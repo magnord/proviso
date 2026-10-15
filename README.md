@@ -19,10 +19,10 @@ It gets there with boundaries an agent can trust, not by removing abstraction.
 - **Signatures that tell the truth.** Every contract states how it is enforced: guaranteed by the type system, verified, checked at runtime, tested, or merely documented.
 - **Capabilities instead of ambient authority.** A function can touch files, the network or the clock only through capability parameters such as `Dir[read]`. Its signature shows exactly what it can do, and tests pass in fakes.
 - **Visible failure.** Every call that can fail is marked where it happens (`try`, `else fail …`). Errors (expected failures) are kept separate from defects (bugs). There are no exceptions.
-- **Value semantics.** Mutation needs exclusive access. A failed call leaves its `inout` arguments unchanged. Object identity uses generational handles, not references.
-- **Refinements with no hidden checks.** Types like `Int where 0 <= age and age < 150` are proven at every construction site. Data from outside becomes trusted only through a `check` that you write, which also names the error to return.
+- **Value semantics, with explicit exceptions.** Data has value semantics, and mutation needs exclusive access. A failed call leaves its `inout` arguments unchanged. Resources and pools can't be copied, and capability handles share state by design. Object identity uses generational handles that are never reused.
+- **Refinements with no hidden checks.** Types like `Int where 0 <= age and age < 150` are proven at every construction site. Data from outside becomes trusted only through a `check` that you write, which also names the error to return. Proofs may rely only on proven, checked or explicitly trusted facts, never on tested ones.
 - **Types for the bugs tests miss.** Distinct ID types, units of measure (`Float[m/s]`) and coordinate-space tags (`Vec3[world]`).
-- **Structured, replayable concurrency.** No shared mutable memory, and every nondeterministic choice is recorded so a run can be replayed exactly.
+- **Structured, replayable concurrency.** No shared mutable memory. Every capability call and scheduling choice is recorded in order, so a run can be replayed exactly.
 - **The compiler as a service.** `proviso sig` gives a contract-level view of a module. `proviso diff-contracts` reports how a change alters behaviour. `proviso edit` makes structured edits with stale-edit detection. `proviso trace` and `proviso replay` support debugging without editing code.
 
 ## A taste
@@ -74,7 +74,7 @@ users.load_users                                      BREAKING
 
 | File | What it is |
 |---|---|
-| [REFERENCE.md](REFERENCE.md) | The working reference: the whole language in about 12K tokens, short enough for an agent to keep in context |
+| [REFERENCE.md](REFERENCE.md) | The working reference: the whole language in about 15K tokens, meant to stay small enough for an agent to keep in context |
 | [RATIONALE.md](RATIONALE.md) | Why the language is designed this way: the needs, goals, alternatives considered, and costs |
 | [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md) | Unresolved design questions, the syntax hypotheses to test, and the experiment plan |
 
@@ -82,9 +82,9 @@ If you are new, start with RATIONALE.md for the reasoning, then skim REFERENCE.m
 
 ## What happens next
 
-1. **Build a checker for a core subset** (OPEN_QUESTIONS P3). It covers parsing, names, types, capabilities, refinements over linear arithmetic, `sig` and `diff-contracts`, plus a small interpreter.
-2. **Run the experiment** (OPEN_QUESTIONS §E). Agents do the same maintenance tasks across variants that differ in one feature at a time, with Rust and TypeScript as baselines. The design's own predictions are written down in advance so they can be proven wrong.
-3. **Settle the open questions** with what the experiment and the prototype show.
+1. **Run the counterexamples.** A small interpreter runs the acceptance counterexamples in OPEN_QUESTIONS §F. Each one broke a guarantee in an earlier draft, and the semantics must survive all of them before any tooling is built (OPEN_QUESTIONS P3).
+2. **Build a checker on those semantics.** It covers parsing, names, types, kinds and ownership, capabilities and reach, refinements over linear arithmetic, `sig` and `diff-contracts`.
+3. **Run the experiment** (OPEN_QUESTIONS §E). Agents do the same maintenance tasks across variants that differ in one feature at a time. The tooling ablation is the clean test of the thesis, and Rust and TypeScript serve as baselines for overall competitiveness. The design's own predictions are written down in advance so they can be proven wrong.
 
 ## Background
 

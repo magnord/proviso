@@ -70,18 +70,18 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Need:** a rule for combining its own error with the callback's error, without error unions (see Q1).
 
 **Q3 — Scope of the effect system.**
-- **Now:** a closure's type records only the error it can fail with. What it may capture is limited by its lifetime (default, `scoped`, `keep`), and `proviso query effects` reports captured capabilities.
+- **Now:** a closure's type records the error it can fail with and the capabilities it captures (`uses`). Effect variables range over both. Permissions are `observes` or `effects`.
 - **Open:** whether to also track divergence (examples and `pred` bodies need termination), allocation, or blocking.
 
 **Q4 — Capability retention.**
-- **Now:** borrowed by default; `keep` allows retention; derived capabilities inherit their source's retention; `main` receives `keep System`.
-- **Options:** full capture-set types, as in Scala's capture checking.
+- **Now:** borrowed by default; `keep` allows retention; derived capabilities inherit their source's retention; `main` receives `keep System`. Reach is tracked transitively, with `uses` on capability, closure, opaque-record and `any` types.
+- **Options:** full capture-set types, as in [Scala's capture checking](https://docs.scala-lang.org/scala3/reference/experimental/capture-checking/overview.html), which also track capabilities reachable through object values.
 - **Resolve by:** writing a long-lived service (a cache, a connection pool, a server holding a `Db`) and checking whether `keep` plus capability-bearing records is enough.
 
-**Q5 — Subtyping as the only implicit conversion.** There are three subtyping relations: permission sets (`Dir[read, write]` accepted as `Dir[read]`), refined types to their base type, and `Never` to any type. Is permission subtyping acceptable, or should narrowing need `.only::[read]()` at every call?
+**Q5 — Subtyping as the only implicit conversion.** There are four subtyping relations: permission sets (`Dir[read, write]` accepted as `Dir[read]`), `uses` sets (`Dir[read]` accepted as `Dir[read] uses Out`), refined types to their base type, and `Never` to any type. Is implicit narrowing acceptable, or should it need `.only::[read]()` at every call?
 
 **Q6 — Permission vocabulary.**
-- **Need:** the permissions for each standard capability (`Dir`, `Net`, `Clock`, `Random`, `Env`, `Process`, `In`, `Out`).
+- **Need:** the permissions for each standard capability (`Dir`, `Net`, `Clock`, `Random`, `Env`, `Process`, `In`, `Out`), and whether each is `observes` or `effects`. Because `observes` operations can't change `state`, consuming input from `In` is an `effects` operation under the current rules. Is that the right call?
 - **Need:** value-level narrowing: paths, hosts, ports, rate limits.
 - **Open:** how a narrowed value appears in `proviso sig`.
 
@@ -90,7 +90,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Need:** a standard transaction model: write-then-rename for files, real transactions for databases, and something for network effects. Also the rules by which `sig` can claim "transactional".
 
 **Q8 — Cost of `inout` atomicity.**
-- **Now:** copy-in/copy-out, with copies elided.
+- **Now:** copy-in/copy-out, with copies elided. Pool generation counters are excluded from rollback.
 - **Open:** how often hot loops need `inout(partial)`.
 - **Resolve by:** benchmarks once a backend exists.
 
@@ -125,7 +125,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 **Q15 — Concurrency model.**
 - **Open:** green threads, OS threads or async I/O.
 - **Open:** `select` and timeouts.
-- **Open:** cancellation latency in pure loops: should the compiler insert implicit checkpoints at loop back-edges?
+- **Now:** loop back-edges are cancellation points. **Open:** their cost in tight loops, and how many delivery points replay must record.
 
 **Q16 — `supervise`.** Does catching defects at task boundaries bring back exceptions as control flow? Options:
 - restrict it to top-level server loops;
@@ -136,7 +136,9 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Options:** regions or arenas; Goose-style data stacks for hot modules.
 - **Need:** performance targets, and how precise `proviso query costs` must be to be useful.
 
-**Q18 — Pools and handles across tasks.** Can handles be sent between tasks? Who owns a pool that several tasks read?
+**Q18 — Pools and handles across tasks.**
+- **Now:** pools are unique, and handles carry the pool's identity and a generation.
+- **Open:** can pools or handles be sent between tasks? Who owns a pool that several tasks read?
 
 **Q19 — Compile-time evaluation.** What may a top-level `let` contain? Is there a general `const fn` facility?
 
@@ -166,6 +168,27 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 
 **Q26 — Implicit boxing.** Recursive enums are boxed implicitly. Should the cost be visible in the type, or only through `proviso query costs`?
 
+**Q27 — Float library functions.**
+- **Now:** basic arithmetic, `sqrt` and conversions are bit-identical everywhere, and NaN bit patterns are canonical.
+- **Open:** whether the standard library implements `sin`, `exp`, `pow` and the rest itself, which costs speed, so they are reproducible too. The [WebAssembly specification](https://www.w3.org/TR/wasm-core/) shows how much care NaN results alone need.
+
+**Q28 — Where refinements must hold.**
+- **Now:** after every assignment. Several fields change together through a whole-value `with`.
+- **Options:** check at the end of each exclusive mutation (such as an `inout self` method); an explicit block that opens the invariant temporarily.
+- **Resolve by:** writing data structures with multi-field invariants and counting the rewrites the strict rule forces.
+
+**Q29 — Cleanup guarantees.**
+- **Now:** bounded. `abandon` runs under a deadline, a defect in one `abandon` does not stop the others, and stack exhaustion and out-of-memory are process-fatal.
+- **Open:** the default deadline; which operations `abandon` should be allowed to perform; whether a reserved emergency area can make post-mortems after out-of-memory reliable.
+
+**Q30 — Serialized capability state.**
+- **Now:** calls on one capability object run one at a time. Proviso-implemented operations run with cancellation masked and commit `state` only on success. Calling back into the same object through a handle is a defect.
+- **Open:** whether re-entrancy can be ruled out at compile time; the throughput cost for shared fakes; deadlocks between two capability objects that call each other; long operations that delay cancellation.
+
+**Q31 — Generics over capabilities.**
+- **Now:** a type parameter may be instantiated with a type that has reach, and the result has that reach. Generic code needs `T: Copy` to copy, store or return a borrowed `T`.
+- **Open:** whether generic code needs a way to name the reach of a type parameter (`T uses C`), for example in generic service containers.
+
 ## C. Tooling
 
 **T1 — Broken code.**
@@ -183,6 +206,11 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Open:** storage size and retention.
 - **Open:** privacy, since recorded capability results can contain secrets. Redaction would need to be declared per capability.
 
+**T9 — Replay event log.**
+- **Now:** an ordered log of capability calls (task, object, operation, arguments, result, completion order) and channel, join and cancellation choices. Replay is simulated by default and reports divergence.
+- **Need:** the log format, how arguments are digested or stored, and how precisely divergence is reported.
+- **Acceptance test:** two tasks write different contents to the same file through copies of a `Dir`, and both are joined in the same order. Replay must reproduce every result the program observed and report the overlapping writes (see §F).
+
 **T6 — `diff-contracts` classification.**
 - **Need:** precise rules for BREAKING, WEAKENED, STRENGTHENED, AUTHORITY and TRUST.
 - **Need:** a way to derive "on failure" guarantees mechanically.
@@ -196,7 +224,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 **P1 — Spec size.**
 - **Question:** can the working reference stay at about 10K tokens once the Q items are resolved?
 - **Evidence:** Goose's specification is about 258 KB, roughly 60K tokens. A precise specification will be long.
-- **Evidence:** after one consistency review, this reference is already about 11–12K tokens (a rough characters-per-token estimate), because each fix added precision.
+- **Evidence:** after one consistency review, this reference was already about 11–12K tokens (a rough characters-per-token estimate), because each fix added precision. The soundness review (v3) added kinds, admissibility, capability reach and bounded cleanup, and grew it to about 15K once a follow-up check of v3 was folded in.
 - **Plan:** keep this reference short and serve the normative text through `proviso explain`.
 - **Measure:** whether agents with only the reference in context make errors that the full specification would have prevented.
 
@@ -205,15 +233,12 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **File extension:** the full `.proviso`. The short forms collide with verification tools: `.pvs` is used by PVS and `.pv` by ProVerif.
 - **Searchability:** search for "proviso lang" or "provisolang".
 
-**P3 — Order of implementation.** First build a checker for a core subset:
-- parser;
-- name resolution;
-- types and exhaustiveness;
-- capabilities and permissions;
-- refinements over linear arithmetic;
-- `sig` and `diff-contracts`.
+**P3 — Order of implementation.** Semantics before tooling, so that every guarantee the tools report survives the counterexamples in §F:
+1. **Settle the foundations in the spec:** which facts a proof may assume (§8.4 of the reference) and the four kinds of type (§5.1). v3 does this.
+2. **Build a small interpreter** that runs the §F counterexamples, including scopes and cancellation, which the cancellation task in §E needs.
+3. **Build the checker over those semantics:** parser, names, types and exhaustiveness, kinds and ownership, capabilities and reach, refinements over linear arithmetic, then `sig` and `diff-contracts`.
 
-A small interpreter for tests is enough to run §E; the C backend comes later.
+The first milestone is a small subset whose reported guarantees survive every §F example. The C backend comes later.
 
 **Implementation notes (non-normative, moved from the reference).**
 - **Compilation.** The whole program is compiled and monomorphized into one C file, as Goose does. TinyCC runs it in-process for `proviso run`; the system C compiler produces `proviso build` output.
@@ -227,7 +252,7 @@ A small interpreter for tests is enough to run §E; the C backend comes later.
 - **Core subset:** the P3 checker plus an interpreter.
 - **Syntax variants:** H1–H8 are implemented as alternative surface syntaxes over one syntax tree, so only the surface changes. Each run changes one variable.
 - **Tooling variants:** H9 and H10 are toggled on and off.
-- **Baselines:** the same tasks in Rust and TypeScript, to measure how much advantage training-data familiarity gives.
+- **Baselines:** the same tasks in Rust and TypeScript. They measure overall competitiveness only: they cannot separate training familiarity from differences in libraries, tooling and semantics. The within-Proviso tooling ablation (H10) is the clean test of the central thesis.
 - **Tasks:**
   - add an error case;
   - change a data representation;
@@ -251,3 +276,28 @@ A small interpreter for tests is enough to run §E; the C backend comes later.
 2. Explicit `check` facts and labels between same-typed parameters (H3) have medium effects.
 3. H1, H2, H6 and H7 have effects near zero on correctness; any H1 gain shows up as fewer failed edits.
 4. Early on, the Rust and TypeScript baselines beat every Proviso variant on the tasks that depend least on contracts.
+
+## F. Acceptance counterexamples
+
+These come from the soundness reviews of v2 and v3. Each one broke a guarantee as written. The first implementation must show the stated outcome for every one, and they stay in the test suite permanently.
+
+| # | Counterexample | Required outcome |
+|---|---|---|
+| 1 | `passthrough(n) ensures(tested) result > 0`, then `Positive(passthrough(n))` | Rejected: a `[tested]` clause is not an assumption, so `Positive`'s refinement is unproven |
+| 2 | `var span = Span(lo: 1, hi: 4); span.lo = 10` | Rejected: the assignment must prove `10 <= span.hi`, and the binding fact `span.hi == 4` refutes it |
+| 3 | `&span.lo` passed to `fn f(x: inout Int)` that sets `x = 10` | Rejected when the call returns: `f`'s `ensures` don't re-establish `lo <= hi` |
+| 4 | An `impl Dir` whose `read_text` writes an audit log through a stored `Out` | Rejected: an `observes` operation calls an `effects` operation |
+| 5 | `fn g(f: fn() -> Text)` called with a closure that writes a file | Rejected: the closure's type `uses Dir[write]` is not accepted by `fn() -> Text` |
+| 6 | `var a = Pool.new(); var b = a; a.insert(10); b.insert(20)` | Rejected: `a` moved into `b`, so `a` is used after the move |
+| 7 | A call inserts through `inout Pool`, fails with an error carrying the new handle, and a later insert reuses the slot | The escaped handle is stale: `get` returns `None`, never the later object |
+| 8 | `let opened = attempt open_file(…)`, giving `Result[File, FsError]` | Accepted; `opened` is a resource. Matching moves the `File`, and abandoning it closes the file only in the `Ok` case |
+| 9 | An `abandon` that hits a defect while two more resources wait | Those two are still abandoned, and the defect and the leak are both reported |
+| 10 | Two tasks write different contents to one file through copies of a `Dir` | `--record` logs both calls with their start and completion order. Replay reproduces every result the program observed, including a later read of the file, and reports the two writes as overlapping |
+| 11 | `MemDir.write_text` updates its map through a plain `self` | Accepted: `state` fields are shared and assignable, and copies of the capability see the write |
+| 12 | An interface method has `requires(checked) P`; an implementation declares `requires P` and assumes it | Rejected: an implementation takes the interface's `requires` exactly as written |
+| 13 | `let w = \|\| try dir.write_text(…)`, then `g(\|\| { w(); return "t" })` where `g` takes `fn() -> Text` | Rejected: the outer closure's reach includes `w`'s, so its type `uses` the writable `Dir` |
+| 14 | `fn f(fs: inout List[File]) fails E` pops a file, closes it, then fails | The caller's list is not rolled back: a resource-bearing `inout` behaves as `inout(partial)`, and `sig` says so |
+| 15 | A callback lent `tx: inout Txn` calls `tx.commit()` | Rejected: a lent resource cannot be consumed |
+| 16 | `&span.lo` passed to `x: inout(partial) Int` | Rejected: a part of a refined value cannot be passed as `inout(partial)` |
+| 17 | `type Sorted = distinct List[Int] where self.is_sorted()`, then `s.value.push(0)` | Rejected unless `push`'s admissible `ensures` re-establish sortedness |
+| 18 | A capability operation is cancelled, or hits a defect, halfway through updating its `state` | The `state` is unchanged: cancellation waits until the operation returns, and a defect discards its changes |

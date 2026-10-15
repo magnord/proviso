@@ -104,6 +104,7 @@ Each decision below is written as a need, the decision that meets it, the altern
 - **Rejected:**
   - "A signature is the complete contract." This was my first draft. A reviewer showed it was false: `fn sort(values: inout List[Int])` is satisfied by a function that clears the list.
   - Unlabelled contracts, which invite false confidence.
+- **Admissibility (v3).** A second review found a soundness hole. The verifier assumed every callee `ensures`, including `[tested]` ones, so a function whose only evidence was one passing example could "prove" a refinement it violated. Now only `[type]`, `[verified]`, `[checked]` (once the check has run) and `[trusted]` (recorded as a trust dependency) can enter a proof. `[tested]` and `[doc]` never can. The lesson is that enforcement levels are not one scale from weak to strong. They split into evidence a proof may assume and evidence meant only for readers and tests. `requires` got the same precision: who establishes each clause, and whether the body may assume it.
 - **Cost.** More annotation, which agents don't mind writing. The risk is that agents downgrade to `(tested)` whenever verification is hard. Q10 tracks that.
 
 ### 7.2 Capabilities instead of ambient authority (ref §9)
@@ -113,16 +114,21 @@ Each decision below is written as a need, the decision that meets it, the altern
   - All authority flows from `main(sys: keep System)` as capability values.
   - A capability's *type* lists its permissions (`Dir[read]`). Its *value* names the resource (a directory or a host).
   - Capabilities are borrowed by default. `keep` allows retention, and capabilities derived from a borrowed one are borrowed too.
+  - **Added in v3:** each permission is `observes` or `effects`. An operation that needs only `observes` permissions may call only `observes` operations of other capabilities. Capability and closure types list the other capabilities they reach (`uses`).
 - **Why it works.** One mechanism answers three questions:
   - *Which resource?* The capability value.
   - *Which actions?* The permission set in its type.
   - *Can the function keep access?* Borrow or `keep`.
 
   The same design also gives two things for free. Fakes are just other implementations (`MemDir`). Replay becomes possible, because every external observation passes through a capability and can be recorded.
+
+  The second review showed that v2's answer to *which actions?* was only about which methods a caller may *name*, not what those methods *do*. An implementation of `read_text` could write an audit log through another capability it held. A closure passed as a plain `fn() -> Text` could write files, because closure types left out what they captured. I had to choose between enforcing the guarantee and reporting a narrower fact ("calls only operations named as read"). I chose enforcement, because the point of capabilities is a guarantee about what *can happen*. That brought back the capture tracking I had dropped earlier, in a small form: `uses` on capability and closure types, with no separate effect system.
+
+  Capability handles are also the one explicit exception to value semantics. Copies of a `Dir` reach the same file system, and copies of a fake share its `state` fields. Operations on one capability object are serialized. Writing a stateful fake in Proviso itself was the test that showed the gap: v2 gave such a fake no way to update its own map.
 - **Rejected:**
-  - **Capabilities plus a separate effect system.** The review rightly said capabilities, effects and determinism are different concepts. I still encode them with one mechanism, because two overlapping systems is two things to learn and keep in sync. Effect *polymorphism* is still needed: `map`'s failure depends on its callback. So there is a small effect variable for failure (`with E`).
+  - **Capabilities plus a separate effect system.** The review rightly said capabilities, effects and determinism are different concepts. I still encode them with one mechanism, because two overlapping systems is two things to learn and keep in sync. Effect *polymorphism* is still needed: `map`'s failure depends on its callback. So there is a small effect variable, `with E`, that covers both failure and `uses`.
   - **Koka-style effect handlers** for fakes. Which handler runs depends on the dynamic call context, and dynamic context is exactly the non-local fact this design tries to remove.
-- **Cost.** Capabilities must be threaded through call chains. A task in the experiment ("add a capability to a deep call chain") measures this directly. Permission subtyping is an implicit conversion, though a narrowing one (Q5).
+- **Cost.** Capabilities must be threaded through call chains. A task in the experiment ("add a capability to a deep call chain") measures this directly. Permission and `uses` subtyping are implicit conversions, though narrowing ones (Q5). Serialized capability state can deadlock if two capability objects call each other (Q30).
 
 ### 7.3 Errors marked at every call; defects kept separate (ref §7)
 
@@ -143,10 +149,12 @@ Each decision below is written as a need, the decision that meets it, the altern
 
 - **Need.** The worst non-local question in most languages is "who else can see this, and change it?"
 - **Decision.**
-  - Every type is a value type. There are no stored references.
+  - Data types have value semantics. There are no stored references.
+  - **Added in v3:** every type has an ownership kind (copyable, unique or resource), and aggregates take the strongest kind among their contents. Reach, meaning which capabilities a value can get to, is tracked on a separate axis (ref §5.1).
   - In-place mutation goes through `inout` with exclusive access, marked at the call site (`&x`).
   - Object identity, the case of "this entity, even after edits", uses generational handles into pools. A stale handle yields `None`, never a different object.
-- **My own addition: failure atomicity.** If a call fails, its `inout` arguments are left exactly as they were. The reviewer asked whether failure leaves arguments unchanged, partly modified, or consumed. The answer is now "unchanged" by default and visible in `sig` otherwise. Copies are elided when no failure point follows the first write.
+  - **Pools are unique, and generations are never reused (v3).** The second review showed that generations alone weren't enough. Copying a pool could make two different objects share a slot and generation. Rolling back a failed insert could hand an escaped handle's identity to a later object. That is exactly the identity bug handles exist to prevent. Now a pool can't be copied, only moved or explicitly duplicated with a fresh identity, and rollback never restores generation counters.
+- **My own addition: failure atomicity.** If a call fails, its `inout` arguments are left exactly as they were. The reviewer asked whether failure leaves arguments unchanged, partly modified, or consumed. The answer is now "unchanged" by default and visible in `sig` otherwise. Copies are elided when no failure point follows the first write. Even `inout(partial)` can never leave a value that violates its type's refinements.
 - **Rejected:**
   - Rust-style borrowing with lifetimes, which produces non-local errors.
   - Shared references with aliasing, which has non-local effects.
@@ -162,10 +170,12 @@ Each decision below is written as a need, the decision that meets it, the altern
   - Verification is modular: a function is checked against the contracts of the functions it calls, never their bodies.
   - Each obligation ends as proven, refuted with a counterexample, or unknown, either because the property is unsupported or because the deterministic budget ran out.
   - Suggested fixes come as alternatives labelled by how they change behaviour: validate, assert, clamp, weaken, or require.
+  - **Added in v3:** refinements hold after every assignment, not just at construction. `span.lo = 10` must prove `10 <= span.hi`, and several fields change together through a whole-value `with`. An `inout` argument must match its parameter's type exactly, and a record invariant is re-verified when an `inout` call on one of its fields returns. Before this, ordinary field assignment could break an invariant that later code was entitled to assume.
 - **Why.** My first draft said "prove what you can, check the rest at runtime", while its own example rejected unproven code. The reviewer caught the contradiction and noted something decisive: **the compiler cannot invent the right domain error.** Only the author knows whether a bad age is `BadAgeText` or `AgeOutOfRange`. Labelling fixes by behaviour has a similar motive. Validating, clamping and weakening all make the code compile, but they implement different programs, and an agent picking the first suggestion would silently pick a behaviour.
 - **Rejected:**
   - Full Dafny-style proofs, because solver timeouts are unpredictable.
-  - Hidden runtime checks.
+  - Hidden runtime checks. Contracts are checked at runtime only where you ask: `check`, `assert` and `(checked)` clauses.
+  - An "open invariant" block for multi-field updates. That is simpler to write but harder to check, and it stays open as Q28.
   - Wall-clock verification budgets, which give results that vary between machines.
 - **Cost.** The predicate fragment is deliberately small (Q9). Properties outside it are honestly `(checked)` or `(tested)`.
 
@@ -189,6 +199,8 @@ Each decision below is written as a need, the decision that meets it, the altern
   - Resources are linear values. On a normal exit, each must be consumed explicitly, with `commit` or `close`, or it is a compile error.
   - On any failure exit, its `abandon` runs automatically in reverse order, with cancellation masked.
   - Scoped helpers like `db.transaction(|tx| …)` are ordinary library functions.
+  - **Added in v3:** ownership flows through aggregates. `Option[File]`, `Result[File, E]` and `List[File]` are resources, matching moves the contents, and abandoning follows the active variant or each element. v2 allowed resources only inside `resource record`s, so even `attempt open_file(…)` broke the rules. Passing a resource to a borrow or `inout` parameter now lends it, which lets a transaction helper lend `tx` to a callback and still commit it afterwards.
+  - **Bounded cleanup (v3):** "cannot fail" never meant "cannot overflow, block or crash". `abandon` now runs under a deadline. A defect in one `abandon` doesn't stop the others, and stack exhaustion and out-of-memory are process-fatal with a best-effort post-mortem. A bounded guarantee stated honestly is better than an absolute one the runtime can't keep (Q29).
 - **Why.** This is the reviewer's point 1 made concrete. The success path stays explicit, because "did we commit?" should be visible. The failure path is automatic, because getting cleanup right on every failure path is exactly where repeated hand-written code goes wrong.
 
 ### 7.8 Structured, replayable concurrency (ref §11)
@@ -198,13 +210,15 @@ Each decision below is written as a need, the decision that meets it, the altern
   - There is no shared mutable memory.
   - Tasks live in a `scope` that waits for all of them. The first failure cancels the siblings.
   - Cancellation is cooperative, is delivered only at known points, and is not an error.
-  - Every nondeterministic choice, at channel and join points and where cancellation is delivered, is recorded by `--record`, so `replay` reproduces the run.
+  - Every nondeterministic choice is recorded by `--record`, so `replay` reproduces the run. That covers channel, join and cancellation choices and, since v3, the completion order of every capability call.
+  - Loop back-edges are cancellation points, so even a pure loop can be cancelled.
+- **Correction (v3).** "No shared mutable memory" doesn't mean "no races". Two tasks can write different contents to the same file through copies of a `Dir`, both return `Unit`, and be joined in the same order, yet the file ends up different. Replay is now an ordered log of capability calls, simulated by default, so effects are not repeated.
 - **Cost.** There are no shared-memory performance tricks, and some designs need the actor pattern. The I/O model is open (Q15).
 
 ### 7.9 Numbers and text without the classic traps (ref §12)
 
 - **Integer overflow is a defect.** Wrapping, saturating and checked arithmetic are named operations.
-- **Float behaviour is reproducible.** No fast-math, and no implicit fused multiply-add.
+- **Float behaviour is reproducible where the language can promise it.** That covers basic arithmetic, `sqrt` and conversions, with a fixed rounding mode, no fast-math, no implicit fused multiply-add, and canonical NaN bits. v2 promised more than that. Functions like `sin` are reproducible only if the standard library implements them itself, which is still open (Q27).
 - **Text has no integer indexing.** This one came from my own mistake: the first draft's example sliced text with `line[comma + 1 ..]`, which is byte arithmetic on UTF-8. Positions are now opaque values that come from searches, and operations that need no positions (`split_once`, `strip_prefix`) are preferred.
 
 ### 7.10 Foreign code as a visible trust boundary (ref §13)
@@ -277,7 +291,7 @@ Some rules stay because they remove ambiguity rather than express taste:
 
 "One name, one symbol" now means that every reference resolves unambiguously. It no longer means a name can be defined in only one module.
 
-## 8. What the consistency review taught
+## 8. What the reviews taught
 
 After v2 was written, my own pass fixed about a dozen inconsistencies, such as `NonEmptyText` used but never defined. An independent review then found 27 more. Many were the very failures Proviso exists to prevent:
 
@@ -287,9 +301,30 @@ After v2 was written, my own pass fixed about a dozen inconsistencies, such as `
 
 A prose spec has no compiler, so its claims drift the way unenforced contracts drift. That points to a concrete rule for the future: **once a checker exists, every code block in REFERENCE.md becomes a test.** It is also evidence for P1. The reference grew from about 10.5K to about 11.7K tokens (rough estimates) because each fix added precision, which suggests a precise reference is likely to keep growing.
 
+A second review then asked a different question: not whether the document agrees with itself, but whether its guarantees **compose**. It found eight places where they didn't:
+- tested contracts used as proof assumptions;
+- refinements broken by ordinary mutation;
+- permissions that didn't constrain what implementations do;
+- pool identities that collided on copy or rollback;
+- capability state that value semantics couldn't express;
+- resources that couldn't sit inside an `Option` or `Result`;
+- a cleanup promise the runtime couldn't keep;
+- replay that missed races through external resources.
+
+**Consistency is not soundness.** A spec can agree with itself everywhere and still promise things its rules don't deliver. The response was to turn each counterexample into a permanent acceptance test (OPEN_QUESTIONS §F), and to change the implementation order. Now the semantics come first and an interpreter runs the counterexamples. Only then come `sig` and `diff-contracts`, because a tool that reports guarantees the rules don't keep is worse than no tool.
+
+A check of v3 itself then found that several fixes were only partial:
+- Reach wasn't transitive, so a closure that captured another closure escaped it.
+- Rollback could hand a caller back a file that had already been closed.
+- A callback lent a transaction could commit it twice.
+- An interface implementation could quietly strengthen a `requires`.
+
+The biggest change was conceptual. v3 had treated "holds a capability" as a kind of type, which made even `Option[Txn]` illegal. Ownership and reach are now separate axes. Every new counterexample joined §F, which now holds 18.
+
 ## 9. Risks, and how we will know
 
-- **The prior might dominate.** Early on, agents will probably write better Rust or TypeScript than Proviso, whatever its design. The experiment includes those baselines so that this cost is measured, not assumed.
+- **The prior might dominate.** Early on, agents will probably write better Rust or TypeScript than Proviso, whatever its design. The experiment includes those baselines to measure overall competitiveness. They can't separate familiarity from differences in libraries, tooling and semantics, which is why the within-Proviso tooling ablation is the real test of the thesis.
+- **The design keeps growing.** Each review made it more correct and larger: kinds, admissibility rules, `uses`, `state` and cleanup deadlines. If soundness needs this much machinery, the "small enough to keep in context" goal is under pressure (P1).
 - **Verification might be unpredictable.** The defences are a small fragment, deterministic budgets, modular obligations, and honest "unknown" results. Whether they are enough is open (Q9, T8).
 - **Verbosity might cost more than it saves.** Labels, explicit conversions and capability threading all cost tokens. They are verbose where they carry information, but the trade has to be measured.
 - **The spec might outgrow the context window** (P1). The plan is a short working reference, with the normative text served by `proviso explain`.

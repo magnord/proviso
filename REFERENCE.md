@@ -1,6 +1,6 @@
 # Proviso — Working Reference
 
-*v2 draft · design only, nothing implemented*
+*v3 draft · design only, nothing implemented*
 
 This is the reference an agent keeps in context while writing Proviso. It aims to be complete enough to write correct code and short enough (~10K tokens) to stay loaded (P1). Normative detail beyond it is served by `proviso explain <rule>`. Choices that are experiment variables are tagged **(H*n*)**. Unresolved design questions are tagged **(Q*n*)**, tooling questions **(T*n*)** and process questions **(P*n*)**. All of them are listed in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md). The reasoning behind the design is in [RATIONALE.md](RATIONALE.md).
 
@@ -8,7 +8,7 @@ This is the reference an agent keeps in context while writing Proviso. It aims t
 
 1. **Minimize the code and reasoning a correct change requires.** Do it with trustworthy boundaries, not by removing abstraction. An abstraction is welcome if its contract is as checkable as the code it hides.
 2. **Every guarantee states how it is enforced** (§8.4). A plausible contract with weak enforcement is worse than none.
-3. **Nothing hidden.** No ambient authority, no implicit conversions beyond subtyping (§9.2), no exceptions, no compiler-inserted contract checks, and no dispatch targets the tools cannot list. Built-in safety checks (overflow, bounds, division by zero, stale handles) are inserted only where the verifier cannot rule the defect out, and `proviso query defects` lists every one.
+3. **Nothing hidden.** No ambient authority, no implicit conversions beyond subtyping (§9.2), no exceptions, no runtime contract checks you didn't ask for, and no dispatch targets the tools cannot list. Built-in safety checks (overflow, bounds, division by zero, stale handles) are inserted only where the verifier cannot rule the defect out from admissible facts (§8.4), and `proviso query defects` lists every one.
 4. **Familiar syntax by default.** Departing from Rust/Swift/TypeScript/Python conventions needs experimental evidence.
 5. **The compiler is a service.** It answers questions, applies structured edits and reports how contracts change (§15).
 
@@ -96,7 +96,7 @@ fn bump_twice() -> Int {
   | Raw and multi-line text | `r"…"`, `"""…"""` |
   | Collections | list `[a, b]`, map `["k": v]`, empty map `[:]`, range `a..b` (half-open), inclusive range `a..=b` |
 
-- **Keywords:** `all and any as assert attempt break cap check continue debug derives distinct effect else ensures enum example expect extern fail fails fn for if impl in inout interface invariant is it keep let loop match needs not opaque or perms pred property pub record requires resource return scope scoped self Self tag take test todo trusted try type unit unreachable use var where while with`. Some words are contextual: `old` and `result` have meaning only inside `ensures`, and `pure` and `uses` only after `trusted`. Keywords may still be used as method names after `.` (`s.with(…)`) and as module path segments (`std.test`).
+- **Keywords:** `all and any as assert attempt break cap check continue debug derives distinct effect effects else ensures enum example expect extern fail fails fn for if impl in inout interface invariant is it keep let loop match needs not observes opaque or pred property pub record requires resource return scope scoped self Self state tag take test todo trusted try type unique unit unreachable use uses var where while with`. Some words are contextual: `old` and `result` have meaning only inside `ensures`, and `pure` only after `trusted`. Keywords may still be used as method names after `.` (`s.with(…)`) and as module path segments (`std.test`).
 
 ## 3. Modules and names
 
@@ -111,7 +111,7 @@ fn bump_twice() -> Int {
 - **Prelude.** Without an import, a module sees exactly:
   - scalar types (§4.1), `Text`, `Bytes`, `Unit`, `Never`, `List`, `Map`, `Set`, `Array`, `Option`, `Result`, `Outcome`, `Defect`, `System`;
   - the enums `Ordering` and `Rounding`, and `Invalid` (the error of generated validators, §4.4);
-  - the interfaces `Eq`, `Ord`, `Hash`, `Show`, `Index`, `Abandon`, `Add`, `Sub`, `Mul`, `Div`, `Neg`;
+  - the interfaces `Eq`, `Ord`, `Hash`, `Show`, `Copy`, `Index`, `Abandon`, `Add`, `Sub`, `Mul`, `Div`, `Neg`;
   - the variants `Some`, `None`, `Ok` and `Err`, the only variants that may be used unqualified in expressions.
 
 ### Calls and argument labels (H3)
@@ -164,6 +164,7 @@ let t = s.with(hi: 9)                                  // functional update; ref
 - **Generics.** Records can be generic: `record Pair[A, B] { first: A, second: B }`.
 - **Derives.** `derives(Eq, Ord, Hash, Show)` generates the implementations. `proviso query expand Span` shows the generated code (Q20).
 - **Validation.** A record with refinements also gets `Span.validate(lo:, hi:) -> Span fails Invalid` (§8.4). An `Invalid` value names the failing field and predicate.
+- **`with` and ownership.** `with` copies a record. On a record that holds a unique or resource value it consumes the original instead, as a `take self` method.
 
 ### 4.5 Enums
 ```proviso
@@ -197,10 +198,11 @@ let c = Shape.Circle(radius: 2.0[m])                   // variants are qualified
   ```
 
 ### 4.8 Generics
-- **Syntax.** Type parameters go in `[]`, and constraints are explicit: `fn max[T: Ord](a: T, b: T) -> T`. Combine constraints with `+`: `T: Ord + Show`.
+- **Syntax.** Type parameters go in `[]`, and constraints are explicit: `fn max[T: Ord + Copy](a: T, b: T) -> T`. Combine constraints with `+`: `T: Ord + Show`.
 - **Type arguments** are inferred at calls, or given explicitly with `::[…]`: `max::[Int](a: 1, b: 2)` (H11). In an expression, `x[…]` is always indexing.
 - **Compilation.** Generics are monomorphized.
 - **Effect parameters** are written `effect E` (§9.5).
+- **Copying and reach.** A type parameter is not assumed copyable, and it may have reach (§5.1). Copying a `T`, or storing or returning a borrowed `T`, requires `T: Copy`. Borrowing and moving need no constraint.
 
 ### 4.9 Interfaces
 ```proviso
@@ -213,7 +215,7 @@ impl Show for Span {
 }
 ```
 - **Explicit implementations.** There is no structural conformance. An `impl` lives in the module of the interface or of the type.
-- **Contracts on interface methods** bind every implementation. Each implementation must meet each contract at the interface's enforcement level or a stronger one.
+- **Contracts on interface methods** bind every implementation. An implementation provides each `ensures` clause at the interface's level, or replaces `[tested]` or `[doc]` with `[checked]` or `[verified]`, or `[checked]` with `[verified]`. It takes the interface's `requires` clauses exactly as written, so its body assumes only what their levels allow. Callers through the interface rely only on the interface's levels (§8.4).
 - **No default methods** (Q13).
 - **Static dispatch.** A parameter of interface type, `x: Show`, means `[T: Show](x: T)`.
 - **Dynamic dispatch** is explicit: `any Show`, for example `List[any Show]` (Q14). Because compilation is whole-program, `proviso query dispatch <call site>` lists every possible target. Capability interfaces are the exception: they are types in their own right and always dispatch dynamically (§9.2).
@@ -221,17 +223,29 @@ impl Show for Span {
 
 ## 5. Values, bindings and mutation
 
-### 5.1 Values
-- **Value semantics everywhere.** Every type is a value type, so assignment and passing never create sharing that code can observe. There are no reference types and no null. Storage sharing is an implementation detail (see the implementation notes in OPEN_QUESTIONS.md).
+### 5.1 Values, ownership and reach
+Every type has an ownership kind:
+
+| Kind | Copies | Dropping | Examples |
+|---|---|---|---|
+| copyable (the default) | implicit | allowed | `Int`, `Text`, `List[User]`, capability handles |
+| unique | none; the value moves or is borrowed | allowed | `Pool[T]`, `unique record` types |
+| resource | none; the value moves or is borrowed | not allowed: consume it, or it is abandoned on failure (§10) | `File`, `Txn` |
+
+- **Aggregates** take the strongest kind among their contents, in the order resource, unique, copyable. So `Option[File]`, `Result[File, E]` and `List[File]` are resources, and a record holding a `Pool` is unique.
+- **Reach** is a separate axis. It is the set of capabilities a value can reach through its own permissions, its fields, its captures and its type arguments. Any value with reach follows the retention rules (§9.3), whatever its kind.
+- **Value semantics** hold for everything except capability handles: assignment and passing never create sharing that code can observe, and there is no null. Copies of a capability handle share its underlying state (§9.6). Storage sharing behind other values is an implementation detail (see the implementation notes in OPEN_QUESTIONS.md).
+- **`Copy`** is satisfied by copyable types with no reach. It cannot be implemented by hand (§4.8).
+- **Moves.** Binding a unique or resource value to a new name, or passing it to a `take` parameter, moves it. The old name is unusable afterwards.
 - **Bindings.** `let` is immutable and `var` is mutable.
 - **Annotations.** Types are required on the parameters of named functions, on return types, fields and top-level constants. They are optional on locals and closure parameters.
 
 ### 5.2 Parameter modes
 | Mode | Declared | Caller writes | Meaning |
 |---|---|---|---|
-| borrow (default) | `x: T` | `f(x: v)` | read-only for the duration of the call |
+| borrow (default) | `x: T` | `f(x: v)` | read-only for the duration of the call (except a capability's `state`, §9.6); a unique or resource value is lent, not consumed |
 | inout | `x: inout T` | `f(x: &v)` (H5) | exclusive mutable access, committed on success (§5.4) |
-| take | `x: take T` | `f(x: v)` | consumes `v`, which is unusable afterwards; required for resources (§10) |
+| take | `x: take T` | `f(x: v)` | transfers ownership of a unique or resource value, which is unusable afterwards; for data it only avoids a copy |
 | keep | `x: keep C` | `f(x: c)` | the callee may retain capability `c` (§9.3) |
 
 Receivers are `self`, `inout self` or `take self`. Calling an `inout self` method requires a `var` or `inout` receiver, with no `&`.
@@ -243,8 +257,10 @@ Receivers are `self`, `inout self` or `take self`. Calling an `inout self` metho
 
 ### 5.4 Failure atomicity
 - **The rule.** If a call fails (an error exit), every `inout` argument is left exactly as it was before the call. Writes are committed only on success.
+- **Resources are not rolled back.** Atomicity covers copyable and unique values. An `inout` argument that holds a resource is never rolled back, because resources can't be copied. It behaves as `inout(partial)`, and `sig` says so. Capability `state` follows its own rule (§9.6).
 - **Implementation.** Copy-in/copy-out, with the copy elided when no failure point follows the first write.
-- **Opting out.** `x: inout(partial) T` lets failures leave partial changes, and `proviso sig` reports it (Q8).
+- **Opting out.** `x: inout(partial) T` lets failures leave partial changes, and `proviso sig` reports it (Q8). Every value it leaves still satisfies its type's refinements, because every assignment must (§8.3). A part of a refined value, such as `&span.lo`, cannot be passed as `inout(partial)`.
+- **Identity is never rolled back.** Restoring a pool on failure restores its contents, not its generation counters (§5.5).
 - **Defects** (§7.3) and **cancellation** (§11) abort the whole task, so there is nothing left to commit.
 
 ### 5.5 Identity: pools and handles
@@ -261,7 +277,10 @@ people.remove(h)
 let q = people[h]        // through Index; a defect if h is stale
 ```
 
-A handle records its pool and a generation. Using it with the wrong pool is a defect (Q18).
+A handle records its pool's identity and a slot generation.
+- **Pools are unique** (§5.1). `let b = a` moves a pool and never copies it. `a.duplicate()` makes a new pool with the same contents and a fresh identity; handles into `a` are not valid in the duplicate.
+- **Generations are never reused.** Every insert takes a new generation, rollback (§5.4) does not restore generation counters, and a slot whose 64-bit generation would overflow is retired. So a handle that escapes from a failed call is stale afterwards.
+- **Stale or wrong-pool handles** make `get` return `None`; `pool[h]` is a defect (Q18).
 
 ## 6. Expressions and control flow
 
@@ -304,10 +323,12 @@ match problem {
 - **Forms:** literals, ranges, `_`, bindings, tuples `(a, b)`, variants (including `Some(x)`, `None`, `Ok(v)`, `Err(e)`), and records.
 - **Variant fields.** For a variant with one field, a bare name binds that field whatever it is called: `Circle(r)`, `Some(x)`. With several fields, a bare name must match a field name, as in `Rect(w, h)`. `field: name` renames: `Rect(w: width, h: height)`.
 - **Records:** `User(name, age: a, ..)` ignores the rest with `..`.
+- **Ownership.** Matching a unique or resource value moves its contents into the bindings; matching a borrowed value borrows them.
 - **Testing with `is`:** `if shape is Circle(radius) and radius > 1.0[m] { … }`. Bindings scope over the rest of the `and` chain and over the then-block.
 
 ### 6.5 Loops
 - **`for pat in expr`** iterates lists, sets, maps (as `(k, v)`) and ranges.
+- **Consuming loops.** `for x in take xs` consumes a collection element by element. It is how a collection of resources is used up (§10).
 - **Other loops:** `while cond`, `loop`.
 - **Control:** `break` and `continue`, with labels like `outer: for … { break outer }`.
 - **Invariants:** a loop may carry `invariant P` clauses before its body (§8).
@@ -328,9 +349,11 @@ These forms apply to an `Option[T]` or to a fallible call (§7):
 
   | Parameter | The closure may live | It captures |
   |---|---|---|
-  | `f: fn(…)` (default) | until the call returns | locals by reference (mutation per §5.3) and any capabilities |
-  | `f: scoped fn(…)` | until the enclosing `scope` ends (§11) | values by copy and borrowed capabilities; nothing mutably |
-  | `f: keep fn(…)` | indefinitely | values by copy and `keep` capabilities only; nothing mutably |
+  | `f: fn(…)` (default) | until the call returns | locals by reference (mutation per §5.3) |
+  | `f: scoped fn(…)` | until the enclosing `scope` ends (§11) | values by copy, with unique and resource values moved; borrowed capabilities; nothing mutably |
+  | `f: keep fn(…)` | indefinitely | values by copy, with unique and resource values moved; `keep` capabilities only; nothing mutably |
+
+  In every case, the closure's reach appears in its type, and the parameter must admit it with `uses` or `with E` (§9.4).
 
 ## 7. Errors and defects
 
@@ -361,6 +384,7 @@ What happens on a defect:
 - The current task aborts, and its resources are abandoned (§10).
 - The enclosing scope cancels its other tasks and propagates the defect as a defect (never as an error), and so on up to `main`.
 - `main` exits with code 70 and writes a post-mortem: `proviso postmortem <id>` shows every frame's locals as JSON.
+- Stack exhaustion and out-of-memory are process-fatal. Cleanup is not guaranteed, and the post-mortem is best effort (§10).
 - Only `supervise` at a task boundary can catch a defect (§11).
 
 `fails E` lists every recoverable failure. `proviso query defects f` lists the defect sites in `f` that the verifier could not rule out. Those are the only places the compiler inserts checks. Stack and memory exhaustion can happen anywhere and are not listed.
@@ -397,30 +421,47 @@ pub fn sort[T: Ord](values: inout List[T])
 ```
 
 ### 8.3 Facts
-The verifier reasons from the facts in scope:
+The verifier reasons only from admissible facts (§8.4):
 - the refinements of the types of values in scope;
-- the current function's `requires`;
-- the `ensures` of functions it calls;
+- the current function's `requires`, at the levels its body may assume;
+- the admissible `ensures` of functions it calls;
+- the value each `let` binds, and the last value assigned to each `var`;
+- loop facts: `a <= i < b` in `for i in a..b`, and `0 <= i < xs.len()` in `for (i, x) in xs.enumerate()`;
 - branch conditions;
 - successful `check` and `assert` statements.
 
 Facts are dropped when the code changes what they describe:
-- Assigning a `var`, or passing it with `&`, drops facts that mention it, except those the callee's `ensures` re-establish.
+- Assigning a `var`, or passing it with `&`, drops facts that mention it, except those the callee's admissible `ensures` re-establish.
 - **Verification is modular.** A function's obligations are checked against the contracts of the functions it calls, never their bodies. Editing a body re-verifies only that body.
 
+**Refinements under mutation.** A value must satisfy its type's refinements wherever it can be observed (Q28):
+- **Every assignment** to a variable or to any part of it is an obligation that the whole value still satisfies its refinements, record-level ones included. With `span: Span`, `span.lo = 10` must prove `10 <= span.hi`.
+- **Several fields at once:** assign a whole value, as in `span = span.with(lo: 10, hi: 20)`.
+- **`inout` arguments** must match the parameter's type exactly, refinements included. Subtyping does not apply, because data flows both ways. Passing part of a refined value as `inout`, such as `&span.lo` or the `.value` of a refined `distinct` type, re-verifies every enclosing refinement when the call returns, using only the callee's admissible `ensures`. So does calling an `inout self` method on such a part.
+- **Inside an `inout self` method**, the same rules apply to each assignment.
+- **Capability `state`** (§9.6) can change behind any call that reaches the capability, so no fact about it survives such a call.
+
 ### 8.4 Enforcement levels
-| Level | Written as | Meaning |
+| Level | Written as | Meaning | May a proof assume it? |
+|---|---|---|---|
+| `[type]` | (implicit) | guaranteed by the type system: authority, retention, errors, exhaustiveness | yes |
+| `[verified]` | `ensures P` (the default) | discharged statically within the budget | yes; its own trust dependencies carry over |
+| `[checked]` | `ensures(checked) P`, `requires(checked) P`, `assert P` | checked at runtime; failure is a defect | yes, once the check has run |
+| `[trusted]` | `ensures(trusted) P` on an `extern` | assumed, not checked (§13) | yes, recording a trust dependency (`proviso query trust`) |
+| `[tested]` | `ensures(tested) P` | backed only by examples or property tests | **never** |
+| `[doc]` | `ensures(doc) "text"` | a stated intent | **never** |
+
+The levels are not one scale from weak to strong. `[tested]` and `[doc]` are evidence for readers and tests, never facts for the verifier, and bounds and overflow checks are removed only on the strength of admissible facts.
+
+**`requires` at each level:**
+
+| Clause | Who establishes it | May the body assume it? |
 |---|---|---|
-| `[type]` | (implicit) | guaranteed by the type system: authority, retention, errors, exhaustiveness |
-| `[verified]` | `ensures P` (the default) | discharged statically within the budget |
-| `[checked]` | `ensures(checked) P`, `assert P` | runtime check; failure is a defect |
-| `[tested]` | `ensures(tested) P` | backed only by examples or property tests |
-| `[doc]` | `ensures(doc) "text"` | a stated intent |
-| `[trusted]` | `ensures(trusted) P` on an `extern` | assumed, not checked (§13) |
+| `requires P` | every caller must prove it | yes |
+| `requires(checked) P` | checked on entry; a failure is a defect reported at the call | yes, after entry |
+| `requires(tested) P`, `requires(doc) "…"` | nobody | no; it only documents what callers should do |
 
-`requires` takes the same levels.
-
-**Refinements are always `[verified]`.** The compiler never inserts a check for a contract or refinement. To build a refined value from unvalidated data, use one of:
+**Contracts and refinements are checked at runtime only where you ask:** in `check` and `assert` statements and `(checked)` clauses. Refinements are always `[verified]`. To build a refined value from unvalidated data, use one of:
 - `check P else fail E(…)`, which runs your check with your error and establishes P;
 - `assert P`, which is a defect if false;
 - the generated validator: `User.validate(…) fails Invalid`.
@@ -470,28 +511,34 @@ record System {                          // provided by the runtime
 
 ### 9.2 Capability interfaces and permissions
 ```proviso
-pub cap interface Dir perms(read, write, create, delete, list) {
+pub cap interface Dir observes(read, list) effects(write, create, delete) {
     fn read_text(self, path: Path) -> Text fails FsError                    needs read
     fn write_text(self, path: Path, text: Text) fails FsError               needs write
     fn size(self, path: Path) -> Int fails FsError                          needs read
     fn sub(self, path: Path) -> Self fails FsError     // same permissions, narrower root
 }
 ```
-- **Capability types.** A capability interface is a type in its own right. `Dir[read]` can be a parameter, field or return type, and calls on it dispatch dynamically to whichever implementation is behind it: the runtime's, or a fake (§9.6).
+- **Capability types.** A capability interface is a type in its own right. `Dir[read]` can be a parameter, field or return type, and calls on it dispatch dynamically to whichever implementation is behind it: the runtime's, or a fake (§9.6). Copies of a capability share its underlying state.
+- **Two kinds of permission.** `observes` permissions cannot change anything outside the program, and `effects` permissions may. Inside an operation that needs only `observes` permissions, `self` is seen through an observes-only view: its `state` is read-only, and every capability it reaches is narrowed to its `observes` permissions. Helpers the operation calls receive that view.
 - **Permission checks are static.** Calling an operation the static type does not permit is a compile error.
-- **Subtyping.** `Dir[read, write]` is accepted where `Dir[read]` is expected. The language has three subtyping relations: permission sets; refined types to their base type (`User.age` used as an `Int`); and `Never` to any type. There are no other implicit conversions (Q5).
+- **Reach.** A capability type also lists the other capabilities its implementation uses: `Dir[read] uses Out`. A bare `Dir[read]` uses none.
+- **Subtyping.** `Dir[read, write]` is accepted where `Dir[read]` is expected, and `Dir[read]` where `Dir[read] uses Out` is expected. The language has four subtyping relations: permission sets; `uses` sets; refined types to their base type (`User.age` used as an `Int`); and `Never` to any type. There are no other implicit conversions (Q5).
 - **Narrowing by type:** `dir.only::[read]()`.
 - **Narrowing by value:** `dir.sub(path)` and `net.only_hosts(["api.example.com"])` (Q6).
 - **Derived capabilities** (from `sub`, `only`, `only_hosts`) have the same retention as the capability they came from (§9.3).
+- **What a signature guarantees.** A function can cause only the effects of the capabilities reachable from its parameters. Those are the capabilities passed directly, held in records, or captured by function-typed arguments, transitively (§9.4), and all of them are visible in the types. An opaque record declares its reach, as in `pub opaque record Cache uses Dir[read, write] { … }`, and the declaration is checked against its fields. A dynamic interface type does too: `any Show uses Out`, where a bare `any Show` admits only values with no reach. So `load_users(dir: Dir[read], …)` cannot write anything outside the program `[type]`, provided the runtime's own capabilities honour their permissions `[trusted]`.
 
 ### 9.3 Retention
-- **Borrowed by default.** A capability parameter can be used, and passed on, during the call. It cannot be stored in a record, returned, or captured by a `keep` closure (§6.7). A capability derived from a borrowed one is borrowed too.
+- **Borrowed by default.** A parameter with reach, whether a capability or a value that holds or captures one, can be used and passed on during the call. It cannot be stored where it outlives the call, returned, or captured by a `keep` closure (§6.7). Anything derived from a borrowed capability is borrowed too.
 - **`keep` allows retention.** A `keep` parameter may be retained, for example `fn open_cache(dir: keep Dir[read, write]) -> Cache`.
-- **Capability-bearing records.** A record with a field of capability type follows the same rules as a capability (Q4).
+- **Records and containers with reach** follow the same retention rules, whatever their ownership kind (Q4).
+- **Generics.** A type parameter may be instantiated with a type that has reach, and the instantiated type then has that reach. Generic code cannot call operations on a `T` without an interface constraint, and cannot store or return a borrowed `T` unless `T: Copy` (§4.8, Q31).
 
 ### 9.4 Function types and closures
-- **Function types:** `fn(A) -> R`, `fn(A) -> R fails E`, and `fn(A) -> R with E`, where `E` is an effect variable.
-- **A closure's type** records the error it can fail with. Capturing a capability does not change the type; what a closure may capture is limited by its lifetime (§6.7). `proviso query effects` reports both (Q3).
+- **Function types:** `fn(A) -> R`, optionally followed by `fails E`, `uses C` or `with E`. Here `C` lists capability types and `E` is an effect variable.
+- **A closure's type** records the error it can fail with and its reach: the union of the reach of everything it captures, including other closures and values that hold capabilities. A closure that captures `dir` has a type like `fn(Path) -> Int uses Dir[read]`, and so does a closure that only captures that closure. A function type without `uses` admits only closures that capture no capabilities, so a parameter `f: fn() -> Text` cannot carry authority. What a closure may capture is also limited by its lifetime (§6.7).
+- **Effect variables** range over both failure and `uses` (Q3).
+- **Parameter modes** may appear in function types, as in `fn(inout Txn) -> T`.
 
 ### 9.5 Effect polymorphism
 ```proviso
@@ -506,20 +553,43 @@ impl[A] List[A] {
 }
 
 let users = try lines.map(|l| try parse(line: l, line_no: 0))   // E = fails LoadError: this call is fallible
-let sizes = names.map(|n| dir.size(n) else 0)                   // E = no failure; capturing dir is allowed
+let sizes = names.map(|n| dir.size(n) else 0)                   // E = uses Dir[read]: not fallible
 ```
 - **Where marking happens.** Marking happens where `E` is concrete, at the outer call site.
 - **No mixing.** A function with `with E` may not also declare its own `fails` (Q2).
 
-### 9.6 Fakes
-- **Writing a fake.** Implement the interface (`impl Dir for MemDir { … }`), then wrap a value as a capability with `Dir.of(x)`. The result carries every permission and narrows like any other capability.
-- **Standard fakes.** `std.test` provides `MemDir`, `FakeClock`, `FakeNet` and `SeededRandom`. Their constructors return capabilities directly.
+### 9.6 Implementing capabilities and fakes
+```proviso
+cap record MemDir {
+    state files: Map[Path, Text]       // shared by every copy of the capability
+}
+
+impl Dir for MemDir {
+    fn read_text(self, path: Path) -> Text fails FsError {
+        return self.files.get(path) else fail FsError.NotFound(path: path)
+    }
+    fn write_text(self, path: Path, text: Text) fails FsError {
+        self.files.set(key: path, value: text)
+    }
+    …
+}
+
+let dir = Dir.of(MemDir(files: [:]))   // Dir[read, list, write, create, delete]
+```
+- **Capability handles share state.** Copies of a capability refer to the same underlying resource: the file system for the runtime's `Dir`, or the `state` fields of a Proviso implementation. This is the one exception to value semantics (§5.1).
+- **`state` fields** are allowed only in a `cap record`, and a `cap record` value is a capability handle. Its `effects` operations may read, assign and mutate `state` through a plain `self`. Its `observes` operations may only read it (§9.2).
+- **Atomic operations.** Calls on one capability object run one at a time. A Proviso-implemented operation runs with cancellation masked; a cancellation is delivered when it returns. Its `state` changes are committed only if it succeeds, so a failure or defect leaves `state` as it was. Calling back into the same object through a capability handle is a defect, while an implementation's direct calls to its own methods are ordinary calls (Q30).
+- **An implementation's reach.** Its operations may use only the capabilities stored in its fields. `Dir.of(x)` has every permission and `uses` the capabilities in `x`. Operations for `observes` permissions may call only `observes` operations (§9.2).
+- **Standard fakes.** `std.test` provides `MemDir`, `FakeClock`, `FakeNet` and `SeededRandom`, written in Proviso this way. Their constructors return capabilities directly.
 
 ### 9.7 debug
 `debug(x, …)` writes debug representations, with the source location, to the debug stream. It needs no capability, and `proviso build --release` rejects it.
 
 ### 9.8 Replay
-All external observations pass through capabilities, and all scheduling choices happen at channel and join points and where cancellation is delivered (§11). So `proviso run --record` can log every capability result and scheduling choice, and `proviso replay <run>` re-executes the run deterministically. Calling an `extern` that is not `pure` makes the run non-replayable unless the extern is wrapped as a capability. A recording run reports when that happens (§13, T5).
+`proviso run --record` writes an ordered event log. It records every capability call, with its task, capability object, operation, arguments and result, in the global order in which calls complete. It also records when each call started, every channel, join and cancellation choice, and every cleanup-deadline expiry (§10, §11). Only calls on the runtime's capabilities are logged; Proviso-implemented capabilities are replayed by running their code. `proviso replay <run>` enforces the logged order and serves results from the log (T9).
+- **Simulated by default.** Replay suppresses external effects and reproduces every result the program observed. A call whose arguments differ from the log is reported as a divergence, at the first point where the runs differ. Calls that overlapped on aliased resources, such as `dir` and `dir.sub("x")`, are reported, because their effect order may differ from their completion order.
+- **`--live`** re-issues the effects one at a time, in logged order. It reproduces the run only if nothing outside the program changes those resources in the meantime.
+- **Foreign code.** Calling an `extern` that is not `pure` makes the run non-replayable unless the extern is wrapped as a capability. A recording run reports when that happens (§13, T5).
 
 ## 10. Resources
 
@@ -529,12 +599,19 @@ impl Abandon for Txn {
     fn abandon(take self) { self.conn.rollback_quietly() }  // cannot fail
 }
 ```
-Every resource type implements `Abandon`.
+Every resource type implements `Abandon`. A `resource record` declares a base resource type, and any aggregate that contains a resource is a resource too (§5.1). I/O resources such as `File[read, write]` are also capabilities: they have permissions and reach (§9.2).
 
-1. **Consumed exactly once.** A resource value must be consumed exactly once: passed as `take`, or used by a `take self` method such as `commit` or `close`. Resources cannot be copied.
-2. **On a normal exit**, every resource in scope must already be consumed, or it is a compile error.
-3. **On a failure exit**, whether `fail`, a `try` that propagates, a defect, or cancellation, unconsumed resources are abandoned in reverse order of acquisition. Cancellation is masked while `abandon` runs.
-4. **Storage.** Resources can be stored only in `resource record`s.
+1. **One owner.** Passing a resource to a borrow parameter (the default) or an `inout` parameter lends it. Passing it to a `take` parameter transfers ownership. A `take self` method such as `commit` or `close` consumes it. Resources are never copied.
+2. **On a normal exit**, every resource the scope still owns must have been consumed or transferred, or it is a compile error.
+3. **On a failure exit**, whether `fail`, a `try` that propagates, a defect, or cancellation, the resources the scope still owns are abandoned in reverse order of acquisition.
+4. **Aggregates.** Matching a resource-bearing value moves the contained resource into the binding (§6.4). Abandoning an aggregate abandons the active variant's resource, or each element in reverse order. `for f in take files { … }` consumes a collection element by element.
+5. **No silent loss.** A resource cannot be overwritten or discarded. Assigning to a place that holds one, or dropping one that an expression produced, is a compile error. A container operation that would discard one returns it instead: `files.replace(…)` returns the old file. Error types cannot be resources.
+6. **Lent resources cannot be consumed.** A borrowed or `inout` resource cannot be passed to `take` or used by a `take self` method. So a callback lent `tx` cannot commit it.
+
+**Cleanup is bounded, not absolute** (Q29):
+- **Deadline.** `abandon` runs with cancellation masked, under a cleanup deadline (default 10 s, set in `proviso.toml`). At the deadline, the runtime interrupts its pending capability call. If it still does not finish, as in a pure loop, the process aborts with exit code 70 and a post-mortem.
+- **Defects during cleanup.** If `abandon` hits a defect, the defect is recorded and that resource is reported as leaked. The remaining resources are still abandoned, and the exit becomes a defect exit even if it began as an error (§7.3).
+- **Fatal conditions.** Stack exhaustion and out-of-memory are process-fatal. Cleanup is not guaranteed, and the post-mortem is best effort.
 
 Scoped helpers are ordinary functions with non-escaping closures:
 
@@ -545,7 +622,7 @@ pub fn rename_user(db: Db[write], id: UserId, name: Text) fails DbError
     try db.transaction(|tx| {          // commits on normal exit, rolls back on failure
         let user = try tx.get(id)
         try tx.put(id: id, user: user.with(name: name))
-    })                                 // tx cannot escape: non-escaping closure, resource type
+    })                                 // tx is lent to the closure (inout Txn); transaction owns and commits it
 }
 ```
 
@@ -558,12 +635,12 @@ let pages = try scope |s| {
     [try a.join(), try b.join()]
 }
 ```
-1. **No shared mutable memory.** A `scope` waits for all its tasks; no task outlives its scope.
-2. **Captures.** `spawn` takes a `scoped` closure (§6.7). It captures values by copy and capabilities as borrows, which is safe because the scope outlives its tasks. It cannot capture a `var` mutably.
+1. **No shared mutable memory**, except capability `state`, which tasks reach only through atomic operations (§9.6). A `scope` waits for all its tasks; no task outlives its scope.
+2. **Captures.** `spawn` takes a `scoped` closure (§6.7). It captures values by copy, with unique and resource values moved, and capabilities as borrows, which is safe because the scope outlives its tasks. It cannot capture a `var` mutably.
 3. **Communication** goes through `Channel[T]`, which is bounded and carries values (Q15).
 4. **Failure.** The first task to fail or hit a defect cancels its siblings. The scope waits for them, then fails with that first error, or propagates that first defect as a defect. The others are recorded in the trace.
-5. **Cancellation** is cooperative, and it is not an error: `else`, `attempt` and `supervise` cannot catch it. It is delivered at capability calls, channel operations, `join` and `checkpoint()`. A cancelled task exits through the failure path, so its resources are abandoned.
-6. **Determinism.** Data races are impossible. The only nondeterminism is ordering at channel and join points and where cancellation is delivered. `--record` captures both, and `proviso test --schedules N` explores seeded orderings.
+5. **Cancellation** is cooperative, and it is not an error: `else`, `attempt` and `supervise` cannot catch it. It is delivered at capability calls, channel operations, `join`, `checkpoint()` and every loop back-edge, so even a pure loop can be cancelled. A cancelled task exits through the failure path, so its resources are abandoned.
+6. **Determinism.** Data races on memory are impossible, because tasks share mutable memory only through atomic capability operations. Races through external resources are still possible: two tasks writing the same file through copies of a `Dir` can complete in either order. The completion order of capability calls is recorded with the other scheduling choices (§9.8), and `proviso test --schedules N` explores seeded orderings.
 7. **Supervision.** `supervise(|| work())` runs `work` in a child task and returns an `Outcome[T, E]`: `Done(t)`, `Failed(e)` or `Crashed(d)`, where `d: Defect`. It is the only way to catch a defect (Q16).
 
 `supervise`, `checkpoint` and `parallel_map` come from `std.task`.
@@ -580,7 +657,9 @@ let pages = try scope |s| {
   - parsing: `Int.parse(text) fails ParseError`.
 
 ### 12.2 Floats
-- **Arithmetic** is IEEE-754, with no fast-math and no implicit fused multiply-add (`x.mul_add(factor: y, addend: z)` is explicit). Results are reproducible across platforms.
+- **Arithmetic** is IEEE-754 with round-to-nearest-even only. There is no rounding-mode control, no fast-math, and no implicit fused multiply-add (`x.mul_add(factor: y, addend: z)` is explicit). `+`, `-`, `*`, `/`, `sqrt` and conversions give bit-identical results on every platform.
+- **NaN.** NaN bit patterns are not observable: `to_bits` returns one canonical NaN.
+- **Library functions** such as `sin` and `exp` are reproducible only if the standard library implements them itself instead of calling the platform's maths library (Q27).
 - **Comparison.** `==` follows IEEE. `Float` does not implement `Eq`, `Ord` or `Hash`; use `total_cmp` for sorting (Q22).
 - **Conversions:** `Float.from(i)` rounds to nearest-even. `f.to_int(rounding: Rounding.TowardZero)` fails on NaN or on an out-of-range value.
 
@@ -689,7 +768,7 @@ Each change is classified as `BREAKING`, `WEAKENED`, `STRENGTHENED`, `AUTHORITY`
 
 ## 16. Packages and formatting
 
-- **Package files.** `proviso.toml` declares the package name, `lang = "0.2"` and the dependencies. `proviso.lock` pins dependencies by content hash.
+- **Package files.** `proviso.toml` declares the package name, `lang = "0.3"` and the dependencies. `proviso.lock` pins dependencies by content hash.
 - **Standard library.** It ships with the toolchain, and `proviso sig std.text` describes the installed version, not a remembered one.
 - **Compilation** is whole-program; Proviso code is never linked dynamically.
 - **Formatting.** There is one canonical format, applied by `proviso fmt`. `proviso check` reports a non-canonical file as a warning, never an error.
@@ -754,8 +833,9 @@ pub record User derives(Eq, Show)                                        rev 1a0
 
 pub fn load_users(dir: Dir[read], path: Path) -> List[User] fails LoadError      rev 9e2210
     /// Reads `name,age` lines from `path` under `dir`.
-    authority     dir: read, not kept                                    [type]
-    on failure    no inout parameters; no external writes possible       [type]
+    authority     dir: Dir[read], observes only, uses nothing, not kept  [type]
+    on failure    no inout parameters; no writes outside the program     [type]
+    trusts        the runtime's Dir honours its permissions              [trusted]
     defects       none unproven                                          [verified]
 
 pub fn parse_user(line: Text, line_no: Int) -> User fails LoadError              rev 44b0c7
