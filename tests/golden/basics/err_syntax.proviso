@@ -1,0 +1,12 @@
+// phase: 1
+// expect-error: E0101
+// Errors are reported once each, and the parser recovers at the next statement.
+fn f() -> Int {
+    let = 3
+    let ok = 4
+    return ok
+}
+
+fn g() -> Int {
+    return 1 2
+}

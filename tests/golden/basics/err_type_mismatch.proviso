@@ -1,0 +1,9 @@
+// phase: 1
+// expect-error: E0301
+// No implicit conversions: not between Text and Int, Int and Int8, or Int literals and Float.
+fn f(small: Int8, big: Int) -> Int {
+    let text: Int = "five"
+    let ratio: Float = 1
+    let sum = small + big
+    return small + 1
+}

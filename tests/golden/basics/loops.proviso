@@ -1,0 +1,46 @@
+// phase: 1
+use std.io { IoError }
+
+/// The first n primes' sum, with a labelled `continue`.
+fn sum_of_primes(n: Int) -> Int {
+    var found = 0
+    var sum = 0
+    var candidate = 1
+    outer: while found < n {
+        candidate += 1
+        for d in 2..candidate {
+            if d * d > candidate {
+                break
+            }
+            if candidate % d == 0 {
+                continue outer
+            }
+        }
+        found += 1
+        sum += candidate
+    }
+    return sum
+}
+
+fn first_square_above(limit: Int) -> Int {
+    var i = 0
+    loop {
+        i += 1
+        if i * i > limit {
+            return i * i
+        }
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{sum_of_primes(10)}")
+    try sys.stdout.write_line(f"{first_square_above(50)}")
+    var total = 0
+    for i in 1..=4 {
+        total += i
+    }
+    for i in 5..5 {
+        total += 1000
+    }
+    try sys.stdout.write_line(f"{total}")
+}

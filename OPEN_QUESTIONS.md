@@ -276,11 +276,34 @@ Each §F row becomes one such test.
 - **Standard library quality.** Every public `std` function meets the quality rule in the reference (§16).
 
 **Implementation notes (non-normative, moved from the reference).**
+- **Host language (decided).** The checker, interpreter and tools are written in Rust. Its integer and float types and UTF-8 strings match Proviso's scalar semantics one to one. Exhaustive matching suits a type checker, and the output is a single binary that starts instantly. The costs are build latency and lifetime friction, which are contained as follows:
+  - The workspace is split into crates (`syntax`, `check`, `interp`, `proviso`), so an edit rebuilds only the crates that depend on it.
+  - The syntax tree lives in arenas addressed by typed ids, and names are interned.
+  - There are no dependencies that rely heavily on procedural macros.
+  - The budget is about 2 s for an incremental `cargo check` and about 10 s from an edit to golden results. Both are measured at the end of each phase.
+
+  The runtime library that the C backend later links against is written in C. For phase 6, each task runs on its own OS thread, and the tasks pass a single baton at delivery points. That keeps scheduling deterministic without rewriting the recursive tree-walker.
 - **Compilation.** The whole program is compiled and monomorphized into one C file, as Goose does. TinyCC runs it in-process for `proviso run`; the system C compiler produces `proviso build` output.
 - **Value storage.** Values use reference counting with in-place reuse, as in Koka's Perceus, plus copy-on-write. Cycles are impossible because nothing stores a reference. An analysis elides `inout` copies (Q17).
 - **Pools** use generational slots.
 - **Incremental work** is keyed by hashes: item hashes for checking, obligation hashes for the verifier cache, dependency hashes for examples.
 - **Costs.** `proviso query costs f` reports the copies and allocations the optimizer could not eliminate.
+
+**P5 — Provisional decisions from the phase-1 implementation.** Implementing phase 1 forced choices the reference leaves open. Each is a default to confirm or overturn, not a settled rule:
+- **Anchors** count the item's first line as line 1, so `users.parse_user+8` is the eighth line of `parse_user` (§15.1).
+- **Exit codes** beyond the reference's 1 and 70 follow the BSD `sysexits` convention that 70 comes from: 64 for usage errors, 65 when `check` fails, and 66 for an unreadable file.
+- **Interpolated text** writes literal braces as `{{` and `}}`, and an interpolation may not span lines. `"""…"""` processes escapes and keeps its content verbatim, with no indentation stripping.
+- **No shadowing (H4)** also covers the module's own functions, not only imported names.
+- **Operators** stay strict where the reference is silent:
+  - `Text` has no `+`; use interpolation.
+  - Floats have no `%`.
+  - `Bool` has no ordering.
+  - Unsigned integers have no unary `-`.
+  - An integer literal never becomes a float, so `let x: Float = 1` is an error.
+- **`Show` for floats** prints the shortest text that reads back as the same value, always with a fraction or an exponent: `1.0`, `0.1`, `1e21`, `NaN`, `inf`.
+- **Value positions.** An `if` without `else` used for its value is an error, and a `try` that marks no fallible call is an error (E0703).
+- **Stack exhaustion** is a defect after 10,000 nested calls, so it is reported as a defect instead of crashing the interpreter.
+- **Diagnostic codes** are grouped by area, as described in the code catalog (`crates/syntax/src/diag.rs`). Constructs from later phases report E0901 with the phase that will implement them.
 
 ## E. Experiment plan
 

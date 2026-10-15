@@ -1,0 +1,6 @@
+// phase: 1
+// expect-error: E0106
+fn f() {
+    var n = 1
+    n + 1 = 2
+}

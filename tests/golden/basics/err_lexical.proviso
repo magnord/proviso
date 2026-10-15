@@ -1,0 +1,11 @@
+// phase: 1
+// expect-error: E0001
+// expect-error: E0003
+// expect-error: E0004
+// expect-error: E0005
+fn f() {
+    let a = 1;
+    let b = "bad \q escape"
+    let c = 12abc
+    let d = 'ab'
+}

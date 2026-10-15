@@ -1,0 +1,10 @@
+[package]
+name = "proviso-check"
+description = "Name resolution and type checking for Proviso"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+proviso-syntax.workspace = true

@@ -1,0 +1,20 @@
+// phase: 1
+// expect-error: E0206
+// expect-error: E0207
+// expect-error: E0208
+// Labels are required for two or more parameters, in declaration order (H3).
+fn area(width: Int, height: Int) -> Int {
+    return width * height
+}
+
+fn square(side: Int) -> Int {
+    return side * side
+}
+
+fn call_sites() {
+    let a = area(3, 4)
+    let b = area(height: 4, width: 3)
+    let c = square(side: 2)
+    let d = square(2)
+    let e = square(1, 2)
+}

@@ -1,0 +1,15 @@
+// phase: 1
+// expect-error: E0901
+// Later-phase constructs are reported as not implemented, without cascading errors.
+record Span {
+    lo: Int
+    hi: Int
+}
+
+fn f(xs: List[Int]) -> Int {
+    let ys = [1, 2, 3]
+    let n = match 3 {
+        _ => 1
+    }
+    return n
+}

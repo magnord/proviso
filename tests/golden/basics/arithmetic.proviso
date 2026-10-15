@@ -1,0 +1,17 @@
+// phase: 1
+// `/` truncates toward zero and `%` takes the sign of the dividend (REFERENCE §12.1).
+// Floats are IEEE binary64 or binary32, and Show prints the shortest round-trip text.
+use std.io { IoError }
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{7 / 2} {-7 / 2} {7 % 3} {-7 % 3} {7 % -3}")
+    let big: UInt64 = 18446744073709551615
+    let low: Int = -9223372036854775808
+    try sys.stdout.write_line(f"{big} {low}")
+    try sys.stdout.write_line(f"{0.1 + 0.2} {1.0 / 3.0} {2e-3} {1.5 * 4.0}")
+    let single: Float32 = 0.1
+    try sys.stdout.write_line(f"{single + single} {1.0 / 0.0} {-1.0 / 0.0}")
+    let nan = 0.0 / 0.0
+    try sys.stdout.write_line(f"{nan} {nan == nan} {nan != nan} {nan < 1.0}")
+    try sys.stdout.write_line(f"{-(3 * 4) + 2} {2 + 3 * 4} {(2 + 3) * 4}")
+}

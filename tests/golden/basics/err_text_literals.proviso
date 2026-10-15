@@ -1,0 +1,9 @@
+// phase: 1
+// expect-error: E0002
+// expect-error: E0006
+// expect-error: E0007
+fn f(n: Int) {
+    let a = f"{n"
+    let b = f"{}"
+    let c = "never closed
+}

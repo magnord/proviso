@@ -1,0 +1,6 @@
+// phase: 1
+// expect-error: E0204
+fn makeTotal(firstValue: Int) -> Int {
+    let SubTotal = firstValue
+    return SubTotal
+}

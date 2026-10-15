@@ -1,0 +1,4 @@
+// phase: 1
+// expect-error: E0205
+use std.io { IoError, Writer }
+use mylib.things { Thing }

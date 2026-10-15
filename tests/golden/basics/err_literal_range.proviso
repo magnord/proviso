@@ -1,0 +1,10 @@
+// phase: 1
+// expect-error: E0302
+// A literal takes the type it meets, and must fit it. `-128` fits in Int8; `-129` does not.
+fn f() {
+    let fits: Int8 = -128
+    let byte: UInt8 = 256
+    let low: Int8 = -129
+    let max: UInt64 = 18446744073709551615
+    let too_big = 9223372036854775808
+}

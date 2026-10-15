@@ -1,0 +1,8 @@
+// phase: 1
+// expect-error: E0303
+pub fn main(sys: keep System) {
+    let n = 3
+    let s = n.length()
+    let o = sys.stdout.flush_all()
+    let q = sys.mailbox
+}

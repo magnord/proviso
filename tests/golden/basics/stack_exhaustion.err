@@ -1,0 +1,4 @@
+defect[stack_exhausted]: the call stack is exhausted after 10000 nested calls
+  at basics/stack_exhaustion.proviso:4:12 (stack_exhaustion.down+2)
+  called from basics/stack_exhaustion.proviso:4:12 (stack_exhaustion.down+2), 9998 times
+  called from basics/stack_exhaustion.proviso:8:13 (stack_exhaustion.main+2)

@@ -1,0 +1,6 @@
+// phase: 1
+// expect-error: E0107
+// `todo` holes need `--incomplete` (Q25).
+fn parse(line: Text) -> Int {
+    todo("split on commas")
+}

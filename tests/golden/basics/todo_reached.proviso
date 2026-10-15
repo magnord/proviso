@@ -1,0 +1,14 @@
+// phase: 1
+// flags: --incomplete
+// expect-exit: 70
+// With `--incomplete` a `todo` checks, and reaching it is a defect.
+use std.io { IoError }
+
+fn later(n: Int) -> Int {
+    todo("work out the formula")
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line("before")
+    try sys.stdout.write_line(f"{later(1)}")
+}

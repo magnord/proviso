@@ -1,0 +1,25 @@
+// phase: 1
+use std.io { IoError }
+
+fn classify(n: Int) -> Text {
+    let size = if n < 10 { "small" } else if n < 100 { "medium" } else { "large" }
+    return f"{n} is {size}"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let out = sys.stdout
+    try out.write_line(classify(5))
+    try out.write_line(classify(50))
+    try out.write_line(classify(500))
+    let word = "naïve"
+    try out.write_line(f"{word} has {word.byte_len()} bytes; empty: {word.is_empty()}, {"".is_empty()}")
+    try out.write_line(f"{'a' < 'b'} {"apple" < "banana"} {"Zebra" < "apple"} {true == false}")
+    try out.write_line(f"braces: {{literal}} and {1 + 1}")
+    try out.write_line(f"show: {42.show()} {true.show()} {'x'.show()}")
+    let both = true and not false
+    let either = false or 1 > 2
+    try out.write_line(f"{both} {either}")
+    try out.write_line(r"raw \n stays")
+    try out.write_line("""two
+lines""")
+}

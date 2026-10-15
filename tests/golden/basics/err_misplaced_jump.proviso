@@ -1,0 +1,8 @@
+// phase: 1
+// expect-error: E0105
+fn f() {
+    break
+    for i in 0..3 {
+        continue outer
+    }
+}

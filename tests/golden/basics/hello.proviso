@@ -1,0 +1,7 @@
+// phase: 1
+// The `main` from REFERENCE §1: all authority starts at `sys`.
+use std.io { IoError }
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line("hello")
+}

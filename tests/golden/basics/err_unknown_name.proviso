@@ -1,0 +1,5 @@
+// phase: 1
+// expect-error: E0201
+fn f() -> Int {
+    return missing + undefined_fn(1)
+}

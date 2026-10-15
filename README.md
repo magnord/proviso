@@ -2,7 +2,7 @@
 
 **A draft programming language designed for coding agents to write and maintain.**
 
-> **Status:** design only. No compiler or interpreter exists yet. This repository holds the language reference, the reasoning behind it, and the open questions that are still to be settled, several of them by experiment.
+> **Status:** mostly design. Phase 1 of the v1 implementation is in place: a checker and a tree-walking interpreter for scalar types, functions and control flow, written in Rust. This repository holds the language reference, the reasoning behind it, the open questions that are still to be settled (several of them by experiment), and that implementation.
 
 ## Why
 
@@ -80,9 +80,34 @@ users.load_users                                      BREAKING
 
 If you are new, start with RATIONALE.md for the reasoning, then skim REFERENCE.md §1 ("At a glance") and §17 ("Worked example").
 
+## Building and running
+
+The toolchain needs Rust 1.85 or later, and has no dependencies outside the standard library.
+
+```bash
+cargo run -- run tests/golden/basics/hello.proviso
+```
+
+- `proviso check [--json] <file>` type-checks a file.
+- `proviso run <file>` checks it and runs its `main`.
+- `proviso explain <code>` describes a diagnostic code.
+
+Constructs from later phases are reported as `E0901 not_implemented`, together with the phase that will add them.
+
+`cargo test` runs the unit tests and every golden file under `tests/golden`. A golden file states its phase and its expected errors or exit code in comments, and it sits next to a `.out` file of expected output (see `crates/proviso/src/golden.rs`). To rewrite the expected output after an intended change, run `PROVISO_BLESS=1 cargo test`.
+
+The workspace is split by stage:
+
+| Crate | What it does |
+|---|---|
+| `syntax` | lexer, parser, syntax tree and the diagnostic code catalog |
+| `check` | names and types |
+| `interp` | the tree-walking interpreter |
+| `proviso` | the command-line tool and the golden test runner |
+
 ## What happens next
 
-1. **Build v1 in phases** (OPEN_QUESTIONS P3). v1 is a checker and an interpreter, and each phase ends in a program that runs. The acceptance counterexamples in OPEN_QUESTIONS §F become golden tests, each assigned to the phase that must make it pass. Until the verifier lands, contracts are checked at runtime, and `sig` says so.
+1. **Build v1 in phases** (OPEN_QUESTIONS P3). v1 is a checker and an interpreter, and each phase ends in a program that runs. Phase 1 is done: hello world and `fib` run, and its golden tests pass. Phase 2 adds data types and ownership. The acceptance counterexamples in OPEN_QUESTIONS §F become golden tests, each assigned to the phase that must make it pass. Until the verifier lands, contracts are checked at runtime, and `sig` says so.
 2. **Meet the v1 success criteria** (P4). A fresh agent writes a small program from the reference alone within two attempts, and its token cost is measured against Rust and TypeScript.
 3. **Run the experiment** (OPEN_QUESTIONS §E). Agents do the same maintenance tasks across variants that differ in one feature at a time. The tooling ablation is the clean test of the thesis, and Rust and TypeScript serve as baselines for overall competitiveness. The design's own predictions are written down in advance so they can be proven wrong.
 

@@ -1,0 +1,11 @@
+// phase: 1
+// expect-error: E0103
+// expect-error: E0104
+// Comparisons do not chain, and `and` and `or` do not mix without parentheses (H2).
+fn f(a: Int, b: Int, c: Int, p: Bool, q: Bool, r: Bool) -> Bool {
+    let chained = a < b < c
+    let mixed = p and q or r
+    let fine = (p and q) or r
+    let not_binds_loosely = not a == b
+    return fine
+}

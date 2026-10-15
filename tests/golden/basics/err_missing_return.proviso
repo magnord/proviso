@@ -1,0 +1,27 @@
+// phase: 1
+// expect-error: E0304
+// Non-Unit functions end every path with an explicit `return`; there is no implicit value.
+fn sign(n: Int) -> Int {
+    if n < 0 {
+        return -1
+    } else if n > 0 {
+        return 1
+    }
+}
+
+fn double(n: Int) -> Int {
+    n * 2
+}
+
+fn ok(n: Int) -> Int {
+    if n < 0 {
+        return 0
+    } else {
+        return n
+    }
+}
+
+fn forever() -> Int {
+    loop {
+    }
+}

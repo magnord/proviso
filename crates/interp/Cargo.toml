@@ -1,0 +1,11 @@
+[package]
+name = "proviso-interp"
+description = "Tree-walking interpreter for checked Proviso programs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+proviso-syntax.workspace = true
+proviso-check.workspace = true

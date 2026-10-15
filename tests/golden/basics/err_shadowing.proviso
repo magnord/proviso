@@ -1,0 +1,18 @@
+// phase: 1
+// expect-error: E0203
+// No binding may reuse a name in scope, including functions and imports (H4).
+use std.io
+
+fn count() -> Int {
+    return 1
+}
+
+fn f(x: Int) {
+    let x = 2
+    let count = 3
+    let io = 4
+    if true {
+        let y = 1
+    }
+    let y = 2
+}

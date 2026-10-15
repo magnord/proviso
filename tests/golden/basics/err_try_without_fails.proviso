@@ -1,0 +1,6 @@
+// phase: 1
+// expect-error: E0702
+// `try` propagates the error unchanged, so `main` must declare it.
+pub fn main(sys: keep System) {
+    try sys.stdout.write_line("hello")
+}

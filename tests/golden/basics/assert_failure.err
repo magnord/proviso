@@ -1,0 +1,2 @@
+defect[assertion_failed]: assertion failed: n % 2 == 0
+  at basics/assert_failure.proviso:6:5 (assert_failure.main+4)

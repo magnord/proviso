@@ -1,0 +1,8 @@
+// phase: 1
+// expect-error: E0701
+// A call that can fail must be marked where it happens (REFERENCE §7.2).
+use std.io { IoError }
+
+pub fn main(sys: keep System) fails IoError {
+    sys.stdout.write_line("hello")
+}

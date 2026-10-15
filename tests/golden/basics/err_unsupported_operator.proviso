@@ -1,0 +1,9 @@
+// phase: 1
+// expect-error: E0306
+fn f(x: Float, u: UInt8, t: Text, b: Bool) {
+    let r = x % 2.0
+    let n = -u
+    let joined = t + t
+    let ordered = b < b
+    let s = f"{()}"
+}

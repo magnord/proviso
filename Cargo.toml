@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+proviso-syntax = { path = "crates/syntax" }
+proviso-check = { path = "crates/check" }
+proviso-interp = { path = "crates/interp" }
+
+[profile.dev]
+# Line tables are enough for backtraces and keep link times down.
+debug = "line-tables-only"
