@@ -1,0 +1,3 @@
+defect[division_by_zero]: `/` by zero
+  at basics/division_by_zero.proviso:6:12 (division_by_zero.ratio+2)
+  called from basics/division_by_zero.proviso:11:34 (division_by_zero.main+3)

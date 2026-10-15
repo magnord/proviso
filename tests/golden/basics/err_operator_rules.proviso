@@ -1,0 +1,14 @@
+// phase: 1
+// expect-error: E0103
+// expect-error: E0104
+// Comparisons do not chain, and `and` and `or` do not mix without parentheses (H2). A
+// longer chain is still one error.
+fn f(a: Int, b: Int, c: Int, p: Bool, q: Bool, r: Bool) -> Bool {
+    let chained = a < b < c                         // <- E0103
+    let longer = a < b < c < a                      // <- E0103
+    let mixed = p and q or r                        // <- E0104
+    let mixed_more = p and q or r and p             // <- E0104
+    let fine = (p and q) or r
+    let not_binds_loosely = not a == b
+    return fine
+}

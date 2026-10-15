@@ -9,6 +9,12 @@
 // `sig` exists.
 //
 // Probe stands in for the row's File (see f08).
+//
+// The test assumes that the popped probe is owned and that `close` consumes it
+// (OPEN_QUESTIONS Q35). It also assumes `List.pop`, `List.len`, and `Out` in
+// `std.io` (Q36). How `sig` shows such an `inout` is open (T11). Printing
+// through a stored `Out` needs `keep` parameters and capability-typed fields,
+// which P3 doesn't put in phase 2.
 
 use std.io { Out, IoError }
 

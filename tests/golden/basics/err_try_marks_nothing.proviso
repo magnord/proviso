@@ -1,0 +1,22 @@
+// phase: 1
+// expect-error: E0201
+// expect-error: E0303
+// expect-error: E0703
+// A `try` must mark a call that can fail. A call that doesn't resolve is reported once,
+// not again for its `try`.
+use std.io { IoError, Out }
+
+fn add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+fn total() -> Int {
+    let sum = try add(a: 1, b: 2)                   // <- E0703
+    return sum
+}
+
+fn write(o: Out) fails IoError {
+    try o.print("x")                                // <- E0303
+    try missing_fn()                                // <- E0201
+    try o.write_line(missing_name)                  // <- E0201
+}

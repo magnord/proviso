@@ -1,0 +1,7 @@
+// phase: 1
+// expect-exit: 70
+pub fn main(sys: keep System) {
+    let n = 3
+    assert n > 0
+    assert n % 2 == 0
+}

@@ -1,0 +1,14 @@
+// phase: 1
+// expect-error: E0301
+// No implicit conversions: not between Text and Int, Int and Int8, or Int literals and Float.
+// An expression made only of literals takes its type from context, like a single literal.
+fn f(small: Int8, big: Int, f32: Float32) -> Int {
+    let text: Int = "five"                          // <- E0301
+    let ratio: Float = 1                            // <- E0301
+    let twice: Float = 1 + 1                        // <- E0301
+    let sum = small + big                           // <- E0301
+    let fits = (1 + 2) + small
+    let same = 0.1 + 0.2 == f32
+    let no_else = if big > 0 { 1 }                  // <- E0301
+    return small + 1                                // <- E0301
+}

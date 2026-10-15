@@ -1,0 +1,9 @@
+// phase: 1
+// expect-exit: 70
+fn down(n: Int) -> Int {
+    return down(n + 1)
+}
+
+pub fn main(sys: keep System) {
+    let n = down(0)
+}

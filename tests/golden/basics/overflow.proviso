@@ -1,0 +1,15 @@
+// phase: 1
+// expect-exit: 70
+// Overflow is a defect, checked against each value's own type (REFERENCE §12.1).
+use std.io { IoError }
+
+fn add(a: Int8, b: Int8) -> Int8 {
+    return a + b
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let fits: UInt8 = 200
+    try sys.stdout.write_line(f"{fits + 55}")
+    try sys.stdout.write_line(f"{add(a: 100, b: 27)}")
+    try sys.stdout.write_line(f"{add(a: 100, b: 28)}")
+}

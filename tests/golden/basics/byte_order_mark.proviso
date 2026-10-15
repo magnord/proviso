@@ -1,0 +1,7 @@
+﻿// phase: 1
+// A file may start with a UTF-8 byte order mark, which is ignored.
+use std.io { IoError }
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line("hello")
+}

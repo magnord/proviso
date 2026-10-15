@@ -1,0 +1,72 @@
+// phase: 1
+// expect-error: E0201
+// expect-error: E0901
+// Later-phase constructs are reported as not implemented, without cascading errors. A
+// binding whose initializer isn't implemented still exists, but only in its own function.
+record Span {                                       // <- E0901
+    lo: Int
+    hi: Int
+}
+
+impl Show for Span {                                // <- E0901
+    fn show(self) -> Text {
+        return "span"
+    }
+}
+
+fn f(xs: List[Int]) -> Int {                        // <- E0901
+    let ys = [1, 2, 3]                              // <- E0901
+    let n = match 3 {                               // <- E0901
+        _ => 1
+    }
+    let copy = ys
+    return n
+}
+
+fn g(c: Bool) -> Bool {
+    return true
+}
+
+fn later_forms(c: Bool) -> Int {
+    if (g(c) else false) {                          // <- E0901
+        return 1
+    }
+    let d = 3.0[m]                                  // <- E0901
+    let e: Float[m] = 1.0                           // <- E0901
+    return 2
+}
+
+fn h(callback: scoped fn(Int)) {                    // <- E0901
+    let a = 1
+}
+
+fn pair(p: (Int, Int)) -> Int {                     // <- E0901
+    return 1
+}
+
+fn id[T](x: T) -> T {                               // <- E0901
+    return x
+}
+
+fn now(x: Int) observes Clock {                     // <- E0901
+    return
+}
+
+fn tick(x: Int) -> Int effects Clock {              // <- E0901
+    return x
+}
+
+distinct UserId = Int                               // <- E0901
+
+effect Foo                                          // <- E0901
+
+fn uses_poisoned() -> Int {
+    return ys                                       // <- E0201
+}
+
+fn main_like() {
+    let z = id(x: 1)
+    let w = pair(p: 1)
+    now(x: 1)
+    let t = tick(x: 2)
+}

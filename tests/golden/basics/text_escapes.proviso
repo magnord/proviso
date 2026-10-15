@@ -1,0 +1,13 @@
+// phase: 1
+// Escapes work in every kind of text except raw text. `"""…"""` keeps its line breaks and
+// indentation as written.
+use std.io { IoError }
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line("tab:\t| quote:\" backslash:\\ apostrophe:\' smile:\u{1F600}")
+    try sys.stdout.write_line("""first line
+    second line, indented, with \"escapes\"\tand a tab""")
+    try sys.stdout.write_line(r"raw: \n \t \u{41}")
+    let quote = '\''
+    try sys.stdout.write_line(f"char: {quote} braces: {{}} \u{41}")
+}

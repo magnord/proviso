@@ -1,0 +1,15 @@
+// phase: 1
+// expect-error: E0002
+// expect-error: E0006
+// expect-error: E0007
+// Text literal errors don't spill onto the next line. An interpolation may hold a char
+// literal, but it may not span lines.
+fn f(n: Int, c: Char) {
+    let a = f"{n"                                   // <- E0006
+    let b = f"{}"                                   // <- E0007
+    let d = f"x}y"                                  // <- E0006
+    let e = f"{c == '}'} {c == '"'}"
+    let g = f"{n                                    // <- E0006
+        + 1}"
+    let j = "never closed                           // <- E0002
+}

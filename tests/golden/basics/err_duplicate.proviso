@@ -1,0 +1,9 @@
+// phase: 1
+// expect-error: E0202
+use std.io { IoError, IoError }                     // <- E0202
+
+fn twice() {
+}
+
+fn twice() {                                        // <- E0202
+}

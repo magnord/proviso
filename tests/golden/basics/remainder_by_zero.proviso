@@ -1,0 +1,13 @@
+// phase: 1
+// expect-exit: 70
+// `%` by zero is a defect, like `/` by zero.
+use std.io { IoError }
+
+fn remainder(a: Int, b: Int) -> Int {
+    return a % b
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{remainder(a: -7, b: 2)}")
+    try sys.stdout.write_line(f"{remainder(a: 7, b: 0)}")
+}

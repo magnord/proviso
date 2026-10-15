@@ -294,8 +294,8 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 
 | Phase | Scope | Milestone |
 |---|---|---|
-| 1. Pipeline | lexer, parser, names, scalar types and functions, `proviso check`, an interpreter for `run` with a stub `System` that provides only `stdout`, the golden test runner | hello world and `fib` run; an `expect-error` golden passes |
-| 2. Data and ownership | records, enums, `match`, collections, `Option` and `Result`, `fails`/`try`/`else`/`attempt`, kinds and moves, `inout` atomicity, resources and `Abandon`, pools and handles, `example` and `test` | `parse_user` from the reference's worked example (§17) runs with its examples; §F rows 6–9, 14 and 15 pass |
+| 1. Pipeline | lexer, parser, names, scalar types and functions, `fails` and `try`, `assert`, `debug`, `todo`, `unreachable`, `proviso check`, an interpreter for `run` with a stub `System` that provides only `stdout`, the golden test runner | hello world and `fib` run; an `expect-error` golden passes |
+| 2. Data and ownership | records, enums, `match`, collections, `Option` and `Result`, `fail`, `else` and `attempt`, kinds and moves, `inout` atomicity, resources and `Abandon`, pools and handles, `example` and `test` | `parse_user` from the reference's worked example (§17) runs with its examples; §F rows 6–9, 14 and 15 pass |
 | 3. Authority | capabilities and permissions, `observes` and `effects`, `uses` and reach, retention, closure lifetimes, `cap record` state, `MemDir` written in Proviso | the whole §17 module runs, including its `MemDir` test; §F rows 4, 5, 11 and 13 pass |
 | 4. Contracts and tools | contracts under the v1 profile, interface contract rules, `sig`, `fmt`, `diff-contracts` | `proviso sig` reproduces the reference's §17 output as a golden file; §F row 12 passes; the P4 criteria are first measured |
 | 5. Verifier | the predicate fragment over linear arithmetic, admissibility, refinements under mutation | §F rows 1–3, 16 and 17 are rejected at compile time; `sig` levels move from `[checked]` to `[verified]` |
@@ -311,8 +311,8 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - packages.
 
 **Test format.** Every phase adds golden tests, as in the Pith design. The format is specified in [tests/golden/README.md](tests/golden/README.md):
-- A file with `// expect-error: <code>` header lines must fail `proviso check` with exactly that set of codes. The codes are catalogued in [tests/DIAGNOSTICS.md](tests/DIAGNOSTICS.md).
-- A `.out`, `.sig` or `.fmt` file holds the expected output of `run`, `sig` or `fmt`. Header directives give the phase, the exit code, the expected runtime reports, and whether to record and replay.
+- A file with `// expect-error: <code>` header lines must fail `proviso check` with exactly that set of codes. Each expected error is marked on its line with a trailing `// <- <code>` comment, and the runner checks those markers. The codes are catalogued in [tests/DIAGNOSTICS.md](tests/DIAGNOSTICS.md).
+- A `.out` file holds the expected stdout of `run`, and an `.err` file holds its expected stderr. A `.sig` or `.fmt` file holds the expected output of `sig` or `fmt`. Header directives give the phase, the exit code, the expected runtime reports, and whether to record and replay.
 
 All 18 §F rows are already written as `tests/golden/fNN_*.proviso`, each tagged with its phase from the table above. Row 14's `.sig` can only be checked from phase 4. Writing them found the gaps in §G.
 
@@ -322,12 +322,43 @@ All 18 §F rows are already written as `tests/golden/fNN_*.proviso`, each tagged
 - **Counterexamples.** Every §F row assigned to a finished phase passes as a golden test.
 - **Standard library quality.** Every public `std` function meets the quality rule in the reference (§16).
 
-**Implementation notes (non-normative, moved from the reference).**
+**Implementation notes (non-normative).**
+- **Host language (decided).** The checker, interpreter and tools are written in Rust. Its integer and float types and UTF-8 strings match Proviso's scalar semantics one to one. Exhaustive matching suits a type checker, and the output is a single binary that starts instantly. The costs are build latency and lifetime friction, which are contained as follows:
+  - The workspace is split into crates (`syntax`, `check`, `interp`, `proviso`), so an edit rebuilds only the crates that depend on it.
+  - The syntax tree lives in arenas addressed by typed ids, and names are interned.
+  - There are no dependencies that rely heavily on procedural macros.
+  - The budget is about 2 s for an incremental `cargo check` and about 10 s from an edit to golden results. Both are measured at the end of each phase. At the end of phase 1, an incremental `cargo check` took 0.21 s and an edit took 0.61 s to reach golden results. Both times are from a debug build on the author's machine.
+
+  The runtime library that the C backend later links against is written in C. For phase 6, each task runs on its own OS thread, and the tasks pass a single baton at delivery points. That keeps scheduling deterministic without rewriting the recursive tree-walker.
 - **Compilation.** The whole program is compiled and monomorphized into one C file, as Goose does. TinyCC runs it in-process for `proviso run`; the system C compiler produces `proviso build` output.
 - **Value storage.** Values use reference counting with in-place reuse, as in Koka's Perceus, plus copy-on-write. Cycles are impossible because nothing stores a reference. An analysis elides `inout` copies (Q17).
 - **Pools** use generational slots.
 - **Incremental work** is keyed by hashes: item hashes for checking, obligation hashes for the verifier cache, dependency hashes for examples.
 - **Costs.** `proviso query costs f` reports the copies and allocations the optimizer could not eliminate.
+
+**P5 — Provisional decisions from the phase-1 implementation.** Implementing phase 1 forced choices the reference leaves open. Each is a default to confirm or overturn, not a settled rule:
+- **Anchors** count the item's first line as line 1, so `users.parse_user+8` is the eighth line of `parse_user` (§15.1).
+- **Exit codes** beyond the reference's 1 and 70 follow the BSD `sysexits` convention that 70 comes from: 64 for usage errors, 65 when `check` fails, and 66 for an unreadable file, including one that is not valid UTF-8. The exception is 101 for an internal error, which is a bug in the toolchain such as an interpreter panic. `--json` applies only to `check`. `run` writes the program's output to stdout, so `run --json` is a usage error (64).
+- **Source files** may start with a UTF-8 byte order mark, which the toolchain ignores.
+- **Escapes** in text and char literals also include `\'`, which a char literal needs (`'\''`). The reference lists only `\n \t \\ \" \u{…}` (§2).
+- **Interpolated text** writes literal braces as `{{` and `}}`, and an interpolation may not span lines. `"""…"""` processes escapes and keeps its content verbatim, with no indentation stripping.
+- **No shadowing (H4)** also covers the module's own functions, not only imported names.
+- **Operators** stay strict where the reference is silent:
+  - `Text` has no `+`; use interpolation.
+  - Floats have no `%`.
+  - `Bool` has no ordering.
+  - Unsigned integers have no unary `-`.
+  - An integer literal never becomes a float, so `let x: Float = 1` is an error.
+- **Literal expressions** built only from literals and arithmetic, such as `1 + 2` or `0.1 + 0.2`, stay untyped like a single literal. So `0.1 + 0.2 == c` compares as `Float32` when `c` is a `Float32`. The literal rule in §2 mentions only single literals.
+- **`Show` for floats** prints the shortest text that reads back as the same value, always with a fraction or an exponent: `1.0`, `0.1`, `1e21`, `NaN`, `inf`.
+- **Value positions.** An `if` without `else` used for its value is an error, and a `try` that marks no fallible call is an error (E0703).
+- **Members of `Never`.** A field access or method call on an expression of type `Never`, such as `unreachable.f()`, is an error (E0303), as in Rust and TypeScript. There is no type to look the member up in.
+- **`fails Never`** is the same as no `fails` clause. `Never` has no values, so a call to such a function cannot fail, and marking it with `try` is an error (E0703).
+- **Nesting limit.** Expressions and blocks may nest at most 1,000 levels deep. Each operator in a chain such as `a + b + c` counts as a level, and so does each link of a call chain such as `a.f().g()`. The toolchain rejects deeper code with E0902 instead of overflowing its own stack.
+- **Stack exhaustion** is a defect after 10,000 nested calls, or sooner if deeply nested expressions in each call run the interpreter's 1 GiB stack low. Either way the interpreter reports a `stack_exhausted` defect instead of crashing. The reference makes stack exhaustion process-fatal (§7.3), but phase 1 has no cleanup to skip, so the run ends like any other defect, with exit code 70.
+- **Diagnostic codes** are grouped by area, as described in [tests/DIAGNOSTICS.md](tests/DIAGNOSTICS.md). A test keeps that catalog and the one the toolchain serves identical. A construct that isn't implemented yet reports E0901, and the message says whether it is planned for a v1 phase, deferred past v1, or not yet scheduled.
+- **Defect reports** go to stderr as `defect[<kind>]: <message>`, followed by `at` and `called from` lines with locations and anchors. A run of identical call sites collapses into one line. This is a provisional answer to T10 for defects; leaks and overlaps are still open.
+- **`debug`** writes to stderr as `[debug <path>:<line>:<col>] <values>`, with text and chars quoted and escaped as Proviso literals.
 
 ## E. Experiment plan
 
@@ -400,4 +431,4 @@ Writing the §F rows as complete programs ([tests/golden](tests/golden/README.md
 | How defects, leaks and replay overlaps are reported; simulated replay suppresses stdout; what counts as overlapping | f09, f10 | T9, T10 |
 | How `sig` shows an `inout` that holds a resource | f14 | T11 |
 | Row 13 as written calls the fallible `w` unmarked, and its `try` adds a second reason for rejection. The golden makes `w` infallible so that reach is the only reason. | f13 | the row's wording |
-| P3's phase 2 lacks features its own rows need: `check` and `assert` (§17's `parse_user`, f09), closures and function types with modes (row 15), and `keep` parameters and capability-typed fields (f08, f09, f14 print through a stored `Out`; retention can still wait for phase 3). P3 also places `supervise` in no phase (f18, phase 6). | f08, f09, f14, f15, f18 | P3 |
+| P3's phase 2 lacks features its own rows need: `check` (§17's `parse_user`), closures and function types with modes (row 15), and `keep` parameters and capability-typed fields (f08, f09, f14 print through a stored `Out`; retention can still wait for phase 3). P3 also places `supervise` in no phase (f18, phase 6). | f08, f09, f14, f15, f18 | P3 |

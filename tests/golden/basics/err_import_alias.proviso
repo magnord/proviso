@@ -1,0 +1,11 @@
+// phase: 1
+// expect-error: E0203
+// expect-error: E0209
+// `as` renames an import only to resolve a name collision (REFERENCE §3, Q24), and an
+// import may not shadow a prelude type (H4).
+use std.io { IoError as StdError }                  // <- E0209
+use std.io { Out as Int }                           // <- E0203
+
+fn f(x: Int) -> Int {
+    return x
+}

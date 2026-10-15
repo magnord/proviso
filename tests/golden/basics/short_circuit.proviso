@@ -1,0 +1,19 @@
+// phase: 1
+// `and` and `or` evaluate their right operand only when it decides the result.
+use std.io { IoError }
+
+fn boom() -> Bool {
+    let zero = 0
+    return 1 / zero == 1
+}
+
+pub fn main(sys: keep System) fails IoError {
+    if false and boom() {
+        try sys.stdout.write_line("not printed")
+    }
+    if true or boom() {
+        try sys.stdout.write_line("`or` stopped at true")
+    }
+    let both = (false and boom()) or true
+    try sys.stdout.write_line(f"`and` stopped at false: {both}")
+}

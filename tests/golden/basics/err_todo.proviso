@@ -1,0 +1,11 @@
+// phase: 1
+// expect-error: E0107
+// `todo` holes need `--incomplete` (Q25). A rejected hole causes no other errors.
+fn parse(line: Text) -> Int {
+    todo("split on commas")                         // <- E0107
+}
+
+fn later(line: Text) -> Int {
+    let n = todo.byte_len()                         // <- E0107
+    return n
+}

@@ -1,0 +1,2 @@
+defect[integer_overflow]: `UInt8` addition overflowed: 255 + 1
+  at basics/compound_overflow.proviso:10:5 (compound_overflow.main+5)

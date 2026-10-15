@@ -1,0 +1,4 @@
+// phase: 1
+// expect-error: E0704
+pub fn main(sys: keep System) fails Unit {          // <- E0704
+}

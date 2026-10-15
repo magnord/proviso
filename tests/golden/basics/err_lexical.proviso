@@ -1,0 +1,18 @@
+// phase: 1
+// expect-error: E0001
+// expect-error: E0003
+// expect-error: E0004
+// expect-error: E0005
+// Each lexical error is reported once, and the line after it still parses.
+fn f() {
+    let a = 1;                                      // <- E0001
+    let b = "bad \q escape"                         // <- E0003
+    let c = 12abc                                   // <- E0004
+    let d = 'ab'                                    // <- E0005
+    let e = true && false                           // <- E0001
+    let g = 1.5e+                                   // <- E0004
+    let h = 1.                                      // <- E0004
+    let größe = 1                                   // <- E0001
+    let i = 1; let j = 2                            // <- E0001
+    let k = 0x                                      // <- E0004
+}

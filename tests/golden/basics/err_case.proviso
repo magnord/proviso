@@ -1,0 +1,16 @@
+// phase: 1
+// expect-error: E0204
+// Types are PascalCase and everything else snake_case. A wrongly cased name is reported
+// once, not again as a duplicate or a shadow of the name it collides with.
+use std.io { IoError }
+
+fn makeTotal(firstValue: Int) -> Int {              // <- E0204, E0204
+    let SubTotal = firstValue                       // <- E0204
+    return SubTotal
+}
+
+fn IoError() {                                      // <- E0204
+}
+
+fn takes(IoError: Int) {                            // <- E0204
+}

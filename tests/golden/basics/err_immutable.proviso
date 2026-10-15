@@ -1,0 +1,10 @@
+// phase: 1
+// expect-error: E0305
+fn f(n: Int) -> Int {
+    let total = 0
+    total += n                                      // <- E0305
+    n = 1                                           // <- E0305
+    var fine = 0
+    fine += n
+    return total
+}

@@ -1,0 +1,9 @@
+// phase: 1
+// expect-error: E0105
+fn f() {
+    break                                           // <- E0105
+    outer: for i in 0..3 {
+        continue outer
+        continue inner                              // <- E0105
+    }
+}

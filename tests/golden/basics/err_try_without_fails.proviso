@@ -1,0 +1,18 @@
+// phase: 1
+// expect-error: E0702
+// expect-error: E0703
+// `try` propagates the error unchanged, so the function must declare that same error.
+// `fails Never` declares none, so a call to such a function cannot fail.
+use std.io { IoError, Out }
+
+pub fn main(sys: keep System) {
+    try sys.stdout.write_line("hello")              // <- E0702
+}
+
+fn never_fails(o: Out) fails Never {
+    try o.write_line("hi")                          // <- E0702
+}
+
+fn calls_it(o: Out) fails IoError {
+    try never_fails(o)                              // <- E0703
+}

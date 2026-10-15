@@ -1,0 +1,3 @@
+defect[integer_overflow]: `Int8` addition overflowed: 100 + 28
+  at basics/overflow.proviso:7:12 (overflow.add+2)
+  called from basics/overflow.proviso:14:34 (overflow.main+5)

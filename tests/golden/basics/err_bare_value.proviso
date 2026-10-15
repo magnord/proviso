@@ -1,0 +1,10 @@
+// phase: 1
+// expect-error: E0102
+// A statement must be a call, an assignment or a control expression.
+fn f(x: Int) {
+    x + 1                                           // <- E0102
+    x                                               // <- E0102
+    "text"                                          // <- E0102
+    debug(x)
+    f(x)
+}

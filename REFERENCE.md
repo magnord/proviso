@@ -1,6 +1,6 @@
 # Proviso — Working Reference
 
-*v3 draft · design only, nothing implemented*
+*v3 draft · phase 1 of the v1 implementation exists (README)*
 
 This is the reference an agent keeps in context while writing Proviso. It aims to be complete enough to write correct code and short enough (~10K tokens) to stay loaded (P1). Normative detail beyond it is served by `proviso explain <rule>`. Choices that are experiment variables are tagged **(H*n*)**. Unresolved design questions are tagged **(Q*n*)**, tooling questions **(T*n*)** and process questions **(P*n*)**. All of them are listed in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md). The reasoning behind the design is in [RATIONALE.md](RATIONALE.md).
 
@@ -74,7 +74,7 @@ fn bump_twice() -> Int {
 
 - **Source and identifiers.** Source is UTF-8. Identifiers are ASCII `[A-Za-z_][A-Za-z0-9_]*`. Case is enforced: types, interfaces, enum variants, and type, effect and tag parameters are `PascalCase`; everything else is `snake_case`, including modules, functions, fields, units, tags and permissions.
 - **Comments.** Comments are `// …`. Doc comments `/// …` attach to the next item and appear in `proviso sig`.
-- **Statement ends.** A newline ends a statement; there are no semicolons (H8). A statement continues onto the next line in three cases:
+- **Statement ends.** A newline ends a statement; there are no semicolons (H8). A statement continues onto the next line in four cases:
   - the innermost unclosed bracket is `(` or `[`;
   - the line ends with a binary operator, `=` or `,`;
   - the next line begins with `.`, `else`, `and` or `or`;

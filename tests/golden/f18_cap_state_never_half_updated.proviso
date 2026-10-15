@@ -16,7 +16,8 @@
 //
 // The flag is a separate capability object, so `stopper` can read it while
 // `transfer` runs. The signatures of `spawn` and `supervise` are not given
-// (OPEN_QUESTIONS Q15, Q16).
+// (OPEN_QUESTIONS Q15, Q16). P3 places `supervise` in no phase, so the test
+// assumes phase 6.
 
 use std.io { IoError }
 use std.task { checkpoint, supervise }

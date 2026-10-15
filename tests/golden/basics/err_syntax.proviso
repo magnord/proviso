@@ -1,0 +1,61 @@
+// phase: 1
+// expect-error: E0101
+// Errors are reported once each, and the parser recovers at the next statement or item,
+// even when the error is inside brackets. An unclosed bracket is reported where it opens.
+fn f() -> Int {
+    let = 3                                         // <- E0101
+    let ok = 4
+    return ok
+}
+
+fn g() -> Int {
+    return 1 2                                      // <- E0101
+}
+
+fn cond(x: Int) -> Bool {
+    return true
+}
+
+fn h() {
+    while cond(x: 1 2) {                            // <- E0101
+        let inside = 1
+    }
+    let after = 2
+}
+
+fn double(x Int) -> Int {                           // <- E0101
+    let y = x * 2
+    return y
+}
+
+fn unclosed_paren(x: Int) -> Int {
+    let a = cond(x                                  // <- E0101
+    return 1
+}
+
+fn unclosed_brace(x: Int) -> Int {
+    if x > 0 {                                      // <- E0101
+        return 1
+
+    return 2
+}
+
+fn unclosed_bracket(x: Int) -> Int {
+    let a: Foo[Int = 1                              // <- E0101
+    return a
+}
+
+fn else_in_condition() {
+    if cond(x: 1) else false {                      // <- E0101
+        let a = 1
+    }
+}
+
+/// A doc comment may follow an item on its line.
+fn documented() {
+} /// It attaches to the next item.
+
+fn next() {
+    let b = double(x: 2) + g()
+}
+/// This one has no item after it.                 // <- E0101

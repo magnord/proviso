@@ -1,0 +1,5 @@
+// phase: 1
+// expect-error: E0307
+fn f(x: Integer) -> Strng {                         // <- E0307, E0307
+    return x
+}

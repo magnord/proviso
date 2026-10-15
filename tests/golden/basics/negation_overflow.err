@@ -1,0 +1,3 @@
+defect[integer_overflow]: `Int8` negation overflowed
+  at basics/negation_overflow.proviso:7:12 (negation_overflow.negate+2)
+  called from basics/negation_overflow.proviso:14:34 (negation_overflow.main+5)

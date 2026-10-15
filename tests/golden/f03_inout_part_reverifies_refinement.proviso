@@ -5,6 +5,9 @@
 // Passing `&span.lo` re-verifies `lo <= hi` when the call returns, using only
 // `set_ten`'s admissible ensures (§8.3). It has none, so the obligation is
 // refuted (for example lo = 10, hi = 4).
+//
+// The reference doesn't say whether the call also drops the facts about
+// `span.hi`. The row is rejected either way (OPEN_QUESTIONS Q28).
 
 record Span {
     lo: Int

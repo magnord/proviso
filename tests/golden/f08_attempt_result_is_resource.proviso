@@ -7,6 +7,11 @@
 //
 // Probe stands in for the row's File, since the reference has no API for
 // opening files (OPEN_QUESTIONS Q36). It reports close and abandon on stdout.
+//
+// The test assumes that a path ending in `fail` counts as returning (Q33), and
+// that `close` consumes the Probe although it holds no resource fields (Q35).
+// The Probe stores an `Out` through a `keep` parameter, which P3 doesn't put in
+// phase 2.
 
 use std.io { Out, IoError }
 

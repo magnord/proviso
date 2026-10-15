@@ -1,0 +1,15 @@
+// phase: 1
+// expect-error: E0303
+// `Never` has no members: an expression that never produces a value has nothing to look up.
+fn stop() -> Never {
+    unreachable
+}
+
+pub fn main(sys: keep System) {
+    let n = 3
+    let s = n.length()                              // <- E0303
+    let o = sys.stdout.flush_all()                  // <- E0303
+    let q = sys.mailbox                             // <- E0303
+    unreachable.frobnicate()                        // <- E0303
+    let m: Int = stop().anything(1, 2, 3).more      // <- E0303
+}

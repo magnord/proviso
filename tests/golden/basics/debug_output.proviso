@@ -1,0 +1,6 @@
+// phase: 1
+// `debug` writes to stderr with its location, and needs no capability (REFERENCE §9.7).
+pub fn main(sys: keep System) {
+    let n = 42
+    debug(n, "text", 'c', 1.5)
+}

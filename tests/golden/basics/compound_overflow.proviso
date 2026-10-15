@@ -1,0 +1,12 @@
+// phase: 1
+// expect-exit: 70
+// Compound assignment checks overflow like the operator it stands for.
+use std.io { IoError }
+
+pub fn main(sys: keep System) fails IoError {
+    var level: UInt8 = 250
+    level += 5
+    try sys.stdout.write_line(f"{level}")
+    level += 1
+    try sys.stdout.write_line(f"{level}")
+}

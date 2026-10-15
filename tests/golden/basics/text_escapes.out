@@ -1,0 +1,5 @@
+tab:	| quote:" backslash:\ apostrophe:' smile:😀
+first line
+    second line, indented, with "escapes"	and a tab
+raw: \n \t \u{41}
+char: ' braces: {} A
