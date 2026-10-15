@@ -1,6 +1,6 @@
 # Proviso — Open Questions
 
-Companion to [REFERENCE.md](REFERENCE.md). The IDs here match the tags in the reference. Each entry gives:
+Companion to [REFERENCE.md](REFERENCE.md); the reasoning behind the design is in [RATIONALE.md](RATIONALE.md). The IDs here match the tags in the reference. Each entry gives:
 - **Now:** what the reference currently says.
 - **Options:** the realistic alternatives.
 - **Resolve by:** how we decide.

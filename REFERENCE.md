@@ -2,7 +2,7 @@
 
 *v2 draft · design only, nothing implemented*
 
-This is the reference an agent keeps in context while writing Proviso. It aims to be complete enough to write correct code and short enough (~10K tokens) to stay loaded (P1). Normative detail beyond it is served by `proviso explain <rule>`. Choices that are experiment variables are tagged **(H*n*)**. Unresolved design questions are tagged **(Q*n*)**, tooling questions **(T*n*)** and process questions **(P*n*)**. All of them are listed in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md).
+This is the reference an agent keeps in context while writing Proviso. It aims to be complete enough to write correct code and short enough (~10K tokens) to stay loaded (P1). Normative detail beyond it is served by `proviso explain <rule>`. Choices that are experiment variables are tagged **(H*n*)**. Unresolved design questions are tagged **(Q*n*)**, tooling questions **(T*n*)** and process questions **(P*n*)**. All of them are listed in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md). The reasoning behind the design is in [RATIONALE.md](RATIONALE.md).
 
 ## 0. Principles
 
