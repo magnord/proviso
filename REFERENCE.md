@@ -1,20 +1,20 @@
-# Writ — Working Reference
+# Proviso — Working Reference
 
-*v2 draft · design only, nothing implemented · "Writ" is a working name (P2)*
+*v2 draft · design only, nothing implemented*
 
-This is the reference an agent keeps in context while writing Writ. It aims to be complete enough to write correct code and short enough (~10K tokens) to stay loaded (P1). Normative detail beyond it is served by `writ explain <rule>`. Choices that are experiment variables are tagged **(H*n*)**. Unresolved design questions are tagged **(Q*n*)**, tooling questions **(T*n*)** and process questions **(P*n*)**. All of them are listed in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md).
+This is the reference an agent keeps in context while writing Proviso. It aims to be complete enough to write correct code and short enough (~10K tokens) to stay loaded (P1). Normative detail beyond it is served by `proviso explain <rule>`. Choices that are experiment variables are tagged **(H*n*)**. Unresolved design questions are tagged **(Q*n*)**, tooling questions **(T*n*)** and process questions **(P*n*)**. All of them are listed in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md).
 
 ## 0. Principles
 
 1. **Minimize the code and reasoning a correct change requires.** Do it with trustworthy boundaries, not by removing abstraction. An abstraction is welcome if its contract is as checkable as the code it hides.
 2. **Every guarantee states how it is enforced** (§8.4). A plausible contract with weak enforcement is worse than none.
-3. **Nothing hidden.** No ambient authority, no implicit conversions beyond subtyping (§9.2), no exceptions, no compiler-inserted contract checks, and no dispatch targets the tools cannot list. Built-in safety checks (overflow, bounds, division by zero, stale handles) are inserted only where the verifier cannot rule the defect out, and `writ query defects` lists every one.
+3. **Nothing hidden.** No ambient authority, no implicit conversions beyond subtyping (§9.2), no exceptions, no compiler-inserted contract checks, and no dispatch targets the tools cannot list. Built-in safety checks (overflow, bounds, division by zero, stale handles) are inserted only where the verifier cannot rule the defect out, and `proviso query defects` lists every one.
 4. **Familiar syntax by default.** Departing from Rust/Swift/TypeScript/Python conventions needs experimental evidence.
 5. **The compiler is a service.** It answers questions, applies structured edits and reports how contracts change (§15).
 
 ## 1. At a glance
 
-```writ
+```proviso
 use std.fs { Dir, Path, FsError }                    // explicit names only, no globs
 use std.io { IoError }
 
@@ -73,7 +73,7 @@ fn bump_twice() -> Int {
 ## 2. Lexical structure
 
 - **Source and identifiers.** Source is UTF-8. Identifiers are ASCII `[A-Za-z_][A-Za-z0-9_]*`. Case is enforced: types, interfaces, enum variants, and type, effect and tag parameters are `PascalCase`; everything else is `snake_case`, including modules, functions, fields, units, tags and permissions.
-- **Comments.** Comments are `// …`. Doc comments `/// …` attach to the next item and appear in `writ sig`.
+- **Comments.** Comments are `// …`. Doc comments `/// …` attach to the next item and appear in `proviso sig`.
 - **Statement ends.** A newline ends a statement; there are no semicolons (H8). A statement continues onto the next line in three cases:
   - the innermost unclosed bracket is `(` or `[`;
   - the line ends with a binary operator, `=` or `,`;
@@ -100,10 +100,10 @@ fn bump_twice() -> Int {
 
 ## 3. Modules and names
 
-- **Modules.** A file is a module: `src/net/http.writ` is module `net.http`. A dependency's modules are prefixed with the package name, and the standard library is `std.*`. Top-level items are order-independent.
+- **Modules.** A file is a module: `src/net/http.proviso` is module `net.http`. A dependency's modules are prefixed with the package name, and the standard library is `std.*`. Top-level items are order-independent.
 - **Imports.** `use a.b { X, y }` imports names. `use a.b` makes `b` usable as a qualifier, as in `b.y()`. `as` is allowed only to resolve a name collision (Q24). There are no glob imports.
 - **Visibility.** Items are private to their module by default. `pub` exports from the package and `pub(pkg)` exports within the package. A `pub record` exposes its fields and constructor; a `pub opaque record` exposes only the type and its `pub` methods.
-- **Re-exports** for facades: `pub use internal.parser { parse_document }`. `writ query def` always reports the original definition.
+- **Re-exports** for facades: `pub use internal.parser { parse_document }`. `proviso query def` always reports the original definition.
 - **One name, one symbol.** Every reference resolves to exactly one symbol, and a module has at most one item per name, so there is no overloading. The same name in different modules is fine.
 - **Methods.** Inherent methods live in `impl T { … }` in T's module. Interface methods live in `impl I for T` (§4.9). A method call `x.f()` must resolve to exactly one candidate, considering T's inherent methods and the methods of in-scope interfaces T implements. If it is ambiguous, call it as `I.f(x)`. Declaring an inherent method with the same name as a method of an interface T implements is an error.
 - **No shadowing (H4).** A local, parameter or pattern binding may not reuse a name already in scope in the same function, including imported names.
@@ -121,7 +121,7 @@ Arguments are labelled with parameter names, in declaration order, with three ex
 - for a function, method or constructor with exactly one parameter besides the receiver, the label is optional;
 - calls of function values take no labels, because closure parameters have none.
 
-```writ
+```proviso
 counts.set(key: k, value: 1)    counts.get(k)    UserId(7)    User(id: i, name: n, age: a)
 ```
 
@@ -152,7 +152,7 @@ Section 12 covers arithmetic and conversions.
 `Text` is immutable UTF-8 and is never indexed by integers (§12.3). `Bytes` is a separate type.
 
 ### 4.4 Records
-```writ
+```proviso
 record Span derives(Eq) {
     lo: Int
     hi: Int
@@ -162,11 +162,11 @@ let s = Span(lo: 1, hi: 4)                             // all fields, in order, 
 let t = s.with(hi: 9)                                  // functional update; refinements re-verified
 ```
 - **Generics.** Records can be generic: `record Pair[A, B] { first: A, second: B }`.
-- **Derives.** `derives(Eq, Ord, Hash, Show)` generates the implementations. `writ query expand Span` shows the generated code (Q20).
+- **Derives.** `derives(Eq, Ord, Hash, Show)` generates the implementations. `proviso query expand Span` shows the generated code (Q20).
 - **Validation.** A record with refinements also gets `Span.validate(lo:, hi:) -> Span fails Invalid` (§8.4). An `Invalid` value names the failing field and predicate.
 
 ### 4.5 Enums
-```writ
+```proviso
 enum Shape {
     Circle(radius: Float[m])
     Rect(w: Float[m], h: Float[m])
@@ -189,7 +189,7 @@ let c = Shape.Circle(radius: 2.0[m])                   // variants are qualified
   - A bare literal has no unit, so `let d: Float[m] = 3.0` is an error. Write `3.0[m]`.
   - `d.to::[cm]()` converts between related units and `d.value_in::[m]()` strips the unit (Q23).
 - **Tags** are phantom type arguments that keep values apart without runtime cost:
-  ```writ
+  ```proviso
   tag world
   tag local
   record Vec3[S: tag] { x: Float[m], y: Float[m], z: Float[m] }
@@ -203,7 +203,7 @@ let c = Shape.Circle(radius: 2.0[m])                   // variants are qualified
 - **Effect parameters** are written `effect E` (§9.5).
 
 ### 4.9 Interfaces
-```writ
+```proviso
 pub interface Show {                     // as declared in the prelude
     fn show(self) -> Text
 }
@@ -216,7 +216,7 @@ impl Show for Span {
 - **Contracts on interface methods** bind every implementation. Each implementation must meet each contract at the interface's enforcement level or a stronger one.
 - **No default methods** (Q13).
 - **Static dispatch.** A parameter of interface type, `x: Show`, means `[T: Show](x: T)`.
-- **Dynamic dispatch** is explicit: `any Show`, for example `List[any Show]` (Q14). Because compilation is whole-program, `writ query dispatch <call site>` lists every possible target. Capability interfaces are the exception: they are types in their own right and always dispatch dynamically (§9.2).
+- **Dynamic dispatch** is explicit: `any Show`, for example `List[any Show]` (Q14). Because compilation is whole-program, `proviso query dispatch <call site>` lists every possible target. Capability interfaces are the exception: they are types in their own right and always dispatch dynamically (§9.2).
 - **Operators.** `==` and `!=` come from `Eq`, ordering from `Ord`, arithmetic from `Add`, `Sub`, `Mul`, `Div` and `Neg`, and `x[i]` from `Index`. Scalars have these operators built in, including IEEE `==` and `<` on `Float` (§12.2). There are no custom operators.
 
 ## 5. Values, bindings and mutation
@@ -244,13 +244,13 @@ Receivers are `self`, `inout self` or `take self`. Calling an `inout self` metho
 ### 5.4 Failure atomicity
 - **The rule.** If a call fails (an error exit), every `inout` argument is left exactly as it was before the call. Writes are committed only on success.
 - **Implementation.** Copy-in/copy-out, with the copy elided when no failure point follows the first write.
-- **Opting out.** `x: inout(partial) T` lets failures leave partial changes, and `writ sig` reports it (Q8).
+- **Opting out.** `x: inout(partial) T` lets failures leave partial changes, and `proviso sig` reports it (Q8).
 - **Defects** (§7.3) and **cancellation** (§11) abort the whole task, so there is nothing left to commit.
 
 ### 5.5 Identity: pools and handles
 There are no stored references. Identity is a handle into a pool:
 
-```writ
+```proviso
 use std.pool { Pool, Handle }
 
 var people: Pool[Person] = Pool.new()
@@ -285,7 +285,7 @@ Other operator rules:
 A condition must be `Bool`; there is no truthiness. `if` is an expression when it has an `else`.
 
 ### 6.3 match
-```writ
+```proviso
 let label = match age {                 // facts make this exhaustive: 0 <= age < 150
     0..18 => "minor"
     18..150 => "adult"
@@ -360,10 +360,10 @@ Defects are bugs, not errors. They include:
 What happens on a defect:
 - The current task aborts, and its resources are abandoned (§10).
 - The enclosing scope cancels its other tasks and propagates the defect as a defect (never as an error), and so on up to `main`.
-- `main` exits with code 70 and writes a post-mortem: `writ postmortem <id>` shows every frame's locals as JSON.
+- `main` exits with code 70 and writes a post-mortem: `proviso postmortem <id>` shows every frame's locals as JSON.
 - Only `supervise` at a task boundary can catch a defect (§11).
 
-`fails E` lists every recoverable failure. `writ query defects f` lists the defect sites in `f` that the verifier could not rule out. Those are the only places the compiler inserts checks. Stack and memory exhaustion can happen anywhere and are not listed.
+`fails E` lists every recoverable failure. `proviso query defects f` lists the defect sites in `f` that the verifier could not rule out. Those are the only places the compiler inserts checks. Stack and memory exhaustion can happen anywhere and are not listed.
 
 ### 7.4 main
 `pub fn main(sys: keep System) fails E` requires `E: Show`. On failure, the program prints `e.show()` to stderr and exits with code 1.
@@ -387,7 +387,7 @@ Anything else is `unsupported` (§8.5, Q9).
 - `requires`, `ensures` and `invariant` clauses;
 - `check` and `assert` statements.
 
-```writ
+```proviso
 pub fn sort[T: Ord](values: inout List[T])
     ensures values.is_sorted()
     ensures values.is_permutation_of(old(values))
@@ -425,7 +425,7 @@ Facts are dropped when the code changes what they describe:
 - `assert P`, which is a defect if false;
 - the generated validator: `User.validate(…) fails Invalid`.
 
-**There is no silent downgrade.** A `[verified]` clause that comes back unknown is a compile error. Changing it to `(checked)` or `(tested)` is an explicit edit, and `writ diff-contracts` reports it as a weakening (Q10).
+**There is no silent downgrade.** A `[verified]` clause that comes back unknown is a compile error. Changing it to `(checked)` or `(tested)` is an explicit edit, and `proviso diff-contracts` reports it as a weakening (Q10).
 
 ### 8.5 Outcomes and budget
 - **Four outcomes.** Each obligation ends as one of:
@@ -433,7 +433,7 @@ Facts are dropped when the code changes what they describe:
   - `refuted`, with counterexample values;
   - `unknown: unsupported`, meaning outside the fragment;
   - `unknown: budget`, meaning the resource limit was exceeded.
-- **Budget units are deterministic, not wall-clock.** There is a default per obligation in `writ.toml`.
+- **Budget units are deterministic, not wall-clock.** There is a default per obligation in `proviso.toml`.
 - **Reproducibility.** Results are cached by obligation hash and must be reproducible on any machine with the same toolchain version (T8).
 
 ### 8.6 Fixes are alternatives
@@ -454,7 +454,7 @@ A fix marked `changes_behavior: true` is never applied automatically (T7).
 ### 9.1 No ambient authority
 The standard library has no global file, network, clock, randomness, environment, process or console access. All authority comes from `main`, which receives the `System` record as `keep`, so it can hand capabilities to `keep` parameters:
 
-```writ
+```proviso
 record System {                          // provided by the runtime
     fs: Dir[read, write, create, delete, list]
     net: Net[connect, listen]
@@ -469,7 +469,7 @@ record System {                          // provided by the runtime
 ```
 
 ### 9.2 Capability interfaces and permissions
-```writ
+```proviso
 pub cap interface Dir perms(read, write, create, delete, list) {
     fn read_text(self, path: Path) -> Text fails FsError                    needs read
     fn write_text(self, path: Path, text: Text) fails FsError               needs write
@@ -491,10 +491,10 @@ pub cap interface Dir perms(read, write, create, delete, list) {
 
 ### 9.4 Function types and closures
 - **Function types:** `fn(A) -> R`, `fn(A) -> R fails E`, and `fn(A) -> R with E`, where `E` is an effect variable.
-- **A closure's type** records the error it can fail with. Capturing a capability does not change the type; what a closure may capture is limited by its lifetime (§6.7). `writ query effects` reports both (Q3).
+- **A closure's type** records the error it can fail with. Capturing a capability does not change the type; what a closure may capture is limited by its lifetime (§6.7). `proviso query effects` reports both (Q3).
 
 ### 9.5 Effect polymorphism
-```writ
+```proviso
 impl[A] List[A] {
     pub fn map[B, effect E](self, f: fn(A) -> B with E) -> List[B] with E {
         var out: List[B] = []
@@ -516,14 +516,14 @@ let sizes = names.map(|n| dir.size(n) else 0)                   // E = no failur
 - **Standard fakes.** `std.test` provides `MemDir`, `FakeClock`, `FakeNet` and `SeededRandom`. Their constructors return capabilities directly.
 
 ### 9.7 debug
-`debug(x, …)` writes debug representations, with the source location, to the debug stream. It needs no capability, and `writ build --release` rejects it.
+`debug(x, …)` writes debug representations, with the source location, to the debug stream. It needs no capability, and `proviso build --release` rejects it.
 
 ### 9.8 Replay
-All external observations pass through capabilities, and all scheduling choices happen at channel and join points and where cancellation is delivered (§11). So `writ run --record` can log every capability result and scheduling choice, and `writ replay <run>` re-executes the run deterministically. Calling an `extern` that is not `pure` makes the run non-replayable unless the extern is wrapped as a capability. A recording run reports when that happens (§13, T5).
+All external observations pass through capabilities, and all scheduling choices happen at channel and join points and where cancellation is delivered (§11). So `proviso run --record` can log every capability result and scheduling choice, and `proviso replay <run>` re-executes the run deterministically. Calling an `extern` that is not `pure` makes the run non-replayable unless the extern is wrapped as a capability. A recording run reports when that happens (§13, T5).
 
 ## 10. Resources
 
-```writ
+```proviso
 pub resource record Txn { conn: Conn }
 impl Abandon for Txn {
     fn abandon(take self) { self.conn.rollback_quietly() }  // cannot fail
@@ -538,7 +538,7 @@ Every resource type implements `Abandon`.
 
 Scoped helpers are ordinary functions with non-escaping closures:
 
-```writ
+```proviso
 pub fn rename_user(db: Db[write], id: UserId, name: Text) fails DbError
     requires not name.is_empty()       // callers must establish this; it discharges User.name
 {
@@ -551,7 +551,7 @@ pub fn rename_user(db: Db[write], id: UserId, name: Text) fails DbError
 
 ## 11. Concurrency
 
-```writ
+```proviso
 let pages = try scope |s| {
     let a = s.spawn(|| try fetch(net: net, url: u1))
     let b = s.spawn(|| try fetch(net: net, url: u2))
@@ -563,7 +563,7 @@ let pages = try scope |s| {
 3. **Communication** goes through `Channel[T]`, which is bounded and carries values (Q15).
 4. **Failure.** The first task to fail or hit a defect cancels its siblings. The scope waits for them, then fails with that first error, or propagates that first defect as a defect. The others are recorded in the trace.
 5. **Cancellation** is cooperative, and it is not an error: `else`, `attempt` and `supervise` cannot catch it. It is delivered at capability calls, channel operations, `join` and `checkpoint()`. A cancelled task exits through the failure path, so its resources are abandoned.
-6. **Determinism.** Data races are impossible. The only nondeterminism is ordering at channel and join points and where cancellation is delivered. `--record` captures both, and `writ test --schedules N` explores seeded orderings.
+6. **Determinism.** Data races are impossible. The only nondeterminism is ordering at channel and join points and where cancellation is delivered. `--record` captures both, and `proviso test --schedules N` explores seeded orderings.
 7. **Supervision.** `supervise(|| work())` runs `work` in a child task and returns an `Outcome[T, E]`: `Done(t)`, `Failed(e)` or `Crashed(d)`, where `d: Defect`. It is the only way to catch a defect (Q16).
 
 `supervise`, `checkpoint` and `parallel_map` come from `std.task`.
@@ -594,7 +594,7 @@ let pages = try scope |s| {
 
 ## 13. Foreign code
 
-```writ
+```proviso
 extern "C" fn crc32(crc: UInt32, data: Bytes) -> UInt32
     trusted pure                                   // no I/O, deterministic, retains nothing
 
@@ -603,20 +603,20 @@ extern "C" fn sqlite_exec(db: Db[write], sql: Text) -> Int32
 ```
 - **Types that cross:** scalars, records made only of scalars, borrowed `Bytes` and `Text` (as pointer plus length), `inout` of those flat types (as pointers), and capabilities (as opaque handles).
 - **Trust clauses.** Each `extern` declares `trusted pure` or `trusted uses <capability parameter>`, and optionally `ensures(trusted) P`.
-- **Obligations on the C side**, which Writ cannot check:
+- **Obligations on the C side**, which Proviso cannot check:
   - retain no borrowed argument after the call;
   - write only through `inout` parameters;
   - be safe to call concurrently;
   - be deterministic if declared `pure`.
-- **Inspecting trust.** `writ query trust f` lists every trusted clause `f` depends on, directly or transitively, and `writ diff-contracts` reports new ones (Q21).
+- **Inspecting trust.** `proviso query trust f` lists every trusted clause `f` depends on, directly or transitively, and `proviso diff-contracts` reports new ones (Q21).
 
 ## 14. Tests, examples and properties
 
 - **`example f(…) == v` or `example f(…) fails P`** is a top-level declaration placed next to the function.
   - An example cannot need capabilities.
-  - It runs under `writ test` and `writ check --examples` with a fuel limit.
+  - It runs under `proviso test` and `proviso check --examples` with a fuel limit.
   - It is cached by the hash of the function and its transitive dependencies.
-  - It appears in `writ sig`.
+  - It appears in `proviso sig`.
 - **`test "name" { … }`** blocks use `expect cond`, `expect f(…) == v` and `expect f(…) fails P`, where `P` is a pattern.
   - When an `expect a == b` fails, both values are reported.
   - Tests may build fakes (§9.6).
@@ -624,14 +624,14 @@ extern "C" fn sqlite_exec(db: Db[write], sql: Text) -> Int32
 - **`property "name" for (xs: List[Int], k: Int) { expect … }`** generates its inputs from the types, respecting refinements.
   - Failing inputs are shrunk and the seed is printed.
   - The failure is saved as a regression example.
-- **`writ test --affected-by <symbol>`** runs only the tests that can reach the symbol, using the static call graph plus dispatch sets.
+- **`proviso test --affected-by <symbol>`** runs only the tests that can reach the symbol, using the static call graph plus dispatch sets.
 
 ## 15. Toolchain
 
 ### 15.1 Contract with agents
 Whether these tools pay off is the central experiment (H10).
 
-- **Two interfaces.** Every command accepts `--json`, and the same operations are available through `writ serve` as JSON-RPC over stdio, also exposed as MCP tools (T4).
+- **Two interfaces.** Every command accepts `--json`, and the same operations are available through `proviso serve` as JSON-RPC over stdio, also exposed as MCP tools (T4).
 - **Stable codes.** Diagnostic codes are stable.
 - **No cascades.** All errors are reported at once, and an error poisons only its dependents.
 - **Broken code.** Queries and edits work on code that does not compile. An answer that depends on broken parts carries `"partial": true` (T1).
@@ -641,22 +641,22 @@ Whether these tools pay off is the central experiment (H10).
 ### 15.2 Commands
 | Command | Purpose |
 |---|---|
-| `writ check [--incomplete] [--examples]` | type-check and verify; `--incomplete` accepts `todo` (Q25) |
-| `writ build [--release]` | whole-program build through C; never accepts `todo`; `--release` also rejects `debug` |
-| `writ run [--incomplete] [--record]` · `writ replay <run>` | run, where reaching a `todo` is a defect; deterministic replay |
-| `writ test [--incomplete] [--affected-by S] [--schedules N]` | examples, tests, properties |
-| `writ sig <module or symbol>` | contracts with enforcement levels, revisions, examples |
-| `writ query <kind> <target>` | `def refs callers callees impls dispatch type effects obligations defects trust costs expand` |
-| `writ explain <code or rule>` | normative text for a diagnostic or rule |
-| `writ edit <op> <symbol> --rev R` | `replace-body replace-item insert-item delete-item rename`; batches are atomic |
-| `writ diff-contracts A..B` | contract changes between two revisions |
-| `writ trace <symbol> -- <run args>` | log a function's calls and results without editing code; works on replays |
-| `writ postmortem <id>` | frames and locals of a defect |
-| `writ fmt` | canonical format |
+| `proviso check [--incomplete] [--examples]` | type-check and verify; `--incomplete` accepts `todo` (Q25) |
+| `proviso build [--release]` | whole-program build through C; never accepts `todo`; `--release` also rejects `debug` |
+| `proviso run [--incomplete] [--record]` · `proviso replay <run>` | run, where reaching a `todo` is a defect; deterministic replay |
+| `proviso test [--incomplete] [--affected-by S] [--schedules N]` | examples, tests, properties |
+| `proviso sig <module or symbol>` | contracts with enforcement levels, revisions, examples |
+| `proviso query <kind> <target>` | `def refs callers callees impls dispatch type effects obligations defects trust costs expand` |
+| `proviso explain <code or rule>` | normative text for a diagnostic or rule |
+| `proviso edit <op> <symbol> --rev R` | `replace-body replace-item insert-item delete-item rename`; batches are atomic |
+| `proviso diff-contracts A..B` | contract changes between two revisions |
+| `proviso trace <symbol> -- <run args>` | log a function's calls and results without editing code; works on replays |
+| `proviso postmortem <id>` | frames and locals of a defect |
+| `proviso fmt` | canonical format |
 
 ### 15.3 Diagnostics
 ```json
-{"code": "E0412", "kind": "refinement_refuted", "at": "src/users.writ:34:12",
+{"code": "E0412", "kind": "refinement_refuted", "at": "src/users.proviso:34:12",
  "anchor": "users.parse_user+8", "message": "User.age requires 0 <= age and age < 150",
  "counterexample": {"age_text": " 900", "age": 900},
  "fixes": [
@@ -668,7 +668,7 @@ Whether these tools pay off is the central experiment (H10).
 
 ### 15.4 Structured edits
 ```
-$ writ edit replace-body users.parse_user --rev 44b0c7 --from body.writ --json
+$ proviso edit replace-body users.parse_user --rev 44b0c7 --from body.proviso --json
 {"applied": true, "rev": "9d01aa", "contract_delta": [], "diagnostics": []}
 {"applied": false, "reason": "stale_rev", "current_rev": "51c3e0", "current_text": "…"}
 ```
@@ -677,7 +677,7 @@ $ writ edit replace-body users.parse_user --rev 44b0c7 --from body.writ --json
 
 ### 15.5 Contract diffs
 ```
-$ writ diff-contracts main..HEAD
+$ proviso diff-contracts main..HEAD
 users.load_users                                      BREAKING
   ~ authority   dir: Dir[read] → Dir[read, write]     widened: may now write files
   ~ fails       LoadError → LoadOrCacheError           callers' `try` no longer type-checks
@@ -689,15 +689,15 @@ Each change is classified as `BREAKING`, `WEAKENED`, `STRENGTHENED`, `AUTHORITY`
 
 ## 16. Packages and formatting
 
-- **Package files.** `writ.toml` declares the package name, `lang = "0.2"` and the dependencies. `writ.lock` pins dependencies by content hash.
-- **Standard library.** It ships with the toolchain, and `writ sig std.text` describes the installed version, not a remembered one.
-- **Compilation** is whole-program; Writ code is never linked dynamically.
-- **Formatting.** There is one canonical format, applied by `writ fmt`. `writ check` reports a non-canonical file as a warning, never an error.
+- **Package files.** `proviso.toml` declares the package name, `lang = "0.2"` and the dependencies. `proviso.lock` pins dependencies by content hash.
+- **Standard library.** It ships with the toolchain, and `proviso sig std.text` describes the installed version, not a remembered one.
+- **Compilation** is whole-program; Proviso code is never linked dynamically.
+- **Formatting.** There is one canonical format, applied by `proviso fmt`. `proviso check` reports a non-canonical file as a warning, never an error.
 
 ## 17. Worked example
 
-```writ
-// src/users.writ
+```proviso
+// src/users.proviso
 use std.fs { Dir, Path, FsError }
 use std.test { MemDir }
 
@@ -746,7 +746,7 @@ test "a bad line reports its line number" {
 ```
 
 ```
-$ writ sig users
+$ proviso sig users
 pub record User derives(Eq, Show)                                        rev 1a09f3
     name: Text where not name.is_empty()
     age:  Int  where 0 <= age and age < 150

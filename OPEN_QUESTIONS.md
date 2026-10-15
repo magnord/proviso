@@ -1,4 +1,4 @@
-# Writ — Open Questions
+# Proviso — Open Questions
 
 Companion to [REFERENCE.md](REFERENCE.md). The IDs here match the tags in the reference. Each entry gives:
 - **Now:** what the reference currently says.
@@ -51,7 +51,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Options:** semicolons.
 - **Risk:** the continuation rules are a source of surprises.
 
-**H9 — Structured edits** (tooling variable). Agents get `writ edit`, versus text replacement only.
+**H9 — Structured edits** (tooling variable). Agents get `proviso edit`, versus text replacement only.
 
 **H10 — Evidence tools** (tooling variable). `sig`, `diff-contracts`, `trace` and `query` on, versus off. This is the test of the central thesis.
 
@@ -70,7 +70,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Need:** a rule for combining its own error with the callback's error, without error unions (see Q1).
 
 **Q3 — Scope of the effect system.**
-- **Now:** a closure's type records only the error it can fail with. What it may capture is limited by its lifetime (default, `scoped`, `keep`), and `writ query effects` reports captured capabilities.
+- **Now:** a closure's type records only the error it can fail with. What it may capture is limited by its lifetime (default, `scoped`, `keep`), and `proviso query effects` reports captured capabilities.
 - **Open:** whether to also track divergence (examples and `pred` bodies need termination), allocation, or blocking.
 
 **Q4 — Capability retention.**
@@ -83,7 +83,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 **Q6 — Permission vocabulary.**
 - **Need:** the permissions for each standard capability (`Dir`, `Net`, `Clock`, `Random`, `Env`, `Process`, `In`, `Out`).
 - **Need:** value-level narrowing: paths, hosts, ports, rate limits.
-- **Open:** how a narrowed value appears in `writ sig`.
+- **Open:** how a narrowed value appears in `proviso sig`.
 
 **Q7 — Partial external writes.**
 - **Now:** `sig` reports "may leave partial writes" for a function that has write authority and can fail.
@@ -120,7 +120,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 **Q14 — Dynamic dispatch (`any I`).**
 - **Now:** capability types always dispatch dynamically; other interfaces need `any I`.
 - **Open:** is `any I` needed in the first version, and what are its representation and cost?
-- **Open:** how `writ query dispatch` presents large target sets.
+- **Open:** how `proviso query dispatch` presents large target sets.
 
 **Q15 — Concurrency model.**
 - **Open:** green threads, OS threads or async I/O.
@@ -134,16 +134,16 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 **Q17 — Memory strategy.**
 - **Now:** Perceus-style reference counting with reuse.
 - **Options:** regions or arenas; Goose-style data stacks for hot modules.
-- **Need:** performance targets, and how precise `writ query costs` must be to be useful.
+- **Need:** performance targets, and how precise `proviso query costs` must be to be useful.
 
 **Q18 — Pools and handles across tasks.** Can handles be sent between tasks? Who owns a pool that several tasks read?
 
 **Q19 — Compile-time evaluation.** What may a top-level `let` contain? Is there a general `const fn` facility?
 
-**Q20 — Code generation beyond `derives`.** Deterministic generators whose output can be inspected (`writ query expand`) and is attributed to its generator. Who may write a generator, and how are its outputs verified?
+**Q20 — Code generation beyond `derives`.** Deterministic generators whose output can be inspected (`proviso query expand`) and is attributed to its generator. Who may write a generator, and how are its outputs verified?
 
 **Q21 — Interop with C.**
-- **Open:** exporting Writ functions to C, callbacks from C, and layout guarantees for flat types.
+- **Open:** exporting Proviso functions to C, callbacks from C, and layout guarantees for flat types.
 - **Open:** replay across `extern` calls, and what to do with an extern that lies about `pure`.
 
 **Q22 — Float equality.** `Float` has no `Eq` or `Hash`, so records with float fields cannot derive `Eq`. Options:
@@ -164,7 +164,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Now:** `check`, `run` and `test` accept `todo` with `--incomplete`, and reaching one is a defect. `build` never accepts it.
 - **Open:** should CI reject `--incomplete` entirely? Should committed code ever contain holes?
 
-**Q26 — Implicit boxing.** Recursive enums are boxed implicitly. Should the cost be visible in the type, or only through `writ query costs`?
+**Q26 — Implicit boxing.** Recursive enums are boxed implicitly. Should the cost be visible in the type, or only through `proviso query costs`?
 
 ## C. Tooling
 
@@ -197,10 +197,13 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Question:** can the working reference stay at about 10K tokens once the Q items are resolved?
 - **Evidence:** Goose's specification is about 258 KB, roughly 60K tokens. A precise specification will be long.
 - **Evidence:** after one consistency review, this reference is already about 11–12K tokens (a rough characters-per-token estimate), because each fix added precision.
-- **Plan:** keep this reference short and serve the normative text through `writ explain`.
+- **Plan:** keep this reference short and serve the normative text through `proviso explain`.
 - **Measure:** whether agents with only the reference in context make errors that the full specification would have prevented.
 
-**P2 — Name.** "Writ" (a written grant of authority) is a working name.
+**P2 — Name.** *Decided:* **Proviso**, a condition attached to an agreement, which fits contracts that carry their enforcement level.
+- **Rejected:** "Writ", because two languages already use the name (a statically typed game-scripting language embedded in Rust, and a Lisp embedded in Go). "Assay", because it collides with tooling for AI agents (a Rust policy engine for agents, and tryassay). "Stet" was the runner-up.
+- **File extension:** the full `.proviso`. The short forms collide with verification tools: `.pvs` is used by PVS and `.pv` by ProVerif.
+- **Searchability:** search for "proviso lang" or "provisolang".
 
 **P3 — Order of implementation.** First build a checker for a core subset:
 - parser;
@@ -213,11 +216,11 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 A small interpreter for tests is enough to run §E; the C backend comes later.
 
 **Implementation notes (non-normative, moved from the reference).**
-- **Compilation.** The whole program is compiled and monomorphized into one C file, as Goose does. TinyCC runs it in-process for `writ run`; the system C compiler produces `writ build` output.
+- **Compilation.** The whole program is compiled and monomorphized into one C file, as Goose does. TinyCC runs it in-process for `proviso run`; the system C compiler produces `proviso build` output.
 - **Value storage.** Values use reference counting with in-place reuse, as in Koka's Perceus, plus copy-on-write. Cycles are impossible because nothing stores a reference. An analysis elides `inout` copies (Q17).
 - **Pools** use generational slots.
 - **Incremental work** is keyed by hashes: item hashes for checking, obligation hashes for the verifier cache, dependency hashes for examples.
-- **Costs.** `writ query costs f` reports the copies and allocations the optimizer could not eliminate.
+- **Costs.** `proviso query costs f` reports the copies and allocations the optimizer could not eliminate.
 
 ## E. Experiment plan
 
@@ -247,4 +250,4 @@ A small interpreter for tests is enough to run §E; the C backend comes later.
 1. H10 (evidence tools) has the largest effect on correctness and regressions.
 2. Explicit `check` facts and labels between same-typed parameters (H3) have medium effects.
 3. H1, H2, H6 and H7 have effects near zero on correctness; any H1 gain shows up as fewer failed edits.
-4. Early on, the Rust and TypeScript baselines beat every Writ variant on the tasks that depend least on contracts.
+4. Early on, the Rust and TypeScript baselines beat every Proviso variant on the tasks that depend least on contracts.
