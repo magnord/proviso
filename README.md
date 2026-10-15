@@ -1,0 +1,93 @@
+# Proviso
+
+**A draft programming language designed for coding agents to write and maintain.**
+
+> **Status:** design only. No compiler or interpreter exists yet. This repository holds the language reference, the reasoning behind it, and the open questions that are still to be settled, several of them by experiment.
+
+## Why
+
+The usual debate is which existing language suits coding agents best: C, Rust, TypeScript, Python, even assembly. Proviso starts from a different question: what would a language look like if it were designed only for agents, with no weight given to what humans find pleasant to type?
+
+The premise is that writing code is not an agent's bottleneck. The expensive part is changing code *correctly* while seeing only a small window of it. So Proviso's central goal is:
+
+> **Minimize the code and reasoning a correct change requires.**
+
+It gets there with boundaries an agent can trust, not by removing abstraction.
+
+## Core ideas
+
+- **Signatures that tell the truth.** Every contract states how it is enforced: guaranteed by the type system, verified, checked at runtime, tested, or merely documented.
+- **Capabilities instead of ambient authority.** A function can touch files, the network or the clock only through capability parameters such as `Dir[read]`. Its signature shows exactly what it can do, and tests pass in fakes.
+- **Visible failure.** Every call that can fail is marked where it happens (`try`, `else fail …`). Errors (expected failures) are kept separate from defects (bugs). There are no exceptions.
+- **Value semantics.** Mutation needs exclusive access. A failed call leaves its `inout` arguments unchanged. Object identity uses generational handles, not references.
+- **Refinements with no hidden checks.** Types like `Int where 0 <= age and age < 150` are proven at every construction site. Data from outside becomes trusted only through a `check` that you write, which also names the error to return.
+- **Types for the bugs tests miss.** Distinct ID types, units of measure (`Float[m/s]`) and coordinate-space tags (`Vec3[world]`).
+- **Structured, replayable concurrency.** No shared mutable memory, and every nondeterministic choice is recorded so a run can be replayed exactly.
+- **The compiler as a service.** `proviso sig` gives a contract-level view of a module. `proviso diff-contracts` reports how a change alters behaviour. `proviso edit` makes structured edits with stale-edit detection. `proviso trace` and `proviso replay` support debugging without editing code.
+
+## A taste
+
+The example below is abridged from the worked example in [REFERENCE.md §17](REFERENCE.md#17-worked-example):
+
+```proviso
+pub record User derives(Eq, Show) {
+    name: Text where not name.is_empty()
+    age:  Int  where 0 <= age and age < 150
+}
+
+// The signature is everything this can do: read files under `dir`, fail with LoadError.
+pub fn load_users(dir: Dir[read], path: Path) -> List[User] fails LoadError {
+    let text = dir.read_text(path) else fail LoadError.Io(cause: it)
+    var users: List[User] = []
+    for (i, line) in text.lines().enumerate() {
+        users.push(try parse_user(line: line, line_no: i + 1))
+    }
+    return users
+}
+
+pub fn parse_user(line: Text, line_no: Int) -> User fails LoadError {
+    let (name_text, age_text) = line.split_once(",")
+        else fail LoadError.MissingComma(line_no: line_no)
+    let name = name_text.trim()
+    check not name.is_empty() else fail LoadError.EmptyName(line_no: line_no)
+    let age = Int.parse(age_text.trim())
+        else fail LoadError.BadAgeText(line_no: line_no, text: age_text)
+    check 0 <= age and age < 150
+        else fail LoadError.AgeOutOfRange(line_no: line_no, value: age)
+    return User(name: name, age: age)     // the two checks prove User's refinements
+}
+
+example parse_user(line: "ada, 36", line_no: 1) == User(name: "ada", age: 36)
+```
+
+And this is what a reviewer, human or agent, would see when a change widens a function's authority:
+
+```
+$ proviso diff-contracts main..HEAD
+users.load_users                                      BREAKING
+  ~ authority   dir: Dir[read] → Dir[read, write]     widened: may now write files
+  ~ fails       LoadError → LoadOrCacheError           callers' `try` no longer type-checks
+  ~ on failure  no external writes → may leave partial writes
+```
+
+## Documents
+
+| File | What it is |
+|---|---|
+| [REFERENCE.md](REFERENCE.md) | The working reference: the whole language in about 12K tokens, short enough for an agent to keep in context |
+| [RATIONALE.md](RATIONALE.md) | Why the language is designed this way: the needs, goals, alternatives considered, and costs |
+| [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md) | Unresolved design questions, the syntax hypotheses to test, and the experiment plan |
+
+If you are new, start with RATIONALE.md for the reasoning, then skim REFERENCE.md §1 ("At a glance") and §17 ("Worked example").
+
+## What happens next
+
+1. **Build a checker for a core subset** (OPEN_QUESTIONS P3). It covers parsing, names, types, capabilities, refinements over linear arithmetic, `sig` and `diff-contracts`, plus a small interpreter.
+2. **Run the experiment** (OPEN_QUESTIONS §E). Agents do the same maintenance tasks across variants that differ in one feature at a time, with Rust and TypeScript as baselines. The design's own predictions are written down in advance so they can be proven wrong.
+3. **Settle the open questions** with what the experiment and the prototype show.
+
+## Background
+
+Proviso began as a conversation about which programming language suits coding agents, prompted by [Goose](https://github.com/aardappel/goose). That language was implemented almost entirely by an AI model from a human design, which shows that building a new language is no longer the hard part. Proviso's design was drafted by Claude, an AI coding agent, revised after an external critique and an independent consistency review, and is maintained in this repository. RATIONALE.md tells that story in full.
+
+The name means a condition attached to an agreement. That fits a language built on contracts that state how they are enforced.
