@@ -44,7 +44,7 @@ Each reviewer and the synthesizer name a role line in the pstack settings file (
 | Tooling | `reflect tooling` | `grok-4.7-xhigh-fast` | `references/tooling-reviewer.md` |
 | Divergent | `reflect judgment, divergent, synthesizer` | `claude-opus-5-5-xhigh` | `references/divergent-reviewer.md` |
 
-Pass each template verbatim, substituting the transcript path or digest where marked. Reviewers return findings in the `Task` response body.
+Pass each template verbatim, substituting the transcript path or digest where marked. Append one line naming that reviewer's own scratch folder, such as `<scratchpad>/reflect-judgment/`, since parallel reviewers sharing a folder overwrite each other's files. Reviewers return findings in the `Task` response body.
 
 ## 3. Synthesize
 
@@ -59,6 +59,8 @@ Move any Accepted item that a lint rule, script, metadata flag, or runtime check
 Present the synthesizer's full Accepted / Rejected / Backlog output and wait for explicit approval before applying any Accepted edit. The user picks the subset and may redirect routings. Skill changes affect every future agent in the org. Do not auto-apply.
 
 File each Backlog item to your team's devex or backlog tracker without waiting. Only the Accepted list waits for approval.
+
+Before the first edit, confirm which checkout and branch the skill files are in. Skill edits go on their own branch, never on a branch that belongs to another task.
 
 Follow each approved row's Routing exactly:
 
