@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use proviso::Phase;
 use proviso::golden::{Report, run_dir};
 
 /// A fresh directory holding `files`, as (name, contents) pairs.
@@ -28,6 +29,41 @@ fn a_directive_the_runner_cannot_check_fails_an_active_file() {
     let dir = dir("unchecked", &[("t.proviso", "// phase: 2\n// expect-log: Dir.write_text\n")]);
     assert_eq!(run_dir(&dir, 1, false).pending, ["t.proviso"]);
     assert!(failure(&run_dir(&dir, 2, false)).contains("cannot check the directives [\"expect-log\"]"));
+}
+
+#[test]
+fn each_phase_slice_turns_on_its_own_files() {
+    let empty = "fn f() {\n}\n";
+    let dir = dir(
+        "slices",
+        &[
+            ("a.proviso", &format!("// phase: 2.1\n{empty}")),
+            ("b.proviso", &format!("// phase: 2.2\n{empty}")),
+            ("c.proviso", &format!("// phase: 2\n{empty}")),
+        ],
+    );
+    let report = run_dir(&dir, 1, false);
+    assert_eq!(report.pending, ["a.proviso", "b.proviso", "c.proviso"]);
+    let report = run_dir(&dir, Phase::slice(2, 1), false);
+    assert_eq!(report.passed, ["a.proviso"]);
+    assert_eq!(report.pending, ["b.proviso", "c.proviso"]);
+    let report = run_dir(&dir, Phase::slice(2, 2), false);
+    assert_eq!(report.passed, ["a.proviso", "b.proviso"]);
+    assert_eq!(report.pending, ["c.proviso"]);
+    assert_eq!(run_dir(&dir, 2, false).passed, ["a.proviso", "b.proviso", "c.proviso"]);
+}
+
+#[test]
+fn a_slice_is_numbered_from_one() {
+    let dir = dir("slice_zero", &[("t.proviso", "// phase: 2.0\nfn f() {\n}\n")]);
+    assert!(failure(&run_dir(&dir, 2, false)).contains("bad phase"));
+}
+
+#[test]
+fn sig_is_checked_from_the_first_slice_of_phase_4() {
+    let dir = dir("sig_slice", &[("t.proviso", "// phase: 1\n// sig: f\nfn f() {\n}\n")]);
+    assert_eq!(run_dir(&dir, Phase::slice(3, 2), false).passed, ["t.proviso"]);
+    assert!(failure(&run_dir(&dir, Phase::slice(4, 1), false)).contains("[\"sig\"]"));
 }
 
 #[test]

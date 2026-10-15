@@ -1,7 +1,7 @@
 //! The golden test runner (OPEN_QUESTIONS P3). `tests/golden/README.md` specifies the format.
 //!
-//! Every `*.proviso` file under the root is one test. Files for a phase after the given one
-//! are pending, but their headers and markers are still validated. Directives this runner
+//! Every `*.proviso` file under the root is one test. Files for a phase or slice after the
+//! given one are pending, but their headers and markers are still validated. Directives this runner
 //! can't check yet (`expect-log`, `run`, `schedules`, and `sig` from phase 4)
 //! make an active file fail rather than pass unchecked. Setting `bless` writes the actual
 //! output to the `.out` and `.err` files instead of comparing.
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use proviso_check::Options;
 use proviso_syntax::diag::{Severity, codes};
 
-use crate::{compile, run};
+use crate::{Phase, compile, run};
 
 #[derive(Default, Debug)]
 pub struct Report {
@@ -22,7 +22,8 @@ pub struct Report {
     pub failed: Vec<(String, String)>,
 }
 
-pub fn run_dir(root: &Path, phase: u32, bless: bool) -> Report {
+pub fn run_dir(root: &Path, phase: impl Into<Phase>, bless: bool) -> Report {
+    let phase = phase.into();
     let mut files = Vec::new();
     collect(root, &mut files);
     files.sort();
@@ -55,7 +56,7 @@ enum Verdict {
     Pending,
 }
 
-/// The phase from which `// sig:` directives are checked; `sig` arrives in phase 4.
+/// The phase whose first slice starts checking `// sig:` directives; `sig` arrives in phase 4.
 const SIG_PHASE: u32 = 4;
 
 /// A line of a `.out` file that separates the outputs a run may legitimately produce.
@@ -74,7 +75,7 @@ const REPORT_KINDS: &[&str] = &["defect", "leak", "overlap"];
 type Reports = BTreeMap<(String, String), usize>;
 
 struct Header {
-    phase: Option<u32>,
+    phase: Option<Phase>,
     expect_errors: Vec<String>,
     expect_exit: i32,
     expect_reports: Reports,
@@ -118,7 +119,11 @@ fn parse_header(text: &str) -> Result<Header, String> {
             continue;
         }
         match name {
-            "phase" => header.phase = Some(value.parse().map_err(|_| format!("bad phase: {line}"))?),
+            "phase" => {
+                let phase =
+                    value.parse().map_err(|()| format!("bad phase, expected `N` or `N.k` with k from 1: {line}"))?;
+                header.phase = Some(phase);
+            }
             "expect-error" => header.expect_errors.push(value.to_string()),
             "expect-exit" => header.expect_exit = value.parse().map_err(|_| format!("bad expect-exit: {line}"))?,
             "expect-report" => {
@@ -182,7 +187,7 @@ fn reports(stderr: &str) -> Reports {
     found
 }
 
-fn run_file(path: &Path, name: &str, phase: u32, bless: bool) -> Result<Verdict, String> {
+fn run_file(path: &Path, name: &str, phase: Phase, bless: bool) -> Result<Verdict, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("cannot read: {e}"))?;
     let header = parse_header(&text)?;
     let marked = markers(&text);
@@ -213,7 +218,7 @@ fn run_file(path: &Path, name: &str, phase: u32, bless: bool) -> Result<Verdict,
         return Ok(Verdict::Pending);
     }
     let mut unchecked = header.unchecked.clone();
-    if header.sig && phase >= SIG_PHASE {
+    if header.sig && phase.number >= SIG_PHASE {
         unchecked.push("sig".to_string());
     }
     if !unchecked.is_empty() {

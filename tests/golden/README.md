@@ -25,6 +25,12 @@ followed by any directives, each a full-line comment, then a comment explaining 
 
 `phase` is required. It is the P3 phase that must make the test pass. The runner skips a test whose phase is later than the implemented one and reports it as pending, after checking its header and markers. From that phase on, a failure is a regression. The runner walks `tests/golden/` recursively, so phase-specific tests can live in subdirectories.
 
+A phase delivered over several pull requests has slices, written `// phase: 2.1`, `// phase: 2.2` and so on, numbered from 1. Each pull request raises `IMPLEMENTED_PHASE` to its own slice, which turns on the tests that slice makes pass. `// phase: 2` still means the whole phase, so the §F rows stay pending until the last slice lands and the implemented phase becomes `2`. A whole phase sorts after its slices: `2.1 < 2.2 < 2 < 3.1`. The slices of phase 2 are:
+
+| Slice | Scope |
+|---|---|
+| 2.1 | the data model, proven by records: declarations, construction, fields, `with`, `derives(Eq, Show)`, refinements checked at runtime |
+
 ## Directives
 
 | Directive | Meaning |

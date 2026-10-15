@@ -41,7 +41,7 @@ The pipeline is split into one crate per stage, and each crate depends only on t
 
 Points that span several files:
 
-- **Phase gating.** `proviso::IMPLEMENTED_PHASE` (in `crates/proviso/src/lib.rs`) is the last P3 phase the toolchain implements. The golden runner reports tests for later phases as pending. When the checker meets a construct from a later phase, it reports `E0901 not_implemented` through `Diagnostics::not_implemented` with a `Planned` value (`Phase(n)`, `PastV1` or `Unscheduled`). Use that path for anything not built yet instead of panicking or silently accepting it.
+- **Phase gating.** `proviso::IMPLEMENTED_PHASE` (in `crates/proviso/src/lib.rs`) is how far the toolchain implements P3: a whole phase such as `1`, or a slice such as `2.1` when a phase lands over several PRs (tests/golden/README.md). The golden runner reports tests for later phases and slices as pending. When the checker meets a construct from a later phase, it reports `E0901 not_implemented` through `Diagnostics::not_implemented` with a `Planned` value (`Phase(n)`, `PastV1` or `Unscheduled`). Use that path for anything not built yet instead of panicking or silently accepting it.
 - **Stacks.** Parsing and checking recurse once per nesting level, so `compile` runs them on a 64 MiB thread. The interpreter runs on its own 1 GiB thread, checks how much stack is left, and turns exhaustion into a defect (`MAX_CALL_DEPTH`, `STACK_RESERVE`) rather than a crash.
 - **Exit codes** live in `proviso::exit`: 0 ok, 1 `main` failed with an error, 65 check errors, 70 defect, 64/66 usage/no input, 101 toolchain bug.
 - **No cascades** (REFERENCE §15.1). A diagnostic that depends on an already-rejected construct must be suppressed. Golden tests fail if an extra error is reported.
