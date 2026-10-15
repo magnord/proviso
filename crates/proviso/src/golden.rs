@@ -2,7 +2,7 @@
 //!
 //! Every `*.proviso` file under the root is one test. Files for a phase after the given one
 //! are pending, but their headers and markers are still validated. Directives this runner
-//! can't check yet (`expect-report`, `expect-log`, `run`, `schedules`, and `sig` from phase 4)
+//! can't check yet (`expect-log`, `run`, `schedules`, and `sig` from phase 4)
 //! make an active file fail rather than pass unchecked. Setting `bless` writes the actual
 //! output to the `.out` and `.err` files instead of comparing.
 
@@ -65,12 +65,19 @@ const ALTERNATIVE: &str = "--- or ---";
 const MARKER: &str = "// <-";
 
 /// Directives in the format that this runner cannot check yet.
-const UNCHECKED: &[&str] = &["expect-report", "expect-log", "run", "schedules"];
+const UNCHECKED: &[&str] = &["expect-log", "run", "schedules"];
+
+/// The kinds of runtime report, the rows of "Runtime reports" in tests/DIAGNOSTICS.md.
+const REPORT_KINDS: &[&str] = &["defect", "leak", "overlap"];
+
+/// Runtime reports as (kind, detail) pairs counted with multiplicity.
+type Reports = BTreeMap<(String, String), usize>;
 
 struct Header {
     phase: Option<u32>,
     expect_errors: Vec<String>,
     expect_exit: i32,
+    expect_reports: Reports,
     incomplete: bool,
     sig: bool,
     unchecked: Vec<String>,
@@ -92,6 +99,7 @@ fn parse_header(text: &str) -> Result<Header, String> {
         phase: None,
         expect_errors: Vec::new(),
         expect_exit: 0,
+        expect_reports: Reports::new(),
         incomplete: false,
         sig: false,
         unchecked: Vec::new(),
@@ -101,8 +109,8 @@ fn parse_header(text: &str) -> Result<Header, String> {
     for (index, line) in text.lines().enumerate() {
         in_header &= line.trim_start().starts_with("//");
         let Some((name, value)) = directive(line) else { continue };
-        let known =
-            matches!(name, "phase" | "expect-error" | "expect-exit" | "flags" | "sig") || UNCHECKED.contains(&name);
+        let known = matches!(name, "phase" | "expect-error" | "expect-exit" | "expect-report" | "flags" | "sig")
+            || UNCHECKED.contains(&name);
         if !in_header {
             if known {
                 return Err(format!("line {}: the directive `{name}` must be in the header", index + 1));
@@ -113,6 +121,20 @@ fn parse_header(text: &str) -> Result<Header, String> {
             "phase" => header.phase = Some(value.parse().map_err(|_| format!("bad phase: {line}"))?),
             "expect-error" => header.expect_errors.push(value.to_string()),
             "expect-exit" => header.expect_exit = value.parse().map_err(|_| format!("bad expect-exit: {line}"))?,
+            "expect-report" => {
+                let (kind, detail) = value.split_once(char::is_whitespace).unwrap_or((value, ""));
+                let detail = detail.trim();
+                if !REPORT_KINDS.contains(&kind) {
+                    return Err(format!(
+                        "line {}: unknown report kind `{kind}`, expected one of {REPORT_KINDS:?}",
+                        index + 1
+                    ));
+                }
+                if detail.is_empty() {
+                    return Err(format!("line {}: `expect-report: {kind}` needs a detail", index + 1));
+                }
+                *header.expect_reports.entry((kind.to_string(), detail.to_string())).or_insert(0) += 1;
+            }
             "flags" => {
                 for flag in value.split_whitespace() {
                     match flag {
@@ -141,6 +163,20 @@ fn markers(text: &str) -> BTreeMap<(usize, String), usize> {
             for code in rest.split([' ', ',']).filter(|c| !c.is_empty()) {
                 *found.entry((index + 1, code.to_string())).or_insert(0) += 1;
             }
+        }
+    }
+    found
+}
+
+/// The reports on stderr: lines that start with `<kind>[<detail>]:`. Indented lines that
+/// follow a report, such as its call sites, belong to it.
+fn reports(stderr: &str) -> Reports {
+    let mut found = Reports::new();
+    for line in stderr.lines() {
+        let Some((kind, rest)) = line.split_once('[') else { continue };
+        let Some((detail, _)) = rest.split_once("]:") else { continue };
+        if REPORT_KINDS.contains(&kind) {
+            *found.entry((kind.to_string(), detail.to_string())).or_insert(0) += 1;
         }
     }
     found
@@ -188,7 +224,7 @@ fn run_file(path: &Path, name: &str, phase: u32, bless: bool) -> Result<Verdict,
 
     let out_path = path.with_extension("out");
     let err_path = path.with_extension("err");
-    let runs = out_path.exists() || err_path.exists() || header.expect_exit != 0;
+    let runs = out_path.exists() || err_path.exists() || header.expect_exit != 0 || !header.expect_reports.is_empty();
     let opts = Options { incomplete: header.incomplete, needs_main: runs && want.is_empty() };
     let compiled = compile(name, text, opts);
 
@@ -244,8 +280,20 @@ fn run_file(path: &Path, name: &str, phase: u32, bless: bool) -> Result<Verdict,
             ));
         }
     }
+    let found = reports(&stderr);
+    if header.expect_reports.iter().any(|(report, n)| found.get(report).unwrap_or(&0) < n) {
+        let list = |m: &Reports| {
+            m.iter().map(|((kind, detail), n)| format!("{kind} {detail} x{n}")).collect::<Vec<_>>().join(", ")
+        };
+        problems.push(format!(
+            "expected reports are missing\n  expected: {}\n  found:    {}\n--- stderr\n{stderr}",
+            list(&header.expect_reports),
+            list(&found)
+        ));
+    }
+    let checks_stderr = err_path.exists() || header.expect_reports.is_empty();
     let expected_err = fs::read_to_string(&err_path).unwrap_or_default();
-    if stderr != expected_err {
+    if checks_stderr && stderr != expected_err {
         if bless {
             fs::write(&err_path, &stderr).map_err(|e| format!("cannot write {}: {e}", err_path.display()))?;
         } else {

@@ -25,9 +25,9 @@ const HELLO: &str = "// phase: 1\nuse std.io { IoError }\n\npub fn main(sys: kee
 
 #[test]
 fn a_directive_the_runner_cannot_check_fails_an_active_file() {
-    let dir = dir("unchecked", &[("t.proviso", "// phase: 2\n// expect-report: defect assertion_failed\n")]);
+    let dir = dir("unchecked", &[("t.proviso", "// phase: 2\n// expect-log: Dir.write_text\n")]);
     assert_eq!(run_dir(&dir, 1, false).pending, ["t.proviso"]);
-    assert!(failure(&run_dir(&dir, 2, false)).contains("cannot check the directives [\"expect-report\"]"));
+    assert!(failure(&run_dir(&dir, 2, false)).contains("cannot check the directives [\"expect-log\"]"));
 }
 
 #[test]
@@ -120,4 +120,54 @@ fn stderr_must_match_the_err_file_or_be_empty() {
     assert!(failure(&run_dir(&dir, 1, false)).contains("stderr differs from t.err"));
     std::fs::write(dir.join("t.err"), "[debug t.proviso:5:5] 1\n").unwrap();
     assert_eq!(run_dir(&dir, 1, false).passed, ["t.proviso"]);
+}
+
+/// A program that prints a line and then hits an `assertion_failed` defect, after `headers`.
+fn defect(headers: &str) -> String {
+    format!(
+        "// phase: 1\n// expect-exit: 70\n{headers}use std.io {{ IoError }}\n\npub fn main(sys: keep System) fails IoError {{\n    try sys.stdout.write_line(\"before\")\n    assert 1 > 2\n}}\n"
+    )
+}
+
+#[test]
+fn each_expected_report_must_be_printed_as_often_as_it_is_expected() {
+    let dir = dir(
+        "reports",
+        &[
+            ("printed.proviso", &defect("// expect-report: defect assertion_failed\n")),
+            ("printed.out", "before\n"),
+            ("missing.proviso", &defect("// expect-report: defect division_by_zero\n")),
+            ("missing.out", "before\n"),
+            ("twice.proviso", &defect(&"// expect-report: defect assertion_failed\n".repeat(2))),
+            ("twice.out", "before\n"),
+        ],
+    );
+    let report = run_dir(&dir, 1, true);
+    assert_eq!(report.passed, ["printed.proviso"]);
+    assert!(!dir.join("printed.err").exists(), "bless wrote an .err for a file with expect-report");
+    let failed: Vec<&str> = report.failed.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(failed, ["missing.proviso", "twice.proviso"]);
+    let (missing, twice) = (&report.failed[0].1, &report.failed[1].1);
+    assert!(missing.contains("expected: defect division_by_zero x1"), "{missing}");
+    assert!(missing.contains("found:    defect assertion_failed x1"), "{missing}");
+    assert!(twice.contains("expected: defect assertion_failed x2"), "{twice}");
+}
+
+#[test]
+fn an_unknown_report_kind_fails_even_a_pending_file() {
+    let dir = dir("report_kind", &[("t.proviso", "// phase: 9\n// expect-report: crash assertion_failed\n")]);
+    assert!(failure(&run_dir(&dir, 1, false)).contains("line 2: unknown report kind `crash`"));
+}
+
+#[test]
+fn an_err_file_is_still_matched_exactly_when_reports_are_expected() {
+    let dir = dir(
+        "reports_and_err",
+        &[
+            ("t.proviso", &defect("// expect-report: defect assertion_failed\n")),
+            ("t.out", "before\n"),
+            ("t.err", "defect[assertion_failed]: assertion failed: 1 > 2\n"),
+        ],
+    );
+    assert!(failure(&run_dir(&dir, 1, false)).contains("stderr differs from t.err"));
 }
