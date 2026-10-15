@@ -72,7 +72,7 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 
 ## Runtime reports (provisional)
 
-Goldens that run check these reports with `// expect-report: <kind> <detail>`. The reference doesn't yet say how `proviso run` and `proviso replay` surface them (OPEN_QUESTIONS T9, T10), so they have names but no numeric codes.
+Goldens that run check these reports with `// expect-report: <kind> <detail>`. OPEN_QUESTIONS T10 fixes how `proviso run` prints defects and leaks. Overlaps wait for replay (T9). Reports have names but no numeric codes.
 
 | Report | Meaning | Goldens |
 |---|---|---|
@@ -91,7 +91,15 @@ The defect kinds so far are:
 | `unreachable_reached` | an `unreachable` was reached |
 | `stack_exhausted` | calls nested more than 10,000 deep |
 
-Phase 1 prints a defect on stderr as `defect[<kind>]: <message>`, followed by its location and call sites (OPEN_QUESTIONS P5). Output of `debug(…)` also goes to stderr, one line per call, as `[debug <path>:<line>:<col>] <values>`.
+Phase 2 adds these kinds:
+
+| Kind | Cause |
+|---|---|
+| `index_out_of_bounds` | `xs[i]` with `i` outside the list ([STD.md](../STD.md)) |
+| `stale_handle` | `pool[h]` with a stale or wrong-pool handle (§5.5) |
+| `refinement_failed` | a value broke its type's refinement, which the v1 profile checks at runtime (OPEN_QUESTIONS P3) |
+
+Every report is printed on stderr as `<kind>[<detail>]: <message>`, followed by its location and call sites (OPEN_QUESTIONS P5, T10). A leak comes right after the defect in `abandon` that caused it, and its location is the binding that owned the resource. Output of `debug(…)` also goes to stderr, one line per call, as `[debug <path>:<line>:<col>] <values>`.
 
 Exit codes of `proviso run` and `proviso check`:
 

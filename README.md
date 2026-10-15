@@ -77,6 +77,7 @@ users.load_users                                      BREAKING
 | [REFERENCE.md](REFERENCE.md) | The working reference: the whole language in about 15K tokens, meant to stay small enough for an agent to keep in context |
 | [RATIONALE.md](RATIONALE.md) | Why the language is designed this way: the needs, goals, alternatives considered, and costs |
 | [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md) | Unresolved design questions, the syntax hypotheses to test, and the experiment plan |
+| [STD.md](STD.md) | The standard library items that phases 1 and 2 implement, until `proviso sig std` can list them |
 | [tests/golden](tests/golden/README.md) | Golden tests: the phase-1 basics and the 18 acceptance counterexamples, which stay pending until their phase is built. [tests/DIAGNOSTICS.md](tests/DIAGNOSTICS.md) is the diagnostic code catalog. |
 
 If you are new, start with RATIONALE.md for the reasoning, then skim REFERENCE.md §1 ("At a glance") and §17 ("Worked example").

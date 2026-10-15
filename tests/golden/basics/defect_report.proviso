@@ -1,0 +1,17 @@
+// phase: 1
+// expect-exit: 70
+// expect-report: defect assertion_failed
+// A defect stops the run with exit code 70 and is reported on stderr. Output printed before
+// it stays printed. This file has no `.err`, so only the report is checked, not its trace.
+use std.io { IoError }
+
+fn check_even(n: Int) {
+    assert n % 2 == 0
+}
+
+pub fn main(sys: keep System) fails IoError {
+    check_even(n: 4)
+    try sys.stdout.write_line("4 is even")
+    check_even(n: 7)
+    try sys.stdout.write_line("7 is even")
+}

@@ -521,7 +521,7 @@ impl Parser<'_> {
                     TypeExprKind::Named(name)
                 }
             }
-            T::Keyword(Kw::Fn) => return self.not_implemented("function types", Planned::Phase(3)),
+            T::Keyword(Kw::Fn) => return self.not_implemented("function types", Planned::Phase(2)),
             T::Keyword(Kw::Scoped) => return self.not_implemented("`scoped` function types", Planned::Phase(3)),
             T::Keyword(Kw::Any) => return self.not_implemented("`any` types", Planned::PastV1),
             T::Keyword(Kw::SelfType) => return self.not_implemented("methods and `Self`", Planned::Phase(2)),
@@ -990,7 +990,7 @@ impl Parser<'_> {
                 ExprKind::Debug(values)
             }
             T::LBracket => return self.not_implemented("list and map literals", Planned::Phase(2)),
-            T::Pipe => return self.not_implemented("closures", Planned::Phase(3)),
+            T::Pipe => return self.not_implemented("closures", Planned::Phase(2)),
             T::Keyword(Kw::Match) => return self.not_implemented("`match` expressions", Planned::Phase(2)),
             T::Keyword(Kw::Scope) => return self.not_implemented("`scope` blocks", Planned::Phase(6)),
             T::Keyword(Kw::Attempt) => return self.not_implemented("`attempt` expressions", Planned::Phase(2)),

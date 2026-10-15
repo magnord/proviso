@@ -10,8 +10,7 @@
 //
 // The test assumes that a path ending in `fail` counts as returning (Q33), and
 // that `close` consumes the Probe although it holds no resource fields (Q35).
-// The Probe stores an `Out` through a `keep` parameter, which P3 doesn't put in
-// phase 2.
+// The Probe stores an `Out` through a `keep` parameter (P3).
 
 use std.io { Out, IoError }
 

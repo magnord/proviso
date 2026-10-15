@@ -10,9 +10,9 @@
 // exit becomes a defect exit (code 70) although it began as an error.
 //
 // The test assumes that `abandon` consumes the probe when it returns
-// (OPEN_QUESTIONS Q35) and that `Out` is in `std.io` (Q36). The report kinds
-// are provisional (T10). Printing through a stored `Out` needs `keep`
-// parameters and capability-typed fields, which P3 doesn't put in phase 2.
+// (OPEN_QUESTIONS Q35) and that `Out` is in `std.io` (Q36). The report
+// format is in T10. Printing through a stored `Out` needs `keep` parameters
+// and capability-typed fields (P3).
 
 use std.io { Out }
 

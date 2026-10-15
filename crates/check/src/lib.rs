@@ -336,7 +336,7 @@ impl Checker<'_> {
                     ParamMode::Borrow => {}
                     ParamMode::Keep if matches!(ty, Ty::System | Ty::Error) => {}
                     ParamMode::Keep => {
-                        self.not_implemented(param.span, "`keep` parameters other than `System`", Planned::Phase(3))
+                        self.not_implemented(param.span, "`keep` parameters other than `System`", Planned::Phase(2))
                     }
                     ParamMode::Inout | ParamMode::InoutPartial => {
                         self.not_implemented(param.span, "`inout` parameters", Planned::Phase(2))
@@ -998,7 +998,7 @@ impl Checker<'_> {
             return self.f.locals[id.index()].ty;
         }
         if self.fn_names.contains_key(&name.sym) {
-            self.not_implemented(name.span, "functions used as values", Planned::Phase(3));
+            self.not_implemented(name.span, "functions used as values", Planned::Phase(2));
         } else if self.imports.contains_key(&name.sym) || builtin_type(text).is_some() {
             self.error(codes::UNKNOWN_NAME, name.span, format!("`{text}` is a type or module, not a value"));
         } else if !m.poisoned.contains(&name.sym) {
@@ -1022,7 +1022,7 @@ impl Checker<'_> {
                 let callee_span = self.span(callee);
                 match name {
                     Some(name) if self.lookup_local(name.sym).is_some() => {
-                        self.not_implemented(callee_span, "calls of function values", Planned::Phase(3))
+                        self.not_implemented(callee_span, "calls of function values", Planned::Phase(2))
                     }
                     Some(name) if builtin_type(m.text(name.sym)).is_some() => {
                         self.not_implemented(callee_span, "conversions such as `Int64(x)`", Planned::Phase(2))
@@ -1032,7 +1032,7 @@ impl Checker<'_> {
                         let text = m.text(name.sym);
                         self.error(codes::UNKNOWN_NAME, name.span, format!("unknown function `{text}`"));
                     }
-                    None => self.not_implemented(callee_span, "calls of function values", Planned::Phase(3)),
+                    None => self.not_implemented(callee_span, "calls of function values", Planned::Phase(2)),
                 }
                 for arg in args {
                     self.infer(arg.value);

@@ -5,7 +5,7 @@ The golden tests of the implementation. `basics/` holds the phase-1 tests. The `
 ## Files
 
 - `fNN_<what>.proviso` is §F row NN, as a complete single-file program. The runner checks it as a one-module package whose module name is the file stem.
-- `fNN_<what>.out` is the expected stdout of `proviso run`, and `fNN_<what>.err` the expected stderr. A missing file means no output. No §F file has an `.err` yet, because the reference doesn't fix what a defect or failure prints (T10).
+- `fNN_<what>.out` is the expected stdout of `proviso run`, and `fNN_<what>.err` the expected stderr. A missing `.out` means no output on stdout. A missing `.err` means no output on stderr, except in a file with `expect-report`, whose stderr is then checked only for the expected reports. The §F files have no `.err`. They check runtime reports with `expect-report` instead (T10), so they don't depend on a report's message or call sites.
 - `fNN_<what>.sig` is the expected output of `proviso sig` for the symbol named by `// sig:`.
 
 - `basics/` holds the phase-1 tests of the implementation. They follow the same format, except that their header has no `§F row` line, and their `.err` files fix the provisional defect output (OPEN_QUESTIONS P5).
@@ -41,20 +41,20 @@ followed by any directives, each a full-line comment, then a comment explaining 
 
 ## Rules
 
-- **Rejected rows.** A file with `expect-error` must fail `proviso check`. Every expected error is marked with `// <-`, and the marked codes must be the `expect-error` codes. Each error must be reported on a line marked with its code, as many times as the marker lists it, and no other error may be reported, so the lines without markers are accepted cases. A diagnostic that depends on a rejected construct is suppressed (§15.1, no cascades), and a test that reports one fails. Warnings are ignored. A file that expects errors doesn't run, so it has no `.out`, `.err` or `expect-exit`.
-- **Accepted rows.** A file without `expect-error` must pass `proviso check`. A file runs if it has `main`, an `.out` or `.err` file, or `expect-exit`, and then it must have `main`. `proviso run` must exit with the expected code and print exactly the `.out` file on stdout and the `.err` file on stderr.
-- **Reports.** `expect-report` lists the reports that must appear. Other reports don't fail the test.
+- **Rejected rows.** A file with `expect-error` must fail `proviso check`. Every expected error is marked with `// <-`, and the marked codes must be the `expect-error` codes. Each error must be reported on a line marked with its code, as many times as the marker lists it, and no other error may be reported, so the lines without markers are accepted cases. A diagnostic that depends on a rejected construct is suppressed (§15.1, no cascades), and a test that reports one fails. Warnings are ignored. A file that expects errors doesn't run, so it has no `.out`, `.err`, `expect-exit` or `expect-report`.
+- **Accepted rows.** A file without `expect-error` must pass `proviso check`. A file runs if it has `main`, an `.out` or `.err` file, `expect-exit` or `expect-report`, and then it must have `main`. `proviso run` must exit with the expected code and print exactly the `.out` file on stdout and the `.err` file on stderr.
+- **Reports.** A report is a stderr line that starts with `<kind>[<detail>]: <message>`, as in `defect[assertion_failed]: assertion failed: n % 2 == 0`. Its kind is one of the runtime reports in DIAGNOSTICS.md, which are `defect`, `leak` and `overlap`. The runner rejects any other kind. The indented lines after it, such as its call sites, belong to it. `expect-report` lists the reports that must appear, and a report listed twice must appear at least twice. Other reports don't fail the test.
 - **Alternatives.** Where the language allows several results, the `.out` lists them separated by a line `--- or ---`, and the run must match one of them (f10).
 - **Environment.** Each run starts in a new, empty working directory, and `sys.fs` is taken to be rooted there (gap: Q6). Phase 1 has no `sys.fs`, so the runner doesn't set this up yet; it must before phase 3.
 - **`.sig` files** are checked from phase 4, when `sig` exists. Until the canonical format covers what they test (T11), each line of the `.sig` must occur in the output in order, as a substring of a line, with runs of whitespace collapsed. After that they become exact goldens.
 
 ## Running
 
-`cargo test` runs every file through the runner in `crates/proviso/src/golden.rs`. `PROVISO_BLESS=1 cargo test` rewrites the `.out` and `.err` files from the actual output of a run that exits with the expected code. It doesn't rewrite a `.out` that lists alternatives, and it never writes markers. Review the diff before committing it.
+`cargo test` runs every file through the runner in `crates/proviso/src/golden.rs`. `PROVISO_BLESS=1 cargo test` rewrites the `.out` and `.err` files from the actual output of a run that exits with the expected code. It doesn't rewrite a `.out` that lists alternatives, it doesn't create an `.err` for a file with `expect-report`, and it never writes markers. Review the diff before committing it.
 
-The runner checks these directives: `phase`, `expect-error`, `expect-exit` and `flags`, and the `// <-` markers. It also checks `.out` files, including `--- or ---` alternatives, and `.err` files.
+The runner checks these directives: `phase`, `expect-error`, `expect-exit`, `expect-report` and `flags`, and the `// <-` markers. It also checks `.out` files, including `--- or ---` alternatives, and `.err` files.
 
-If an active file uses a directive the runner can't check yet, the file fails instead of passing unchecked. Those directives are `expect-report`, `expect-log`, `run`, `schedules`, and `sig` from phase 4. Each of them has to be implemented before its phase is reached.
+If an active file uses a directive the runner can't check yet, the file fails instead of passing unchecked. Those directives are `expect-log`, `run`, `schedules`, and `sig` from phase 4. Each of them has to be implemented before its phase is reached.
 
 ## Rows
 

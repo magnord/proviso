@@ -214,6 +214,12 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
   - whether `it` is bound in `e else { … }` when `e` is a fallible call;
   - whether a path that ends in `fail` meets the rule that a non-`Unit` body ends every path with `return` (f07).
 - **Goldens:** use `try` statements, discard an error with `let _ = attempt f()`, and give a closure with statements a braced body that ends in its value.
+- **Decided for phase 2:**
+  - A call marked with `try` or with an `else` form counts as a call statement, so `out.write_line(t) else ()` and `save(x) else fail E.Io(cause: it)` are statements. `attempt f()` doesn't count. Its value is a `Result`, and discarding it takes `let _ = attempt f()`.
+  - `return` in a closure returns from the closure, as in Rust, Swift and TypeScript. A braced closure body yields its final expression, or the value of a `return` that ends it earlier.
+  - An unbraced closure body extends as far as an expression can, so `|| f() else ()` means `|| (f() else ())`.
+  - `it` is the error in every `else` form on a fallible call, including `else value` and `else { … }`. It isn't bound for an `Option`. In nested `else` forms, `it` is the error of the innermost one.
+  - A path that ends in an expression of type `Never` meets the `return` rule. That covers `fail`, `unreachable`, `todo` and a call that returns `Never`. Phase 1 already treats `unreachable` and `todo` this way.
 
 **Q34 — Closures bound to locals.** Found by the goldens (§G).
 - **Now:** a closure's lifetime and captures are decided by the parameter it is passed to (ref §6.7).
@@ -224,6 +230,11 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Unclear:** what finally ends a resource that holds no resource fields. The goldens assume that a `take self` method in the type's own `impl`, `abandon` included, consumes `self` when it returns.
 - **Options:** that rule; explicit destructuring (`let Txn(..) = self`); a dedicated form allowed only in the type's module.
 - **Also unclear:** whether a resource moved out of an `inout` container, as `probes.pop()` does, is owned by the caller or still lent (§10 rule 6). §F row 14 needs it to be owned, so that it can be closed.
+- **Decided for phase 2:** the first option.
+  - A `take self` method declared in the resource type's own module consumes `self` when it returns normally, so `close`, `commit` and `abandon` need no extra statement. Before it returns, the method must consume or transfer any resource fields of `self` (§10 rule 2). If it fails, `self` is abandoned like any other resource its scope owns (§10 rule 3).
+  - Outside the type's module, a `take self` method must pass `self` to something that consumes it.
+  - A resource that an operation moves out of an `inout` value, as `probes.pop()` does, is owned by the caller of that operation. Rule 6 still forbids consuming the `inout` value itself. The moved resource is no longer in the container, so the container's owner can't consume it a second time, and §5.4 already makes such an `inout` partial.
+- **Rejected:** destructuring adds a line to every `close` and `abandon` that only repeats what `take self` says. A dedicated form adds syntax for the same thing.
 
 **Q36 — The standard library the reference assumes.** Found by the goldens (§G).
 - **Now:** the reference names some std items in passing. The rest is meant to come from `proviso sig std` (ref §16, P4), which doesn't exist yet.
@@ -234,6 +245,12 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
   - `Pool.insert` and `Pool.get`;
   - a way to open a file as a resource. Rows 8 and 14 use a test-local resource instead.
 - **Proposal:** write the `sig` of the std items that phases 1–3 need before phase 1 ends, so goldens and the P4 trial can use them.
+- **Decided for phase 2:** [STD.md](STD.md) lists the std items that phases 1 and 2 implement. Items that only phase 3 needs wait for phase 3, with `Dir`.
+  - `Out`, `In` and `IoError` are in `std.io`.
+  - `List.pop` and `List.len` are in STD.md. The caller owns a popped element (Q35).
+  - `List.push`'s `ensures` covers only the length. Whether row 17 is `refuted` or `unknown` is left to phase 5, when the verifier exists.
+  - `Pool.insert`, `Pool.get` and the rest of `std.pool` follow §5.5.
+  - Phase 2 has no way to open a file. Rows 8 and 14 keep their test-local resource, and `File` arrives with `Dir` in phase 3 (Q6).
 
 ## C. Tooling
 
@@ -270,6 +287,12 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 **T10 — Runtime reports.** Found by the goldens (§G).
 - **Now:** a defect makes `main` exit with code 70 and write a post-mortem (ref §7.3). A resource whose `abandon` hits a defect is "reported as leaked" (§10), and replay "reports" overlapping calls (§9.8).
 - **Need:** where these reports go (stderr, the post-mortem, `--json` output) and in what form. Until then, runtime goldens assert them with provisional `expect-report` kinds (tests/DIAGNOSTICS.md).
+- **Decided for defects and leaks:**
+  - Reports go to stderr, one per event, in the order the events happen. There is no JSON form before `serve` (T4), and `postmortem` is deferred past v1 (P3).
+  - Each report is a line `<kind>[<detail>]: <message>` followed by indented `at` and `called from` lines, the format P5 gives defects. `// expect-report: <kind> <detail>` matches the first line.
+  - A leak is reported as `leak[<Type>]: …`, right after the defect in `abandon` that caused it. Its `at` line is the binding that owned the resource.
+  - A defect during cleanup replaces the error that started the exit. The remaining resources are still abandoned, the error isn't printed, and the run exits with code 70. If several `abandon` calls hit defects, each one is reported, and the first one propagates.
+- **Still open:** how overlaps are reported, which comes with replay in phase 6 (T9).
 
 **T11 — `sig` beyond the worked example.** Found by the goldens (§G).
 - **Now:** ref §17 shows `sig` output for three items.
@@ -295,11 +318,19 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 | Phase | Scope | Milestone |
 |---|---|---|
 | 1. Pipeline | lexer, parser, names, scalar types and functions, `fails` and `try`, `assert`, `debug`, `todo`, `unreachable`, `proviso check`, an interpreter for `run` with a stub `System` that provides only `stdout`, the golden test runner | hello world and `fib` run; an `expect-error` golden passes |
-| 2. Data and ownership | records, enums, `match`, collections, `Option` and `Result`, `fail`, `else` and `attempt`, kinds and moves, `inout` atomicity, resources and `Abandon`, pools and handles, `example` and `test` | `parse_user` from the reference's worked example (§17) runs with its examples; §F rows 6–9, 14 and 15 pass |
-| 3. Authority | capabilities and permissions, `observes` and `effects`, `uses` and reach, retention, closure lifetimes, `cap record` state, `MemDir` written in Proviso | the whole §17 module runs, including its `MemDir` test; §F rows 4, 5, 11 and 13 pass |
+| 2. Data and ownership | records, enums, aliases and `distinct` types, methods, `impl` blocks, interfaces and generic functions, `match`, collections and tuples, `Option` and `Result`, `fail`, `else` and `attempt`, `check`, refinements checked at runtime, kinds and moves, `inout` atomicity, resources and `Abandon`, pools and handles, function types and closures with the default lifetime, `keep` parameters and capability-typed fields without retention checks, the std items in [STD.md](STD.md), `example`, `test` and `proviso test` | `parse_user` from the reference's worked example (§17) runs with its examples; §F rows 6–9, 14 and 15 pass |
+| 3. Authority | capabilities and permissions, `observes` and `effects`, `uses` and reach, effect variables, retention, closure lifetimes and captures, `cap record` state, `MemDir` written in Proviso | the whole §17 module runs, including its `MemDir` test; §F rows 4, 5, 11 and 13 pass |
 | 4. Contracts and tools | contracts under the v1 profile, interface contract rules, `sig`, `fmt`, `diff-contracts` | `proviso sig` reproduces the reference's §17 output as a golden file; §F row 12 passes; the P4 criteria are first measured |
 | 5. Verifier | the predicate fragment over linear arithmetic, admissibility, refinements under mutation | §F rows 1–3, 16 and 17 are rejected at compile time; `sig` levels move from `[checked]` to `[verified]` |
-| 6. Concurrency and replay | `scope`, tasks, cancellation, channels, `--record` and `replay` | §F rows 10 and 18 pass; the §E cancellation task runs |
+| 6. Concurrency and replay | `scope`, tasks, cancellation, channels, `supervise`, `--record` and `replay` | §F rows 10 and 18 pass; the §E cancellation task runs |
+
+**What phase 2 gained.** The first version of this table left out features that phase 2's own rows and milestone need (§G). They moved into phase 2, each only as far as those rows need it:
+- **`check` and refinements**, for `parse_user`. Under the v1 profile, phase 2 checks a refinement at runtime whenever a value of the refined type is built or changed. That includes assigning one of its fields, and passing part of it as `inout`, which is checked when the call returns. A false refinement is a `refinement_failed` defect.
+- **Function types with parameter modes, and closures with the default lifetime**, for row 15. A closure that captures a value with reach, or mutates a captured `var`, waits for phase 3.
+- **`keep` parameters and capability-typed fields**, for rows 8, 9 and 14. Phase 2 doesn't check retention, so phase 3 may reject a program that phase 2 accepts. No tool reports a retention guarantee before `sig` exists in phase 4.
+- **Aliases, `distinct` types, methods, `impl` blocks, interfaces and generic functions**, which the implementation already planned for phase 2. Rows 8, 9, 14 and 15 declare `take self` methods and implement `Abandon`.
+
+`supervise` moved into phase 6, with tasks, for row 18. Effect variables (§9.5) are named in phase 3, where the implementation already planned them.
 
 **The v1 profile.** Until phase 5 there is no verifier. Clauses that would be `[verified]`, and refinements, are checked at runtime instead, and `sig` labels them `[checked]`. So v1 never claims a guarantee it doesn't enforce. The enforcement levels are what make this honest staging possible.
 
@@ -432,3 +463,5 @@ Writing the §F rows as complete programs ([tests/golden](tests/golden/README.md
 | How `sig` shows an `inout` that holds a resource | f14 | T11 |
 | Row 13 as written calls the fallible `w` unmarked, and its `try` adds a second reason for rejection. The golden makes `w` infallible so that reach is the only reason. | f13 | the row's wording |
 | P3's phase 2 lacks features its own rows need: `check` (§17's `parse_user`), closures and function types with modes (row 15), and `keep` parameters and capability-typed fields (f08, f09, f14 print through a stored `Out`; retention can still wait for phase 3). P3 also places `supervise` in no phase (f18, phase 6). | f08, f09, f14, f15, f18 | P3 |
+
+The P3 row, Q33, Q35, Q36 and T10 now have decisions for phase 2. Each one still lists the parts that stay open.
