@@ -13,6 +13,7 @@ Verify every task output by checking the real thing directly. Do not infer from 
 Check the real thing, not a proxy:
 - Check process liveness directly, not indirectly through derived state
 - Read the actual value, not a cached or derived representation
+- Measure a stated capacity ("sized for N") at N, with the worst per-level shape, in every build profile that runs it
 - When verification fails, suspect the observation method before suspecting the system
 
 ## Script the check when you can
