@@ -140,6 +140,8 @@ pub mod codes {
             "An argument label that does not match the parameter in that position.";
         WRONG_ARGUMENT_COUNT = "E0208", "wrong_argument_count",
             "A call passes more or fewer arguments than the function has parameters.";
+        NEEDLESS_ALIAS = "E0209", "needless_alias",
+            "`as` renames an import only to resolve a name collision (REFERENCE §3, Q24).";
 
         TYPE_MISMATCH = "E0301", "type_mismatch",
             "A value of one type where another is expected. Proviso has no implicit conversions (REFERENCE §9.2).";
@@ -185,6 +187,8 @@ pub mod codes {
 
         NOT_IMPLEMENTED = "E0901", "not_implemented",
             "A construct the language has that this implementation does not support yet.";
+        NESTING_TOO_DEEP = "E0902", "nesting_too_deep",
+            "Expressions and blocks nest at most 1,000 levels deep in this implementation (OPEN_QUESTIONS P5).";
     }
 
     pub fn find(id: &str) -> Option<Code> {

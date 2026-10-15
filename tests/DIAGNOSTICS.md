@@ -41,12 +41,13 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0107 | `todo_requires_incomplete` | 1 | A `todo` hole without `--incomplete` (§15.2, Q25). | basics/err_todo |
 | E0201 | `unknown_name` | 1 | A name that resolves to no local, function or import. | basics/err_unknown_name |
 | E0202 | `duplicate_item` | 1 | Two items with one name in a module, or a name imported twice (§3). | basics/err_duplicate |
-| E0203 | `shadowing` | 1 | A binding that reuses a name already in scope in the function, including functions and imports (§3, H4). | basics/err_shadowing |
+| E0203 | `shadowing` | 1 | A binding that reuses a name already in scope in the function, including functions and imports, or an import that reuses a prelude type's name (§3, H4). | basics/err_shadowing, basics/err_import_alias |
 | E0204 | `wrong_case` | 1 | A type or variant that isn't PascalCase, or any other name that isn't snake_case (§2). | basics/err_case |
 | E0205 | `unknown_import` | 1 | A `use` that names a module or item that doesn't exist. | basics/err_unknown_import |
 | E0206 | `missing_label` | 1 | An unlabelled argument in a call to a function with two or more parameters (§3, H3). | basics/err_labels |
 | E0207 | `wrong_label` | 1 | An argument label that doesn't match the parameter in its position. | basics/err_labels |
 | E0208 | `wrong_argument_count` | 1 | More or fewer arguments than the function has parameters. | basics/err_labels |
+| E0209 | `needless_alias` | 1 | An import renamed with `as` although nothing else has its name; `as` only resolves a collision (§3, Q24). | basics/err_import_alias |
 | E0301 | `type_mismatch` | 1 | A value of one type where another is expected. There are no implicit conversions (§9.2). | basics/err_type_mismatch |
 | E0302 | `literal_out_of_range` | 1 | A literal that doesn't fit the type it meets (§2). | basics/err_literal_range |
 | E0303 | `unknown_member` | 1 | A field or method that the type doesn't have. | basics/err_unknown_member |
@@ -54,7 +55,7 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0305 | `immutable_assignment` | 1 | An assignment to a `let` binding or a parameter. | basics/err_immutable |
 | E0306 | `unsupported_operator` | 1 | An operator or interpolation that the operand's type doesn't support. | basics/err_unsupported_operator |
 | E0307 | `unknown_type` | 1 | A type name that doesn't resolve. | basics/err_unknown_type |
-| E0308 | `invalid_main` | 1 | `main` is missing, or isn't declared `pub fn main(sys: keep System)` (§7.4). | basics/err_main_signature |
+| E0308 | `invalid_main` | 1 | `main` is missing from a file that is run, or isn't declared `pub fn main(sys: keep System)` (§7.4). | basics/err_main_signature |
 | E0412 | `refinement_refuted` | 5 | A refinement obligation is refuted: the verifier found values, consistent with every admissible fact, that violate it (§8.3, §8.5). The diagnostic carries the counterexample. | f01, f02, f03, f17 |
 | E0413 | `partial_inout_of_refined_part` | 5 | A part of a refined value is passed as `inout(partial)` (§5.4). | f16 |
 | E0414 | `impl_requires_mismatch` | 4 | An implementation's `requires` clauses differ from the interface method's as written (§4.9). | f12 |
@@ -66,7 +67,8 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0702 | `try_error_mismatch` | 1 | A `try` whose call fails with a different error type than the function declares, or in a function that declares none (§7.2). | basics/err_try_without_fails |
 | E0703 | `try_without_failure` | 1 | A `try` that marks no call that can fail. | basics/err_try_marks_nothing |
 | E0704 | `main_error_not_show` | 1 | `main`'s error type doesn't implement `Show` (§7.4). | basics/err_main_error_not_show |
-| E0901 | `not_implemented` | 1 | A construct the language has but this implementation doesn't support yet. The message names the phase that adds it. | basics/err_not_implemented |
+| E0901 | `not_implemented` | 1 | A construct the language has but this implementation doesn't support yet. The message says whether it is planned for a v1 phase, deferred past v1, or not yet scheduled. | basics/err_not_implemented |
+| E0902 | `nesting_too_deep` | 1 | Expressions and blocks nested more than 1,000 levels deep, counting each operator of a chain such as `a + b + c` (OPEN_QUESTIONS P5). | basics/err_nesting_too_deep |
 
 ## Runtime reports (provisional)
 
@@ -89,7 +91,7 @@ The defect kinds so far are:
 | `unreachable_reached` | an `unreachable` was reached |
 | `stack_exhausted` | calls nested more than 10,000 deep |
 
-Phase 1 prints a defect on stderr as `defect[<kind>]: <message>`, followed by its location and call sites (OPEN_QUESTIONS P5).
+Phase 1 prints a defect on stderr as `defect[<kind>]: <message>`, followed by its location and call sites (OPEN_QUESTIONS P5). Output of `debug(…)` also goes to stderr, one line per call, as `[debug <path>:<line>:<col>] <values>`.
 
 Exit codes of `proviso run` and `proviso check`:
 
@@ -99,7 +101,8 @@ Exit codes of `proviso run` and `proviso check`:
 | 1 | `main` failed with an error (§7.4) |
 | 64 | usage error |
 | 65 | `check` found errors |
-| 66 | unreadable file |
+| 66 | unreadable file, or one that isn't UTF-8 |
 | 70 | defect (§7.3) |
+| 101 | internal error, which is a bug in the toolchain |
 
-Codes 64, 65 and 66 are provisional (P5).
+Codes 64, 65, 66 and 101 are provisional (P5).

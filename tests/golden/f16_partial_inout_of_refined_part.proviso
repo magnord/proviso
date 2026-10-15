@@ -7,6 +7,9 @@
 // holds whatever the callee does. Compare f03, which differs only in
 // `(partial)`. Re-verifying `lo <= hi` depends on the rejected call, so it is
 // not reported separately (§15.1, no cascades).
+//
+// As in f03, the row is rejected whether or not passing `&span.lo` drops the
+// facts about `span.hi` (OPEN_QUESTIONS Q28).
 
 record Span {
     lo: Int

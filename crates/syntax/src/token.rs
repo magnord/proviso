@@ -168,3 +168,26 @@ pub struct Token {
     pub span: Span,
     pub value: TokenValue,
 }
+
+/// Tracks the brackets open in a run of tokens. A closer closes the innermost matching
+/// opener, and with it any unclosed brackets inside that one.
+pub(crate) fn track(open: &mut Vec<TokenKind>, kind: TokenKind) {
+    match kind {
+        TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => open.push(kind),
+        TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+            if let Some(i) = open.iter().rposition(|&k| k == opener(kind)) {
+                open.truncate(i);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The opening bracket that `closer` closes.
+pub(crate) fn opener(closer: TokenKind) -> TokenKind {
+    match closer {
+        TokenKind::RParen => TokenKind::LParen,
+        TokenKind::RBracket => TokenKind::LBracket,
+        _ => TokenKind::LBrace,
+    }
+}

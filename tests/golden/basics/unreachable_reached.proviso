@@ -1,0 +1,18 @@
+// phase: 1
+// expect-exit: 70
+// Reaching `unreachable` is a defect.
+use std.io { IoError }
+
+fn name(digit: Int) -> Text {
+    if digit == 0 {
+        return "zero"
+    } else if digit == 1 {
+        return "one"
+    }
+    unreachable
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(name(digit: 1))
+    try sys.stdout.write_line(name(digit: 7))
+}

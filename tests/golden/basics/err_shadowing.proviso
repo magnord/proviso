@@ -8,11 +8,13 @@ fn count() -> Int {
 }
 
 fn f(x: Int) {
-    let x = 2
-    let count = 3
-    let io = 4
+    let x = 2                                       // <- E0203
+    let count = 3                                   // <- E0203
+    let io = 4                                      // <- E0203
     if true {
         let y = 1
     }
     let y = 2
+    for x in 0..3 {                                 // <- E0203
+    }
 }

@@ -5,6 +5,10 @@
 // The failure rolls back the pool's contents but not its generation counters
 // (§5.4, §5.5), so the next insert, which may reuse the slot, gets a new
 // generation. The escaped handle must read as None, never as "alice".
+//
+// The test assumes that a path ending in `fail`, as in `add_then_fail`, counts
+// as returning (OPEN_QUESTIONS Q33). `insert` and `get` follow the example in
+// §5.5, because the reference gives no signatures for Pool's operations (Q36).
 
 use std.io { IoError }
 use std.pool { Pool, Handle }

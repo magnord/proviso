@@ -6,7 +6,7 @@ use std::path::Path;
 #[test]
 fn golden_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden");
-    let bless = std::env::var_os("PROVISO_BLESS").is_some();
+    let bless = std::env::var("PROVISO_BLESS").is_ok_and(|v| v == "1");
     let report = proviso::golden::run_dir(&root, proviso::IMPLEMENTED_PHASE, bless);
     for name in &report.pending {
         println!("pending  {name}");

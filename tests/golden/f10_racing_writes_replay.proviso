@@ -15,6 +15,10 @@
 // read, because the printed line is an argument of a logged call. It must
 // also report the two writes as overlapping. That assumes "overlapping"
 // means the program doesn't order them (OPEN_QUESTIONS T9).
+//
+// `write_text` creates the file under the root of `sys.fs`, which the
+// reference doesn't define (Q6). The signatures of `spawn` and `join` are not
+// given (Q15, Q16), and the overlap report is provisional (T10).
 
 use std.fs { Dir, Path, FsError }
 use std.io { IoError }

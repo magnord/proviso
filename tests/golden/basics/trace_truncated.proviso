@@ -1,0 +1,20 @@
+// phase: 1
+// expect-exit: 70
+// A defect report shows at most 40 call sites, and says how many it left out.
+use std.io { IoError }
+
+fn ping(n: Int) -> Int {
+    if n == 0 {
+        let zero = 0
+        return 1 / zero
+    }
+    return pong(n: n - 1)
+}
+
+fn pong(n: Int) -> Int {
+    return ping(n: n - 1)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{ping(n: 60)}")
+}

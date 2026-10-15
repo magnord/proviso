@@ -2,12 +2,14 @@
 
 use crate::diag::{Code, Diagnostics, codes};
 use crate::source::Span;
-use crate::token::{FPart, Keyword, Token, TokenKind, TokenValue};
+use crate::token::{FPart, Keyword, Token, TokenKind, TokenValue, track};
 
 /// Lexes `src`, whose first byte is at offset `base` in its file. The result ends with
 /// `Eof`, and its `Newline` tokens are only the ones that end statements.
 pub fn tokenize(src: &str, base: u32, diags: &mut Diagnostics) -> Vec<Token> {
-    let raw = Lexer { src, pos: 0, base, tokens: Vec::new(), diags }.run();
+    // A file may start with a byte order mark, which is not part of the program.
+    let pos = if base == 0 && src.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
+    let raw = Lexer { src, pos, base, tokens: Vec::new(), diags }.run();
     apply_continuations(raw)
 }
 
@@ -32,8 +34,8 @@ impl Lexer<'_> {
                 '/' if self.peek_at(1) == Some('/') => self.comment(),
                 'f' if self.peek_at(1) == Some('"') => self.interpolated_text(),
                 'r' if self.peek_at(1) == Some('"') => self.raw_text(),
-                c if c.is_ascii_alphabetic() || c == '_' => self.ident(),
                 c if c.is_ascii_digit() => self.number(),
+                c if is_ident_char(c) => self.ident(),
                 '"' if self.src[self.pos..].starts_with("\"\"\"") => self.multiline_text(),
                 '"' => self.text(),
                 '\'' => self.char_literal(),
@@ -80,11 +82,17 @@ impl Lexer<'_> {
         }
     }
 
+    /// Reads a name. A name with non-ASCII letters is reported once, as a whole, and still
+    /// becomes a name token so that the statement around it parses.
     fn ident(&mut self) {
         let src = self.src;
         let start = self.pos;
         self.pos += ident_len(&src[start..]);
-        let kind = match Keyword::from_text(&src[start..self.pos]) {
+        let text = &src[start..self.pos];
+        if !text.is_ascii() {
+            self.error(codes::INVALID_CHARACTER, start, format!("`{text}` is not a valid name; names are ASCII"));
+        }
+        let kind = match Keyword::from_text(text) {
             Some(kw) => TokenKind::Keyword(kw),
             None => TokenKind::Ident,
         };
@@ -121,6 +129,15 @@ impl Lexer<'_> {
                 is_float = true;
                 self.pos += 1;
                 self.eat_digits(10);
+            } else if self.peek() == Some('.')
+                && !self.peek_at(1).is_some_and(|c| c == '.' || c == '_' || c.is_alphabetic())
+            {
+                // `1.` with nothing after the dot; `1..2` and `1.show()` are fine.
+                self.pos += 1;
+                let text = &src[start..self.pos];
+                self.error(codes::INVALID_NUMBER, start, format!("`{text}` is not a valid number; write `{text}0`"));
+                self.push(TokenKind::Float, start, TokenValue::Float("0.0".into()));
+                return;
             }
             if matches!(self.peek(), Some('e' | 'E')) {
                 let digit_at = |n| self.peek_at(n).is_some_and(|c: char| c.is_ascii_digit());
@@ -131,10 +148,21 @@ impl Lexer<'_> {
                 } else {
                     None
                 };
-                if let Some(skip) = skip {
-                    is_float = true;
-                    self.pos += skip;
-                    self.eat_digits(10);
+                match skip {
+                    Some(skip) => {
+                        is_float = true;
+                        self.pos += skip;
+                        self.eat_digits(10);
+                    }
+                    // An exponent sign with no digits, as in `1.5e+`, belongs to the bad literal.
+                    None if matches!(self.peek_at(1), Some('+' | '-')) => {
+                        self.pos += 2;
+                        let text = &src[start..self.pos];
+                        self.error(codes::INVALID_NUMBER, start, format!("`{text}` is not a valid number"));
+                        self.push(TokenKind::Float, start, TokenValue::Float("0.0".into()));
+                        return;
+                    }
+                    None => {}
                 }
             }
             let text: String = src[start..self.pos].chars().filter(|&c| c != '_').collect();
@@ -169,7 +197,8 @@ impl Lexer<'_> {
     fn escape(&mut self, out: &mut String) {
         let start = self.pos;
         self.pos += 1;
-        let Some(c) = self.peek() else { return };
+        // A backslash at the end of a line escapes nothing; the literal is unterminated.
+        let Some(c) = self.peek().filter(|&c| c != '\n') else { return };
         self.pos += c.len_utf8();
         match c {
             'n' => out.push('\n'),
@@ -350,7 +379,15 @@ impl Lexer<'_> {
                     }
                     let open = self.pos;
                     self.pos += 1;
-                    match self.interpolation_end() {
+                    if self.interpolation_end(false).is_none()
+                        && let Some(close) = self.interpolation_end(true)
+                    {
+                        // The expression continues on a later line, and the text closes after it.
+                        self.error(codes::UNTERMINATED_INTERPOLATION, open, "an interpolation may not span lines");
+                        self.pos = close + 1;
+                        continue;
+                    }
+                    match self.interpolation_end(false) {
                         Some(close) => {
                             if src[open + 1..close].trim().is_empty() {
                                 self.pos = close + 1;
@@ -394,30 +431,42 @@ impl Lexer<'_> {
     }
 
     /// Finds the `}` that closes the interpolation starting at `self.pos`, skipping nested
-    /// brackets and text literals. Interpolations do not span lines.
-    fn interpolation_end(&self) -> Option<usize> {
+    /// brackets, and text and char literals. Interpolations do not span lines, so with
+    /// `across_lines` this only finds a `}` on a later line that the f-string's closing
+    /// quote follows, to report that one error instead of the cascade after it.
+    fn interpolation_end(&self, across_lines: bool) -> Option<usize> {
+        let src = self.src;
         let mut depth = 0usize;
-        let mut in_text = false;
+        let mut quote: Option<char> = None;
         let mut escaped = false;
-        for (i, c) in self.src[self.pos..].char_indices() {
-            if c == '\n' {
+        for (i, c) in src[self.pos..].char_indices() {
+            if c == '\n' && (!across_lines || quote.is_some()) {
                 return None;
             }
-            if in_text {
+            if let Some(q) = quote {
                 if escaped {
                     escaped = false;
                 } else if c == '\\' {
                     escaped = true;
-                } else if c == '"' {
-                    in_text = false;
+                } else if c == q {
+                    quote = None;
                 }
                 continue;
             }
             match c {
-                '"' => in_text = true,
+                '"' | '\'' => quote = Some(c),
                 '(' | '[' | '{' => depth += 1,
                 ')' | ']' => depth = depth.saturating_sub(1),
-                '}' if depth == 0 => return Some(self.pos + i),
+                '}' if depth == 0 => {
+                    let close = self.pos + i;
+                    if !across_lines {
+                        return Some(close);
+                    }
+                    let spans = src[self.pos..close].contains('\n');
+                    let rest = &src[close + 1..];
+                    let closes_text = rest[..rest.find('\n').unwrap_or(rest.len())].contains('"');
+                    return (spans && closes_text).then_some(close);
+                }
                 '}' => depth -= 1,
                 _ => {}
             }
@@ -460,9 +509,28 @@ impl Lexer<'_> {
             ('/', Some('=')) => (SlashEq, 2),
             ('/', _) => (Slash, 1),
             ('%', _) => (Percent, 1),
+            // Each of these is reported, then read as what it most likely means, so the
+            // statement around it still parses.
             ('&', Some('&')) => {
                 self.pos += 2;
                 self.error(codes::INVALID_CHARACTER, start, "`&&` is not an operator; write `and` (H2)");
+                self.push(Keyword(crate::token::Keyword::And), start, TokenValue::None);
+                return;
+            }
+            ('!', _) => {
+                self.pos += 1;
+                self.error(codes::INVALID_CHARACTER, start, "unexpected character `!`; write `not` (H2)");
+                self.push(Keyword(crate::token::Keyword::Not), start, TokenValue::None);
+                return;
+            }
+            (';', _) => {
+                self.pos += 1;
+                self.error(
+                    codes::INVALID_CHARACTER,
+                    start,
+                    "unexpected character `;`; a newline ends a statement, so Proviso has no semicolons (H8)",
+                );
+                self.push(Newline, start, TokenValue::None);
                 return;
             }
             ('&', _) => (Amp, 1),
@@ -470,10 +538,7 @@ impl Lexer<'_> {
             _ => {
                 self.pos += c.len_utf8();
                 let hint = match c {
-                    '!' => "; write `not` (H2)",
-                    ';' => "; a newline ends a statement, so Proviso has no semicolons (H8)",
                     '?' => "; mark a fallible call with `try` (H6)",
-                    c if !c.is_ascii() && c.is_alphabetic() => "; names are ASCII",
                     _ => "",
                 };
                 self.error(codes::INVALID_CHARACTER, start, format!("unexpected character `{c}`{hint}"));
@@ -485,15 +550,21 @@ impl Lexer<'_> {
     }
 }
 
+/// Whether `c` can be part of a name. Non-ASCII letters are lexed as part of a name so the
+/// name is reported once, as a whole.
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || (!c.is_ascii() && c.is_alphanumeric())
+}
+
 fn ident_len(s: &str) -> usize {
-    s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(s.len())
+    s.find(|c: char| !is_ident_char(c)).unwrap_or(s.len())
 }
 
 /// Removes the newlines that do not end a statement (REFERENCE §2). A statement continues
 /// onto the next line when the innermost unclosed bracket is `(` or `[`, when the line ends
 /// with a binary operator, `=` or `,`, when the next line begins with `.`, `else`, `and`,
-/// `or` or a header clause, or when the next line is a lone `{`. Doc comments inside
-/// brackets are dropped, and runs of newlines collapse to one.
+/// `or` or a header clause, or when the next line is a lone `{`. Doc comments inside `(`
+/// or `[` are dropped, and runs of newlines collapse to one.
 fn apply_continuations(raw: Vec<Token>) -> Vec<Token> {
     let mut out: Vec<Token> = Vec::with_capacity(raw.len());
     let mut brackets: Vec<TokenKind> = Vec::new();
@@ -501,11 +572,15 @@ fn apply_continuations(raw: Vec<Token>) -> Vec<Token> {
     while i < raw.len() {
         let token = &raw[i];
         match token.kind {
-            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => brackets.push(token.kind),
-            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
-                brackets.pop();
-            }
-            TokenKind::DocComment if !brackets.is_empty() => {
+            // An unclosed `(` closes with the block around it, so it doesn't swallow the
+            // newlines after that block.
+            TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::LBrace
+            | TokenKind::RParen
+            | TokenKind::RBracket
+            | TokenKind::RBrace => track(&mut brackets, token.kind),
+            TokenKind::DocComment if matches!(brackets.last(), Some(TokenKind::LParen | TokenKind::LBracket)) => {
                 i += 1;
                 continue;
             }
@@ -651,7 +726,7 @@ mod tests {
     #[test]
     fn doc_comments_survive_only_at_top_level() {
         assert_eq!(kinds("/// doc\nfn"), [DocComment, Newline, Keyword(crate::token::Keyword::Fn), Eof]);
-        assert_eq!(kinds("{\n/// doc\n}"), [LBrace, Newline, RBrace, Eof]);
+        assert_eq!(kinds("(\n/// doc\n)"), [LParen, RParen, Eof]);
     }
 
     #[test]
@@ -684,6 +759,21 @@ mod tests {
         assert_eq!(parts[0], FPart::Expr(Span::new(3, 4)));
         assert_eq!(parts[1], FPart::Lit(" and {b} ".into()));
         assert_eq!(parts[2], FPart::Expr(Span::new(17, 26)));
+    }
+
+    #[test]
+    fn backslash_at_line_end_leaves_the_text_unterminated() {
+        let mut diags = Diagnostics::default();
+        let tokens = tokenize("\"abc\\\nx", 0, &mut diags);
+        let list = diags.into_vec();
+        assert_eq!(list.iter().map(|d| d.code).collect::<Vec<_>>(), [codes::UNTERMINATED_TEXT]);
+        assert!(!list[0].message.contains('\n'));
+        assert_eq!(tokens.iter().map(|t| t.kind).collect::<Vec<_>>(), [Text, Newline, Ident, Eof]);
+    }
+
+    #[test]
+    fn a_leading_byte_order_mark_is_ignored() {
+        assert_eq!(kinds("\u{feff}fn"), [Keyword(crate::token::Keyword::Fn), Eof]);
     }
 
     #[test]

@@ -8,6 +8,11 @@
 // order (§10 rule 3). Probe 3's abandon hits a defect. The defect is recorded,
 // probe 3 is reported as leaked, and probes 2 and 1 are still abandoned. The
 // exit becomes a defect exit (code 70) although it began as an error.
+//
+// The test assumes that `abandon` consumes the probe when it returns
+// (OPEN_QUESTIONS Q35) and that `Out` is in `std.io` (Q36). The report kinds
+// are provisional (T10). Printing through a stored `Out` needs `keep`
+// parameters and capability-typed fields, which P3 doesn't put in phase 2.
 
 use std.io { Out }
 

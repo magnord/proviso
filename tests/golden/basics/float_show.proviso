@@ -1,0 +1,18 @@
+// phase: 1
+// `Show` prints the shortest text that reads back as the same float, with an exponent for
+// very large and very small values (OPEN_QUESTIONS P5). `Float32` arithmetic rounds to
+// binary32: 16777217 is not a `Float32`, so adding 1.0 to 16777216.0 changes nothing.
+use std.io { IoError }
+
+pub fn main(sys: keep System) fails IoError {
+    let big = 1e21
+    let small = 1.5e-7
+    let zero = 0.0
+    try sys.stdout.write_line(f"{big} {small} {0.1 + 0.2} {100.0} {-zero}")
+    try sys.stdout.write_line(f"{1.0 / zero} {-1.0 / zero} {zero / zero}")
+    let single: Float32 = 16777216.0
+    let double: Float = 16777216.0
+    try sys.stdout.write_line(f"{single + 1.0} {double + 1.0}")
+    let tenth: Float32 = 0.1
+    try sys.stdout.write_line(f"{tenth} {tenth + 0.2}")
+}

@@ -1,0 +1,14 @@
+// phase: 1
+// expect-exit: 70
+// `/=` by zero is a defect, like `/`.
+use std.io { IoError }
+
+pub fn main(sys: keep System) fails IoError {
+    var total = 10
+    var parts = 2
+    total /= parts
+    try sys.stdout.write_line(f"{total}")
+    parts -= 2
+    total /= parts
+    try sys.stdout.write_line(f"{total}")
+}

@@ -18,7 +18,7 @@ pub struct Module {
     pub stmts: Arena<Stmt>,
     pub types: Arena<TypeExpr>,
     pub interner: Interner,
-    /// Names whose declarations failed to parse. Uses of them are not reported again.
+    /// Functions whose declarations failed to parse. Calls of them are not reported again.
     pub poisoned: HashSet<Symbol>,
 }
 
@@ -75,6 +75,8 @@ pub struct FnDecl {
     pub ret: Option<TypeId>,
     pub fails: Option<TypeId>,
     pub body: Block,
+    /// The body needed error recovery, so its control flow is unknown.
+    pub recovered: bool,
 }
 
 pub struct Param {
@@ -224,6 +226,8 @@ pub enum ExprKind {
     Todo(Option<String>),
     Unreachable,
     Debug(Vec<ExprId>),
+    /// Stands in for code that failed to parse, which is already reported.
+    Error,
 }
 
 pub enum ElseBranch {

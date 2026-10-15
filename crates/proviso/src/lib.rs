@@ -9,15 +9,16 @@ use std::path::Path;
 use proviso_check::{Options, Program, check_module};
 use proviso_interp::{Defect, Outcome, run_main};
 use proviso_syntax::ast::Module;
-use proviso_syntax::diag::{Diagnostic, Diagnostics, Severity, codes};
+use proviso_syntax::diag::{Diagnostic, Diagnostics, Severity};
 use proviso_syntax::parse_module;
 use proviso_syntax::source::{SourceFile, Span};
 
 /// The last phase of the v1 plan (OPEN_QUESTIONS P3) that this toolchain implements.
 pub const IMPLEMENTED_PHASE: u32 = 1;
 
-/// Process exit codes. 1 and 70 come from REFERENCE §7.3 and §7.4; the others follow the
-/// BSD `sysexits` convention that 70 already belongs to.
+/// Process exit codes. 1 comes from REFERENCE §7.4 and 70 from §7.3; 64 to 66 follow the
+/// BSD `sysexits` convention that 70 already belongs to, and 101 is Rust's panic status
+/// (OPEN_QUESTIONS P5).
 pub mod exit {
     pub const OK: i32 = 0;
     /// `main` failed with an error.
@@ -28,11 +29,13 @@ pub mod exit {
     pub const NO_INPUT: i32 = 66;
     /// The program hit a defect.
     pub const DEFECT: i32 = 70;
+    /// A bug in the toolchain.
     pub const INTERNAL: i32 = 101;
 }
 
-/// The interpreter's thread stack, sized for `proviso_interp::MAX_CALL_DEPTH` nested calls.
-const INTERPRETER_STACK: usize = 1 << 30;
+/// The stack for parsing and checking, which recurse once per level of nesting, up to
+/// `proviso_syntax::parser::MAX_NESTING` levels. At that limit a debug build needed 8 MiB.
+const COMPILE_STACK: usize = 64 << 20;
 
 /// The most call-site lines a defect report shows.
 pub const MAX_TRACE_LINES: usize = 40;
@@ -49,10 +52,20 @@ pub struct Compiled {
 pub fn compile(path: &str, text: String, opts: Options) -> Compiled {
     let file = SourceFile::new(path, text);
     let name = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("main").to_string();
-    let mut diags = Diagnostics::default();
-    let module = parse_module(&file, &name, &mut diags);
-    let program = check_module(&module, opts, &mut diags);
-    let mut diagnostics = diags.into_vec();
+    let compiled = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("proviso-compile".to_string())
+            .stack_size(COMPILE_STACK)
+            .spawn_scoped(scope, || {
+                let mut diags = Diagnostics::default();
+                let module = parse_module(&file, &name, &mut diags);
+                let program = check_module(&module, opts, &mut diags);
+                (module, program, diags.into_vec())
+            })
+            .expect("failed to start the compiler thread")
+            .join()
+    });
+    let (module, program, mut diagnostics) = compiled.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     diagnostics.sort_by_key(|d| (d.span.lo, d.span.hi));
     Compiled { file, module, program, diagnostics }
 }
@@ -60,18 +73,6 @@ pub fn compile(path: &str, text: String, opts: Options) -> Compiled {
 impl Compiled {
     pub fn has_errors(&self) -> bool {
         self.diagnostics.iter().any(|d| d.severity == Severity::Error)
-    }
-
-    /// Reports a missing `main`, which only matters when the file is run.
-    pub fn require_main(&mut self) {
-        if self.program.main.is_none() {
-            self.diagnostics.push(Diagnostic {
-                code: codes::INVALID_MAIN,
-                severity: Severity::Error,
-                span: Span::default(),
-                message: "there is no `main` to run; declare `pub fn main(sys: keep System)`".to_string(),
-            });
-        }
     }
 
     /// `path:line:col`
@@ -85,12 +86,13 @@ impl Compiled {
     pub fn anchor(&self, span: Span) -> String {
         let m = &self.module;
         for item in &m.items {
-            if item.span.lo <= span.lo && span.lo < item.span.hi.max(item.span.lo + 1) {
-                if let Some(name) = item.name() {
-                    let (line, _) = self.file.line_col(span.lo);
-                    let (first, _) = self.file.line_col(item.span.lo);
-                    return format!("{}.{}+{}", m.name, m.text(name.sym), line - first + 1);
-                }
+            if item.span.lo <= span.lo
+                && span.lo < item.span.hi.max(item.span.lo + 1)
+                && let Some(name) = item.name()
+            {
+                let (line, _) = self.file.line_col(span.lo);
+                let (first, _) = self.file.line_col(item.span.lo);
+                return format!("{}.{}+{}", m.name, m.text(name.sym), line - first + 1);
             }
         }
         m.name.clone()
@@ -157,16 +159,7 @@ impl Compiled {
 /// Runs a compiled program without errors and returns its exit code. The program writes to
 /// `stdout`; failures and defects are reported on `stderr`.
 pub fn run(compiled: &Compiled, stdout: &mut (dyn Write + Send), stderr: &mut (dyn Write + Send)) -> i32 {
-    let outcome = std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .name("proviso-main".to_string())
-            .stack_size(INTERPRETER_STACK)
-            .spawn_scoped(scope, || {
-                run_main(&compiled.file, &compiled.module, &compiled.program, &mut *stdout, &mut *stderr)
-            })
-            .expect("failed to start the interpreter thread")
-            .join()
-    });
+    let outcome = run_main(&compiled.file, &compiled.module, &compiled.program, stdout, stderr);
     let _ = stdout.flush();
     match outcome {
         Ok(Outcome::Done) => exit::OK,

@@ -1,0 +1,2 @@
+defect[division_by_zero]: `/` by zero
+  at basics/compound_division_by_zero.proviso:12:5 (compound_division_by_zero.main+7)

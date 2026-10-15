@@ -83,19 +83,19 @@ If you are new, start with RATIONALE.md for the reasoning, then skim REFERENCE.m
 
 ## Building and running
 
-The toolchain needs Rust 1.85 or later, and has no dependencies outside the standard library.
+The toolchain needs Rust 1.88 or later, and has no dependencies outside the standard library.
 
 ```bash
 cargo run -- run tests/golden/basics/hello.proviso
 ```
 
-- `proviso check [--json] <file>` type-checks a file.
-- `proviso run <file>` checks it and runs its `main`.
+- `proviso check [--incomplete] [--json] <file>` type-checks a file.
+- `proviso run [--incomplete] <file>` checks it and runs its `main`.
 - `proviso explain <code>` describes a diagnostic code.
 
-Constructs from later phases are reported as `E0901 not_implemented`, together with the phase that will add them.
+`--incomplete` accepts `todo` holes. A construct that isn't implemented yet is reported as `E0901 not_implemented`, and the message says whether it is planned for a v1 phase, deferred past v1, or not yet scheduled.
 
-`cargo test` runs the unit tests and every golden file under `tests/golden`. A golden file states its phase and its expected errors or exit code in comments, and it sits next to a `.out` file of expected output. The format is specified in [tests/golden/README.md](tests/golden/README.md). To rewrite the expected output after an intended change, run `PROVISO_BLESS=1 cargo test`.
+`cargo test` runs the unit tests and every golden file under `tests/golden`. A golden file states its phase and its expected errors or exit code in header comments. A file that expects errors also marks each error's line with a trailing `// <- <code>` comment. A file that runs is compared with a `.out` file of its expected stdout and an `.err` file of its expected stderr, and a missing file means no output. The format is specified in [tests/golden/README.md](tests/golden/README.md). To rewrite the expected output after an intended change, run `PROVISO_BLESS=1 cargo test`.
 
 The workspace is split by stage:
 

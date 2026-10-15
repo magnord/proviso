@@ -1,8 +1,16 @@
 // phase: 1
 // expect-error: E0701
-// A call that can fail must be marked where it happens (REFERENCE §7.2).
-use std.io { IoError }
+// A call that can fail must be marked where it happens (REFERENCE §7.2). `try` covers only
+// the postfix chain to its right, not calls in the arguments.
+use std.io { IoError, Out }
+
+fn get(o: Out) -> Text fails IoError {
+    try o.write_line("get")
+    return "v"
+}
 
 pub fn main(sys: keep System) fails IoError {
-    sys.stdout.write_line("hello")
+    sys.stdout.write_line("hello")                  // <- E0701
+    try sys.stdout.write_line(get(sys.stdout))      // <- E0701
+    try sys.stdout.write_line(try get(sys.stdout))
 }

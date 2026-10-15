@@ -1,0 +1,3 @@
+defect[unreachable_reached]: reached `unreachable`
+  at basics/unreachable_reached.proviso:12:5 (unreachable_reached.name+7)
+  called from basics/unreachable_reached.proviso:17:31 (unreachable_reached.main+3)

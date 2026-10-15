@@ -14,9 +14,16 @@ use proviso_check::{Builtin, FnId, Program, Res};
 use proviso_syntax::ast::*;
 use proviso_syntax::source::{SourceFile, Span};
 
-/// Calls nested deeper than this are a stack-exhaustion defect (REFERENCE §7.3). The host
-/// runs the interpreter on a thread with a stack large enough for this depth.
+/// Calls nested deeper than this are a stack-exhaustion defect (REFERENCE §7.3).
 pub const MAX_CALL_DEPTH: usize = 10_000;
+
+/// The interpreter thread's stack. Each call can still use a lot of it when its expressions
+/// nest deeply, so the interpreter also checks how much is left, and stops with the same
+/// defect before it runs out.
+const STACK_SIZE: usize = 1 << 30;
+
+/// The stack kept free for the deepest work between two checks.
+const STACK_RESERVE: usize = 1 << 20;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Value {
@@ -73,23 +80,34 @@ pub enum Outcome {
     Defect(Defect),
 }
 
-/// Runs `main`. Program output goes to `stdout`; `debug` output goes to `stderr`.
-pub fn run_main(file: &SourceFile, m: &Module, p: &Program, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Outcome {
-    let main = p.main.expect("the driver checks that `main` exists");
-    let site = m.fn_decl(p.fns[main].item).expect("`main` is a function").name.span;
-    let mut interp = Interp { file, m, p, stdout, stderr, depth: 0 };
-    match interp.call(main, vec![Value::System], site) {
-        Ok(_) => Outcome::Done,
-        Err(Unwind::Fail(error)) => Outcome::Failed(show(&error)),
-        Err(Unwind::Defect(mut defect)) => {
-            // The last caller is the synthetic call of `main` itself.
-            defect.callers.pop();
-            Outcome::Defect(defect)
-        }
-        Err(Unwind::Return(_) | Unwind::Break(_) | Unwind::Continue(_)) => {
-            unreachable!("returns and jumps do not escape a function")
-        }
-    }
+/// Runs `main` on a thread of its own. Program output goes to `stdout`; `debug` output goes
+/// to `stderr`. An `Err` is a panic in the interpreter, which is a bug.
+pub fn run_main(
+    file: &SourceFile,
+    m: &Module,
+    p: &Program,
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+) -> std::thread::Result<Outcome> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("proviso-main".to_string())
+            .stack_size(STACK_SIZE)
+            .spawn_scoped(scope, || {
+                // The stack grows down, so this is close to its top.
+                let stack_limit = stack_address().saturating_sub(STACK_SIZE - STACK_RESERVE);
+                let mut interp = Interp { file, m, p, stdout, stderr, depth: 0, stack_limit };
+                interp.main()
+            })
+            .expect("failed to start the interpreter thread")
+            .join()
+    })
+}
+
+/// The address of a local variable, which shows how deep the stack is.
+fn stack_address() -> usize {
+    let marker = 0u8;
+    std::hint::black_box(&marker) as *const u8 as usize
 }
 
 /// Why evaluation left the normal path.
@@ -111,23 +129,50 @@ struct Interp<'a> {
     file: &'a SourceFile,
     m: &'a Module,
     p: &'a Program,
-    stdout: &'a mut dyn Write,
-    stderr: &'a mut dyn Write,
+    stdout: &'a mut (dyn Write + Send),
+    stderr: &'a mut (dyn Write + Send),
+    /// The number of calls in progress.
     depth: usize,
+    /// The lowest stack address the interpreter may reach.
+    stack_limit: usize,
 }
 
 /// A function's local slots, indexed by `LocalId`.
 type Frame = Vec<Value>;
 
 impl Interp<'_> {
-    fn call(&mut self, f: FnId, args: Vec<Value>, site: Span) -> Flow<Value> {
-        if self.depth >= MAX_CALL_DEPTH {
+    fn main(&mut self) -> Outcome {
+        let main = self.p.main.expect("the driver checks that `main` exists");
+        let site = self.m.fn_decl(self.p.fns[main].item).expect("`main` is a function").name.span;
+        match self.call(main, vec![Value::System], site) {
+            Ok(_) => Outcome::Done,
+            Err(Unwind::Fail(error)) => Outcome::Failed(show(&error)),
+            Err(Unwind::Defect(mut defect)) => {
+                // The last caller is the synthetic call of `main` itself.
+                defect.callers.pop();
+                Outcome::Defect(defect)
+            }
+            Err(Unwind::Return(_) | Unwind::Break(_) | Unwind::Continue(_)) => {
+                unreachable!("returns and jumps do not escape a function")
+            }
+        }
+    }
+
+    /// Stops with a defect when the stack is nearly used up.
+    fn check_stack(&self, span: Span) -> Flow<()> {
+        if self.depth >= MAX_CALL_DEPTH || stack_address() < self.stack_limit {
+            let depth = self.depth;
             return Err(defect(
                 DefectKind::StackExhausted,
-                format!("the call stack is exhausted after {MAX_CALL_DEPTH} nested calls"),
-                site,
+                format!("the call stack is exhausted after {depth} nested calls"),
+                span,
             ));
         }
+        Ok(())
+    }
+
+    fn call(&mut self, f: FnId, args: Vec<Value>, site: Span) -> Flow<Value> {
+        self.check_stack(site)?;
         let info = &self.p.fns[f];
         let decl = self.m.fn_decl(info.item).expect("functions are declared by `fn` items");
         let mut frame = args;
@@ -225,6 +270,7 @@ impl Interp<'_> {
     fn expr(&mut self, e: ExprId, frame: &mut Frame) -> Flow<Value> {
         let m = self.m;
         let span = m.exprs[e].span;
+        self.check_stack(span)?;
         Ok(match &m.exprs[e].kind {
             ExprKind::Int(value) => Value::Int(*value as i128),
             ExprKind::Float(text) => match self.p.ty(e) {
@@ -364,6 +410,7 @@ impl Interp<'_> {
                 return Err(defect(DefectKind::TodoReached, message, span));
             }
             ExprKind::Unreachable => return Err(defect(DefectKind::UnreachableReached, "reached `unreachable`", span)),
+            ExprKind::Error => unreachable!("programs with errors don't run"),
             ExprKind::Debug(values) => {
                 let mut parts = Vec::with_capacity(values.len());
                 for value in values {
@@ -514,13 +561,33 @@ pub fn show(value: &Value) -> String {
     }
 }
 
-/// The `debug` text of a value: like `show`, but text and chars are quoted and escaped.
+/// The `debug` text of a value: like `show`, but text and chars are quoted and written with
+/// Proviso's escapes, so the output reads as a literal.
 fn debug_repr(value: &Value) -> String {
     match value {
-        Value::Text(text) => format!("{:?}", &**text),
-        Value::Char(c) => format!("{c:?}"),
+        Value::Text(text) => quote(text, '"'),
+        Value::Char(c) => quote(c.encode_utf8(&mut [0; 4]), '\''),
         other => show(other),
     }
+}
+
+fn quote(text: &str, quote: char) -> String {
+    let mut out = String::from(quote);
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\\' => out.push_str("\\\\"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
 }
 
 #[cfg(test)]
@@ -554,6 +621,13 @@ mod tests {
         assert_eq!(show(&Value::F64(0.1 + 0.2)), "0.30000000000000004");
         assert_eq!(show(&Value::F32(0.1)), "0.1");
         assert_eq!(show(&Value::F64(f64::NAN)), "NaN");
+    }
+
+    #[test]
+    fn debug_quotes_with_proviso_escapes() {
+        assert_eq!(debug_repr(&Value::Text("a\"\\\n\t\r\0é".into())), r#""a\"\\\n\t\u{d}\u{0}é""#);
+        assert_eq!(debug_repr(&Value::Char('\'')), r"'\''");
+        assert_eq!(debug_repr(&Value::Char('"')), "'\"'");
     }
 
     #[test]

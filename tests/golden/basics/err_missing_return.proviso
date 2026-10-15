@@ -7,10 +7,14 @@ fn sign(n: Int) -> Int {
     } else if n > 0 {
         return 1
     }
-}
+}                                                   // <- E0304
 
 fn double(n: Int) -> Int {
-    n * 2
+    n * 2                                           // <- E0304
+}
+
+fn pick(c: Bool) -> Int {
+    if c { 1 } else { 2 }                           // <- E0304, E0304
 }
 
 fn ok(n: Int) -> Int {
@@ -24,4 +28,12 @@ fn ok(n: Int) -> Int {
 fn forever() -> Int {
     loop {
     }
+}
+
+fn bound_forever() -> Int {
+    let x: Int = loop {}
+}
+
+fn stops() -> Int {
+    unreachable
 }

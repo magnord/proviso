@@ -1,4 +1,4 @@
 // phase: 1
 // expect-error: E0308
-fn main(sys: System) {
+fn main(sys: System) {                              // <- E0308
 }

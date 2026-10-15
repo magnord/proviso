@@ -9,10 +9,23 @@ use crate::diag::{Code, Diagnostics, Planned, codes};
 use crate::intern::Interner;
 use crate::lexer::tokenize;
 use crate::source::{SourceFile, Span};
-use crate::token::{FPart, Keyword as Kw, Token, TokenKind as T, TokenValue};
+use crate::token::{FPart, Keyword as Kw, Token, TokenKind as T, TokenValue, opener, track};
 
 /// Parse failures are already reported when this is `Err`; callers only recover.
 type PResult<X> = Result<X, ()>;
+
+/// How deeply expressions and blocks may nest. Each operator of a chain such as `a + b + c`,
+/// and each link of a call chain such as `a.f().g()`, counts as a level, because the checker
+/// and interpreter recurse once per level. Deeper code is rejected instead of overflowing
+/// the stack (OPEN_QUESTIONS P5).
+pub const MAX_NESTING: u32 = 1_000;
+
+/// Where error recovery stops: at the end of a statement or of an item.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    Stmt,
+    Item,
+}
 
 pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> Module {
     let tokens = tokenize(&file.text, 0, diags);
@@ -25,7 +38,18 @@ pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> M
         interner: Interner::default(),
         poisoned: HashSet::new(),
     };
-    let mut parser = Parser { file, tokens, pos: 0, diags, m: module };
+    let mut parser = Parser {
+        file,
+        tokens,
+        pos: 0,
+        diags,
+        m: module,
+        depth: 0,
+        stmt_indent: 0,
+        item_indent: 0,
+        recovered: false,
+        unclosed_reported: false,
+    };
     parser.items();
     parser.m
 }
@@ -36,6 +60,18 @@ struct Parser<'a> {
     pos: usize,
     diags: &'a mut Diagnostics,
     m: Module,
+    /// The nesting level being parsed, limited by [`MAX_NESTING`].
+    depth: u32,
+    /// The indentation of the line where the current statement or item starts. A block
+    /// should close at the same indentation.
+    stmt_indent: usize,
+    /// The indentation of the line where the current item starts.
+    item_indent: usize,
+    /// Set when the current function body needed error recovery.
+    recovered: bool,
+    /// Set once an unclosed `{` has been reported in the current item, so the blocks around
+    /// it close without reporting it again.
+    unclosed_reported: bool,
 }
 
 impl Parser<'_> {
@@ -142,20 +178,125 @@ impl Parser<'_> {
         self.m.exprs[e].span
     }
 
-    fn skip_balanced(&mut self) {
-        let mut depth = 0;
+    /// The indentation of the line holding `span`, with tabs at every fourth column.
+    fn indent(&self, span: Span) -> usize {
+        let text = self.file.text.as_bytes();
+        let line_start = text[..span.lo as usize].iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+        let mut width = 0;
+        for &b in &text[line_start..] {
+            match b {
+                b' ' => width += 1,
+                b'\t' => width = (width / 4 + 1) * 4,
+                _ => break,
+            }
+        }
+        width
+    }
+
+    /// Whether the current token is a `fn` or `pub` that starts an item, not one nested in
+    /// a later-phase item such as an `impl` block.
+    fn starts_item(&self) -> bool {
+        let span = self.peek().span;
+        self.starts_line(span) && self.indent(span) <= self.item_indent
+    }
+
+    /// Whether `span` is the first token on its line.
+    fn starts_line(&self, span: Span) -> bool {
+        let text = &self.file.text.as_bytes()[..span.lo as usize];
+        text.iter().rev().take_while(|&&b| b != b'\n').all(|&b| b == b' ' || b == b'\t')
+    }
+
+    fn unclosed<X>(&mut self, open: &Token) -> PResult<X> {
+        let what = open.kind.describe();
+        self.error(codes::UNEXPECTED_TOKEN, open.span, format!("this {what} is never closed"));
+        Err(())
+    }
+
+    /// Expects the bracket that closes `open`. When the next token starts a line no deeper
+    /// than the line that opened the bracket, the bracket was most likely never closed, so
+    /// that is what is reported.
+    fn close(&mut self, open: &Token, kind: T, expected: &str) -> PResult<Token> {
+        if self.at(kind) {
+            return Ok(self.bump());
+        }
+        let next = self.peek().span;
+        if self.at(T::Eof) || (self.starts_line(next) && self.indent(next) <= self.indent(open.span)) {
+            return self.unclosed(open);
+        }
+        self.unexpected(expected)
+    }
+
+    /// Skips a bracketed group, such as type arguments, whose contents phase 1 doesn't parse.
+    fn skip_group(&mut self) -> PResult<()> {
+        let open = self.bump();
+        let mut stack = vec![open.kind];
         loop {
-            match self.kind() {
-                T::LParen | T::LBracket | T::LBrace => depth += 1,
+            let kind = self.kind();
+            match kind {
+                T::LParen | T::LBracket | T::LBrace => stack.push(kind),
                 T::RParen | T::RBracket | T::RBrace => {
-                    depth -= 1;
-                    if depth <= 0 {
+                    // A closer that matches nothing open here belongs to an enclosing construct.
+                    if stack.last() != Some(&opener(kind)) {
+                        return self.unclosed(&open);
+                    }
+                    stack.pop();
+                    if stack.is_empty() {
                         self.bump();
-                        return;
+                        return Ok(());
                     }
                 }
-                T::Eof => return,
+                T::Eof => return self.unclosed(&open),
                 _ => {}
+            }
+            self.bump();
+        }
+    }
+
+    /// Enters one more level of nesting; see [`MAX_NESTING`].
+    fn deeper(&mut self) -> PResult<()> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            let span = self.peek().span;
+            self.error(
+                codes::NESTING_TOO_DEEP,
+                span,
+                format!("this nests more than {MAX_NESTING} levels deep; split it into smaller expressions"),
+            );
+            return Err(());
+        }
+        Ok(())
+    }
+
+    /// Parses `f` one level deeper, and restores the level afterwards.
+    fn nested<X>(&mut self, f: impl FnOnce(&mut Self) -> PResult<X>) -> PResult<X> {
+        let base = self.depth;
+        let result = match self.deeper() {
+            Ok(()) => f(self),
+            Err(()) => Err(()),
+        };
+        self.depth = base;
+        result
+    }
+
+    /// Skips the rest of a statement or item that failed to parse, which began at token
+    /// `start`. Brackets opened since `start` are skipped to their close, wherever inside
+    /// them the error was. A statement also ends before the `}` that closes its block, and
+    /// both end before a `fn` or `pub` that starts a line no deeper than the current item,
+    /// since that starts the next item.
+    fn recover(&mut self, start: usize, stop: Stop) {
+        self.recovered = true;
+        let mut open = Vec::new();
+        for token in &self.tokens[start..self.pos] {
+            track(&mut open, token.kind);
+        }
+        loop {
+            let kind = self.kind();
+            match kind {
+                T::Eof => return,
+                T::Newline if open.is_empty() => return,
+                T::RBrace if stop == Stop::Stmt && !open.contains(&T::LBrace) => return,
+                T::Keyword(Kw::Fn | Kw::Pub) if self.pos > start && self.starts_item() => return,
+                _ => track(&mut open, kind),
             }
             self.bump();
         }
@@ -169,46 +310,36 @@ impl Parser<'_> {
             if self.at(T::Eof) {
                 break;
             }
-            let before = self.pos;
+            let start = self.pos;
+            self.depth = 0;
+            self.unclosed_reported = false;
+            self.stmt_indent = self.indent(self.peek().span);
+            self.item_indent = self.stmt_indent;
             match self.item() {
                 Ok(Some(item)) => {
                     self.m.items.push(item);
-                    if !matches!(self.kind(), T::Newline | T::Eof) {
+                    // A doc comment may follow an item on its line; it documents the next one.
+                    if !matches!(self.kind(), T::Newline | T::Eof | T::DocComment) {
                         let _ = self.unexpected::<()>("end of line after the item");
-                        self.recover_item();
+                        self.recover(start, Stop::Item);
                     }
                 }
                 Ok(None) => {}
-                Err(()) => self.recover_item(),
+                Err(()) => self.recover(start, Stop::Item),
             }
-            if self.pos == before {
+            if self.pos == start {
                 self.bump();
             }
         }
     }
 
-    /// Skips to the end of the current item: the next newline outside brackets.
-    fn recover_item(&mut self) {
-        let mut depth: i32 = 0;
-        loop {
-            match self.kind() {
-                T::Eof => return,
-                T::Newline if depth <= 0 => {
-                    self.bump();
-                    return;
-                }
-                T::LParen | T::LBracket | T::LBrace => depth += 1,
-                T::RParen | T::RBracket | T::RBrace => depth -= 1,
-                _ => {}
-            }
-            self.bump();
-        }
-    }
-
     fn item(&mut self) -> PResult<Option<Item>> {
         let mut doc: Option<String> = None;
+        let mut doc_span = None;
         while self.at(T::DocComment) {
-            if let TokenValue::Doc(text) = self.bump().value {
+            let token = self.bump();
+            doc_span = Some(token.span);
+            if let TokenValue::Doc(text) = token.value {
                 match &mut doc {
                     Some(d) => {
                         d.push('\n');
@@ -220,6 +351,9 @@ impl Parser<'_> {
             self.skip_newlines();
         }
         if self.at(T::Eof) {
+            if let Some(span) = doc_span {
+                self.error(codes::UNEXPECTED_TOKEN, span, "a doc comment documents the next item, but none follows");
+            }
             return Ok(None);
         }
         let start = self.peek().span;
@@ -242,11 +376,7 @@ impl Parser<'_> {
             }
             T::Keyword(Kw::Use) => ItemKind::Use(self.use_decl()?),
             T::Keyword(kw) => match planned_item(kw) {
-                Some((what, planned)) => {
-                    let _ = self.not_implemented::<()>(what, planned);
-                    self.recover_item();
-                    return Ok(None);
-                }
+                Some((what, planned)) => return self.not_implemented(what, planned),
                 None => return self.unexpected("an item such as `fn` or `use`"),
             },
             _ => return self.unexpected("an item such as `fn` or `use`"),
@@ -261,7 +391,8 @@ impl Parser<'_> {
             path.push(self.member_name("a module name")?);
         }
         let mut names = Vec::new();
-        if self.eat(T::LBrace) {
+        if self.at(T::LBrace) {
+            let open = self.bump();
             loop {
                 self.skip_newlines();
                 if self.eat(T::RBrace) {
@@ -273,7 +404,7 @@ impl Parser<'_> {
                 self.skip_newlines();
                 if !self.eat(T::Comma) {
                     self.skip_newlines();
-                    self.expect(T::RBrace, "`,` or `}`")?;
+                    self.close(&open, T::RBrace, "`,` or `}`")?;
                     break;
                 }
             }
@@ -295,7 +426,7 @@ impl Parser<'_> {
         if self.at(T::LBracket) {
             return self.not_implemented("generic functions", Planned::Phase(2));
         }
-        self.expect(T::LParen, "`(`")?;
+        let open = self.expect(T::LParen, "`(`")?;
         let mut params = Vec::new();
         while !self.at(T::RParen) {
             params.push(self.param()?);
@@ -303,7 +434,7 @@ impl Parser<'_> {
                 break;
             }
         }
-        self.expect(T::RParen, "`,` or `)`")?;
+        self.close(&open, T::RParen, "`,` or `)`")?;
         let ret = if self.eat(T::Arrow) { Some(self.type_expr()?) } else { None };
         let mut fails = None;
         loop {
@@ -333,8 +464,9 @@ impl Parser<'_> {
                 _ => break,
             }
         }
+        self.recovered = false;
         let body = self.block()?;
-        Ok(FnDecl { name, params, ret, fails, body })
+        Ok(FnDecl { name, params, ret, fails, body, recovered: self.recovered })
     }
 
     fn param(&mut self) -> PResult<Param> {
@@ -380,13 +512,14 @@ impl Parser<'_> {
             T::Ident => {
                 let name = self.ident("a type")?;
                 if self.at(T::LBracket) {
-                    self.skip_balanced();
+                    self.skip_group()?;
                     TypeExprKind::Applied(name)
                 } else {
                     TypeExprKind::Named(name)
                 }
             }
             T::Keyword(Kw::Fn) => return self.not_implemented("function types", Planned::Phase(3)),
+            T::Keyword(Kw::Scoped) => return self.not_implemented("`scoped` function types", Planned::Phase(3)),
             T::Keyword(Kw::Any) => return self.not_implemented("`any` types", Planned::PastV1),
             T::Keyword(Kw::SelfType) => return self.not_implemented("methods and `Self`", Planned::Phase(2)),
             T::LParen => return self.not_implemented("tuple types", Planned::Phase(2)),
@@ -400,47 +533,77 @@ impl Parser<'_> {
 
     fn block(&mut self) -> PResult<Block> {
         let open = self.expect(T::LBrace, "`{`")?;
+        let indent = self.stmt_indent;
+        self.nested(|p| Ok(p.block_rest(&open, indent)))
+    }
+
+    /// Parses statements up to the `}` that closes `open`. A block that is never closed is
+    /// reported where it opens, and ends where its enclosing block or item does: before a
+    /// `}` indented less than the statement that opened it, before an item, or at the end of
+    /// the file.
+    fn block_rest(&mut self, open: &Token, indent: usize) -> Block {
         let mut stmts = Vec::new();
         loop {
-            self.skip_newlines();
-            match self.kind() {
-                T::RBrace => {
+            // A doc comment documents an item, so there is nothing for it to do in a block.
+            while matches!(self.kind(), T::Newline | T::DocComment) {
+                self.bump();
+            }
+            let next = self.peek().span;
+            let unclosed = match self.kind() {
+                T::RBrace if self.indent(next) >= indent || !self.starts_line(next) => {
                     self.bump();
                     break;
                 }
-                T::Eof => {
-                    self.error(codes::UNEXPECTED_TOKEN, open.span, "this `{` is never closed");
-                    return Err(());
+                T::RBrace | T::Eof => true,
+                T::Keyword(Kw::Fn | Kw::Pub) => self.starts_item(),
+                _ => false,
+            };
+            if unclosed {
+                self.recovered = true;
+                if !self.unclosed_reported {
+                    self.unclosed_reported = true;
+                    let _ = self.unclosed::<()>(open);
                 }
-                _ => {}
+                break;
             }
-            match self.stmt() {
+            let start = self.pos;
+            let saved = (self.depth, self.stmt_indent);
+            self.stmt_indent = self.indent(next);
+            let stmt = match self.stmt() {
                 Ok(stmt) => {
-                    stmts.push(stmt);
-                    if !matches!(self.kind(), T::Newline | T::RBrace) {
+                    if !matches!(self.kind(), T::Newline | T::RBrace | T::Eof) {
                         let _ = self.unexpected::<()>("end of statement");
-                        self.recover_stmt();
+                        self.recover(start, Stop::Stmt);
                     }
+                    stmt
                 }
-                Err(()) => self.recover_stmt(),
-            }
+                Err(()) => {
+                    self.recover(start, Stop::Stmt);
+                    if self.pos == start {
+                        self.bump();
+                    }
+                    self.placeholder(start)
+                }
+            };
+            (self.depth, self.stmt_indent) = saved;
+            stmts.push(stmt);
         }
-        Ok(Block { stmts, span: open.span.to(self.prev_span()) })
+        Block { stmts, span: open.span.to(self.prev_span()) }
     }
 
-    /// Skips to the end of the current statement, leaving a closing `}` for the block.
-    fn recover_stmt(&mut self) {
-        let mut depth: i32 = 0;
-        loop {
-            match self.kind() {
-                T::Eof => return,
-                T::Newline | T::RBrace if depth <= 0 => return,
-                T::LParen | T::LBracket | T::LBrace => depth += 1,
-                T::RParen | T::RBracket | T::RBrace => depth -= 1,
-                _ => {}
+    /// Stands in for a statement that failed to parse. A `let` still binds its name, with
+    /// an unknown type, so later uses of it aren't reported again.
+    fn placeholder(&mut self, start: usize) -> StmtId {
+        let span = self.tokens[start].span.to(self.prev_span());
+        let init = self.alloc(ExprKind::Error, span);
+        let kind = match (self.tokens[start].kind, self.tokens.get(start + 1)) {
+            (T::Keyword(kw @ (Kw::Let | Kw::Var)), Some(next)) if next.kind == T::Ident => {
+                let name = self.intern(next.span);
+                StmtKind::Let { mutable: kw == Kw::Var, name, ty: None, init }
             }
-            self.bump();
-        }
+            _ => StmtKind::Expr(init),
+        };
+        self.m.stmts.alloc(Stmt { kind, span })
     }
 
     fn stmt(&mut self) -> PResult<StmtId> {
@@ -509,29 +672,38 @@ impl Parser<'_> {
             return self.not_implemented("destructuring `let` statements", Planned::Phase(2));
         }
         let name = self.ident("a variable name")?;
-        match self.let_rest() {
-            Ok((ty, init)) => Ok(StmtKind::Let { mutable, name, ty, init }),
-            Err(()) => {
-                self.m.poisoned.insert(name.sym);
-                Err(())
-            }
-        }
-    }
-
-    fn let_rest(&mut self) -> PResult<(Option<TypeId>, ExprId)> {
         let ty = if self.eat(T::Colon) { Some(self.type_expr()?) } else { None };
         self.expect(T::Eq, "`=`")?;
-        Ok((ty, self.expr()?))
+        let init = self.expr()?;
+        Ok(StmtKind::Let { mutable, name, ty, init })
     }
 
     // ---- expressions, from lowest precedence to highest (REFERENCE §6.1) ----
 
     fn expr(&mut self) -> PResult<ExprId> {
-        let e = self.logical()?;
+        self.nested(|p| {
+            let e = p.logical()?;
+            if p.at_kw(Kw::Else) {
+                return p.not_implemented("`else` unwrapping forms", Planned::Phase(2));
+            }
+            Ok(e)
+        })
+    }
+
+    /// A condition of `if` or `while`, which stops before `{`. An `else` form there must
+    /// be parenthesized, since its own block would be ambiguous with the body.
+    fn condition(&mut self) -> PResult<ExprId> {
+        let cond = self.nested(Self::logical)?;
         if self.at_kw(Kw::Else) {
-            return self.not_implemented("`else` unwrapping forms", Planned::Phase(2));
+            let span = self.peek().span;
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "an `else` form in a condition must be parenthesized, as in `if (x else false) {`",
+            );
+            return Err(());
         }
-        Ok(e)
+        Ok(cond)
     }
 
     fn binary(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId) -> ExprId {
@@ -540,27 +712,33 @@ impl Parser<'_> {
     }
 
     fn logical(&mut self) -> PResult<ExprId> {
+        let base = self.depth;
         let mut lhs = self.not_expr()?;
         let mut first: Option<BinOp> = None;
+        let mut mixed = false;
         loop {
             let op = match self.kind() {
                 T::Keyword(Kw::And) => BinOp::And,
                 T::Keyword(Kw::Or) => BinOp::Or,
-                _ => return Ok(lhs),
+                _ => {
+                    self.depth = base;
+                    return Ok(lhs);
+                }
             };
             let token = self.bump();
             match first {
                 None => first = Some(op),
-                Some(f) if f != op => {
+                Some(f) if f != op && !mixed => {
                     self.error(
                         codes::MIXED_AND_OR,
                         token.span,
                         "`and` and `or` cannot be mixed without parentheses (H2)",
                     );
-                    first = Some(op);
+                    mixed = true;
                 }
                 Some(_) => {}
             }
+            self.deeper()?;
             let rhs = self.not_expr()?;
             lhs = self.binary(op, lhs, rhs);
         }
@@ -569,7 +747,7 @@ impl Parser<'_> {
     fn not_expr(&mut self) -> PResult<ExprId> {
         if self.at_kw(Kw::Not) {
             let token = self.bump();
-            let operand = self.not_expr()?;
+            let operand = self.nested(Self::not_expr)?;
             let span = token.span.to(self.span_of(operand));
             return Ok(self.alloc(ExprKind::Unary { op: UnaryOp::Not, operand }, span));
         }
@@ -599,8 +777,10 @@ impl Parser<'_> {
         if self.comparison_op()?.is_some() {
             let span = self.peek().span;
             self.error(codes::CHAINED_COMPARISON, span, "comparisons cannot be chained; write `a < b and b < c`");
-            self.bump();
-            self.range()?;
+            while self.comparison_op()?.is_some() {
+                self.bump();
+                self.range()?;
+            }
         }
         Ok(e)
     }
@@ -619,29 +799,39 @@ impl Parser<'_> {
     }
 
     fn additive(&mut self) -> PResult<ExprId> {
+        let base = self.depth;
         let mut lhs = self.multiplicative()?;
         loop {
             let op = match self.kind() {
                 T::Plus => BinOp::Add,
                 T::Minus => BinOp::Sub,
-                _ => return Ok(lhs),
+                _ => {
+                    self.depth = base;
+                    return Ok(lhs);
+                }
             };
             self.bump();
+            self.deeper()?;
             let rhs = self.multiplicative()?;
             lhs = self.binary(op, lhs, rhs);
         }
     }
 
     fn multiplicative(&mut self) -> PResult<ExprId> {
+        let base = self.depth;
         let mut lhs = self.prefix()?;
         loop {
             let op = match self.kind() {
                 T::Star => BinOp::Mul,
                 T::Slash => BinOp::Div,
                 T::Percent => BinOp::Rem,
-                _ => return Ok(lhs),
+                _ => {
+                    self.depth = base;
+                    return Ok(lhs);
+                }
             };
             self.bump();
+            self.deeper()?;
             let rhs = self.prefix()?;
             lhs = self.binary(op, lhs, rhs);
         }
@@ -651,14 +841,14 @@ impl Parser<'_> {
         match self.kind() {
             T::Minus => {
                 let token = self.bump();
-                let operand = self.prefix()?;
+                let operand = self.nested(Self::prefix)?;
                 let span = token.span.to(self.span_of(operand));
                 Ok(self.alloc(ExprKind::Unary { op: UnaryOp::Neg, operand }, span))
             }
             T::Keyword(Kw::Try) => {
                 // `try` covers the whole postfix chain to its right.
                 let token = self.bump();
-                let inner = self.postfix()?;
+                let inner = self.nested(Self::postfix)?;
                 let span = token.span.to(self.span_of(inner));
                 Ok(self.alloc(ExprKind::Try(inner), span))
             }
@@ -668,8 +858,12 @@ impl Parser<'_> {
     }
 
     fn postfix(&mut self) -> PResult<ExprId> {
+        let base = self.depth;
         let mut e = self.primary()?;
         loop {
+            if matches!(self.kind(), T::LParen | T::Dot) {
+                self.deeper()?;
+            }
             match self.kind() {
                 T::LParen => {
                     let args = self.args()?;
@@ -691,15 +885,21 @@ impl Parser<'_> {
                         e = self.alloc(ExprKind::Field { base: e, name }, span);
                     }
                 }
+                T::LBracket if matches!(self.m.exprs[e].kind, ExprKind::Int(_) | ExprKind::Float(_)) => {
+                    return self.not_implemented("units of measure", Planned::PastV1);
+                }
                 T::LBracket => return self.not_implemented("indexing expressions", Planned::Phase(2)),
                 T::ColonColon => return self.not_implemented("explicit type arguments (`::[…]`)", Planned::Phase(2)),
-                _ => return Ok(e),
+                _ => {
+                    self.depth = base;
+                    return Ok(e);
+                }
             }
         }
     }
 
     fn args(&mut self) -> PResult<Vec<Arg>> {
-        self.expect(T::LParen, "`(`")?;
+        let open = self.expect(T::LParen, "`(`")?;
         let mut args = Vec::new();
         while !self.at(T::RParen) {
             let label = if self.at(T::Ident) && self.nth(1) == T::Colon {
@@ -716,7 +916,7 @@ impl Parser<'_> {
                 break;
             }
         }
-        self.expect(T::RParen, "`,` or `)`")?;
+        self.close(&open, T::RParen, "`,` or `)`")?;
         Ok(args)
     }
 
@@ -744,7 +944,7 @@ impl Parser<'_> {
             }
             T::Ident => ExprKind::Name(self.ident("a name")?),
             T::LParen => {
-                self.bump();
+                let open = self.bump();
                 if self.eat(T::RParen) {
                     ExprKind::Unit
                 } else {
@@ -752,7 +952,7 @@ impl Parser<'_> {
                     if self.at(T::Comma) {
                         return self.not_implemented("tuples", Planned::Phase(2));
                     }
-                    self.expect(T::RParen, "`)`")?;
+                    self.close(&open, T::RParen, "`)`")?;
                     return Ok(inner);
                 }
             }
@@ -775,7 +975,7 @@ impl Parser<'_> {
             }
             T::Keyword(Kw::Debug) => {
                 self.bump();
-                self.expect(T::LParen, "`(`")?;
+                let open = self.expect(T::LParen, "`(`")?;
                 let mut values = Vec::new();
                 while !self.at(T::RParen) {
                     values.push(self.expr()?);
@@ -783,7 +983,7 @@ impl Parser<'_> {
                         break;
                     }
                 }
-                self.expect(T::RParen, "`,` or `)`")?;
+                self.close(&open, T::RParen, "`,` or `)`")?;
                 ExprKind::Debug(values)
             }
             T::LBracket => return self.not_implemented("list and map literals", Planned::Phase(2)),
@@ -834,12 +1034,11 @@ impl Parser<'_> {
 
     fn if_expr(&mut self) -> PResult<ExprId> {
         let start = self.bump().span;
-        // An `else` form in a condition must be parenthesized, so the condition stops before `else`.
-        let cond = self.logical()?;
+        let cond = self.condition()?;
         let then_block = self.block()?;
         let else_branch = if self.eat(T::Keyword(Kw::Else)) {
             if self.at_kw(Kw::If) {
-                Some(ElseBranch::If(self.if_expr()?))
+                Some(ElseBranch::If(self.nested(Self::if_expr)?))
             } else {
                 Some(ElseBranch::Block(self.block()?))
             }
@@ -855,7 +1054,7 @@ impl Parser<'_> {
         let kind = match self.kind() {
             T::Keyword(Kw::While) => {
                 self.bump();
-                let cond = self.logical()?;
+                let cond = self.condition()?;
                 self.no_invariant()?;
                 let body = self.block()?;
                 ExprKind::While { label, cond, body }
@@ -875,7 +1074,7 @@ impl Parser<'_> {
                 if self.at_kw(Kw::Take) {
                     return self.not_implemented("consuming loops (`for … in take`)", Planned::Phase(2));
                 }
-                let iter = self.logical()?;
+                let iter = self.nested(Self::logical)?;
                 self.no_invariant()?;
                 let body = self.block()?;
                 ExprKind::For { label, binding, iter, body }
