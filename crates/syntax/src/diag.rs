@@ -123,6 +123,8 @@ pub mod codes {
             "Only variables and their parts can be assigned.";
         TODO_REQUIRES_INCOMPLETE = "E0107", "todo_requires_incomplete",
             "`todo` holes are accepted only with `--incomplete` (REFERENCE §15.2, Q25).";
+        MISPLACED_RETURN = "E0108", "misplaced_return",
+            "`return` outside a function body, such as in a `where` clause.";
 
         UNKNOWN_NAME = "E0201", "unknown_name",
             "A name that does not resolve to any local, function or import.";

@@ -163,11 +163,13 @@ struct FnState {
     scopes: Vec<Vec<(Symbol, LocalId)>>,
     locals: Vec<Local>,
     loops: Vec<LoopState>,
+    /// False in a refinement, which is an expression with no function to return from.
+    returns: bool,
 }
 
 impl FnState {
     fn new(ret: Ty, fails: Option<Ty>) -> FnState {
-        FnState { ret, fails, scopes: Vec::new(), locals: Vec::new(), loops: Vec::new() }
+        FnState { ret, fails, scopes: Vec::new(), locals: Vec::new(), loops: Vec::new(), returns: true }
     }
 }
 
@@ -440,6 +442,7 @@ impl Checker<'_> {
             let (id, decl) = self.records[k];
             let fields = &self.p.decls.adt(id).variant().fields;
             let mut state = FnState::new(Ty::Unit, None);
+            state.returns = false;
             state.locals = fields.iter().map(|f| Local { ty: f.ty.clone(), mutable: false }).collect();
             self.f = state;
             let mut preds = Vec::new();
@@ -773,6 +776,17 @@ impl Checker<'_> {
             }
             StmtKind::Assign { target, op, value } => diverges_ty(&self.assign(*target, *op, *value)),
             StmtKind::Expr(e) => diverges_ty(&self.expr_stmt(*e)),
+            StmtKind::Return(value) if !self.f.returns => {
+                if let Some(value) = value {
+                    self.infer(*value);
+                }
+                self.error(
+                    codes::MISPLACED_RETURN,
+                    stmt.span,
+                    "`return` outside a function body; a `where` clause is an expression",
+                );
+                true
+            }
             StmtKind::Return(value) => {
                 let ret = self.f.ret.clone();
                 match value {
@@ -803,7 +817,12 @@ impl Checker<'_> {
         if let ExprKind::If { .. } = self.m.exprs[e].kind {
             return self.if_expr(e, Mode::Stmt);
         }
-        if self.is_bare_value(e) {
+        let bare = self.is_bare_value(e);
+        let ty = self.infer(e);
+        // A `with` on something that isn't a record is already reported.
+        let unresolved =
+            matches!(self.m.exprs[e].kind, ExprKind::MethodCall { .. }) && self.p.res(e) != Some(Res::With);
+        if bare && !unresolved {
             let span = self.span(e);
             self.error(
                 codes::BARE_VALUE_STATEMENT,
@@ -811,7 +830,7 @@ impl Checker<'_> {
                 "this value is unused; a statement must be a call, an assignment or a control expression",
             );
         }
-        self.infer(e)
+        ty
     }
 
     /// Checks an assignment and returns the type of the assigned value.
@@ -1215,8 +1234,8 @@ impl Checker<'_> {
                 let (lt, rt) = self.operands(lhs, rhs, None);
                 let ty = self.unify_operands(lt, rt, span);
                 let defined = match op {
-                    BinOp::Eq | BinOp::Ne => self.p.decls.implements(&ty, IfaceId::EQ),
-                    // Floats have IEEE `<` without implementing `Ord` (REFERENCE §12.2).
+                    // Floats have IEEE `==` and `<` without implementing `Eq` or `Ord` (REFERENCE §12.2).
+                    BinOp::Eq | BinOp::Ne => matches!(ty, Ty::Float(_)) || self.p.decls.implements(&ty, IfaceId::EQ),
                     _ => matches!(ty, Ty::Float(_)) || self.p.decls.implements(&ty, IfaceId::ORD),
                 };
                 if !defined && !ty.is_unknown() {

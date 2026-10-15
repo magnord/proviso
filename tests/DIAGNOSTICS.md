@@ -39,6 +39,7 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0105 | `misplaced_jump` | 1 | `break` or `continue` outside a loop, or naming a label that no enclosing loop has. | basics/err_misplaced_jump |
 | E0106 | `invalid_assignment_target` | 1 | An assignment to something that isn't a variable or one of its parts. | basics/err_assignment_target, records/err_fields |
 | E0107 | `todo_requires_incomplete` | 1 | A `todo` hole without `--incomplete` (§15.2, Q25). | basics/err_todo |
+| E0108 | `misplaced_return` | 2 | `return` outside a function body, such as in a `where` clause. | records/err_refinement_scope |
 | E0201 | `unknown_name` | 1 | A name that resolves to no local, function or import. | basics/err_unknown_name |
 | E0202 | `duplicate_item` | 1 | Two items with one name in a module, or a name imported twice (§3). | basics/err_duplicate |
 | E0203 | `shadowing` | 1 | A binding that reuses a name already in scope in the function, including functions and imports, or an import that reuses a prelude type's name (§3, H4). | basics/err_shadowing, basics/err_import_alias |

@@ -377,12 +377,33 @@ impl Parser<'_> {
             T::Keyword(Kw::Use) => ItemKind::Use(self.use_decl()?),
             T::Keyword(Kw::Record) => ItemKind::Record(self.record_decl()?),
             T::Keyword(kw) => match planned_item(kw) {
-                Some((what, planned)) => return self.not_implemented(what, planned),
+                Some((what, planned)) => {
+                    self.poison_declared_type();
+                    return self.not_implemented(what, planned);
+                }
                 None => return self.unexpected("an item such as `fn` or `use`"),
             },
             _ => return self.unexpected("an item such as `fn` or `use`"),
         };
         Ok(Some(Item { kind, vis, doc, span: start.to(self.prev_span()) }))
+    }
+
+    /// Marks the type a later-phase declaration such as `unique record Token` or `enum Shape`
+    /// names, so that its uses aren't reported as unknown types.
+    fn poison_declared_type(&mut self) {
+        let declares_type = |kind| {
+            matches!(kind, T::Keyword(Kw::Unique | Kw::Opaque | Kw::Resource | Kw::Record | Kw::Enum | Kw::Type))
+        };
+        let mut i = self.pos;
+        while self.tokens.get(i).is_some_and(|t| declares_type(t.kind)) {
+            i += 1;
+        }
+        if i > self.pos
+            && let Some(token) = self.tokens.get(i).filter(|t| t.kind == T::Ident)
+        {
+            let name = self.intern(token.span);
+            self.m.poisoned.insert(name.sym);
+        }
     }
 
     fn use_decl(&mut self) -> PResult<UseDecl> {

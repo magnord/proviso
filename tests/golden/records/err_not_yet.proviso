@@ -1,7 +1,8 @@
 // phase: 2.1
 // expect-error: E0901
 // Records that are generic, unique, opaque or resources, the `Ord` and `Hash` derives, and
-// a record's generated validator come in later slices of phase 2.
+// a record's generated validator come in later slices of phase 2. Uses of their names aren't
+// reported again.
 record Pair[A, B] {                                 // <- E0901
     first: A
     second: B
@@ -11,7 +12,7 @@ unique record Token {                               // <- E0901
     id: Int
 }
 
-resource record Handle {                            // <- E0901
+resource record Lock {                              // <- E0901
     id: Int
 }
 
@@ -34,5 +35,9 @@ record Span {
 
 fn validated(lo: Int, hi: Int) -> Int {
     let s = Span.validate(lo: lo, hi: hi)           // <- E0901
+    return 0
+}
+
+fn later_types(t: Token, l: Lock, s: Secret, p: Pair) -> Int {
     return 0
 }

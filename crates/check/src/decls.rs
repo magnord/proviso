@@ -139,8 +139,9 @@ impl Decls {
             Ty::Adt(id, _) => self.adt(*id).derives.contains(&iface),
             // Text is ordered by code point (REFERENCE §12.3).
             Ty::Int(_) | Ty::Char | Ty::Text => matches!(iface, IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW),
-            // `Float` counts as `Eq`, with IEEE `==`, although REFERENCE §12.2 and Q22 say it has none.
-            Ty::Float(_) | Ty::Bool => matches!(iface, IfaceId::EQ | IfaceId::SHOW),
+            // `Float` has IEEE `==` built in, but no `Eq` (REFERENCE §12.2, Q22).
+            Ty::Float(_) => iface == IfaceId::SHOW,
+            Ty::Bool => matches!(iface, IfaceId::EQ | IfaceId::SHOW),
             Ty::Unit => iface == IfaceId::EQ,
             Ty::IoError => iface == IfaceId::SHOW,
             Ty::Cap(_) | Ty::Never | Ty::Error => false,

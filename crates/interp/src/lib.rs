@@ -809,13 +809,4 @@ mod tests {
         assert_eq!(show(&value, &decls), expected);
         assert_eq!(debug_repr(&value, &decls), expected);
     }
-
-    #[test]
-    fn a_record_holding_nan_is_unequal_to_itself() {
-        let mut decls = Decls::default();
-        let def = decls.push(AdtDef::record("Reading", vec![field("value", Ty::Float(FloatTy::F64))]));
-        let reading = record(def, vec![Value::F64(f64::NAN)]);
-        assert!(!compare(BinOp::Eq, &reading, &reading.clone()));
-        assert!(compare(BinOp::Ne, &reading, &reading.clone()));
-    }
 }

@@ -6,7 +6,7 @@
 // expect-error: E0309
 // `==` needs a record that derives `Eq`, and `show()` and interpolation need one that
 // derives `Show` (STD.md). A record can derive an interface only when every field's type
-// implements it.
+// implements it. `Float` has IEEE `==` but doesn't implement `Eq` (REFERENCE §12.2).
 use std.io { Out }
 
 record Plain {
@@ -20,6 +20,10 @@ record Holder derives(Eq, Show) {
 
 record Port derives(Show) {
     out: Out                                        // <- E0309
+}
+
+record Reading derives(Eq, Show) {
+    value: Float                                    // <- E0309
 }
 
 record Twice derives(Eq, Eq) {                      // <- E0210
