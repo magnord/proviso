@@ -1,0 +1,24 @@
+// §F row 16: a part of a refined value cannot be passed as inout(partial)
+// phase: 5
+// expect-error: E0413
+//
+// inout(partial) can leave a half-updated value behind on failure, so a part
+// of a refined value may not be passed that way (§5.4). The rule is static and
+// holds whatever the callee does. Compare f03, which differs only in
+// `(partial)`. Re-verifying `lo <= hi` depends on the rejected call, so it is
+// not reported separately (§15.1, no cascades).
+
+record Span {
+    lo: Int
+    hi: Int
+} where lo <= hi
+
+fn set_ten(x: inout(partial) Int) {
+    x = 10
+}
+
+fn shift() -> Span {
+    var span = Span(lo: 1, hi: 4)
+    set_ten(x: &span.lo)                            // <- E0413
+    return span
+}

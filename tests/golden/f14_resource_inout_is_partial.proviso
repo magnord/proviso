@@ -1,0 +1,56 @@
+// §F row 14: an inout argument that holds a resource is never rolled back
+// phase: 2
+// sig: close_last_then_fail
+//
+// `close_last_then_fail` pops a probe, closes it, then fails. Rolling `probes`
+// back would hand the caller a probe that is already closed, so an inout that
+// holds a resource behaves as inout(partial) (§5.4): the caller sees one probe
+// left. `proviso sig` must say so; the .sig check starts at phase 4, when
+// `sig` exists.
+//
+// Probe stands in for the row's File (see f08).
+
+use std.io { Out, IoError }
+
+resource record Probe {
+    name: Text
+    out: Out
+}
+
+impl Probe {
+    fn close(take self) {
+        say(out: self.out, line: f"close {self.name}")
+    }
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.name}")
+    }
+}
+
+enum Stop {
+    Halt
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)            // close and abandon cannot fail
+}
+
+/// Closes the last probe, then fails.
+fn close_last_then_fail(probes: inout List[Probe]) fails Stop {
+    let last = probes.pop() else fail Stop.Halt
+    last.close()
+    fail Stop.Halt
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let a = Probe(name: "a", out: sys.stdout)
+    let b = Probe(name: "b", out: sys.stdout)
+    var probes: List[Probe] = [a, b]
+    let _ = attempt close_last_then_fail(probes: &probes)
+    try sys.stdout.write_line(f"left: {probes.len()}")
+    for probe in take probes {
+        probe.close()
+    }
+}

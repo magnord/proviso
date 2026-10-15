@@ -1,0 +1,18 @@
+// §F row 2: assigning one field must keep the record's refinement
+// phase: 5
+// expect-error: E0412
+//
+// Every assignment to a part of a value must prove that the whole value
+// still satisfies its refinements (§8.3). The binding fact `span.hi == 4`
+// refutes `10 <= span.hi`.
+
+record Span {
+    lo: Int
+    hi: Int
+} where lo <= hi
+
+fn move_lo() -> Span {
+    var span = Span(lo: 1, hi: 4)
+    span.lo = 10                                    // <- E0412
+    return span
+}

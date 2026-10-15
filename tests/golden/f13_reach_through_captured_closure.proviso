@@ -1,0 +1,29 @@
+// §F row 13: reach is transitive through captured closures
+// phase: 3
+// expect-error: E0602
+//
+// `w` captures `dir`, so its type `uses Dir[write]`. The closure passed to `g`
+// captures only `w`, but a closure's reach is the union of everything it
+// captures (§9.4), so its type also `uses Dir[write]`, and `fn() -> Text`
+// doesn't admit it.
+//
+// The row writes `|| try dir.write_text(…)` and `{ w(); return "t" }`. Here
+// `w` discards its error and the outer closure ends in its value, so reach is
+// the only reason for rejection. With `try`, both closures would also fail
+// with FsError, which `fn() -> Text` rejects too, and the bare `w()` would be
+// an unmarked fallible call. A closure bound to a local has no stated
+// lifetime (OPEN_QUESTIONS Q33, Q34).
+
+use std.fs { Dir, Path }
+
+fn g(f: fn() -> Text) -> Text {
+    return f()
+}
+
+fn caller(dir: Dir[write]) -> Text {
+    let w = || attempt dir.write_text(path: Path("audit.log"), text: "x")
+    return g(|| {                                   // <- E0602
+        let _ = w()
+        "t"
+    })
+}

@@ -1,0 +1,30 @@
+// §F row 15: a callback lent a resource cannot consume it
+// phase: 2
+// expect-error: E0502
+//
+// `transaction` owns `tx` and lends it to `body` as `inout Txn`. A lent
+// resource cannot be passed to `take` or used by a `take self` method
+// (§10 rule 6), so the callback cannot commit it. Otherwise `transaction`
+// would commit it a second time.
+
+resource record Txn {
+    id: Int
+}
+
+impl Txn {
+    fn commit(take self) {}
+}
+
+impl Abandon for Txn {
+    fn abandon(take self) {}
+}
+
+fn transaction(id: Int, body: fn(inout Txn)) {
+    var tx = Txn(id: id)
+    body(&tx)
+    tx.commit()
+}
+
+fn commit_inside() {
+    transaction(id: 1, body: |tx| tx.commit())      // <- E0502
+}
