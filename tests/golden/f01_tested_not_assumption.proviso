@@ -1,0 +1,21 @@
+// §F row 1: a [tested] ensures is never a proof assumption
+// phase: 5
+// expect-error: E0412
+//
+// `passthrough` backs `result > 0` only with an example, so the verifier may
+// not assume it (§8.4). Nothing admissible constrains its result, so building
+// a `Positive` from it is refuted (counterexample: result = 0).
+
+type Positive = distinct Int where self > 0
+
+fn passthrough(n: Int) -> Int
+    ensures(tested) result > 0
+{
+    return n
+}
+
+example passthrough(n: 5) == 5
+
+fn make_positive(n: Int) -> Positive {
+    return Positive(passthrough(n))                 // <- E0412
+}

@@ -1,0 +1,37 @@
+// §F row 10: racing writes through copies of a Dir are recorded and replayed
+// phase: 6
+// run: record-replay
+// expect-log: Dir.write_text
+// expect-log: Dir.write_text
+// expect-log: Dir.read_text
+// expect-report: overlap Dir.write_text Dir.write_text
+//
+// Two tasks write different contents to one file through copies of a Dir,
+// and are joined in a fixed order. The file ends up with whichever write
+// completed last, so either output is correct. `--record` logs both writes
+// with their start and completion order (§9.8). Replay is simulated: it
+// serves the later read from the log and suppresses external effects, stdout
+// included. It must report no divergence, which shows that it reproduced the
+// read, because the printed line is an argument of a logged call. It must
+// also report the two writes as overlapping. That assumes "overlapping"
+// means the program doesn't order them (OPEN_QUESTIONS T9).
+
+use std.fs { Dir, Path, FsError }
+use std.io { IoError }
+
+fn race(dir: Dir[read, write], path: Path) -> Text fails FsError {
+    let copy_a = dir
+    let copy_b = dir
+    try scope |s| {
+        let a = s.spawn(|| try copy_a.write_text(path: path, text: "from a"))
+        let b = s.spawn(|| try copy_b.write_text(path: path, text: "from b"))
+        try a.join()
+        try b.join()
+    }
+    return try dir.read_text(path)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let text = race(dir: sys.fs, path: Path("shared.txt")) else "<fs error>"
+    try sys.stdout.write_line(f"final: {text}")
+}

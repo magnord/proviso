@@ -1,0 +1,23 @@
+// §F row 5: a function type without `uses` admits no authority
+// phase: 3
+// expect-error: E0602
+//
+// The closure captures `dir` and writes through it, so its type is
+// `fn() -> Text uses Dir[write]` (§9.4). `g`'s parameter type `fn() -> Text`
+// admits only closures that reach no capabilities.
+//
+// The closure discards the write's error with `let _ = attempt …`, so that
+// reach is the only reason for rejection (see f13 and OPEN_QUESTIONS Q33).
+
+use std.fs { Dir, Path }
+
+fn g(f: fn() -> Text) -> Text {
+    return f()
+}
+
+fn caller(dir: Dir[write]) -> Text {
+    return g(|| {                                   // <- E0602
+        let _ = attempt dir.write_text(path: Path("note.txt"), text: "x")
+        "t"
+    })
+}

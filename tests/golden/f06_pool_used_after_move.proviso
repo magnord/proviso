@@ -1,0 +1,15 @@
+// §F row 6: a pool is unique, so `var b = a` moves it
+// phase: 2
+// expect-error: E0501
+//
+// Copying a pool would let two objects share one slot and generation, so
+// pools move and are never copied (§5.5). After the move, `a` is unusable.
+
+use std.pool { Pool }
+
+fn two_pools() {
+    var a: Pool[Int] = Pool.new()
+    var b = a
+    a.insert(10)                                    // <- E0501
+    b.insert(20)
+}

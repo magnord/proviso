@@ -1,0 +1,25 @@
+// §F row 12: an implementation takes the interface's requires exactly as written
+// phase: 4
+// expect-error: E0414
+//
+// The interface says `requires(checked) d != 0`: callers need not prove it,
+// and it is checked on entry. Declaring plain `requires d != 0` instead would
+// let the body assume a fact that callers through the interface never prove,
+// with no entry check (§4.9, §8.4).
+
+interface Divider {
+    fn divide(self, n: Int, d: Int) -> Int
+        requires(checked) d != 0
+}
+
+record Truncating {
+    scale: Int
+}
+
+impl Divider for Truncating {
+    fn divide(self, n: Int, d: Int) -> Int
+        requires d != 0                             // <- E0414
+    {
+        return n / d
+    }
+}

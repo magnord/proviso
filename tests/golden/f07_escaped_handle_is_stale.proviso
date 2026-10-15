@@ -1,0 +1,32 @@
+// §F row 7: a handle that escapes a failed call is stale afterwards
+// phase: 2
+//
+// `add_then_fail` inserts through `inout Pool` and fails with the new handle.
+// The failure rolls back the pool's contents but not its generation counters
+// (§5.4, §5.5), so the next insert, which may reuse the slot, gets a new
+// generation. The escaped handle must read as None, never as "alice".
+
+use std.io { IoError }
+use std.pool { Pool, Handle }
+
+enum AddError {
+    Rejected(handle: Handle[Text])
+}
+
+fn add_then_fail(pool: inout Pool[Text], name: Text) -> Handle[Text] fails AddError {
+    let h = pool.insert(name)
+    fail AddError.Rejected(handle: h)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var people: Pool[Text] = Pool.new()
+    let escaped = match attempt add_then_fail(pool: &people, name: "ghost") {
+        Ok(h) => h
+        Err(Rejected(handle)) => handle
+    }
+    let later = people.insert("alice")
+    let via_escaped = people.get(escaped) else "<none>"
+    let via_later = people.get(later) else "<none>"
+    try sys.stdout.write_line(f"escaped: {via_escaped}")
+    try sys.stdout.write_line(f"later: {via_later}")
+}
