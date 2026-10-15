@@ -35,8 +35,8 @@ All golden files run inside a single test (`crates/proviso/tests/golden.rs`), an
 The pipeline is split into one crate per stage, and each crate depends only on the ones before it:
 
 1. **`syntax`** (`proviso-syntax`): lexer, parser, AST, source spans, interning, and the diagnostic code catalog (`diag.rs`). AST nodes live in append-only arenas addressed by typed `Id<T>`s (`arena.rs`).
-2. **`check`** (`proviso-check`): name resolution and type checking. It **never rewrites the tree**. What it learns goes into `SideTable`s on `Program`, keyed by AST ids.
-3. **`interp`** (`proviso-interp`): tree-walking interpreter over the AST plus the checker's `Program`. It trusts the checker, so a missing side-table entry is an interpreter bug, not a user error. Copy values are shared behind `Arc` so later phases can hand them to task threads.
+2. **`check`** (`proviso-check`): name resolution and type checking. It **never rewrites the tree**. What it learns goes into `SideTable`s on `Program`, keyed by AST ids. A `Ty` owns its parts and names a record by `AdtId`. The record's declaration lives in `Program::decls` (`decls.rs`), which also answers `implements` and how a type is displayed.
+3. **`interp`** (`proviso-interp`): tree-walking interpreter over the AST plus the checker's `Program`. It trusts the checker, so a missing side-table entry is an interpreter bug, not a user error. Values describe themselves (an integer carries its type, a record its `AdtId`), so the interpreter reads static types only for literals. Copy values are shared behind `Arc` so later phases can hand them to task threads.
 4. **`proviso`**: the CLI (`main.rs`), the `compile`/`run` driver (`lib.rs`), and the golden test runner (`golden.rs`).
 
 Points that span several files:
