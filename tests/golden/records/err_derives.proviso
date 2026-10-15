@@ -1,0 +1,37 @@
+// phase: 2.1
+// expect-error: E0210
+// expect-error: E0303
+// expect-error: E0306
+// expect-error: E0307
+// expect-error: E0309
+// `==` needs a record that derives `Eq`, and `show()` and interpolation need one that
+// derives `Show` (STD.md). A record can derive an interface only when every field's type
+// implements it.
+use std.io { Out }
+
+record Plain {
+    n: Int
+}
+
+record Holder derives(Eq, Show) {
+    plain: Plain                                    // <- E0309, E0309
+    n: Int
+}
+
+record Port derives(Show) {
+    out: Out                                        // <- E0309
+}
+
+record Twice derives(Eq, Eq) {                      // <- E0210
+    n: Int
+}
+
+record Unknown derives(Sortable) {                  // <- E0307
+    n: Int
+}
+
+fn uses_plain(a: Plain, b: Plain) -> Bool {
+    let shown = a.show()                            // <- E0303
+    let text = f"{a}"                               // <- E0306
+    return a == b                                   // <- E0306
+}

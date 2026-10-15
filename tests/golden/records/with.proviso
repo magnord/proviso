@@ -1,0 +1,21 @@
+// phase: 2.1
+// `with` copies a record and replaces the fields it names, which it labels in declaration
+// order (REFERENCE §4.4). The original is unchanged.
+use std.io { IoError }
+
+record Config {
+    name: Text
+    retries: Int
+    verbose: Bool
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let base = Config(name: "base", retries: 3, verbose: false)
+    let loud = base.with(verbose: true)
+    let other = base.with(name: "other", verbose: true)
+    let chained = base.with(retries: 5).with(retries: base.retries + 1)
+    try sys.stdout.write_line(f"{base.name} {base.retries} {base.verbose}")
+    try sys.stdout.write_line(f"{loud.name} {loud.retries} {loud.verbose}")
+    try sys.stdout.write_line(f"{other.name} {other.retries} {other.verbose}")
+    try sys.stdout.write_line(f"{chained.retries}")
+}

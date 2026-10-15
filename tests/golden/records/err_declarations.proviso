@@ -1,0 +1,49 @@
+// phase: 2.1
+// expect-error: E0202
+// expect-error: E0203
+// expect-error: E0204
+// expect-error: E0210
+// expect-error: E0301
+// expect-error: E0307
+// A record's name is PascalCase and unique in the module, and may not reuse a prelude
+// type's name. Its fields are snake_case and distinct, and their types resolve in any
+// order. A `where` clause is a `Bool`.
+record Point {
+    x: Int
+    y: Int
+}
+
+record Point {                                      // <- E0202
+    z: Int
+}
+
+record List {                                       // <- E0203
+    items: Int
+}
+
+record bad_name {                                   // <- E0204
+    x: Int
+}
+
+record Fields {
+    Upper: Int                                      // <- E0204
+    lower: Int
+    lower: Text                                     // <- E0210
+    missing: Nowhere                                // <- E0307
+    later: Later
+}
+
+record Later {
+    n: Int where n + 1                              // <- E0301
+}
+
+record Whole {
+    a: Int
+    b: Int
+} where a                                           // <- E0301
+
+record Commas { a: Int, b: Text }
+
+fn uses_them(p: Point, f: Fields, c: Commas) -> Int {
+    return p.x + f.later.n + c.a
+}

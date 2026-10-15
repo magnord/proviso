@@ -1,0 +1,38 @@
+// phase: 2.1
+// expect-error: E0106
+// expect-error: E0206
+// expect-error: E0207
+// expect-error: E0208
+// expect-error: E0210
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0305
+// Fields are read with `.name` and assigned only through a `var`. `with` labels each field
+// it replaces, once and in declaration order.
+record Point {
+    x: Int
+    y: Int
+}
+
+fn origin() -> Point {
+    return Point(x: 0, y: 0)
+}
+
+fn fields(param: Point) {
+    let p = Point(x: 1, y: 2)
+    var q = p
+    let z = p.z                                     // <- E0303
+    p.x = 3                                         // <- E0305
+    param.y = 4                                     // <- E0305
+    origin().x = 5                                  // <- E0106
+    q.x = "six"                                     // <- E0301
+    q.x += 1
+    q.w = 1                                         // <- E0303
+    let a = p.with(z: 1)                            // <- E0303
+    let b = p.with(1)                               // <- E0206
+    let c = p.with(y: 1, x: 2)                      // <- E0207
+    let d = p.with(x: 1, x: 2)                      // <- E0210
+    let e = p.with()                                // <- E0208
+    let f = p.with(y: true)                         // <- E0301
+    let g = p.x.y                                   // <- E0303
+}

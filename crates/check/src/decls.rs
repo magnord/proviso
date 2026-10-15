@@ -4,6 +4,8 @@
 
 use std::fmt;
 
+use proviso_syntax::ast::ExprId;
+
 use crate::types::Ty;
 
 /// A record declared in Proviso. The prelude's come first, at fixed ids.
@@ -20,17 +22,18 @@ pub struct IfaceId(u32);
 
 impl IfaceId {
     pub const EQ: IfaceId = IfaceId(0);
-    pub const SHOW: IfaceId = IfaceId(1);
+    pub const ORD: IfaceId = IfaceId(1);
+    pub const SHOW: IfaceId = IfaceId(2);
     /// The capability interface of `std.io`.
-    pub const OUT: IfaceId = IfaceId(2);
+    pub const OUT: IfaceId = IfaceId(3);
 
     pub fn name(self) -> &'static str {
-        ["Eq", "Show", "Out"][self.0 as usize]
+        ["Eq", "Ord", "Show", "Out"][self.0 as usize]
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct FieldIdx(u32);
+pub struct FieldIdx(pub(crate) u32);
 
 impl FieldIdx {
     pub fn index(self) -> usize {
@@ -52,33 +55,55 @@ impl VariantIdx {
 
 pub struct AdtDef {
     pub name: Box<str>,
-    /// The declaring item in `Module::items`; `None` for the prelude.
-    pub item: Option<usize>,
     /// A record has one.
     pub variants: Vec<VariantDef>,
+    /// What `derives` names, including a derive whose fields don't all implement it, so that
+    /// its uses aren't reported again.
     pub derives: Vec<IfaceId>,
 }
 
 impl AdtDef {
-    /// The fields of a record, which are those of its one variant.
-    pub fn record(&self) -> &VariantDef {
+    pub fn record(name: &str, fields: Vec<FieldDef>) -> AdtDef {
+        let variant = VariantDef { name: name.into(), locals: fields.len(), fields, preds: Vec::new() };
+        AdtDef { name: name.into(), variants: vec![variant], derives: Vec::new() }
+    }
+
+    /// The one variant of a record.
+    pub fn variant(&self) -> &VariantDef {
         &self.variants[VariantIdx::RECORD.index()]
     }
 
+    pub fn variant_mut(&mut self) -> &mut VariantDef {
+        &mut self.variants[VariantIdx::RECORD.index()]
+    }
+
     pub fn field(&self, name: &str) -> Option<(FieldIdx, &FieldDef)> {
-        let i = self.record().fields.iter().position(|f| &*f.name == name)?;
-        Some((FieldIdx(i as u32), &self.record().fields[i]))
+        let i = self.variant().fields.iter().position(|f| &*f.name == name)?;
+        Some((FieldIdx(i as u32), &self.variant().fields[i]))
     }
 }
 
 pub struct VariantDef {
     pub name: Box<str>,
     pub fields: Vec<FieldDef>,
+    /// The fields' `where` clauses in field order, then the record-level one. Each is checked
+    /// in a scope where field `i` is `LocalId(i)`.
+    pub preds: Vec<Pred>,
+    /// The local slots its predicates need, fields first.
+    pub locals: usize,
 }
 
 pub struct FieldDef {
     pub name: Box<str>,
     pub ty: Ty,
+}
+
+/// A refinement, which the v1 profile checks at run time (OPEN_QUESTIONS P3).
+pub struct Pred {
+    pub expr: ExprId,
+    /// The field whose `where` this is, which sees only that field; `None` for the
+    /// record-level one, which sees them all (OPEN_QUESTIONS P5).
+    pub field: Option<FieldIdx>,
 }
 
 pub struct Decls {
@@ -88,22 +113,23 @@ pub struct Decls {
 impl Default for Decls {
     /// The prelude, with each declaration at the id its constant names.
     fn default() -> Decls {
-        let system = AdtDef {
-            name: "System".into(),
-            item: None,
-            variants: vec![VariantDef {
-                name: "System".into(),
-                fields: vec![FieldDef { name: "stdout".into(), ty: Ty::out() }],
-            }],
-            derives: Vec::new(),
-        };
+        let system = AdtDef::record("System", vec![FieldDef { name: "stdout".into(), ty: Ty::out() }]);
         Decls { adts: vec![system] }
     }
 }
 
 impl Decls {
+    pub fn push(&mut self, def: AdtDef) -> AdtId {
+        self.adts.push(def);
+        AdtId(self.adts.len() as u32 - 1)
+    }
+
     pub fn adt(&self, id: AdtId) -> &AdtDef {
         &self.adts[id.0 as usize]
+    }
+
+    pub fn adt_mut(&mut self, id: AdtId) -> &mut AdtDef {
+        &mut self.adts[id.0 as usize]
     }
 
     /// Whether `ty` implements `iface`, built in or derived (STD.md). An unknown type
@@ -111,8 +137,10 @@ impl Decls {
     pub fn implements(&self, ty: &Ty, iface: IfaceId) -> bool {
         match ty {
             Ty::Adt(id, _) => self.adt(*id).derives.contains(&iface),
-            // `==` on floats follows IEEE (REFERENCE §4.9).
-            Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Text => matches!(iface, IfaceId::EQ | IfaceId::SHOW),
+            // Text is ordered by code point (REFERENCE §12.3).
+            Ty::Int(_) | Ty::Char | Ty::Text => matches!(iface, IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW),
+            // `Float` counts as `Eq`, with IEEE `==`, although REFERENCE §12.2 and Q22 say it has none.
+            Ty::Float(_) | Ty::Bool => matches!(iface, IfaceId::EQ | IfaceId::SHOW),
             Ty::Unit => iface == IfaceId::EQ,
             Ty::IoError => iface == IfaceId::SHOW,
             Ty::Cap(_) | Ty::Never | Ty::Error => false,

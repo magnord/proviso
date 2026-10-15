@@ -37,7 +37,7 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0103 | `chained_comparison` | 1 | `a < b < c`: comparisons are non-associative (§6.1). | basics/err_operator_rules |
 | E0104 | `mixed_and_or` | 1 | `and` and `or` mixed without parentheses (§6.1, H2). | basics/err_operator_rules |
 | E0105 | `misplaced_jump` | 1 | `break` or `continue` outside a loop, or naming a label that no enclosing loop has. | basics/err_misplaced_jump |
-| E0106 | `invalid_assignment_target` | 1 | An assignment to something that isn't a variable or one of its parts. | basics/err_assignment_target |
+| E0106 | `invalid_assignment_target` | 1 | An assignment to something that isn't a variable or one of its parts. | basics/err_assignment_target, records/err_fields |
 | E0107 | `todo_requires_incomplete` | 1 | A `todo` hole without `--incomplete` (§15.2, Q25). | basics/err_todo |
 | E0201 | `unknown_name` | 1 | A name that resolves to no local, function or import. | basics/err_unknown_name |
 | E0202 | `duplicate_item` | 1 | Two items with one name in a module, or a name imported twice (§3). | basics/err_duplicate |
@@ -48,6 +48,7 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0207 | `wrong_label` | 1 | An argument label that doesn't match the parameter in its position. | basics/err_labels |
 | E0208 | `wrong_argument_count` | 1 | More or fewer arguments than the function has parameters. | basics/err_labels |
 | E0209 | `needless_alias` | 1 | An import renamed with `as` although nothing else has its name; `as` only resolves a collision (§3, Q24). | basics/err_import_alias |
+| E0210 | `duplicate_name` | 2 | A name given twice in one list: a record's fields, the fields a `with` replaces, or a `derives` list (§4.4). | records/err_declarations, records/err_fields, records/err_derives |
 | E0301 | `type_mismatch` | 1 | A value of one type where another is expected. There are no implicit conversions (§9.2). | basics/err_type_mismatch |
 | E0302 | `literal_out_of_range` | 1 | A literal that doesn't fit the type it meets (§2). | basics/err_literal_range |
 | E0303 | `unknown_member` | 1 | A field or method that the type doesn't have. | basics/err_unknown_member |
@@ -56,6 +57,7 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0306 | `unsupported_operator` | 1 | An operator or interpolation that the operand's type doesn't support. | basics/err_unsupported_operator |
 | E0307 | `unknown_type` | 1 | A type name that doesn't resolve. | basics/err_unknown_type |
 | E0308 | `invalid_main` | 1 | `main` is missing from a file that is run, or isn't declared `pub fn main(sys: keep System)` (§7.4). | basics/err_main_signature |
+| E0309 | `missing_implementation` | 2 | A type doesn't implement an interface it needs, such as a field's type in a `derives` list (§4.4, §4.9). | records/err_derives |
 | E0412 | `refinement_refuted` | 5 | A refinement obligation is refuted: the verifier found values, consistent with every admissible fact, that violate it (§8.3, §8.5). The diagnostic carries the counterexample. | f01, f02, f03, f17 |
 | E0413 | `partial_inout_of_refined_part` | 5 | A part of a refined value is passed as `inout(partial)` (§5.4). | f16 |
 | E0414 | `impl_requires_mismatch` | 4 | An implementation's `requires` clauses differ from the interface method's as written (§4.9). | f12 |

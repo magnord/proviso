@@ -9,9 +9,9 @@ use std::cmp::Ordering;
 use std::io::Write;
 use std::sync::Arc;
 
-use proviso_check::decls::{AdtId, Decls, VariantIdx};
+use proviso_check::decls::{AdtId, Decls, FieldIdx, VariantIdx};
 use proviso_check::types::{FloatTy, IntTy, Ty};
-use proviso_check::{Builtin, FnId, Program, Res};
+use proviso_check::{Builtin, FnId, LocalId, Program, Res};
 use proviso_syntax::ast::*;
 use proviso_syntax::source::{SourceFile, Span};
 
@@ -244,15 +244,12 @@ impl Interp<'_> {
             }
             StmtKind::Assign { target, op, value } => {
                 let value = self.expr(*value, frame)?;
-                let Some(Res::Local(id)) = self.p.res(*target) else { unreachable!("assignment targets are locals") };
-                let new = match op.bin_op() {
+                let (root, path) = self.place(*target);
+                let slot = slot(&mut frame[root.index()], &path);
+                *slot = match op.bin_op() {
                     None => value,
-                    Some(op) => {
-                        let old = frame[id.index()].clone();
-                        self.arithmetic(op, old, value, stmt.span)?
-                    }
+                    Some(op) => self.arithmetic(op, slot.clone(), value, stmt.span)?,
                 };
-                frame[id.index()] = new;
             }
             StmtKind::Expr(e) => {
                 self.expr(*e, frame)?;
@@ -274,6 +271,25 @@ impl Interp<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The local an assignment target is rooted at, and the fields from there to the target.
+    fn place(&self, target: ExprId) -> (LocalId, Vec<FieldIdx>) {
+        let mut path = Vec::new();
+        let mut e = target;
+        loop {
+            match (&self.m.exprs[e].kind, self.p.res(e)) {
+                (ExprKind::Name(_), Some(Res::Local(id))) => {
+                    path.reverse();
+                    return (id, path);
+                }
+                (ExprKind::Field { base, .. }, Some(Res::Field(i))) => {
+                    path.push(i);
+                    e = *base;
+                }
+                (_, res) => unreachable!("assignment targets are places, not {res:?}"),
+            }
+        }
     }
 
     fn jump_target(&self, s: StmtId) -> ExprId {
@@ -331,21 +347,36 @@ impl Interp<'_> {
                 other => unreachable!("names evaluate to locals, not {other:?}"),
             },
             ExprKind::Call { callee, args } => {
-                let Some(Res::Fn(f)) = self.p.res(*callee) else { unreachable!("calls are resolved") };
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.expr(arg.value, frame)?);
                 }
-                return self.call(f, values, span);
+                match self.p.res(*callee) {
+                    Some(Res::Fn(f)) => return self.call(f, values, span),
+                    // Labels follow the declaration order, so argument `i` is field `i`.
+                    Some(Res::Ctor(def, variant)) => Value::Adt(Adt { def, variant, fields: values.into() }),
+                    other => unreachable!("calls are resolved, not {other:?}"),
+                }
             }
             ExprKind::MethodCall { receiver, args, .. } => {
-                let Some(Res::Method(builtin)) = self.p.res(e) else { unreachable!("methods are resolved") };
                 let receiver = self.expr(*receiver, frame)?;
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.expr(arg.value, frame)?);
                 }
-                return self.builtin(builtin, receiver, values);
+                match self.p.res(e) {
+                    Some(Res::Method(builtin)) => return self.builtin(builtin, receiver, values),
+                    Some(Res::With) => {
+                        let Value::Adt(mut adt) = receiver else { unreachable!("`with` copies a record") };
+                        let replaced = self.p.with_fields.get(e).expect("`with` is resolved");
+                        let fields = Arc::make_mut(&mut adt.fields);
+                        for (i, value) in replaced.iter().zip(values) {
+                            fields[i.index()] = value;
+                        }
+                        Value::Adt(adt)
+                    }
+                    other => unreachable!("methods are resolved, not {other:?}"),
+                }
             }
             ExprKind::Field { base, .. } => {
                 let Some(Res::Field(i)) = self.p.res(e) else { unreachable!("fields are resolved") };
@@ -509,6 +540,16 @@ impl Interp<'_> {
     }
 }
 
+/// The slot `path` names inside `value`. Each record on the way is copied first if it is
+/// shared, so the write changes no other copy (REFERENCE §5.1).
+fn slot<'v>(mut value: &'v mut Value, path: &[FieldIdx]) -> &'v mut Value {
+    for i in path {
+        let Value::Adt(adt) = value else { unreachable!("field paths go through records") };
+        value = &mut Arc::make_mut(&mut adt.fields)[i.index()];
+    }
+    value
+}
+
 enum LoopStep {
     Next,
     Break,
@@ -650,6 +691,8 @@ fn quote(text: &str, quote: char) -> String {
 
 #[cfg(test)]
 mod tests {
+    use proviso_check::decls::{AdtDef, FieldDef};
+
     use super::*;
 
     #[test]
@@ -694,5 +737,34 @@ mod tests {
         assert!(!compare(BinOp::Eq, &nan, &nan));
         assert!(compare(BinOp::Ne, &nan, &nan));
         assert!(!compare(BinOp::Lt, &nan, &nan));
+    }
+
+    fn field(name: &str, ty: Ty) -> FieldDef {
+        FieldDef { name: name.into(), ty }
+    }
+
+    fn record(def: AdtId, fields: Vec<Value>) -> Value {
+        Value::Adt(Adt { def, variant: VariantIdx::RECORD, fields: fields.into() })
+    }
+
+    #[test]
+    fn nested_records_show_as_constructions_with_quoted_text() {
+        let mut decls = Decls::default();
+        let tag = decls.push(AdtDef::record("Tag", vec![field("label", Ty::Text), field("mark", Ty::Char)]));
+        let outer = decls.push(AdtDef::record("Labelled", vec![field("tag", Ty::adt(tag)), field("n", Ty::INT)]));
+        let inner = record(tag, vec![Value::Text("a\"b".into()), Value::Char('\n')]);
+        let value = record(outer, vec![inner, Value::Int(-3, IntTy::I64)]);
+        let expected = r#"Labelled(tag: Tag(label: "a\"b", mark: '\n'), n: -3)"#;
+        assert_eq!(show(&value, &decls), expected);
+        assert_eq!(debug_repr(&value, &decls), expected);
+    }
+
+    #[test]
+    fn a_record_holding_nan_is_unequal_to_itself() {
+        let mut decls = Decls::default();
+        let def = decls.push(AdtDef::record("Reading", vec![field("value", Ty::Float(FloatTy::F64))]));
+        let reading = record(def, vec![Value::F64(f64::NAN)]);
+        assert!(!compare(BinOp::Eq, &reading, &reading.clone()));
+        assert!(compare(BinOp::Ne, &reading, &reading.clone()));
     }
 }

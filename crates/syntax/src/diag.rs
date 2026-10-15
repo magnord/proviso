@@ -142,6 +142,8 @@ pub mod codes {
             "A call passes more or fewer arguments than the function has parameters.";
         NEEDLESS_ALIAS = "E0209", "needless_alias",
             "`as` renames an import only to resolve a name collision (REFERENCE §3, Q24).";
+        DUPLICATE_NAME = "E0210", "duplicate_name",
+            "A name given twice in one list: a record's fields, the fields a `with` replaces, or a `derives` list (REFERENCE §4.4).";
 
         TYPE_MISMATCH = "E0301", "type_mismatch",
             "A value of one type where another is expected. Proviso has no implicit conversions (REFERENCE §9.2).";
@@ -159,6 +161,8 @@ pub mod codes {
             "A type name that does not resolve.";
         INVALID_MAIN = "E0308", "invalid_main",
             "A program needs `pub fn main(sys: keep System)`, optionally with `fails E` (REFERENCE §7.4).";
+        MISSING_IMPLEMENTATION = "E0309", "missing_implementation",
+            "A type does not implement an interface it needs, such as a field's type in a `derives` list (REFERENCE §4.4, §4.9).";
 
         // Reserved for later phases: the §F goldens already expect these.
         REFINEMENT_REFUTED = "E0412", "refinement_refuted",

@@ -1,0 +1,33 @@
+// phase: 2.1
+// A field of a `var` can be assigned, at any depth, with `=` or a compound operator. Values
+// have value semantics (REFERENCE §5.1): a copy taken before the assignment, and an
+// argument the callee received, never see it.
+use std.io { IoError }
+
+record Point {
+    x: Int
+    y: Int
+}
+
+record Box {
+    corner: Point
+    size: Int
+}
+
+fn moved(b: Box) -> Box {
+    var copy = b
+    copy.corner.x += 100
+    return copy
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var b = Box(corner: Point(x: 1, y: 2), size: 3)
+    let before = b
+    b.size = 10
+    b.corner.y *= 7
+    b.corner = Point(x: b.corner.x - 1, y: b.corner.y)
+    let after_move = moved(b)
+    try sys.stdout.write_line(f"before: {before.corner.x} {before.corner.y} {before.size}")
+    try sys.stdout.write_line(f"b: {b.corner.x} {b.corner.y} {b.size}")
+    try sys.stdout.write_line(f"moved: {after_move.corner.x} {after_move.corner.y} {after_move.size}")
+}

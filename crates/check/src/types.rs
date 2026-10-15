@@ -137,11 +137,6 @@ impl Ty {
         matches!(self, Ty::Error | Ty::Never)
     }
 
-    /// `<`, `<=`, `>` and `>=`. Text compares by code point (REFERENCE §12.3).
-    pub fn has_ordering(&self) -> bool {
-        matches!(self, Ty::Int(_) | Ty::Float(_) | Ty::Char | Ty::Text)
-    }
-
     /// Whether `actual` may be used where `self` is expected. `Never` is a subtype of every
     /// type (REFERENCE §9.2).
     pub fn accepts(&self, actual: &Ty) -> bool {

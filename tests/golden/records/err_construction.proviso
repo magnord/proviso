@@ -1,0 +1,28 @@
+// phase: 2.1
+// expect-error: E0102
+// expect-error: E0206
+// expect-error: E0207
+// expect-error: E0208
+// expect-error: E0301
+// A construction passes every field, labelled in declaration order, like a call (REFERENCE
+// §3, §4.4). A construction has no effect but its value, so it isn't a statement.
+record Point {
+    x: Int
+    y: Int
+}
+
+record Wrapper {
+    inner: Point
+}
+
+fn builds() {
+    let a = Point(1, 2)                             // <- E0206
+    let b = Point(y: 2, x: 1)                       // <- E0207
+    let c = Point(x: 1)                             // <- E0208
+    let d = Point(x: 1, y: "two")                   // <- E0301
+    let e = Wrapper(Point(x: 1, y: 2))
+    let f = Wrapper(inner: 3)                       // <- E0301
+    let g: Point = Wrapper(inner: Point(x: 0, y: 0))   // <- E0301
+    Point(x: 1, y: 2)                               // <- E0102
+    e.inner.with(x: 5)                              // <- E0102
+}
