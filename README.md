@@ -83,7 +83,7 @@ If you are new, start with RATIONALE.md for the reasoning, then skim REFERENCE.m
 
 ## Building and running
 
-The toolchain needs Rust 1.88 or later, and has no dependencies outside the standard library.
+The toolchain needs Rust 1.99 or later, and has no dependencies outside the standard library.
 
 ```bash
 cargo run -- run tests/golden/basics/hello.proviso
