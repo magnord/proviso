@@ -30,7 +30,14 @@ impl Module {
     pub fn fn_decl(&self, item: usize) -> Option<&FnDecl> {
         match &self.items.get(item)?.kind {
             ItemKind::Fn(decl) => Some(decl),
-            ItemKind::Use(_) => None,
+            _ => None,
+        }
+    }
+
+    pub fn record_decl(&self, item: usize) -> Option<&RecordDecl> {
+        match &self.items.get(item)?.kind {
+            ItemKind::Record(decl) => Some(decl),
+            _ => None,
         }
     }
 }
@@ -59,6 +66,7 @@ impl Item {
     pub fn name(&self) -> Option<Ident> {
         match &self.kind {
             ItemKind::Fn(decl) => Some(decl.name),
+            ItemKind::Record(decl) => Some(decl.name),
             ItemKind::Use(_) => None,
         }
     }
@@ -67,6 +75,7 @@ impl Item {
 pub enum ItemKind {
     Fn(FnDecl),
     Use(UseDecl),
+    Record(RecordDecl),
 }
 
 pub struct FnDecl {
@@ -93,6 +102,24 @@ pub enum ParamMode {
     InoutPartial,
     Take,
     Keep,
+}
+
+/// `record Span derives(Eq) { lo: Int, hi: Int } where lo <= hi` (REFERENCE §4.4).
+pub struct RecordDecl {
+    pub name: Ident,
+    /// The interfaces named in `derives(…)`, which the checker resolves.
+    pub derives: Vec<Ident>,
+    pub fields: Vec<FieldDecl>,
+    /// The record-level `where` predicate, which sees every field.
+    pub refinement: Option<ExprId>,
+}
+
+/// `name: Text where not name.is_empty()`
+pub struct FieldDecl {
+    pub name: Ident,
+    pub ty: TypeId,
+    /// The field's `where` predicate, which sees only this field.
+    pub refinement: Option<ExprId>,
 }
 
 /// `use a.b { X, y as z }`, or `use a.b` with no names.

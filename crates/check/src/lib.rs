@@ -221,6 +221,7 @@ impl Checker<'_> {
         let text = m.text(name.name.sym);
         let mut others = m.items.iter().flat_map(|item| match &item.kind {
             ItemKind::Fn(decl) => vec![decl.name],
+            ItemKind::Record(decl) => vec![decl.name],
             ItemKind::Use(decl) if decl.names.is_empty() => vec![decl.path[decl.path.len() - 1]],
             ItemKind::Use(decl) => decl
                 .names

@@ -375,6 +375,7 @@ impl Parser<'_> {
                 return self.not_implemented("re-exports (`pub use`)", Planned::Unscheduled);
             }
             T::Keyword(Kw::Use) => ItemKind::Use(self.use_decl()?),
+            T::Keyword(Kw::Record) => ItemKind::Record(self.record_decl()?),
             T::Keyword(kw) => match planned_item(kw) {
                 Some((what, planned)) => return self.not_implemented(what, planned),
                 None => return self.unexpected("an item such as `fn` or `use`"),
@@ -410,6 +411,54 @@ impl Parser<'_> {
             }
         }
         Ok(UseDecl { path, names })
+    }
+
+    fn record_decl(&mut self) -> PResult<RecordDecl> {
+        self.bump();
+        let name = self.ident("a record name")?;
+        let decl = self.record_rest(name);
+        if decl.is_err() {
+            self.m.poisoned.insert(name.sym);
+        }
+        decl
+    }
+
+    fn record_rest(&mut self, name: Ident) -> PResult<RecordDecl> {
+        if self.at(T::LBracket) {
+            return self.not_implemented("generic records", Planned::Phase(2));
+        }
+        let mut derives = Vec::new();
+        if self.eat(T::Keyword(Kw::Derives)) {
+            let open = self.expect(T::LParen, "`(` and the interfaces to derive")?;
+            while !self.at(T::RParen) {
+                derives.push(self.ident("an interface name")?);
+                if !self.eat(T::Comma) {
+                    break;
+                }
+            }
+            self.close(&open, T::RParen, "`,` or `)`")?;
+        }
+        let open = self.expect(T::LBrace, "`{` and the record's fields")?;
+        let mut fields = Vec::new();
+        loop {
+            while matches!(self.kind(), T::Newline | T::DocComment) {
+                self.bump();
+            }
+            if self.eat(T::RBrace) {
+                break;
+            }
+            let field = self.ident("a field name")?;
+            self.expect(T::Colon, "`:` and the field's type")?;
+            let ty = self.type_expr()?;
+            let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
+            fields.push(FieldDecl { name: field, ty, refinement });
+            if !self.eat(T::Comma) && !self.at(T::Newline) {
+                self.close(&open, T::RBrace, "`,`, a new line or `}`")?;
+                break;
+            }
+        }
+        let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
+        Ok(RecordDecl { name, derives, fields, refinement })
     }
 
     fn fn_decl(&mut self) -> PResult<FnDecl> {
@@ -1099,7 +1148,6 @@ impl Parser<'_> {
 /// Item keywords that belong to later phases, with what to call them.
 fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
     Some(match kw {
-        Kw::Record => ("`record` declarations", Planned::Phase(2)),
         Kw::Enum => ("`enum` declarations", Planned::Phase(2)),
         Kw::Type => ("`type` declarations", Planned::Phase(2)),
         Kw::Distinct => ("distinct types", Planned::Phase(2)),
