@@ -1,0 +1,21 @@
+// phase: 2.1
+// expect-exit: 70
+// expect-report: defect refinement_failed
+// Assigning a part of a nested record re-checks every record on the path to it, starting
+// with the innermost (REFERENCE §8.3). Here the inner `Span` still holds, but the outer
+// `Window` doesn't.
+record Span {
+    lo: Int
+    hi: Int
+} where lo <= hi
+
+record Window {
+    span: Span
+    limit: Int
+} where span.hi <= limit
+
+pub fn main(sys: keep System) {
+    var w = Window(span: Span(lo: 0, hi: 5), limit: 10)
+    w.span.hi += 5
+    w.span.hi += 1
+}

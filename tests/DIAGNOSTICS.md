@@ -78,7 +78,7 @@ Goldens that run check these reports with `// expect-report: <kind> <detail>`. O
 
 | Report | Meaning | Goldens |
 |---|---|---|
-| `defect <defect kind>` | The run hit a defect of this kind (§7.3). | f09 |
+| `defect <defect kind>` | The run hit a defect of this kind (§7.3). | f09, records/refinement_construction |
 | `leak <Type>` | A resource of this type leaked because its `abandon` hit a defect (§10). | f09 |
 | `overlap <op> <op>` | Replay found two capability calls that overlapped on aliased resources (§9.8). | f10 |
 

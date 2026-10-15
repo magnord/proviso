@@ -73,6 +73,7 @@ pub enum DefectKind {
     TodoReached,
     UnreachableReached,
     StackExhausted,
+    RefinementFailed,
 }
 
 impl DefectKind {
@@ -84,6 +85,7 @@ impl DefectKind {
             DefectKind::TodoReached => "todo_reached",
             DefectKind::UnreachableReached => "unreachable_reached",
             DefectKind::StackExhausted => "stack_exhausted",
+            DefectKind::RefinementFailed => "refinement_failed",
         }
     }
 }
@@ -250,6 +252,11 @@ impl Interp<'_> {
                     None => value,
                     Some(op) => self.arithmetic(op, slot.clone(), value, stmt.span)?,
                 };
+                // Each record on the path has changed, so each is checked, innermost first
+                // (OPEN_QUESTIONS P5).
+                for depth in (0..path.len()).rev() {
+                    self.refine(at(&frame[root.index()], &path[..depth]), stmt.span)?;
+                }
             }
             StmtKind::Expr(e) => {
                 self.expr(*e, frame)?;
@@ -269,6 +276,36 @@ impl Interp<'_> {
                     return Err(defect(DefectKind::AssertionFailed, format!("assertion failed: {text}"), stmt.span));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// A defect if `value` breaks a refinement of its record. A record holds its refinements
+    /// once built, so only one that was just built or changed is checked (OPEN_QUESTIONS P3).
+    fn refine(&mut self, value: &Value, span: Span) -> Flow<()> {
+        let Value::Adt(adt) = value else { return Ok(()) };
+        let (p, file) = (self.p, self.file);
+        let def = p.decls.adt(adt.def);
+        let variant = &def.variants[adt.variant.index()];
+        if variant.preds.is_empty() {
+            return Ok(());
+        }
+        let mut frame: Frame = adt.fields.to_vec();
+        frame.resize(variant.locals, Value::Unit);
+        for pred in &variant.preds {
+            if self.bool(pred.expr, &mut frame)? {
+                continue;
+            }
+            let text = file.slice(self.m.exprs[pred.expr].span);
+            let message = match pred.field {
+                Some(i) => {
+                    let shown = debug_repr(&adt.fields[i.index()], &p.decls);
+                    let field = &variant.fields[i.index()].name;
+                    format!("`{}.{field}` is {shown}, which breaks its refinement `{text}`", def.name)
+                }
+                None => format!("{} breaks `{}`'s refinement `{text}`", debug_repr(value, &p.decls), def.name),
+            };
+            return Err(defect(DefectKind::RefinementFailed, message, span));
         }
         Ok(())
     }
@@ -354,7 +391,11 @@ impl Interp<'_> {
                 match self.p.res(*callee) {
                     Some(Res::Fn(f)) => return self.call(f, values, span),
                     // Labels follow the declaration order, so argument `i` is field `i`.
-                    Some(Res::Ctor(def, variant)) => Value::Adt(Adt { def, variant, fields: values.into() }),
+                    Some(Res::Ctor(def, variant)) => {
+                        let value = Value::Adt(Adt { def, variant, fields: values.into() });
+                        self.refine(&value, span)?;
+                        value
+                    }
                     other => unreachable!("calls are resolved, not {other:?}"),
                 }
             }
@@ -373,7 +414,9 @@ impl Interp<'_> {
                         for (i, value) in replaced.iter().zip(values) {
                             fields[i.index()] = value;
                         }
-                        Value::Adt(adt)
+                        let value = Value::Adt(adt);
+                        self.refine(&value, span)?;
+                        value
                     }
                     other => unreachable!("methods are resolved, not {other:?}"),
                 }
@@ -538,6 +581,14 @@ impl Interp<'_> {
             (builtin, receiver) => unreachable!("{builtin:?} does not apply to {receiver:?}"),
         })
     }
+}
+
+fn at<'v>(mut value: &'v Value, path: &[FieldIdx]) -> &'v Value {
+    for i in path {
+        let Value::Adt(adt) = value else { unreachable!("field paths go through records") };
+        value = &adt.fields[i.index()];
+    }
+    value
 }
 
 /// The slot `path` names inside `value`. Each record on the way is copied first if it is

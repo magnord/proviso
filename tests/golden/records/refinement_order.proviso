@@ -1,0 +1,13 @@
+// phase: 2.1
+// expect-exit: 70
+// expect-report: defect refinement_failed
+// A value that breaks several refinements reports the first: the fields' in field order,
+// then the record's.
+record Range {
+    lo: Int where lo >= 0
+    hi: Int where hi >= 0
+} where lo <= hi
+
+pub fn main(sys: keep System) {
+    let r = Range(lo: -1, hi: -2)
+}

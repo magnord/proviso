@@ -1,0 +1,14 @@
+// phase: 2.1
+// expect-exit: 70
+// expect-report: defect refinement_failed
+// `with` re-checks the refinements of the record it builds (REFERENCE §4.4).
+record Span {
+    lo: Int
+    hi: Int
+} where lo <= hi
+
+pub fn main(sys: keep System) {
+    let s = Span(lo: 1, hi: 4)
+    let t = s.with(lo: 4)
+    let u = t.with(hi: 3)
+}

@@ -1,0 +1,2 @@
+defect[refinement_failed]: Span(lo: 5, hi: 4) breaks `Span`'s refinement `lo <= hi`
+  at records/refinement_innermost_first.proviso:18:5 (refinement_innermost_first.main+3)

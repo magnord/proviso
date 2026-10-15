@@ -1,0 +1,31 @@
+// phase: 2.1
+// Under the v1 profile, refinements are checked at runtime whenever a value of the refined
+// type is built or changed (OPEN_QUESTIONS P3). A field's `where` sees that field, and a
+// record-level `where` sees every field. Values that satisfy them run normally.
+use std.io { IoError }
+
+record Span derives(Show) {
+    lo: Int
+    hi: Int
+} where lo <= hi
+
+record User derives(Show) {
+    name: Text where not name.is_empty()
+    age: Int where 0 <= age and age < 150
+}
+
+record Booking {
+    who: User
+    when: Span
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var span = Span(lo: 1, hi: 4)
+    span.hi = 9
+    span.lo += 8
+    span = span.with(lo: 20, hi: 30)
+    var b = Booking(who: User(name: "ada", age: 36), when: span)
+    b.who.age += 1
+    b.when.lo = b.when.hi
+    try sys.stdout.write_line(f"{span} {b.who} {b.when}")
+}

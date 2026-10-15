@@ -1,0 +1,2 @@
+defect[refinement_failed]: Window(span: Span(lo: 0, hi: 11), limit: 10) breaks `Window`'s refinement `span.hi <= limit`
+  at records/refinement_nested_assignment.proviso:20:5 (refinement_nested_assignment.main+4)

@@ -1,0 +1,3 @@
+defect[refinement_failed]: `User.age` is 150, which breaks its refinement `0 <= age and age < 150`
+  at records/refinement_construction.proviso:11:12 (refinement_construction.make+2)
+  called from records/refinement_construction.proviso:16:15 (refinement_construction.main+3)
