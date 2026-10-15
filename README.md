@@ -77,6 +77,7 @@ users.load_users                                      BREAKING
 | [REFERENCE.md](REFERENCE.md) | The working reference: the whole language in about 15K tokens, meant to stay small enough for an agent to keep in context |
 | [RATIONALE.md](RATIONALE.md) | Why the language is designed this way: the needs, goals, alternatives considered, and costs |
 | [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md) | Unresolved design questions, the syntax hypotheses to test, and the experiment plan |
+| [tests/golden](tests/golden/README.md) | The acceptance counterexamples as golden tests, written before any compiler, with the diagnostic codes they expect in [tests/DIAGNOSTICS.md](tests/DIAGNOSTICS.md) |
 
 If you are new, start with RATIONALE.md for the reasoning, then skim REFERENCE.md §1 ("At a glance") and §17 ("Worked example").
 

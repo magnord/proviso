@@ -717,7 +717,7 @@ extern "C" fn sqlite_exec(db: Db[write], sql: Text) -> Int32
 Whether these tools pay off is the central experiment (H10).
 
 - **Two interfaces.** Every command accepts `--json`, and the same operations are available through `proviso serve` as JSON-RPC over stdio, also exposed as MCP tools (T4).
-- **Stable codes.** Diagnostic codes are stable.
+- **Stable codes.** Diagnostic codes are stable; they are catalogued in [tests/DIAGNOSTICS.md](tests/DIAGNOSTICS.md).
 - **No cascades.** All errors are reported at once, and an error poisons only its dependents.
 - **Broken code.** Queries and edits work on code that does not compile. An answer that depends on broken parts carries `"partial": true` (T1).
 - **Locations.** Each location is given two ways: `file:line:col`, and a symbol anchor such as `users.parse_user+8` (line 8 of the item). The anchor stays stable when other items are edited (T3).

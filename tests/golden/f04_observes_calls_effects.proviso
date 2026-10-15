@@ -1,0 +1,42 @@
+// §F row 4: an observes operation may not call an effects operation
+// phase: 3
+// expect-error: E0601
+//
+// `read_text` needs only `read`, an observes permission, so it sees `self`
+// through an observes-only view: the stored `log` is narrowed to Log's
+// observes permissions, of which there are none (§9.2). Appending to it is
+// rejected. `write_text` is an effects operation, so it may append.
+//
+// The row's `impl Dir` that writes through a stored `Out` is modelled with
+// test-local `Store` and `Log` interfaces: the reference doesn't list all of
+// Dir's operations or Out's permissions (OPEN_QUESTIONS Q6, §G).
+
+enum StoreError {
+    NotFound(key: Text)
+}
+
+cap interface Log effects(append) {
+    fn append(self, line: Text)                                 needs append
+}
+
+cap interface Store observes(read) effects(write) {
+    fn read_text(self, key: Text) -> Text fails StoreError      needs read
+    fn write_text(self, key: Text, text: Text)                  needs write
+}
+
+cap record AuditedStore {
+    state files: Map[Text, Text]
+    log: Log[append]
+}
+
+impl Store for AuditedStore {
+    fn read_text(self, key: Text) -> Text fails StoreError {
+        self.log.append(f"read {key}")              // <- E0601
+        return self.files.get(key) else fail StoreError.NotFound(key: key)
+    }
+
+    fn write_text(self, key: Text, text: Text) {
+        self.log.append(f"write {key}")
+        self.files.set(key: key, value: text)
+    }
+}

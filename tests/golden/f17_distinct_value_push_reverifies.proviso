@@ -1,0 +1,17 @@
+// §F row 17: mutating the .value of a refined distinct type re-verifies it
+// phase: 5
+// expect-error: E0412
+//
+// `s.value.push(0)` calls an inout self method on a part of a refined value,
+// so `self.is_sorted()` is re-verified when it returns, using only push's
+// admissible ensures (§8.3). They can't re-establish sortedness, and with
+// push's natural contract [1, 2, 3, 0] is the counterexample. The reference
+// doesn't give push's contract (OPEN_QUESTIONS Q36).
+
+type Sorted = distinct List[Int] where self.is_sorted()
+
+fn append_zero() -> Sorted {
+    var s = Sorted([1, 2, 3])
+    s.value.push(0)                                 // <- E0412
+    return s
+}

@@ -1,0 +1,93 @@
+// §F row 18: capability state never shows a half-finished operation
+// phase: 6
+//
+// `transfer` moves an amount between two `state` fields in two steps (§9.6).
+// - A defect halfway discards the operation's state changes, so the ledger
+//   still reads 100/0. `supervise` catches the defect (§11 rule 7).
+// - For cancellation halfway, `stopper` waits until the transfer is half
+//   done, then fails, which cancels `mover`. Cancellation is masked inside the
+//   operation and delivered after it returns, so the transfer completes: 93/7.
+// A half-finished update would read 95/0 or 93/0.
+//
+// The flag is a separate capability object, so `stopper` can read it while
+// `transfer` runs. The signatures of `spawn` and `supervise` are not given
+// (OPEN_QUESTIONS Q15, Q16).
+
+use std.io { IoError }
+use std.task { checkpoint, supervise }
+
+enum Stop {
+    Halt
+}
+
+cap interface Flag observes(read) effects(write) {
+    fn raise(self)                                              needs write
+    fn is_raised(self) -> Bool                                  needs read
+}
+
+cap record MemFlag {
+    state raised: Bool
+}
+
+impl Flag for MemFlag {
+    fn raise(self) {
+        self.raised = true
+    }
+
+    fn is_raised(self) -> Bool {
+        return self.raised
+    }
+}
+
+cap interface Ledger observes(read) effects(write) {
+    fn transfer(self, amount: Int, crash: Bool)                 needs write
+    fn totals(self) -> Text                                     needs read
+}
+
+cap record MemLedger {
+    state left: Int
+    state right: Int
+    halfway: Flag[write]
+}
+
+impl Ledger for MemLedger {
+    fn transfer(self, amount: Int, crash: Bool) {
+        self.left -= amount
+        self.halfway.raise()
+        assert not crash                            // the defect case stops here
+        checkpoint()                                // masked: no cancellation inside an operation
+        self.right += amount
+    }
+
+    fn totals(self) -> Text {
+        return f"{self.left}/{self.right}"
+    }
+}
+
+fn stop_when_raised(flag: Flag[read]) fails Stop {
+    while not flag.is_raised() {
+        checkpoint()
+    }
+    fail Stop.Halt
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let crash_flag = Flag.of(MemFlag(raised: false))
+    let crashed = Ledger.of(MemLedger(left: 100, right: 0, halfway: crash_flag))
+    let outcome = supervise(|| crashed.transfer(amount: 5, crash: true))
+    let how = match outcome {
+        Done(_) => "done"
+        Failed(_) => "failed"
+        Crashed(_) => "crashed"
+    }
+    try sys.stdout.write_line(f"defect: {how}, ledger {crashed.totals()}")
+
+    let cancel_flag = Flag.of(MemFlag(raised: false))
+    let cancelled = Ledger.of(MemLedger(left: 100, right: 0, halfway: cancel_flag))
+    let _ = attempt scope |s| {
+        let mover = s.spawn(|| cancelled.transfer(amount: 7, crash: false))
+        let stopper = s.spawn(|| try stop_when_raised(flag: cancel_flag))
+        try stopper.join()                          // fails, cancelling mover; the scope waits for it
+    }
+    try sys.stdout.write_line(f"cancel: ledger {cancelled.totals()}")
+}

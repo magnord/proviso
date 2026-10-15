@@ -1,0 +1,49 @@
+// §F row 9: a defect in one abandon doesn't stop the others
+// phase: 2
+// expect-exit: 70
+// expect-report: defect assert_failed
+// expect-report: leak Probe
+//
+// `work` holds probes 1, 2 and 3, then fails, so they are abandoned in reverse
+// order (§10 rule 3). Probe 3's abandon hits a defect. The defect is recorded,
+// probe 3 is reported as leaked, and probes 2 and 1 are still abandoned. The
+// exit becomes a defect exit (code 70) although it began as an error.
+
+use std.io { Out }
+
+resource record Probe {
+    id: Int
+    fragile: Bool
+    out: Out
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.id}")
+        assert not self.fragile
+    }
+}
+
+enum Stop derives(Show) {
+    Halt
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)            // abandon cannot fail
+}
+
+fn acquire(id: Int, fragile: Bool, out: keep Out) -> Probe {
+    say(out: out, line: f"acquire {id}")
+    return Probe(id: id, fragile: fragile, out: out)
+}
+
+fn work(out: keep Out) fails Stop {
+    let first = acquire(id: 1, fragile: false, out: out)
+    let second = acquire(id: 2, fragile: false, out: out)
+    let third = acquire(id: 3, fragile: true, out: out)
+    fail Stop.Halt
+}
+
+pub fn main(sys: keep System) fails Stop {
+    try work(out: sys.stdout)
+}

@@ -1,0 +1,70 @@
+// §F row 8: `attempt` on a call that returns a resource yields a resource
+// phase: 2
+//
+// `Result[Probe, OpenError]` is a resource because it may hold one (§5.1).
+// Matching it moves the Probe into the binding (§6.4), and abandoning it
+// abandons the Probe only in the Ok case (§10 rule 4).
+//
+// Probe stands in for the row's File, since the reference has no API for
+// opening files (OPEN_QUESTIONS Q36). It reports close and abandon on stdout.
+
+use std.io { Out, IoError }
+
+resource record Probe {
+    name: Text
+    out: Out
+}
+
+impl Probe {
+    fn close(take self) {
+        say(out: self.out, line: f"close {self.name}")
+    }
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.name}")
+    }
+}
+
+enum OpenError {
+    Refused(name: Text)
+}
+
+enum Stop {
+    Halt
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)            // close and abandon cannot fail
+}
+
+fn open_probe(name: Text, out: keep Out, ok: Bool) -> Probe fails OpenError {
+    if not ok {
+        fail OpenError.Refused(name: name)
+    }
+    return Probe(name: name, out: out)
+}
+
+// Normal exit: the Ok arm moves the Probe out of `opened`, then consumes it.
+fn open_and_close(out: keep Out) {
+    let opened = attempt open_probe(name: "a", out: out, ok: true)
+    match opened {
+        Ok(probe) => probe.close()
+        Err(_) => say(out: out, line: "open failed")
+    }
+}
+
+// Failure exit: `opened` is abandoned, which abandons its Probe only if it is Ok.
+fn open_then_fail(name: Text, out: keep Out, ok: Bool) fails Stop {
+    let opened = attempt open_probe(name: name, out: out, ok: ok)
+    say(out: out, line: f"failing ({name})")
+    fail Stop.Halt
+}
+
+pub fn main(sys: keep System) fails IoError {
+    open_and_close(out: sys.stdout)
+    let _ = attempt open_then_fail(name: "b", out: sys.stdout, ok: true)
+    let _ = attempt open_then_fail(name: "c", out: sys.stdout, ok: false)
+    try sys.stdout.write_line("done")
+}

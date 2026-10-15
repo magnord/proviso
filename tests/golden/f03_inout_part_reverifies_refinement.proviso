@@ -1,0 +1,22 @@
+// §F row 3: an inout call on a part re-verifies the enclosing refinement
+// phase: 5
+// expect-error: E0412
+//
+// Passing `&span.lo` re-verifies `lo <= hi` when the call returns, using only
+// `set_ten`'s admissible ensures (§8.3). It has none, so the obligation is
+// refuted (for example lo = 10, hi = 4).
+
+record Span {
+    lo: Int
+    hi: Int
+} where lo <= hi
+
+fn set_ten(x: inout Int) {
+    x = 10
+}
+
+fn shift() -> Span {
+    var span = Span(lo: 1, hi: 4)
+    set_ten(x: &span.lo)                            // <- E0412
+    return span
+}

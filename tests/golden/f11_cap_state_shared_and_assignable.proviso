@@ -1,0 +1,50 @@
+// §F row 11: a cap record's effects operations update `state` through plain self
+// phase: 3
+//
+// `write_text` mutates a `state` map and assigns a `state` counter through a
+// plain `self` (§9.6). State is shared by every copy of the capability, so
+// the original handle sees a write made through a copy.
+//
+// The row's MemDir is modelled with a test-local `Store` interface, because
+// the reference doesn't list all of Dir's operations (OPEN_QUESTIONS Q6).
+
+use std.io { IoError }
+
+enum StoreError {
+    NotFound(key: Text)
+}
+
+cap interface Store observes(read) effects(write) {
+    fn read_text(self, key: Text) -> Text fails StoreError      needs read
+    fn write_count(self) -> Int                                 needs read
+    fn write_text(self, key: Text, text: Text)                  needs write
+}
+
+cap record MemStore {
+    state files: Map[Text, Text]
+    state writes: Int
+}
+
+impl Store for MemStore {
+    fn read_text(self, key: Text) -> Text fails StoreError {
+        return self.files.get(key) else fail StoreError.NotFound(key: key)
+    }
+
+    fn write_count(self) -> Int {
+        return self.writes
+    }
+
+    fn write_text(self, key: Text, text: Text) {
+        self.files.set(key: key, value: text)
+        self.writes += 1
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let original = Store.of(MemStore(files: [:], writes: 0))
+    let copy = original
+    copy.write_text(key: "k", text: "written through the copy")
+    let seen = original.read_text("k") else "<missing>"
+    try sys.stdout.write_line(f"original sees: {seen}")
+    try sys.stdout.write_line(f"writes: {original.write_count()}")
+}

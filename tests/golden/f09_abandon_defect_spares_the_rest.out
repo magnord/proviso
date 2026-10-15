@@ -1,0 +1,6 @@
+acquire 1
+acquire 2
+acquire 3
+abandon 3
+abandon 2
+abandon 1

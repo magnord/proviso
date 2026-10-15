@@ -89,6 +89,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Need:** the permissions for each standard capability (`Dir`, `Net`, `Clock`, `Random`, `Env`, `Process`, `In`, `Out`), and whether each is `observes` or `effects`. Because `observes` operations can't change `state`, consuming input from `In` is an `effects` operation under the current rules. Is that the right call?
 - **Need:** value-level narrowing: paths, hosts, ports, rate limits.
 - **Open:** how a narrowed value appears in `proviso sig`.
+- **Found by the goldens (§G):** `Dir`'s full operation list. The reference shows no operations for `list`, `create` or `delete`, so no complete `impl Dir` can be written, and rows 4 and 11 use test-local interfaces instead. Also open: how an observes-only view narrows a capability type that has no permission list, such as `Out` (row 4 as written); whether `write_text` to a new file needs `create`; and which directory `sys.fs` is rooted at.
 
 **Q7 — Partial external writes.**
 - **Now:** `sig` reports "may leave partial writes" for a function that has write authority and can fail.
@@ -131,10 +132,13 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Open:** green threads, OS threads or async I/O.
 - **Open:** `select` and timeouts.
 - **Now:** loop back-edges are cancellation points. **Open:** their cost in tight loops, and how many delivery points replay must record.
+- **Found by the goldens (§G):** the signatures of `spawn` and `join`: what reach a spawned closure may have, and whether `join` on a task that cannot fail is marked. f18 never joins its infallible task and relies on the scope to wait for it.
 
 **Q16 — `supervise`.** Does catching defects at task boundaries bring back exceptions as control flow? Options:
 - restrict it to top-level server loops;
 - require a capability to use it.
+
+**Found by the goldens (§G):** `supervise`'s signature is not given: the closure lifetime it takes, the reach it admits, `Outcome`'s `E` when the work cannot fail, and what a `Defect` value exposes. P3 places `supervise` in no phase, but row 18 needs it by phase 6.
 
 **Q17 — Memory strategy.**
 - **Now:** Perceus-style reference counting with reuse.
@@ -181,6 +185,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Now:** after every assignment. Several fields change together through a whole-value `with`.
 - **Options:** check at the end of each exclusive mutation (such as an `inout self` method); an explicit block that opens the invariant temporarily.
 - **Resolve by:** writing data structures with multi-field invariants and counting the rewrites the strict rule forces.
+- **Found by the goldens (§G):** whether passing `&span.lo`, or assigning `span.lo`, drops facts about `span.hi`. ref §8.3 drops the facts that "mention" the variable. Rows 3 and 16 are rejected either way, but an accepted variant, such as a callee that ensures `x <= 3`, is provable only if facts about the other parts survive.
 
 **Q29 — Cleanup guarantees.**
 - **Now:** bounded. `abandon` runs under a deadline, a defect in one `abandon` does not stop the others, and stack exhaustion and out-of-memory are process-fatal.
@@ -198,6 +203,34 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Now:** value semantics hide allocation, and `proviso query costs` reports it only after the fact.
 - **Proposal:** a function may declare `noalloc`, checked transitively like an effect (as the Pith design's `alloc` effect is), and `sig` shows it. Hot paths in games need a guarantee, not just a report.
 - **Open:** how `noalloc` interacts with copy-on-write and reference counting, where an ordinary copy can allocate.
+
+**Q33 — Statement and closure-body forms.** Found by the goldens (§G).
+- **Now:** an expression statement must be a call, an assignment or a control expression, and closures and `else` blocks yield their final expression (ref §2). `try f()` is used as a statement (ref §1, §10).
+- **Unclear:**
+  - whether a call marked with an `else` form (§7.2), such as `out.write_line(t) else ()` or `save(x) else fail E.Io(cause: it)`, counts as a call statement;
+  - whether a closure body may use `return`, and what it returns from. §F row 13 writes `{ w(); return "t" }`;
+  - how far an unbraced closure body extends: `|| f() else ()` could parse as `(|| f()) else ()`;
+  - whether `it` is bound in `e else { … }` when `e` is a fallible call.
+- **Goldens:** use `try` statements, discard an error with `let _ = attempt f()`, and give a closure with statements a braced body that ends in its value.
+
+**Q34 — Closures bound to locals.** Found by the goldens (§G).
+- **Now:** a closure's lifetime and captures are decided by the parameter it is passed to (ref §6.7).
+- **Unclear:** a closure bound with `let w = || …` (§F row 13) is not passed to anything. Presumably it has the default lifetime, captures by reference, and is checked again wherever it is passed. f13 relies only on its reach being tracked.
+
+**Q35 — Consuming a base resource.** Found by the goldens (§G).
+- **Now:** a resource is consumed by a `take` parameter or a `take self` method (ref §10). The reference's `Txn.abandon` consumes `self` without visibly consuming the `Txn` itself.
+- **Unclear:** what finally ends a resource that holds no resource fields. The goldens assume that a `take self` method in the type's own `impl`, `abandon` included, consumes `self` when it returns.
+- **Options:** that rule; explicit destructuring (`let Txn(..) = self`); a dedicated form allowed only in the type's module.
+
+**Q36 — The standard library the reference assumes.** Found by the goldens (§G).
+- **Now:** the reference names some std items in passing. The rest is meant to come from `proviso sig std` (ref §16, P4), which doesn't exist yet.
+- **Need, for the goldens:**
+  - the module of `Out` and `In`; the goldens assume `std.io`, where `IoError` lives;
+  - `List.pop` and `List.len`;
+  - the `ensures` of `List.push`. Row 17 is `refuted` only if they let the verifier build a counterexample; otherwise it is `unknown`;
+  - `Pool.insert` and `Pool.get`;
+  - a way to open a file as a resource. Rows 8 and 14 use a test-local resource instead.
+- **Proposal:** write the `sig` of the std items that phases 1–3 need before phase 1 ends, so goldens and the P4 trial can use them.
 
 ## C. Tooling
 
@@ -220,6 +253,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Now:** an ordered log of capability calls (task, object, operation, arguments, result, completion order) and channel, join and cancellation choices. Replay is simulated by default and reports divergence.
 - **Need:** the log format, how arguments are digested or stored, and how precisely divergence is reported.
 - **Acceptance test:** two tasks write different contents to the same file through copies of a `Dir`, and both are joined in the same order. Replay must reproduce every result the program observed and report the overlapping writes (see §F).
+- **Goldens:** f10 asserts the log entries and the overlap report with provisional directives (`expect-log`, `expect-report`) until this format exists.
 
 **T6 — `diff-contracts` classification.**
 - **Need:** precise rules for BREAKING, WEAKENED, STRENGTHENED, AUTHORITY and TRUST.
@@ -228,6 +262,15 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 **T7 — Applying fixes.** Only fixes with `changes_behavior: false` may be applied automatically. Which kinds qualify (formatting, imports, adding a missing `try`?), and who decides?
 
 **T8 — Verification determinism.** Can cached proof results be shared across machines and continuous-integration runs? What invalidates them?
+
+**T10 — Runtime reports.** Found by the goldens (§G).
+- **Now:** a defect makes `main` exit with code 70 and write a post-mortem (ref §7.3). A resource whose `abandon` hits a defect is "reported as leaked" (§10), and replay "reports" overlapping calls (§9.8).
+- **Need:** where these reports go (stderr, the post-mortem, `--json` output) and in what form. Until then, runtime goldens assert them with provisional `expect-report` kinds (tests/DIAGNOSTICS.md).
+
+**T11 — `sig` beyond the worked example.** Found by the goldens (§G).
+- **Now:** ref §17 shows `sig` output for three items.
+- **Need:** how `sig` shows an `inout` that holds a resource (§F row 14: "`sig` says so"), reach through data (a parameter whose records hold capabilities), and the `defects` line under the v1 profile. Also whether enums are listed: §17's output leaves out `pub enum LoadError`.
+- **Until then:** f14's `.sig` is matched loosely, line by line (tests/golden/README.md).
 
 ## D. Process
 
@@ -263,11 +306,11 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - `proviso edit`, `trace`, `postmortem` and `serve`;
 - packages.
 
-**Test format.** Every phase adds golden tests, as in the Pith design:
-- A file containing `// expect-error: <code>` must fail `proviso check` with that diagnostic.
-- A `.out`, `.sig` or `.fmt` file holds the expected output of `run`, `sig` or `fmt`.
+**Test format.** Every phase adds golden tests, as in the Pith design. The format is specified in [tests/golden/README.md](tests/golden/README.md):
+- A file with `// expect-error: <code>` header lines must fail `proviso check` with exactly that set of codes. The codes are catalogued in [tests/DIAGNOSTICS.md](tests/DIAGNOSTICS.md).
+- A `.out`, `.sig` or `.fmt` file holds the expected output of `run`, `sig` or `fmt`. Header directives give the phase, the exit code, the expected runtime reports, and whether to record and replay.
 
-Each §F row becomes one such test.
+All 18 §F rows are already written as `tests/golden/fNN_*.proviso`, each tagged with its phase from the table above. Row 14's `.sig` can only be checked from phase 4. Writing them found the gaps in §G.
 
 **P4 — v1 success criteria.** First measured after phase 4, and again after phase 5:
 - **The reference is enough.** A fresh agent session given only REFERENCE.md and the `proviso sig` output for `std` writes a correct small program within two `proviso check` attempts. The program is the §17 loader plus a summary report. This is the direct test of P1.
@@ -314,7 +357,7 @@ Each §F row becomes one such test.
 
 ## F. Acceptance counterexamples
 
-These come from the soundness reviews of v2 and v3. Each one broke a guarantee as written. The first implementation must show the stated outcome for every one, and they stay in the test suite permanently. Each row becomes a golden test (P3), and P3 assigns each row to the phase that must make it pass.
+These come from the soundness reviews of v2 and v3. Each one broke a guarantee as written. The first implementation must show the stated outcome for every one, and they stay in the test suite permanently. Each row becomes a golden test (P3), and P3 assigns each row to the phase that must make it pass. The tests are in [tests/golden](tests/golden/README.md).
 
 | # | Counterexample | Required outcome |
 |---|---|---|
@@ -336,3 +379,21 @@ These come from the soundness reviews of v2 and v3. Each one broke a guarantee a
 | 16 | `&span.lo` passed to `x: inout(partial) Int` | Rejected: a part of a refined value cannot be passed as `inout(partial)` |
 | 17 | `type Sorted = distinct List[Int] where self.is_sorted()`, then `s.value.push(0)` | Rejected unless `push`'s admissible `ensures` re-establish sortedness |
 | 18 | A capability operation is cancelled, or hits a defect, halfway through updating its `state` | The `state` is unchanged: cancellation waits until the operation returns, and a defect discards its changes |
+
+## G. Spec gaps found while writing goldens
+
+Writing the §F rows as complete programs ([tests/golden](tests/golden/README.md)) showed where the reference is ambiguous or too thin to write from. The goldens don't invent semantics there: they take the most literal reading, avoid the construct, or use a test-local stand-in, and their headers say so. Each gap is filed below as a Q, T or P item. The new items (Q33–Q36, T10, T11) are not yet tagged in the reference.
+
+| Gap | Goldens | Filed as |
+|---|---|---|
+| Whether a call marked with an `else` form is a valid statement; `return` and body extent in closures; whether `it` is bound in `else { … }` | f05, f08, f13 | Q33 |
+| The lifetime and captures of a closure bound to a local | f13 | Q34 |
+| What finally consumes a resource that holds no resource fields | f08, f09, f14, f15 | Q35 |
+| The std items the rows need: `Out`'s module, `List.pop`, `List.push`'s contract, `Pool`'s operations, opening a file | f07, f08, f09, f14, f17 | Q36 |
+| `Dir`'s full operation list; narrowing a capability that has no permission list (`Out`); `create` for new files; the root of `sys.fs` | f04, f10, f11 | Q6 |
+| Whether `&span.lo` drops facts about `span.hi` | f03, f16 | Q28 |
+| The signatures of `spawn`, `join` and `supervise` | f10, f18 | Q15, Q16 |
+| How defects, leaks and replay overlaps are reported | f09, f10 | T9, T10 |
+| How `sig` shows an `inout` that holds a resource | f14 | T11 |
+| Row 13 as written calls the fallible `w` unmarked, and its `try` adds a second reason for rejection. The golden makes `w` infallible so that reach is the only reason. | f13 | the row's wording |
+| P3 places neither `check` and `assert` (needed in phase 2 by §17's `parse_user` and by f09) nor `supervise` (f18, phase 6) | f09, f18 | P3 |
