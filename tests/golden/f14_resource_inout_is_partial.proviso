@@ -14,7 +14,7 @@
 // (OPEN_QUESTIONS Q35). It also assumes `List.pop`, `List.len`, and `Out` in
 // `std.io` (Q36). How `sig` shows such an `inout` is open (T11). Printing
 // through a stored `Out` needs `keep` parameters and capability-typed fields,
-// which P3 doesn't put in phase 2.
+// both in phase 2 (P3).
 
 use std.io { Out, IoError }
 

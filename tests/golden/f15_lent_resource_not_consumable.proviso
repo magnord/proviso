@@ -9,7 +9,7 @@
 //
 // The test assumes that `commit` and `abandon` consume the Txn when they
 // return (OPEN_QUESTIONS Q35). It also needs closures and function types with
-// modes, which P3 doesn't put in phase 2.
+// modes, both in phase 2 (P3).
 
 resource record Txn {
     id: Int
