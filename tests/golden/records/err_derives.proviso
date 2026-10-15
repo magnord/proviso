@@ -4,9 +4,12 @@
 // expect-error: E0306
 // expect-error: E0307
 // expect-error: E0309
+// expect-error: E0310
 // `==` needs a record that derives `Eq`, and `show()` and interpolation need one that
 // derives `Show` (STD.md). A record can derive an interface only when every field's type
-// implements it. `Float` has IEEE `==` but doesn't implement `Eq` (REFERENCE §12.2).
+// implements it. `Float` has IEEE `==` but doesn't implement `Eq` (REFERENCE §12.2). A
+// record can derive only `Eq`, `Ord`, `Hash` and `Show` (§4.4). A rejected `derives` entry
+// may have named any of them, so uses of them aren't reported again (§15.1).
 use std.io { Out }
 
 record Plain {
@@ -34,8 +37,22 @@ record Unknown derives(Sortable) {                  // <- E0307
     n: Int
 }
 
+record Copied derives(Copy) {                       // <- E0310
+    n: Int
+}
+
+record Added derives(Eq, Add) {                     // <- E0310
+    n: Int
+}
+
+fn uses_rejected(u: Unknown, c: Copied, a: Added) -> Text {
+    let same = u == u and c == c and a.eq(a)
+    return f"{u} {c.show()} {a}"
+}
+
 fn uses_plain(a: Plain, b: Plain) -> Bool {
     let shown = a.show()                            // <- E0303
     let text = f"{a}"                               // <- E0306
+    let same = a.eq(b)                              // <- E0303
     return a == b                                   // <- E0306
 }

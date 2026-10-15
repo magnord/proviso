@@ -293,8 +293,16 @@ impl Interp<'_> {
         let mut frame: Frame = adt.fields.to_vec();
         frame.resize(variant.locals, Value::Unit);
         for pred in &variant.preds {
-            if self.bool(pred.expr, &mut frame)? {
-                continue;
+            match self.bool(pred.expr, &mut frame) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                // The predicate runs on behalf of the construction or assignment, so a defect
+                // in it is traced back there, as a defect in a call is.
+                Err(Unwind::Defect(mut defect)) => {
+                    defect.callers.push(span);
+                    return Err(Unwind::Defect(defect));
+                }
+                Err(other) => return Err(other),
             }
             let text = file.slice(self.m.exprs[pred.expr].span);
             let message = match pred.field {
@@ -576,6 +584,7 @@ impl Interp<'_> {
                 Value::Unit
             }
             (Builtin::Show, value) => Value::Text(show(value, &self.p.decls).into()),
+            (Builtin::Eq, value) => Value::Bool(equal(value, &args[0])),
             (Builtin::ByteLen, Value::Text(text)) => Value::Int(text.len() as i128, IntTy::I64),
             (Builtin::IsEmpty, Value::Text(text)) => Value::Bool(text.is_empty()),
             (builtin, receiver) => unreachable!("{builtin:?} does not apply to {receiver:?}"),
@@ -668,57 +677,95 @@ fn compare(op: BinOp, a: &Value, b: &Value) -> bool {
     }
 }
 
-/// `==`, built into scalars and derived for records, which are equal when every field is.
+/// `==`, built into scalars and derived for records, which are equal when every field is. It
+/// walks nested records with a list of its own rather than recursion, so no value is too deep
+/// for the native stack.
 fn equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Int(x, _), Value::Int(y, _)) => x == y,
-        (Value::F64(x), Value::F64(y)) => x == y,
-        (Value::F32(x), Value::F32(y)) => x == y,
-        (Value::Bool(x), Value::Bool(y)) => x == y,
-        (Value::Char(x), Value::Char(y)) => x == y,
-        (Value::Text(x), Value::Text(y)) => x == y,
-        (Value::Unit, Value::Unit) => true,
-        (Value::Adt(x), Value::Adt(y)) => {
-            x.variant == y.variant && x.fields.iter().zip(y.fields.iter()).all(|(x, y)| equal(x, y))
+    let mut pairs = vec![(a, b)];
+    while let Some(pair) = pairs.pop() {
+        let same = match pair {
+            (Value::Int(x, _), Value::Int(y, _)) => x == y,
+            (Value::F64(x), Value::F64(y)) => x == y,
+            (Value::F32(x), Value::F32(y)) => x == y,
+            (Value::Bool(x), Value::Bool(y)) => x == y,
+            (Value::Char(x), Value::Char(y)) => x == y,
+            (Value::Text(x), Value::Text(y)) => x == y,
+            (Value::Unit, Value::Unit) => true,
+            (Value::Adt(x), Value::Adt(y)) => {
+                pairs.extend(x.fields.iter().zip(y.fields.iter()));
+                x.variant == y.variant
+            }
+            (a, b) => unreachable!("cannot compare {a:?} and {b:?}"),
+        };
+        if !same {
+            return false;
         }
-        (a, b) => unreachable!("cannot compare {a:?} and {b:?}"),
     }
+    true
 }
 
 /// The `Show` text of a value. Floats print the shortest text that reads back as the same
 /// value, always with a fraction or exponent, such as `1.0`, `0.1` and `1e21`. A record
 /// writes the expression that builds it, as a derived `Show` does (STD.md).
 pub fn show(value: &Value, decls: &Decls) -> String {
-    match value {
-        Value::Int(x, _) => x.to_string(),
-        Value::F64(x) => format!("{x:?}"),
-        Value::F32(x) => format!("{x:?}"),
-        Value::Bool(b) => b.to_string(),
-        Value::Char(c) => c.to_string(),
-        Value::Text(text) => text.to_string(),
-        Value::Unit => "()".to_string(),
-        Value::Adt(adt) => {
-            let def = decls.adt(adt.def);
-            let variant = &def.variants[adt.variant.index()];
-            let fields: Vec<String> = (variant.fields.iter().zip(adt.fields.iter()))
-                .map(|(field, value)| format!("{}: {}", field.name, debug_repr(value, decls)))
-                .collect();
-            format!("{}({})", variant.name, fields.join(", "))
-        }
-        Value::IoError(message) => message.to_string(),
-        Value::Cap(Cap::Stdout) => "Out".to_string(),
-    }
+    write_value(value, false, decls)
 }
 
 /// The `debug` text of a value: like `show`, but text and chars are quoted and written with
 /// Proviso's escapes, so the output reads as a literal. A record is written as `show` writes
 /// it, whether or not it derives `Show` (OPEN_QUESTIONS P5).
 fn debug_repr(value: &Value, decls: &Decls) -> String {
-    match value {
-        Value::Text(text) => quote(text, '"'),
-        Value::Char(c) => quote(c.encode_utf8(&mut [0; 4]), '\''),
-        other => show(other, decls),
+    write_value(value, true, decls)
+}
+
+/// Writes `value` as `show` does, or as `debug` does when `quoted`. A record's fields are
+/// always quoted. Like [`equal`], it keeps the parts still to write in a list of its own, so
+/// no value is too deep for the native stack.
+fn write_value(value: &Value, quoted: bool, decls: &Decls) -> String {
+    enum Part<'v> {
+        Value(&'v Value, bool),
+        Text(&'v str),
     }
+    let mut out = String::new();
+    let mut parts = vec![Part::Value(value, quoted)];
+    while let Some(part) = parts.pop() {
+        let (value, quoted) = match part {
+            Part::Text(text) => {
+                out.push_str(text);
+                continue;
+            }
+            Part::Value(value, quoted) => (value, quoted),
+        };
+        match value {
+            Value::Int(x, _) => out.push_str(&x.to_string()),
+            Value::F64(x) => out.push_str(&format!("{x:?}")),
+            Value::F32(x) => out.push_str(&format!("{x:?}")),
+            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::Char(c) if quoted => out.push_str(&quote(c.encode_utf8(&mut [0; 4]), '\'')),
+            Value::Char(c) => out.push(*c),
+            Value::Text(text) if quoted => out.push_str(&quote(text, '"')),
+            Value::Text(text) => out.push_str(text),
+            Value::Unit => out.push_str("()"),
+            Value::Adt(adt) => {
+                let variant = &decls.adt(adt.def).variants[adt.variant.index()];
+                out.push_str(&variant.name);
+                out.push('(');
+                // Pushed in reverse, so they are written in order.
+                parts.push(Part::Text(")"));
+                for (i, (field, value)) in variant.fields.iter().zip(adt.fields.iter()).enumerate().rev() {
+                    parts.push(Part::Value(value, true));
+                    parts.push(Part::Text(": "));
+                    parts.push(Part::Text(&field.name));
+                    if i > 0 {
+                        parts.push(Part::Text(", "));
+                    }
+                }
+            }
+            Value::IoError(message) => out.push_str(message),
+            Value::Cap(Cap::Stdout) => out.push_str("Out"),
+        }
+    }
+    out
 }
 
 fn quote(text: &str, quote: char) -> String {

@@ -1,1 +1,1 @@
-[debug records/derives.proviso:31:5] Tagged(at: Point(x: 1, y: -2), name: "say \"hi\"\n", mark: '\'', weight: 0.5, on: true), Hidden(secret: 7)
+[debug records/derives.proviso:32:5] Tagged(at: Point(x: 1, y: -2), name: "say \"hi\"\n", mark: '\'', weight: 0.5, on: true), Hidden(secret: 7)

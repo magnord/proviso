@@ -16,7 +16,7 @@ impl AdtId {
     pub const SYSTEM: AdtId = AdtId(0);
 }
 
-/// An interface of the prelude.
+/// An interface of the prelude, or of the standard library such as `std.io`'s `Out`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct IfaceId(u32);
 
@@ -29,6 +29,11 @@ impl IfaceId {
 
     pub fn name(self) -> &'static str {
         ["Eq", "Ord", "Show", "Out"][self.0 as usize]
+    }
+
+    /// Whether a record can derive it (REFERENCE §4.4).
+    pub fn derivable(self) -> bool {
+        matches!(self, IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW)
     }
 }
 
@@ -60,12 +65,24 @@ pub struct AdtDef {
     /// What `derives` names, including a derive whose fields don't all implement it, so that
     /// its uses aren't reported again.
     pub derives: Vec<IfaceId>,
+    /// A rejected `derives` entry or `impl` block may have given it more interfaces, so it is
+    /// taken to implement each one a record can derive, and their uses aren't reported again.
+    pub unknown_interfaces: bool,
+    /// A rejected `impl` block may have given it methods, so a call of a method it doesn't
+    /// have isn't reported.
+    pub unknown_methods: bool,
 }
 
 impl AdtDef {
     pub fn record(name: &str, fields: Vec<FieldDef>) -> AdtDef {
         let variant = VariantDef { name: name.into(), locals: fields.len(), fields, preds: Vec::new() };
-        AdtDef { name: name.into(), variants: vec![variant], derives: Vec::new() }
+        AdtDef {
+            name: name.into(),
+            variants: vec![variant],
+            derives: Vec::new(),
+            unknown_interfaces: false,
+            unknown_methods: false,
+        }
     }
 
     /// The one variant of a record.
@@ -136,7 +153,10 @@ impl Decls {
     /// implements nothing, so callers decide whether it is worth reporting.
     pub fn implements(&self, ty: &Ty, iface: IfaceId) -> bool {
         match ty {
-            Ty::Adt(id, _) => self.adt(*id).derives.contains(&iface),
+            Ty::Adt(id, _) => {
+                let def = self.adt(*id);
+                def.derives.contains(&iface) || (def.unknown_interfaces && iface.derivable())
+            }
             // Text is ordered by code point (REFERENCE §12.3).
             Ty::Int(_) | Ty::Char | Ty::Text => matches!(iface, IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW),
             // `Float` has IEEE `==` built in, but no `Eq` (REFERENCE §12.2, Q22).
@@ -148,8 +168,12 @@ impl Decls {
         }
     }
 
-    /// How diagnostics write `ty`.
+    /// How diagnostics write `ty`. A standard library type is qualified when a record of the
+    /// module has its name, so the two can be told apart.
     pub fn display<'a>(&'a self, ty: &'a Ty) -> impl fmt::Display + 'a {
+        let std = move |name: &'static str, qualified: &'static str| {
+            if self.adts.iter().any(|adt| &*adt.name == name) { qualified } else { name }
+        };
         fmt::from_fn(move |f| {
             f.write_str(match ty {
                 Ty::Int(it) => it.name(),
@@ -160,10 +184,27 @@ impl Decls {
                 Ty::Unit => "Unit",
                 Ty::Never => "Never",
                 Ty::Adt(id, _) => &self.adt(*id).name,
-                Ty::IoError => "IoError",
+                Ty::IoError => std("IoError", "std.io.IoError"),
+                Ty::Cap(cap) if cap.iface == IfaceId::OUT => std("Out", "std.io.Out"),
                 Ty::Cap(cap) => cap.iface.name(),
                 Ty::Error => "{unknown}",
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn std_types_are_qualified_when_a_record_shares_their_name() {
+        let mut decls = Decls::default();
+        assert_eq!(decls.display(&Ty::IoError).to_string(), "IoError");
+        assert_eq!(decls.display(&Ty::out()).to_string(), "Out");
+        let own = decls.push(AdtDef::record("IoError", Vec::new()));
+        assert_eq!(decls.display(&Ty::IoError).to_string(), "std.io.IoError");
+        assert_eq!(decls.display(&Ty::adt(own)).to_string(), "IoError");
+        assert_eq!(decls.display(&Ty::out()).to_string(), "Out");
     }
 }

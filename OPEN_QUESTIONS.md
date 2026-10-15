@@ -391,9 +391,10 @@ All 18 §F rows are already written as `tests/golden/fNN_*.proviso`, each tagged
 - **Defect reports** go to stderr as `defect[<kind>]: <message>`, followed by `at` and `called from` lines with locations and anchors. A run of identical call sites collapses into one line. This is a provisional answer to T10 for defects; leaks and overlaps are still open.
 - **`debug`** writes to stderr as `[debug <path>:<line>:<col>] <values>`, with text and chars quoted and escaped as Proviso literals.
 - **Record refinements** (phase 2). A field's `where` sees only that field. A record-level `where` sees every field. Field types and predicates may name records declared later in the file.
-- **Runtime refinement checks** (phase 2). A construction, a `with` and an assignment to any part of a value check the refinements of the records they build or change. A nested assignment such as `w.span.hi = 5` checks every record on the path, innermost first. The defect names the value, the type and the predicate.
-- **`with`** labels every field it replaces, at least one, in declaration order, like the arguments of a call (§3).
-- **Constructions are values.** A construction or a `with` used as a statement is reported like any other unused value (E0102).
+- **Runtime refinement checks** (phase 2). A construction, a `with` and an assignment to any part of a value check the refinements of the records they build or change. A nested assignment such as `w.span.hi = 5` checks every record on the path, innermost first. Within one record, the fields' refinements are checked in field order, then the record's, and the first that breaks is reported. The defect names the value, the type and the predicate. A defect inside a predicate, such as an overflow, is traced back to the construction or assignment that checked it.
+- **Calls in refinements** (phase 2). A refinement may call any function, since the v1 profile only runs it. §8.1 allows only `pred` functions, which phase 5 brings along with the verifier, so from then on a call of a plain `fn` in a refinement is rejected.
+- **`with`** labels every field it replaces, at least one, once each and in declaration order. Unlike a call (H3), it needs the label even on a one-field record, since the label is what says which fields it replaces.
+- **`main` and visibility.** `main` is `pub` so that the runtime can call it (§7.4), not to export it, so its signature may mention private types, as f09's `fails Stop` does. §3 makes no such exception.
 - **`debug`** writes a record the way a derived `Show` would, whether or not the record derives `Show`.
 
 ## E. Experiment plan

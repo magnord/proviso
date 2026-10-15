@@ -1,13 +1,13 @@
 // phase: 2.1
 // expect-error: E0202
-// expect-error: E0203
 // expect-error: E0204
 // expect-error: E0210
 // expect-error: E0301
 // expect-error: E0307
-// A record's name is PascalCase and unique in the module, and may not reuse a prelude
-// type's name. Its fields are snake_case and distinct, and their types resolve in any
-// order. A `where` clause is a `Bool`.
+// A record's name is PascalCase and unique in the module. Its fields are snake_case and
+// distinct, and their types resolve in any order. A `where` clause is a `Bool`. A rejected
+// name or field is reported once, and its uses and what it collides with are not
+// (REFERENCE §15.1).
 record Point {
     x: Int
     y: Int
@@ -17,12 +17,15 @@ record Point {                                      // <- E0202
     z: Int
 }
 
-record List {                                       // <- E0203
-    items: Int
-}
-
 record bad_name {                                   // <- E0204
     x: Int
+}
+
+record other_name {                                 // <- E0204
+    x: Int
+}
+
+fn other_name() {
 }
 
 record Fields {
@@ -44,6 +47,20 @@ record Whole {
 
 record Commas { a: Int, b: Text }
 
-fn uses_them(p: Point, f: Fields, c: Commas) -> Int {
-    return p.x + f.later.n + c.a
+record Dup {
+    a: Int
+    a: Text                                         // <- E0210
+}
+
+fn uses_them(p: Point, f: Fields, c: Commas, b: bad_name) -> Int {
+    other_name()
+    let d = Dup(a: 1)
+    let e = d.with(a: "two")
+    let t: Text = e.a
+    let lower: Text = f.lower
+    return p.x + f.later.n + c.a + b.x + d.a
+}
+
+fn applied(p: Point[Int]) -> Int {                  // <- E0307
+    return p.x
 }

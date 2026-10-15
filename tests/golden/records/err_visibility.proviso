@@ -1,0 +1,47 @@
+// phase: 2.1
+// expect-error: E0211
+// A `pub` item may not mention a private type in its signature or, for a `pub record`, its
+// fields (REFERENCE §3), and a `pub` item may not mention a `pub(pkg)` one either. `main` is
+// `pub` so that the runtime can call it, so it may (OPEN_QUESTIONS P5).
+record Point {
+    x: Int
+}
+
+pub(pkg) record Shared {
+    n: Int
+}
+
+pub record Open {
+    n: Int
+}
+
+record Stop derives(Show) {
+    code: Int
+}
+
+pub record Line {
+    a: Point                                        // <- E0211
+    b: Open
+}
+
+pub(pkg) record Near {
+    p: Point                                        // <- E0211
+    s: Shared
+}
+
+pub fn origin() -> Point {                          // <- E0211
+    return Point(x: 0)
+}
+
+pub fn wide(s: Shared, o: Open) {                   // <- E0211
+}
+
+pub(pkg) fn near(s: Shared, p: Point) {             // <- E0211
+}
+
+fn private(p: Point, s: Shared) -> Line {
+    return Line(a: p, b: Open(n: s.n))
+}
+
+pub fn main(sys: keep System) fails Stop {
+}

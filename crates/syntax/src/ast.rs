@@ -18,8 +18,12 @@ pub struct Module {
     pub stmts: Arena<Stmt>,
     pub types: Arena<TypeExpr>,
     pub interner: Interner,
-    /// Functions whose declarations failed to parse. Calls of them are not reported again.
+    /// Names of items whose declarations were rejected, such as a function that failed to
+    /// parse or a later-phase `enum`. Uses of them are not reported again.
     pub poisoned: HashSet<Symbol>,
+    /// Types named by a rejected `impl` block, such as `Point` in `impl Show for Point`. The
+    /// block may have given them methods and interfaces, so uses of those aren't reported.
+    pub impls: HashSet<Symbol>,
 }
 
 impl Module {
@@ -148,6 +152,8 @@ pub enum TypeExprKind {
 pub struct Block {
     pub stmts: Vec<StmtId>,
     pub span: Span,
+    /// The block was never closed, so the code that ended it is missing.
+    pub unclosed: bool,
 }
 
 pub struct Stmt {

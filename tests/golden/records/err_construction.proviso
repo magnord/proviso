@@ -1,13 +1,12 @@
 // phase: 2.1
-// expect-error: E0102
 // expect-error: E0206
 // expect-error: E0207
 // expect-error: E0208
 // expect-error: E0301
 // expect-error: E0303
 // A construction passes every field, labelled in declaration order, like a call (REFERENCE
-// §3, §4.4). A construction has no effect but its value, so it isn't a statement. A `with`
-// on something that isn't a record is reported once.
+// §3, §4.4). A construction and a `with` are calls, so either may be a statement (§2, H3).
+// A `with` on something that isn't a record is reported once.
 record Point {
     x: Int
     y: Int
@@ -25,7 +24,7 @@ fn builds() {
     let e = Wrapper(Point(x: 1, y: 2))
     let f = Wrapper(inner: 3)                       // <- E0301
     let g: Point = Wrapper(inner: Point(x: 0, y: 0))   // <- E0301
-    Point(x: 1, y: 2)                               // <- E0102
-    e.inner.with(x: 5)                              // <- E0102
+    Point(x: 1, y: 2)
+    e.inner.with(x: 5)
     e.inner.x.with(x: 5)                            // <- E0303
 }
