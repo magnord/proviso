@@ -41,7 +41,7 @@ The row for assembly carries the most important lesson. The argument that "agent
 
 Rust is the closest mainstream fit. Much of Proviso can be read as Rust's error-handling discipline plus Go's simplicity, with contracts, capabilities and a queryable compiler added. That framing is not new. What I hope is more useful is the specific reasoning behind each addition.
 
-## 4. What Goose showed
+## 4. What Goose and Pith showed
 
 Goose mattered for two reasons.
 
@@ -61,6 +61,26 @@ Goose mattered for two reasons.
 | A stale reference into a reused slot can read a different value of the same type (spec §9.4) | **Replaced** by generational handles | That is safe for memory but not for identity, and an identity bug is exactly the kind of silent wrongness agents miss |
 | `extern fn` obligations rest on the C side (spec §7.10) | **Kept, but made inspectable** | The trust boundary has to exist; it should also be something you can query |
 | A specification of about 258 KB | **A warning** (P1) | A precise spec is long, which threatens the "fits in context" goal |
+
+**Pith** is a parallel design for an LLM-oriented systems language. It reached much of the same thesis independently: local reasoning, a trusted `sig`, effects and contracts in signatures, no overloading or implicit conversions, enforced casing, and one canonical format. That is some evidence the thesis isn't idiosyncratic. Pith is smaller and can be built now. Proviso has stronger guarantees and nothing built. Proviso adopted these lessons from it:
+
+| Pith practice | Adopted in Proviso as |
+|---|---|
+| Delivery phases, each ending in a program that runs | v1 phases with runnable milestones (P3) |
+| A cheap success criterion: a fresh model writes a small tool from the spec within two compile attempts, with tokens measured against C | the v1 success criteria (P4), which are the direct test of P1 |
+| `expect-error`, `.sig` and `.fmt` golden files | the test format for the §F counterexamples, and canonical `sig` output (ref §15.1) |
+| Literals stay untyped until they meet an expected type | the literal typing rule (ref §2) |
+| Public signatures may not mention private types | the same rule (ref §3) |
+| Every access is qualified, with no imported names | an experiment variable (H12) |
+| An `alloc` effect | a proposed `noalloc` declaration (Q32) |
+| Every std function has docs, effects, and a contract or an explicit "none" | the standard library quality rule (ref §16) |
+
+Proviso deliberately differs where Pith keeps a problem the reviews fixed:
+- Pith's `sig` prints contracts that release builds strip, so a reader can't tell checked from unchecked. That is the false confidence enforcement levels exist to prevent.
+- Overflow panics in debug builds and wraps in release, so tests and production disagree.
+- A coarse `io` effect can't tell a read from a write, or name the resource.
+
+The biggest lesson was discipline rather than any feature: a v1 that can ship, milestones that run, and a criterion that can be measured soon. Proviso's enforcement levels make that discipline cheaper to follow. Before the verifier exists, v1 checks contracts at runtime and *says so* in `sig`, so a smaller first version never has to overclaim.
 
 ## 5. From the first thesis to the current one
 

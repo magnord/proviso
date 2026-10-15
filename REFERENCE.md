@@ -96,13 +96,17 @@ fn bump_twice() -> Int {
   | Raw and multi-line text | `r"…"`, `"""…"""` |
   | Collections | list `[a, b]`, map `["k": v]`, empty map `[:]`, range `a..b` (half-open), inclusive range `a..=b` |
 
+- **Literal types.** A literal is untyped until it meets an expected type: a declared type, a parameter, a return type, or the other operand of a binary operator. An integer literal can become any integer type that holds it, and a float literal any float type. With no expected type, integers are `Int`, floats `Float` and text `Text`. This is inference, not conversion: once chosen, a literal has exactly one type.
+  - A literal never becomes a `distinct` type; write `UserId(7)`.
+  - When a literal meets a refined type, the refinement is an ordinary obligation, discharged by the literal's value.
+  - A unit is part of a literal (`3.0[m]`), and a bare literal has no unit (§4.7).
 - **Keywords:** `all and any as assert attempt break cap check continue debug derives distinct effect effects else ensures enum example expect extern fail fails fn for if impl in inout interface invariant is it keep let loop match needs not observes opaque or pred property pub record requires resource return scope scoped self Self state tag take test todo trusted try type unique unit unreachable use uses var where while with`. Some words are contextual: `old` and `result` have meaning only inside `ensures`, and `pure` only after `trusted`. Keywords may still be used as method names after `.` (`s.with(…)`) and as module path segments (`std.test`).
 
 ## 3. Modules and names
 
 - **Modules.** A file is a module: `src/net/http.proviso` is module `net.http`. A dependency's modules are prefixed with the package name, and the standard library is `std.*`. Top-level items are order-independent.
-- **Imports.** `use a.b { X, y }` imports names. `use a.b` makes `b` usable as a qualifier, as in `b.y()`. `as` is allowed only to resolve a name collision (Q24). There are no glob imports.
-- **Visibility.** Items are private to their module by default. `pub` exports from the package and `pub(pkg)` exports within the package. A `pub record` exposes its fields and constructor; a `pub opaque record` exposes only the type and its `pub` methods.
+- **Imports.** `use a.b { X, y }` imports names. `use a.b` makes `b` usable as a qualifier, as in `b.y()`. `as` is allowed only to resolve a name collision (Q24). There are no glob imports (H12).
+- **Visibility.** Items are private to their module by default. `pub` exports from the package and `pub(pkg)` exports within the package. A `pub record` exposes its fields and constructor; a `pub opaque record` exposes only the type and its `pub` methods. A `pub` item may not mention a private type in its signature, its contracts or, for a `pub record`, its fields.
 - **Re-exports** for facades: `pub use internal.parser { parse_document }`. `proviso query def` always reports the original definition.
 - **One name, one symbol.** Every reference resolves to exactly one symbol, and a module has at most one item per name, so there is no overloading. The same name in different modules is fine.
 - **Methods.** Inherent methods live in `impl T { … }` in T's module. Interface methods live in `impl I for T` (§4.9). A method call `x.f()` must resolve to exactly one candidate, considering T's inherent methods and the methods of in-scope interfaces T implements. If it is ambiguous, call it as `I.f(x)`. Declaring an inherent method with the same name as a method of an interface T implements is an error.
@@ -468,6 +472,8 @@ The levels are not one scale from weak to strong. `[tested]` and `[doc]` are evi
 
 **There is no silent downgrade.** A `[verified]` clause that comes back unknown is a compile error. Changing it to `(checked)` or `(tested)` is an explicit edit, and `proviso diff-contracts` reports it as a weakening (Q10).
 
+**Before a verifier exists**, the v1 implementation checks `[verified]` clauses and refinements at runtime instead, and labels them `[checked]` in `sig`. That way v1 never claims more than it enforces (P3).
+
 ### 8.5 Outcomes and budget
 - **Four outcomes.** Each obligation ends as one of:
   - `proven`;
@@ -716,6 +722,7 @@ Whether these tools pay off is the central experiment (H10).
 - **Broken code.** Queries and edits work on code that does not compile. An answer that depends on broken parts carries `"partial": true` (T1).
 - **Locations.** Each location is given two ways: `file:line:col`, and a symbol anchor such as `users.parse_user+8` (line 8 of the item). The anchor stays stable when other items are edited (T3).
 - **Revisions.** Every top-level item has a revision hash, which structured edits use (T2).
+- **Canonical output.** The output of `sig`, `fmt` and `diff-contracts` is canonical and deterministic, so it can be checked in as golden files.
 
 ### 15.2 Commands
 | Command | Purpose |
@@ -731,7 +738,7 @@ Whether these tools pay off is the central experiment (H10).
 | `proviso diff-contracts A..B` | contract changes between two revisions |
 | `proviso trace <symbol> -- <run args>` | log a function's calls and results without editing code; works on replays |
 | `proviso postmortem <id>` | frames and locals of a defect |
-| `proviso fmt` | canonical format |
+| `proviso fmt [--check]` | canonical format; `--check` fails if a file would change |
 
 ### 15.3 Diagnostics
 ```json
@@ -770,6 +777,7 @@ Each change is classified as `BREAKING`, `WEAKENED`, `STRENGTHENED`, `AUTHORITY`
 
 - **Package files.** `proviso.toml` declares the package name, `lang = "0.3"` and the dependencies. `proviso.lock` pins dependencies by content hash.
 - **Standard library.** It ships with the toolchain, and `proviso sig std.text` describes the installed version, not a remembered one.
+- **Standard library quality.** Every public `std` function has a doc comment and its authority in its signature. It also has at least one contract, or `ensures(doc) "none"` stating that none applies.
 - **Compilation** is whole-program; Proviso code is never linked dynamically.
 - **Formatting.** There is one canonical format, applied by `proviso fmt`. `proviso check` reports a non-canonical file as a warning, never an error.
 

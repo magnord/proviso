@@ -82,8 +82,8 @@ If you are new, start with RATIONALE.md for the reasoning, then skim REFERENCE.m
 
 ## What happens next
 
-1. **Run the counterexamples.** A small interpreter runs the acceptance counterexamples in OPEN_QUESTIONS §F. Each one broke a guarantee in an earlier draft, and the semantics must survive all of them before any tooling is built (OPEN_QUESTIONS P3).
-2. **Build a checker on those semantics.** It covers parsing, names, types, kinds and ownership, capabilities and reach, refinements over linear arithmetic, `sig` and `diff-contracts`.
+1. **Build v1 in phases** (OPEN_QUESTIONS P3). v1 is a checker and an interpreter, and each phase ends in a program that runs. The acceptance counterexamples in OPEN_QUESTIONS §F become golden tests, each assigned to the phase that must make it pass. Until the verifier lands, contracts are checked at runtime, and `sig` says so.
+2. **Meet the v1 success criteria** (P4). A fresh agent writes a small program from the reference alone within two attempts, and its token cost is measured against Rust and TypeScript.
 3. **Run the experiment** (OPEN_QUESTIONS §E). Agents do the same maintenance tasks across variants that differ in one feature at a time. The tooling ablation is the clean test of the thesis, and Rust and TypeScript serve as baselines for overall competitiveness. The design's own predictions are written down in advance so they can be proven wrong.
 
 ## Background

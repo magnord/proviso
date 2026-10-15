@@ -59,6 +59,11 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Now:** `::[…]`, as in `max::[Int](…)` and `d.to::[cm]()`, so that `x[…]` in an expression is always indexing.
 - **Options:** a different bracket for type arguments; no explicit type arguments, using annotations instead.
 
+**H12 — Always-qualified access.**
+- **Now:** `use a.b { X, y }` imports names. `as` resolves collisions, and imported names count for the no-shadowing rule.
+- **Options:** every access is qualified (`fs.Dir`, `text.split_lines(…)`), with no imported names at all, as in the Pith design. This removes import lists, collisions, `as` and import shadowing, and every call shows where it comes from. The cost is verbosity.
+- **Measure:** tokens per task, failed edits, and calls that resolve to the wrong symbol.
+
 ## B. Semantics
 
 **Q1 — One error type per function.**
@@ -189,6 +194,11 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Now:** a type parameter may be instantiated with a type that has reach, and the result has that reach. Generic code needs `T: Copy` to copy, store or return a borrowed `T`.
 - **Open:** whether generic code needs a way to name the reach of a type parameter (`T uses C`), for example in generic service containers.
 
+**Q32 — Visible allocation.**
+- **Now:** value semantics hide allocation, and `proviso query costs` reports it only after the fact.
+- **Proposal:** a function may declare `noalloc`, checked transitively like an effect (as the Pith design's `alloc` effect is), and `sig` shows it. Hot paths in games need a guarantee, not just a report.
+- **Open:** how `noalloc` interacts with copy-on-write and reference counting, where an ordinary copy can allocate.
+
 ## C. Tooling
 
 **T1 — Broken code.**
@@ -233,12 +243,37 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **File extension:** the full `.proviso`. The short forms collide with verification tools: `.pvs` is used by PVS and `.pv` by ProVerif.
 - **Searchability:** search for "proviso lang" or "provisolang".
 
-**P3 — Order of implementation.** Semantics before tooling, so that every guarantee the tools report survives the counterexamples in §F:
-1. **Settle the foundations in the spec:** which facts a proof may assume (§8.4 of the reference) and the four kinds of type (§5.1). v3 does this.
-2. **Build a small interpreter** that runs the §F counterexamples, including scopes and cancellation, which the cancellation task in §E needs.
-3. **Build the checker over those semantics:** parser, names, types and exhaustiveness, kinds and ownership, capabilities and reach, refinements over linear arithmetic, then `sig` and `diff-contracts`.
+**P3 — v1 scope and delivery phases.** v1 is a checker plus a tree-walking interpreter; the C backend comes later. Semantics come before tooling, so every guarantee a tool reports survives the §F counterexamples. Each phase ends in something that runs:
 
-The first milestone is a small subset whose reported guarantees survive every §F example. The C backend comes later.
+| Phase | Scope | Milestone |
+|---|---|---|
+| 1. Pipeline | lexer, parser, names, scalar types and functions, `proviso check`, an interpreter for `run` with a stub `System` that provides only `stdout`, the golden test runner | hello world and `fib` run; an `expect-error` golden passes |
+| 2. Data and ownership | records, enums, `match`, collections, `Option` and `Result`, `fails`/`try`/`else`/`attempt`, kinds and moves, `inout` atomicity, resources and `Abandon`, pools and handles, `example` and `test` | `parse_user` from the reference's worked example (§17) runs with its examples; §F rows 6–9, 14 and 15 pass |
+| 3. Authority | capabilities and permissions, `observes` and `effects`, `uses` and reach, retention, closure lifetimes, `cap record` state, `MemDir` written in Proviso | the whole §17 module runs, including its `MemDir` test; §F rows 4, 5, 11 and 13 pass |
+| 4. Contracts and tools | contracts under the v1 profile, interface contract rules, `sig`, `fmt`, `diff-contracts` | `proviso sig` reproduces the reference's §17 output as a golden file; §F row 12 passes; the P4 criteria are first measured |
+| 5. Verifier | the predicate fragment over linear arithmetic, admissibility, refinements under mutation | §F rows 1–3, 16 and 17 are rejected at compile time; `sig` levels move from `[checked]` to `[verified]` |
+| 6. Concurrency and replay | `scope`, tasks, cancellation, channels, `--record` and `replay` | §F rows 10 and 18 pass; the §E cancellation task runs |
+
+**The v1 profile.** Until phase 5 there is no verifier. Clauses that would be `[verified]`, and refinements, are checked at runtime instead, and `sig` labels them `[checked]`. So v1 never claims a guarantee it doesn't enforce. The enforcement levels are what make this honest staging possible.
+
+**Deferred past v1:**
+- the C backend;
+- units and tags;
+- `any I`;
+- `proviso edit`, `trace`, `postmortem` and `serve`;
+- packages.
+
+**Test format.** Every phase adds golden tests, as in the Pith design:
+- A file containing `// expect-error: <code>` must fail `proviso check` with that diagnostic.
+- A `.out`, `.sig` or `.fmt` file holds the expected output of `run`, `sig` or `fmt`.
+
+Each §F row becomes one such test.
+
+**P4 — v1 success criteria.** First measured after phase 4, and again after phase 5:
+- **The reference is enough.** A fresh agent session given only REFERENCE.md and the `proviso sig` output for `std` writes a correct small program within two `proviso check` attempts. The program is the §17 loader plus a summary report. This is the direct test of P1.
+- **Token cost.** The program's token count, measured with one stated tokenizer, is reported next to idiomatic Rust and TypeScript versions. More than 1.5 times the Rust version is a design warning.
+- **Counterexamples.** Every §F row assigned to a finished phase passes as a golden test.
+- **Standard library quality.** Every public `std` function meets the quality rule in the reference (§16).
 
 **Implementation notes (non-normative, moved from the reference).**
 - **Compilation.** The whole program is compiled and monomorphized into one C file, as Goose does. TinyCC runs it in-process for `proviso run`; the system C compiler produces `proviso build` output.
@@ -249,7 +284,7 @@ The first milestone is a small subset whose reported guarantees survive every §
 
 ## E. Experiment plan
 
-- **Core subset:** the P3 checker plus an interpreter.
+- **Core subset:** v1 after phase 6 (P3). The success criteria in P4 come first.
 - **Syntax variants:** H1–H8 are implemented as alternative surface syntaxes over one syntax tree, so only the surface changes. Each run changes one variable.
 - **Tooling variants:** H9 and H10 are toggled on and off.
 - **Baselines:** the same tasks in Rust and TypeScript. They measure overall competitiveness only: they cannot separate training familiarity from differences in libraries, tooling and semantics. The within-Proviso tooling ablation (H10) is the clean test of the central thesis.
@@ -279,7 +314,7 @@ The first milestone is a small subset whose reported guarantees survive every §
 
 ## F. Acceptance counterexamples
 
-These come from the soundness reviews of v2 and v3. Each one broke a guarantee as written. The first implementation must show the stated outcome for every one, and they stay in the test suite permanently.
+These come from the soundness reviews of v2 and v3. Each one broke a guarantee as written. The first implementation must show the stated outcome for every one, and they stay in the test suite permanently. Each row becomes a golden test (P3), and P3 assigns each row to the phase that must make it pass.
 
 | # | Counterexample | Required outcome |
 |---|---|---|
