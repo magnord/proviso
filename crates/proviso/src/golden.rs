@@ -1,20 +1,16 @@
-//! Golden tests (OPEN_QUESTIONS P3). Each `*.proviso` file under a root directory is one
-//! test, configured by full-line comments anywhere in the file:
+//! The golden test runner (OPEN_QUESTIONS P3). `tests/golden/README.md` specifies the format.
 //!
-//! - `// phase: N` (required): files for a phase after [`crate::IMPLEMENTED_PHASE`] are pending.
-//! - `// expect-error: E0301`, once per code: `check` must fail with exactly this set of
-//!   error codes.
-//! - `// expect-exit: N`: the exit code of `run`, 0 by default.
-//! - `// flags: --incomplete`: check and run with `--incomplete`.
-//!
-//! A file without `expect-error` must check cleanly. If it has a `main`, it is run, and its
-//! stdout must equal `<name>.out`. When `<name>.err` exists, stderr must equal it too.
-//! Setting `bless` writes the actual output to those files instead of comparing.
+//! Every `*.proviso` file under the root is one test. Files for a phase after
+//! [`crate::IMPLEMENTED_PHASE`] are pending. Directives this runner can't check yet
+//! (`expect-report`, `expect-log`, `run`, `schedules`, and `sig` before phase 4) make an active
+//! file fail rather than pass unchecked. Setting `bless` writes the actual output to the
+//! `.out` and `.err` files instead of comparing.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use proviso_check::Options;
+use proviso_syntax::diag::codes;
 
 use crate::{compile, run};
 
@@ -58,15 +54,31 @@ enum Verdict {
     Pending,
 }
 
+/// The phase from which `// sig:` directives are checked; `sig` arrives in phase 4.
+const SIG_PHASE: u32 = 4;
+
+/// A line of a `.out` file that separates the outputs a run may legitimately produce.
+const ALTERNATIVE: &str = "--- or ---";
+
 struct Header {
     phase: Option<u32>,
     expect_errors: Vec<String>,
     expect_exit: i32,
     incomplete: bool,
+    sig: bool,
+    /// Directives in the format that this runner cannot check yet.
+    unchecked: Vec<String>,
 }
 
 fn parse_header(text: &str) -> Result<Header, String> {
-    let mut header = Header { phase: None, expect_errors: Vec::new(), expect_exit: 0, incomplete: false };
+    let mut header = Header {
+        phase: None,
+        expect_errors: Vec::new(),
+        expect_exit: 0,
+        incomplete: false,
+        sig: false,
+        unchecked: Vec::new(),
+    };
     for line in text.lines() {
         let Some(comment) = line.trim().strip_prefix("//") else { continue };
         let comment = comment.trim();
@@ -83,6 +95,12 @@ fn parse_header(text: &str) -> Result<Header, String> {
                     other => return Err(format!("unknown flag `{other}` in: {line}")),
                 }
             }
+        } else if comment.starts_with("sig:") {
+            header.sig = true;
+        } else if let Some(directive) =
+            ["expect-report:", "expect-log:", "run:", "schedules:"].iter().find(|d| comment.starts_with(**d))
+        {
+            header.unchecked.push(directive.trim_end_matches(':').to_string());
         }
     }
     Ok(header)
@@ -92,8 +110,22 @@ fn run_file(path: &Path, name: &str, phase: u32, bless: bool) -> Result<Verdict,
     let text = fs::read_to_string(path).map_err(|e| format!("cannot read: {e}"))?;
     let header = parse_header(&text)?;
     let Some(file_phase) = header.phase else { return Err("missing `// phase: N` header".to_string()) };
+    let uncatalogued: Vec<&String> = header.expect_errors.iter().filter(|c| codes::find(c).is_none()).collect();
+    if !uncatalogued.is_empty() {
+        return Err(format!("expect-error codes {uncatalogued:?} are not in tests/DIAGNOSTICS.md"));
+    }
     if file_phase > phase {
         return Ok(Verdict::Pending);
+    }
+    let mut unchecked = header.unchecked.clone();
+    if header.sig && phase >= SIG_PHASE {
+        unchecked.push("sig".to_string());
+    }
+    unchecked.dedup();
+    if !unchecked.is_empty() {
+        return Err(format!(
+            "this runner cannot check the directives {unchecked:?} yet, but the file's phase is active"
+        ));
     }
     let mut compiled = compile(name, text, Options { incomplete: header.incomplete });
 
@@ -145,7 +177,7 @@ fn run_file(path: &Path, name: &str, phase: u32, bless: bool) -> Result<Verdict,
         problems.push(format!("exit code {code}, expected {}", header.expect_exit));
     }
     let expected_out = fs::read_to_string(&out_path).unwrap_or_default();
-    if stdout != expected_out {
+    if !alternatives(&expected_out).contains(&stdout) {
         problems.push(format!(
             "stdout differs from {}:\n--- expected\n{expected_out}--- actual\n{stdout}",
             file_name(&out_path)
@@ -165,6 +197,39 @@ fn run_file(path: &Path, name: &str, phase: u32, bless: bool) -> Result<Verdict,
     if problems.is_empty() { Ok(Verdict::Pass) } else { Err(problems.join("\n")) }
 }
 
+/// The outputs a `.out` file allows, separated by lines of exactly [`ALTERNATIVE`].
+fn alternatives(expected: &str) -> Vec<String> {
+    let mut outputs = vec![String::new()];
+    for line in expected.split_inclusive('\n') {
+        if line.trim_end_matches(['\r', '\n']) == ALTERNATIVE {
+            outputs.push(String::new());
+        } else {
+            outputs.last_mut().expect("there is always a current output").push_str(line);
+        }
+    }
+    outputs
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn out_files_may_list_alternatives() {
+        assert_eq!(alternatives("a\n--- or ---\nb\n"), ["a\n", "b\n"]);
+        assert_eq!(alternatives("only\n"), ["only\n"]);
+        assert_eq!(alternatives(""), [""]);
+    }
+
+    #[test]
+    fn unchecked_directives_are_collected() {
+        let header =
+            parse_header("// phase: 2\n// expect-report: leak Probe\n// sig: f\n// run: record-replay\n").unwrap();
+        assert_eq!(header.unchecked, ["expect-report", "run"]);
+        assert!(header.sig);
+    }
 }

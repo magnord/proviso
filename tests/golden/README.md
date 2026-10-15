@@ -8,7 +8,9 @@ One test per acceptance counterexample in [OPEN_QUESTIONS §F](../../OPEN_QUESTI
 - `fNN_<what>.out` is the expected stdout of `proviso run`. An optional `.err` holds the expected stderr; no §F file has one yet, because the reference doesn't fix what a defect or failure prints (T10).
 - `fNN_<what>.sig` is the expected output of `proviso sig` for the symbol named by `// sig:`.
 
-Error codes are in [../DIAGNOSTICS.md](../DIAGNOSTICS.md).
+- `basics/` holds the phase-1 tests of the implementation. They follow the same format, and their `.err` files fix the provisional defect output (OPEN_QUESTIONS P5).
+
+Error codes are in [../DIAGNOSTICS.md](../DIAGNOSTICS.md). The runner rejects an `expect-error` code that isn't in the catalog.
 
 ## Header
 
@@ -28,6 +30,7 @@ followed by any directives, each a full-line comment, then a comment explaining 
 | `// expect-error: <code>` | `proviso check` must fail with `<code>`; one line per expected code. |
 | `// <- <code>` | Trailing comment marking the line where `<code>` is reported; for an expression that spans lines, the line where it starts. Runners may check it; the code set is what must match. |
 | `// expect-exit: <n>` | The exit code of `proviso run`; 0 if absent, 1 when `main` fails with an error, 70 for a defect. |
+| `// flags: --incomplete` | Check and run with `--incomplete`, so `todo` holes are accepted (Q25). |
 | `// expect-report: <kind> <detail>` | The run must report this event; see the runtime reports in DIAGNOSTICS.md. |
 | `// run: record-replay` | Run with `proviso run --record`, whose stdout must match the `.out`. Then `proviso replay` the log, which must report no divergence. Simulated replay suppresses external effects, stdout included (§9.8), so a clean replay is what shows that every observed result was reproduced. |
 | `// expect-log: <operation>` | The recorded log holds a call to this capability operation, with its start and completion order. Write one line per expected call. |
@@ -42,6 +45,14 @@ followed by any directives, each a full-line comment, then a comment explaining 
 - **Alternatives.** Where the language allows several results, the `.out` lists them separated by a line `--- or ---`, and the run must match one of them (f10).
 - **Environment.** Each run starts in a new, empty working directory, and `sys.fs` is taken to be rooted there (gap: Q6).
 - **`.sig` files** are checked from phase 4, when `sig` exists. Until the canonical format covers what they test (T11), each line of the `.sig` must occur in the output in order, as a substring of a line, with runs of whitespace collapsed. After that they become exact goldens.
+
+## Running
+
+`cargo test` runs every file through the runner in `crates/proviso/src/golden.rs`. `PROVISO_BLESS=1 cargo test` rewrites the `.out` and `.err` files from the actual output. Review the diff before committing it.
+
+The runner currently checks these directives: `phase`, `expect-error`, `expect-exit` and `flags`. It also checks `.out` files, including `--- or ---` alternatives, and `.err` files. The `// <-` markers are not checked yet.
+
+If an active file uses a directive the runner can't check yet, the file fails instead of passing unchecked. Those directives are `expect-report`, `expect-log`, `run`, `schedules`, and `sig` from phase 4. Each of them has to be implemented before its phase is reached.
 
 ## Rows
 

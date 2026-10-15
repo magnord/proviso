@@ -350,7 +350,8 @@ All 18 §F rows are already written as `tests/golden/fNN_*.proviso`, each tagged
 - **`Show` for floats** prints the shortest text that reads back as the same value, always with a fraction or an exponent: `1.0`, `0.1`, `1e21`, `NaN`, `inf`.
 - **Value positions.** An `if` without `else` used for its value is an error, and a `try` that marks no fallible call is an error (E0703).
 - **Stack exhaustion** is a defect after 10,000 nested calls, so it is reported as a defect instead of crashing the interpreter.
-- **Diagnostic codes** are grouped by area, as described in the code catalog (`crates/syntax/src/diag.rs`). Constructs from later phases report E0901 with the phase that will implement them.
+- **Diagnostic codes** are grouped by area, as described in [tests/DIAGNOSTICS.md](tests/DIAGNOSTICS.md). A test keeps that catalog and the one the toolchain serves identical. Constructs from later phases report E0901 with the phase that will implement them.
+- **Defect reports** go to stderr as `defect[<kind>]: <message>`, followed by `at` and `called from` lines with locations and anchors. A run of identical call sites collapses into one line. This is a provisional answer to T10 for defects; leaks and overlaps are still open.
 
 ## E. Experiment plan
 

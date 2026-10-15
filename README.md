@@ -77,7 +77,7 @@ users.load_users                                      BREAKING
 | [REFERENCE.md](REFERENCE.md) | The working reference: the whole language in about 15K tokens, meant to stay small enough for an agent to keep in context |
 | [RATIONALE.md](RATIONALE.md) | Why the language is designed this way: the needs, goals, alternatives considered, and costs |
 | [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md) | Unresolved design questions, the syntax hypotheses to test, and the experiment plan |
-| [tests/golden](tests/golden/README.md) | The acceptance counterexamples as golden tests, written before any compiler, with the diagnostic codes they expect in [tests/DIAGNOSTICS.md](tests/DIAGNOSTICS.md) |
+| [tests/golden](tests/golden/README.md) | Golden tests: the phase-1 basics and the 18 acceptance counterexamples, which stay pending until their phase is built. [tests/DIAGNOSTICS.md](tests/DIAGNOSTICS.md) is the diagnostic code catalog. |
 
 If you are new, start with RATIONALE.md for the reasoning, then skim REFERENCE.md §1 ("At a glance") and §17 ("Worked example").
 
@@ -95,7 +95,7 @@ cargo run -- run tests/golden/basics/hello.proviso
 
 Constructs from later phases are reported as `E0901 not_implemented`, together with the phase that will add them.
 
-`cargo test` runs the unit tests and every golden file under `tests/golden`. A golden file states its phase and its expected errors or exit code in comments, and it sits next to a `.out` file of expected output (see `crates/proviso/src/golden.rs`). To rewrite the expected output after an intended change, run `PROVISO_BLESS=1 cargo test`.
+`cargo test` runs the unit tests and every golden file under `tests/golden`. A golden file states its phase and its expected errors or exit code in comments, and it sits next to a `.out` file of expected output. The format is specified in [tests/golden/README.md](tests/golden/README.md). To rewrite the expected output after an intended change, run `PROVISO_BLESS=1 cargo test`.
 
 The workspace is split by stage:
 

@@ -1,7 +1,7 @@
 // §F row 9: a defect in one abandon doesn't stop the others
 // phase: 2
 // expect-exit: 70
-// expect-report: defect assert_failed
+// expect-report: defect assertion_failed
 // expect-report: leak Probe
 //
 // `work` holds probes 1, 2 and 3, then fails, so they are abandoned in reverse

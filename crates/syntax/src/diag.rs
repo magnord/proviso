@@ -4,6 +4,9 @@
 //! E03xx types, E04xx refinements and contracts, E05xx ownership and resources, E06xx
 //! capabilities, E07xx errors and failure marking, E08xx concurrency, and E09xx
 //! implementation limits. A code is never reused for a different meaning.
+//!
+//! `tests/DIAGNOSTICS.md` documents the same catalog, and `tests/catalog.rs` keeps the two
+//! in step.
 
 use crate::source::Span;
 
@@ -154,6 +157,22 @@ pub mod codes {
             "A type name that does not resolve.";
         INVALID_MAIN = "E0308", "invalid_main",
             "A program needs `pub fn main(sys: keep System)`, optionally with `fails E` (REFERENCE §7.4).";
+
+        // Reserved for later phases: the §F goldens already expect these.
+        REFINEMENT_REFUTED = "E0412", "refinement_refuted",
+            "A refinement obligation is refuted: values consistent with every admissible fact violate it (REFERENCE §8.3, §8.5).";
+        PARTIAL_INOUT_OF_REFINED_PART = "E0413", "partial_inout_of_refined_part",
+            "A part of a refined value cannot be passed as `inout(partial)` (REFERENCE §5.4).";
+        IMPL_REQUIRES_MISMATCH = "E0414", "impl_requires_mismatch",
+            "An implementation takes the interface method's `requires` clauses exactly as written (REFERENCE §4.9).";
+        USE_AFTER_MOVE = "E0501", "use_after_move",
+            "A unique or resource value is used after it moved (REFERENCE §5.1).";
+        LENT_RESOURCE_CONSUMED = "E0502", "lent_resource_consumed",
+            "A borrowed or `inout` resource cannot be passed to `take` or used by a `take self` method (REFERENCE §10).";
+        EFFECTS_CALL_IN_OBSERVES = "E0601", "effects_call_in_observes",
+            "An operation that needs only `observes` permissions calls an `effects` operation (REFERENCE §9.2).";
+        REACH_NOT_ADMITTED = "E0602", "reach_not_admitted",
+            "A value's reach is not admitted by the expected type's `uses` or `with E` (REFERENCE §9.4).";
 
         UNMARKED_FALLIBLE_CALL = "E0701", "unmarked_fallible_call",
             "A call that can fail must be marked with `try`, `else` or `attempt` (REFERENCE §7.2).";
