@@ -1,0 +1,93 @@
+// phase: 2.1
+// expect-error: E0901
+// Records that are generic, unique, opaque or resources, the `Ord` and `Hash` derives, a
+// record's generated validator, `impl` blocks, interfaces and distinct types come in later
+// slices of phase 2, and capability declarations and the rest of `System` in phase 3. Uses
+// of what they declare aren't reported again (REFERENCE §15.1).
+record Pair[A, B] {                                 // <- E0901
+    first: A
+    second: B
+}
+
+unique record Token {                               // <- E0901
+    id: Int
+}
+
+resource record Lock {                              // <- E0901
+    id: Int
+}
+
+opaque record Secret {                              // <- E0901
+    id: Int
+}
+
+record Ranked derives(Eq, Ord) {                    // <- E0901
+    n: Int
+}
+
+record Keyed derives(Hash) {                        // <- E0901
+    n: Int
+}
+
+record Span {
+    lo: Int
+    hi: Int
+} where lo <= hi
+
+fn validated(lo: Int, hi: Int) -> Int {
+    let s = Span.validate(lo: lo, hi: hi)           // <- E0901
+    return 0
+}
+
+fn later_types(t: Token, l: Lock, s: Secret, p: Pair, q: Pair[Int, Int]) -> Int {
+    return 0
+}
+
+impl Span {                                         // <- E0901
+    fn width(self) -> Int {
+        return self.hi - self.lo
+    }
+}
+
+impl Show for Span {                                // <- E0901
+    fn show(self) -> Text {
+        return "span"
+    }
+}
+
+fn methods(s: Span) -> Text {
+    let w = s.width() + s.width()
+    let t = Show.show(s)                            // <- E0901
+    return f"{s} {s.show()}"
+}
+
+interface Named {                                   // <- E0901
+    fn name(self) -> Text
+}
+
+cap interface Logger {                              // <- E0901
+    fn log(self, t: Text)
+}
+
+cap record Counter {                                // <- E0901
+    n: Int
+}
+
+distinct type Meters = Int                          // <- E0901
+
+record Holder {
+    n: Named
+    l: Logger
+    c: Counter
+    m: Meters
+}
+
+fn later_declarations(n: Named, l: Logger, c: Counter, m: Meters, h: Holder) -> Int {
+    return 0
+}
+
+fn system(sys: System) {
+    let a = sys.stderr                              // <- E0901
+    let b = sys.with(stderr: sys.stdout)            // <- E0901
+    let c = System(stdout: sys.stdout)              // <- E0901
+}

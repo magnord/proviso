@@ -37,6 +37,7 @@ pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> M
         types: Arena::new(),
         interner: Interner::default(),
         poisoned: HashSet::new(),
+        impls: HashSet::new(),
     };
     let mut parser = Parser {
         file,
@@ -49,6 +50,7 @@ pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> M
         item_indent: 0,
         recovered: false,
         unclosed_reported: false,
+        field_indent: None,
     };
     parser.items();
     parser.m
@@ -72,6 +74,9 @@ struct Parser<'a> {
     /// Set once an unclosed `{` has been reported in the current item, so the blocks around
     /// it close without reporting it again.
     unclosed_reported: bool,
+    /// The indentation of the record field being parsed. A line of a block in its `where`
+    /// that is no deeper starts the next field, so the block was never closed.
+    field_indent: Option<usize>,
 }
 
 impl Parser<'_> {
@@ -193,11 +198,16 @@ impl Parser<'_> {
         width
     }
 
-    /// Whether the current token is a `fn` or `pub` that starts an item, not one nested in
-    /// a later-phase item such as an `impl` block.
+    /// Whether the current token is a keyword that starts an item, such as `fn`, `pub` or
+    /// `record`, at the start of a line no deeper than the current item. One nested in a
+    /// later-phase item such as an `impl` block is deeper.
     fn starts_item(&self) -> bool {
+        let T::Keyword(kw) = self.kind() else { return false };
+        // `let` also starts a statement, so it never ends one.
+        let item =
+            matches!(kw, Kw::Fn | Kw::Pub | Kw::Use | Kw::Record) || (kw != Kw::Let && planned_item(kw).is_some());
         let span = self.peek().span;
-        self.starts_line(span) && self.indent(span) <= self.item_indent
+        item && self.starts_line(span) && self.indent(span) <= self.item_indent
     }
 
     /// Whether `span` is the first token on its line.
@@ -281,8 +291,7 @@ impl Parser<'_> {
     /// Skips the rest of a statement or item that failed to parse, which began at token
     /// `start`. Brackets opened since `start` are skipped to their close, wherever inside
     /// them the error was. A statement also ends before the `}` that closes its block, and
-    /// both end before a `fn` or `pub` that starts a line no deeper than the current item,
-    /// since that starts the next item.
+    /// both end before the next item (see [`Parser::starts_item`]).
     fn recover(&mut self, start: usize, stop: Stop) {
         self.recovered = true;
         let mut open = Vec::new();
@@ -295,7 +304,7 @@ impl Parser<'_> {
                 T::Eof => return,
                 T::Newline if open.is_empty() => return,
                 T::RBrace if stop == Stop::Stmt && !open.contains(&T::LBrace) => return,
-                T::Keyword(Kw::Fn | Kw::Pub) if self.pos > start && self.starts_item() => return,
+                T::Keyword(_) if self.pos > start && self.starts_item() => return,
                 _ => track(&mut open, kind),
             }
             self.bump();
@@ -319,7 +328,8 @@ impl Parser<'_> {
                 Ok(Some(item)) => {
                     self.m.items.push(item);
                     // A doc comment may follow an item on its line; it documents the next one.
-                    if !matches!(self.kind(), T::Newline | T::Eof | T::DocComment) {
+                    // An item whose block was never closed ends right before the next item.
+                    if !matches!(self.kind(), T::Newline | T::Eof | T::DocComment) && !self.starts_item() {
                         let _ = self.unexpected::<()>("end of line after the item");
                         self.recover(start, Stop::Item);
                     }
@@ -375,13 +385,86 @@ impl Parser<'_> {
                 return self.not_implemented("re-exports (`pub use`)", Planned::Unscheduled);
             }
             T::Keyword(Kw::Use) => ItemKind::Use(self.use_decl()?),
+            T::Keyword(Kw::Record) => ItemKind::Record(self.record_decl()?),
             T::Keyword(kw) => match planned_item(kw) {
-                Some((what, planned)) => return self.not_implemented(what, planned),
+                Some((what, planned)) => {
+                    self.poison_declared_type();
+                    if kw == Kw::Impl {
+                        self.note_impl_target();
+                    }
+                    return self.not_implemented(what, planned);
+                }
                 None => return self.unexpected("an item such as `fn` or `use`"),
             },
             _ => return self.unexpected("an item such as `fn` or `use`"),
         };
         Ok(Some(Item { kind, vis, doc, span: start.to(self.prev_span()) }))
+    }
+
+    /// Marks the type a later-phase declaration such as `unique record Token`, `enum Shape`
+    /// or `cap interface Logger` names, so that its uses aren't reported as unknown types.
+    fn poison_declared_type(&mut self) {
+        let declares_type = |kind| {
+            matches!(
+                kind,
+                T::Keyword(
+                    Kw::Unique
+                        | Kw::Opaque
+                        | Kw::Resource
+                        | Kw::Record
+                        | Kw::Enum
+                        | Kw::Type
+                        | Kw::Distinct
+                        | Kw::Interface
+                        | Kw::Cap
+                )
+            )
+        };
+        let mut i = self.pos;
+        while self.tokens.get(i).is_some_and(|t| declares_type(t.kind)) {
+            i += 1;
+        }
+        if i > self.pos
+            && let Some(token) = self.tokens.get(i).filter(|t| t.kind == T::Ident)
+        {
+            let name = self.intern(token.span);
+            self.m.poisoned.insert(name.sym);
+        }
+    }
+
+    /// Notes the type a rejected `impl` block is for: `Point` in `impl Point` and in
+    /// `impl Show for Point`.
+    fn note_impl_target(&mut self) {
+        let mut i = self.pos + 1;
+        let mut target = None;
+        while let Some(token) = self.tokens.get(i) {
+            match token.kind {
+                T::Ident => target = Some(token.span),
+                T::Keyword(Kw::For) => {}
+                T::LBracket => {
+                    // Skips type parameters and arguments, such as `impl[T] Show for Box[T]`.
+                    let mut depth = 0;
+                    while let Some(token) = self.tokens.get(i) {
+                        match token.kind {
+                            T::LBracket => depth += 1,
+                            T::RBracket => depth -= 1,
+                            T::Newline | T::LBrace | T::Eof => break,
+                            _ => {}
+                        }
+                        if depth == 0 {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => break,
+            }
+            i += 1;
+        }
+        if let Some(span) = target {
+            let name = self.intern(span);
+            self.m.impls.insert(name.sym);
+        }
     }
 
     fn use_decl(&mut self) -> PResult<UseDecl> {
@@ -410,6 +493,68 @@ impl Parser<'_> {
             }
         }
         Ok(UseDecl { path, names })
+    }
+
+    fn record_decl(&mut self) -> PResult<RecordDecl> {
+        self.bump();
+        let name = self.ident("a record name")?;
+        let decl = self.record_rest(name);
+        if decl.is_err() {
+            self.m.poisoned.insert(name.sym);
+        }
+        decl
+    }
+
+    fn record_rest(&mut self, name: Ident) -> PResult<RecordDecl> {
+        if self.at(T::LBracket) {
+            return self.not_implemented("generic records", Planned::Phase(2));
+        }
+        let mut derives = Vec::new();
+        if self.eat(T::Keyword(Kw::Derives)) {
+            let open = self.expect(T::LParen, "`(` and the interfaces to derive")?;
+            while !self.at(T::RParen) {
+                derives.push(self.ident("an interface name")?);
+                if !self.eat(T::Comma) {
+                    break;
+                }
+            }
+            self.close(&open, T::RParen, "`,` or `)`")?;
+        }
+        let open = self.expect(T::LBrace, "`{` and the record's fields")?;
+        let mut fields = Vec::new();
+        loop {
+            while matches!(self.kind(), T::Newline | T::DocComment) {
+                self.bump();
+            }
+            if self.eat(T::RBrace) {
+                break;
+            }
+            if self.at(T::Eof) || self.starts_item() {
+                return self.unclosed(&open);
+            }
+            let indent = self.indent(self.peek().span);
+            let saved = (self.stmt_indent, self.field_indent);
+            (self.stmt_indent, self.field_indent) = (indent, Some(indent));
+            let field = self.field_decl();
+            (self.stmt_indent, self.field_indent) = saved;
+            fields.push(field?);
+            // A field's `where` block that was never closed ends before the next field's line.
+            let next = self.peek().span;
+            if !self.eat(T::Comma) && !self.at(T::Newline) && !(self.unclosed_reported && self.starts_line(next)) {
+                self.close(&open, T::RBrace, "`,`, a new line or `}`")?;
+                break;
+            }
+        }
+        let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
+        Ok(RecordDecl { name, derives, fields, refinement })
+    }
+
+    fn field_decl(&mut self) -> PResult<FieldDecl> {
+        let name = self.ident("a field name")?;
+        self.expect(T::Colon, "`:` and the field's type")?;
+        let ty = self.type_expr()?;
+        let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
+        Ok(FieldDecl { name, ty, refinement })
     }
 
     fn fn_decl(&mut self) -> PResult<FnDecl> {
@@ -542,8 +687,8 @@ impl Parser<'_> {
 
     /// Parses statements up to the `}` that closes `open`. A block that is never closed is
     /// reported where it opens, and ends where its enclosing block or item does: before a
-    /// `}` indented less than the statement that opened it, before an item, or at the end of
-    /// the file.
+    /// `}` indented less than the statement that opened it, before an item or, in a field's
+    /// `where`, before the next field, or at the end of the file.
     fn block_rest(&mut self, open: &Token, indent: usize) -> Block {
         let mut stmts = Vec::new();
         loop {
@@ -558,8 +703,10 @@ impl Parser<'_> {
                     break;
                 }
                 T::RBrace | T::Eof => true,
-                T::Keyword(Kw::Fn | Kw::Pub) => self.starts_item(),
-                _ => false,
+                _ if self.field_indent.is_some_and(|field| self.starts_line(next) && self.indent(next) <= field) => {
+                    true
+                }
+                _ => self.starts_item(),
             };
             if unclosed {
                 self.recovered = true;
@@ -567,7 +714,7 @@ impl Parser<'_> {
                     self.unclosed_reported = true;
                     let _ = self.unclosed::<()>(open);
                 }
-                break;
+                return Block { stmts, span: open.span.to(self.prev_span()), unclosed: true };
             }
             let start = self.pos;
             let saved = (self.depth, self.stmt_indent);
@@ -591,7 +738,7 @@ impl Parser<'_> {
             (self.depth, self.stmt_indent) = saved;
             stmts.push(stmt);
         }
-        Block { stmts, span: open.span.to(self.prev_span()) }
+        Block { stmts, span: open.span.to(self.prev_span()), unclosed: false }
     }
 
     /// Stands in for a statement that failed to parse. A `let` still binds its name, with
@@ -1099,7 +1246,6 @@ impl Parser<'_> {
 /// Item keywords that belong to later phases, with what to call them.
 fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
     Some(match kw {
-        Kw::Record => ("`record` declarations", Planned::Phase(2)),
         Kw::Enum => ("`enum` declarations", Planned::Phase(2)),
         Kw::Type => ("`type` declarations", Planned::Phase(2)),
         Kw::Distinct => ("distinct types", Planned::Phase(2)),

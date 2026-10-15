@@ -1,0 +1,2 @@
+defect[refinement_failed]: `Range.lo` is -1, which breaks its refinement `lo >= 0`
+  at records/refinement_order.proviso:12:13 (refinement_order.main+2)

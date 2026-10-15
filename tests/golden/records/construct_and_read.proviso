@@ -1,0 +1,43 @@
+// phase: 2.1
+// A record is built with every field, labelled in declaration order (REFERENCE §4.4, §3),
+// and read with `.field`. Records nest, and pass to and return from functions like any
+// other value. A one-field record may omit the label, as a one-parameter call may.
+use std.io { IoError }
+
+record Point {
+    x: Int
+    y: Int
+}
+
+record Segment {
+    from: Point
+    to: Point
+    label: Text
+}
+
+record Meters {
+    value: Float
+}
+
+fn length_squared(s: Segment) -> Int {
+    let dx = s.to.x - s.from.x
+    let dy = s.to.y - s.from.y
+    return dx * dx + dy * dy
+}
+
+fn origin() -> Point {
+    return Point(x: 0, y: 0)
+}
+
+fn shifted(p: Point, by: Int) -> Point {
+    return Point(x: p.x + by, y: p.y + by)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let s = Segment(from: origin(), to: shifted(p: origin(), by: 3), label: "diagonal")
+    try sys.stdout.write_line(f"{s.label}: {length_squared(s)}")
+    try sys.stdout.write_line(f"to ({s.to.x}, {s.to.y})")
+    let m = Meters(2.5)
+    let n = Meters(value: 0.5)
+    try sys.stdout.write_line(f"{m.value + n.value}")
+}

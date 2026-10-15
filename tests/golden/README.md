@@ -8,7 +8,7 @@ The golden tests of the implementation. `basics/` holds the phase-1 tests. The `
 - `fNN_<what>.out` is the expected stdout of `proviso run`, and `fNN_<what>.err` the expected stderr. A missing `.out` means no output on stdout. A missing `.err` means no output on stderr, except in a file with `expect-report`, whose stderr is then checked only for the expected reports. The §F files have no `.err`. They check runtime reports with `expect-report` instead (T10), so they don't depend on a report's message or call sites.
 - `fNN_<what>.sig` is the expected output of `proviso sig` for the symbol named by `// sig:`.
 
-- `basics/` holds the phase-1 tests of the implementation. They follow the same format, except that their header has no `§F row` line, and their `.err` files fix the provisional defect output (OPEN_QUESTIONS P5).
+- `basics/` holds the phase-1 tests of the implementation, and `records/` the tests of slice 2.1. They follow the same format, except that their header has no `§F row` line, and their `.err` files fix the provisional defect output (OPEN_QUESTIONS P5).
 
 Error codes are in [../DIAGNOSTICS.md](../DIAGNOSTICS.md). The runner rejects an `expect-error` code that isn't in the catalog.
 
@@ -24,6 +24,12 @@ Each file starts with:
 followed by any directives, each a full-line comment, then a comment explaining the required outcome. The header is the run of comment lines that starts the file, and directives are read only from it. A header comment shaped like a directive, a lowercase word and a colon as in `// note:`, must name a directive, so a misspelled one fails the test, and so does a directive after the header. Explanatory lines start with a capital letter or `§`.
 
 `phase` is required. It is the P3 phase that must make the test pass. The runner skips a test whose phase is later than the implemented one and reports it as pending, after checking its header and markers. From that phase on, a failure is a regression. The runner walks `tests/golden/` recursively, so phase-specific tests can live in subdirectories.
+
+A phase delivered over several pull requests has slices, written `// phase: 2.1`, `// phase: 2.2` and so on, numbered from 1. Each pull request raises `IMPLEMENTED_PHASE` to its own slice, which turns on the tests that slice makes pass. `// phase: 2` still means the whole phase, so the §F rows stay pending until the last slice lands and the implemented phase becomes `2`. A whole phase sorts after its slices: `2.1 < 2.2 < 2 < 3.1`. The slices of phase 2 are:
+
+| Slice | Scope |
+|---|---|
+| 2.1 | the data model, proven by records: declarations, construction, fields, `with`, `derives(Eq, Show)`, refinements checked at runtime |
 
 ## Directives
 

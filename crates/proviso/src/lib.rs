@@ -13,8 +13,67 @@ use proviso_syntax::diag::{Diagnostic, Diagnostics, Severity};
 use proviso_syntax::parse_module;
 use proviso_syntax::source::{SourceFile, Span};
 
-/// The last phase of the v1 plan (OPEN_QUESTIONS P3) that this toolchain implements.
-pub const IMPLEMENTED_PHASE: u32 = 1;
+/// How far this toolchain implements the v1 plan (OPEN_QUESTIONS P3): phase 1, and the first
+/// slice of phase 2.
+pub const IMPLEMENTED_PHASE: Phase = Phase::slice(2, 1);
+
+/// A point in the v1 plan: a whole phase, or a slice of one. A phase delivered over several
+/// pull requests numbers its slices `2.1`, `2.2` and so on, and each pull request turns its
+/// own slice on. The whole phase sorts after all its slices, so `2.1 < 2.2 < 2 < 3.1`, and a
+/// golden test written for the whole phase stays pending until the last slice lands.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Phase {
+    pub number: u32,
+    slice: u32,
+}
+
+impl Phase {
+    const WHOLE: u32 = u32::MAX;
+
+    pub const fn whole(number: u32) -> Phase {
+        Phase { number, slice: Phase::WHOLE }
+    }
+
+    pub const fn slice(number: u32, slice: u32) -> Phase {
+        assert!(slice > 0 && slice < Phase::WHOLE, "slices are numbered from 1");
+        Phase { number, slice }
+    }
+}
+
+impl From<u32> for Phase {
+    fn from(number: u32) -> Phase {
+        Phase::whole(number)
+    }
+}
+
+impl std::str::FromStr for Phase {
+    type Err = ();
+
+    /// `2` or `2.1`. A slice is numbered from 1, so `2.0` is rejected.
+    fn from_str(text: &str) -> Result<Phase, ()> {
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        match text.split_once('.') {
+            None if digits(text) => text.parse().map(Phase::whole).map_err(|_| ()),
+            Some((number, slice)) if digits(number) && digits(slice) => {
+                let number = number.parse().map_err(|_| ())?;
+                match slice.parse() {
+                    Ok(slice) if slice > 0 && slice < Phase::WHOLE => Ok(Phase::slice(number, slice)),
+                    _ => Err(()),
+                }
+            }
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.slice {
+            Phase::WHOLE => write!(f, "{}", self.number),
+            slice => write!(f, "{}.{slice}", self.number),
+        }
+    }
+}
 
 /// Process exit codes. 1 comes from REFERENCE §7.4 and 70 from §7.3; 64 to 66 follow the
 /// BSD `sysexits` convention that 70 already belongs to, and 101 is Rust's panic status

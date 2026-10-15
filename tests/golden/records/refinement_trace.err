@@ -1,0 +1,4 @@
+defect[integer_overflow]: `Int8` addition overflowed: 100 + 100
+  at records/refinement_trace.proviso:9:9 (refinement_trace.Sum+4)
+  called from records/refinement_trace.proviso:12:12 (refinement_trace.build+2)
+  called from records/refinement_trace.proviso:17:15 (refinement_trace.main+3)

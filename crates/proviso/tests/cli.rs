@@ -88,6 +88,35 @@ fn deep_recursion_through_nested_expressions_is_a_defect() {
     assert!(stderr(&output).starts_with("defect[stack_exhausted]"), "{}", stderr(&output));
 }
 
+/// A program whose recursion runs the interpreter's stack low while each call compares or
+/// shows a value nested `depth` records deep, so that work runs right next to the limit.
+fn deep_records(depth: usize, probe: &str) -> String {
+    let mut text = String::from("record R0 derives(Eq, Show) {\n    x: Int\n}\n");
+    for i in 1..depth {
+        text += &format!("record R{i} derives(Eq, Show) {{\n    r: R{}\n}}\n", i - 1);
+    }
+    let last = depth - 1;
+    let nested = (0..100).fold(format!("{probe} + down(v: v)"), |e, _| format!("0 + ({e})"));
+    text += &format!("fn down(v: R{last}) -> Int {{\n    return {nested}\n}}\n");
+    text += "pub fn main(sys: keep System) {\n    let v0 = R0(x: 1)\n";
+    for i in 1..depth {
+        text += &format!("    let v{i} = R{i}(r: v{})\n", i - 1);
+    }
+    text += &format!("    let n = down(v: v{last})\n}}\n");
+    text
+}
+
+#[test]
+fn equality_and_show_of_deep_records_never_overflow_the_stack() {
+    let probes = [("deep_eq.proviso", "(if v == v { 1 } else { 0 })"), ("deep_show.proviso", "v.show().byte_len()")];
+    for (name, probe) in probes {
+        let file = source(name, &deep_records(6_000, probe));
+        let output = run(&["run"], &file);
+        assert_eq!(output.status.code(), Some(70), "{name}: {}", stderr(&output));
+        assert!(stderr(&output).starts_with("defect[stack_exhausted]"), "{name}: {}", stderr(&output));
+    }
+}
+
 /// A stdout that refuses every write.
 struct Closed;
 

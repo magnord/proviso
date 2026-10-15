@@ -123,25 +123,31 @@ pub mod codes {
             "Only variables and their parts can be assigned.";
         TODO_REQUIRES_INCOMPLETE = "E0107", "todo_requires_incomplete",
             "`todo` holes are accepted only with `--incomplete` (REFERENCE §15.2, Q25).";
+        MISPLACED_RETURN = "E0108", "misplaced_return",
+            "`return` outside a function body, such as in a `where` clause.";
 
         UNKNOWN_NAME = "E0201", "unknown_name",
             "A name that does not resolve to any local, function or import.";
         DUPLICATE_ITEM = "E0202", "duplicate_item",
             "A module may hold at most one item per name, and a name may be imported once (REFERENCE §3).";
         SHADOWING = "E0203", "shadowing",
-            "A binding may not reuse a name already in scope in the same function, including imported names (REFERENCE §3, H4).";
+            "A binding may not reuse a name already in scope in the same function, including imported names, and an import or record may not reuse a prelude name (REFERENCE §3, H4).";
         WRONG_CASE = "E0204", "wrong_case",
             "Types and variants are PascalCase; everything else is snake_case (REFERENCE §2).";
         UNKNOWN_IMPORT = "E0205", "unknown_import",
             "A `use` names a module or item that does not exist.";
         MISSING_LABEL = "E0206", "missing_label",
-            "Calls to functions with two or more parameters label every argument (REFERENCE §3, H3).";
+            "Calls to functions with two or more parameters label every argument, and so does every `with` (REFERENCE §3, H3).";
         WRONG_LABEL = "E0207", "wrong_label",
             "An argument label that does not match the parameter in that position.";
         WRONG_ARGUMENT_COUNT = "E0208", "wrong_argument_count",
-            "A call passes more or fewer arguments than the function has parameters.";
+            "A call passes more or fewer arguments than the function has parameters, or a `with` replaces no field.";
         NEEDLESS_ALIAS = "E0209", "needless_alias",
             "`as` renames an import only to resolve a name collision (REFERENCE §3, Q24).";
+        DUPLICATE_NAME = "E0210", "duplicate_name",
+            "A name given twice in one list: a record's fields, the fields a `with` replaces, or a `derives` list (REFERENCE §4.4).";
+        PRIVATE_IN_PUBLIC = "E0211", "private_in_public",
+            "A `pub` item mentions a less visible type in its signature or, for a `pub record`, its fields (REFERENCE §3).";
 
         TYPE_MISMATCH = "E0301", "type_mismatch",
             "A value of one type where another is expected. Proviso has no implicit conversions (REFERENCE §9.2).";
@@ -159,6 +165,10 @@ pub mod codes {
             "A type name that does not resolve.";
         INVALID_MAIN = "E0308", "invalid_main",
             "A program needs `pub fn main(sys: keep System)`, optionally with `fails E` (REFERENCE §7.4).";
+        MISSING_IMPLEMENTATION = "E0309", "missing_implementation",
+            "A type does not implement an interface it needs, such as a field's type in a `derives` list (REFERENCE §4.4, §4.9).";
+        NOT_DERIVABLE = "E0310", "not_derivable",
+            "A `derives` list names a prelude interface that can't be derived, such as `Copy` or `Add` (REFERENCE §4.4).";
 
         // Reserved for later phases: the §F goldens already expect these.
         REFINEMENT_REFUTED = "E0412", "refinement_refuted",

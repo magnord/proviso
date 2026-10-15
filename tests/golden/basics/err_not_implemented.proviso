@@ -3,7 +3,7 @@
 // expect-error: E0901
 // Later-phase constructs are reported as not implemented, without cascading errors. A
 // binding whose initializer isn't implemented still exists, but only in its own function.
-record Span {                                       // <- E0901
+record Span {
     lo: Int
     hi: Int
 }

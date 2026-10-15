@@ -1,0 +1,16 @@
+// phase: 2.1
+// expect-exit: 70
+// expect-report: defect refinement_failed
+// Assigning a field re-checks the whole value, record-level refinements included
+// (REFERENCE §8.3). This is §F row 2's program, which the v1 profile checks at runtime
+// until the verifier rejects it at compile time in phase 5.
+record Span {
+    lo: Int
+    hi: Int
+} where lo <= hi
+
+pub fn main(sys: keep System) {
+    var span = Span(lo: 1, hi: 4)
+    span.lo = 4
+    span.lo = 10
+}

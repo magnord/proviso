@@ -1,0 +1,33 @@
+// phase: 2.1
+// `derives(Eq, Show)` generates `==`, `eq` and `show()` (STD.md). `Show` writes the expression
+// that builds the value, with text and chars quoted and escaped as `debug` writes them.
+// `debug` shows any record in the same form, whether or not it derives `Show`. A record
+// with a `Float` field can't derive `Eq` (REFERENCE §12.2).
+use std.io { IoError }
+
+record Point derives(Eq, Show) {
+    x: Int
+    y: Int
+}
+
+record Tagged derives(Show) {
+    at: Point
+    name: Text
+    mark: Char
+    weight: Float
+    on: Bool
+}
+
+record Hidden {
+    secret: Int
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let p = Point(x: 1, y: -2)
+    let t = Tagged(at: p, name: "say \"hi\"\n", mark: '\'', weight: 0.5, on: true)
+    try sys.stdout.write_line(p.show())
+    try sys.stdout.write_line(f"{t}")
+    try sys.stdout.write_line(f"{p == Point(x: 1, y: -2)} {p != p} {p == p.with(y: 2)}")
+    try sys.stdout.write_line(f"{p.eq(Point(x: 1, y: -2))} {p.eq(p.with(x: 0))} {(3).eq(3)}")
+    debug(t, Hidden(7))
+}

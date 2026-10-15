@@ -1,0 +1,29 @@
+// phase: 2.1
+// expect-error: E0101
+// A bracket that is never closed is reported where it opens. The item ends before the next
+// item, which is parsed as usual, and a field's `where` block ends before the next field
+// (REFERENCE §15.1).
+record Open {                                       // <- E0101
+    a: Int
+
+record After {
+    b: Int
+}
+
+record Derived derives(Eq { c: Int }                // <- E0101
+
+record Guarded {
+    n: Int where if n > 0 { true                    // <- E0101
+    m: Int
+}
+
+fn broken() {                                       // <- E0101
+    let x = 1
+
+record Last {
+    d: Int
+}
+
+fn reads(o: Open, a: After, d: Derived, g: Guarded, l: Last) -> Int {
+    return o.a + a.b + d.c + g.m + l.d
+}

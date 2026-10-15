@@ -1,13 +1,15 @@
-//! Name resolution and type checking for the phase-1 subset: scalar types, functions,
-//! control flow, `fails` and `try`, and the stub `System` with only `stdout`.
+//! Name resolution and type checking for the phase-1 subset (scalar types, functions,
+//! control flow, `fails` and `try`, and the prelude's `System` with only `stdout`) and for
+//! records.
 //!
 //! The checker never rewrites the tree. It records what it learns in side tables of
 //! [`Program`], which the interpreter reads.
 
+pub mod decls;
 pub mod types;
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 
 use proviso_syntax::arena::SideTable;
 use proviso_syntax::ast::*;
@@ -15,6 +17,7 @@ use proviso_syntax::diag::{Code, Diagnostics, Planned, codes};
 use proviso_syntax::intern::Symbol;
 use proviso_syntax::source::Span;
 
+use crate::decls::{AdtDef, AdtId, Decls, FieldDef, FieldIdx, IfaceId, Pred, VariantIdx};
 use crate::types::{FloatTy, IntTy, Ty};
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -48,6 +51,8 @@ pub enum Builtin {
     ByteLen,
     /// `Text.is_empty() -> Bool`
     IsEmpty,
+    /// `eq(other: Self) -> Bool` on any type with `Eq` (STD.md)
+    Eq,
 }
 
 /// What a name, call or member access resolved to.
@@ -56,8 +61,12 @@ pub enum Res {
     Local(LocalId),
     Fn(FnId),
     Method(Builtin),
-    /// `System.stdout`
-    Stdout,
+    /// `base.name` on a record.
+    Field(FieldIdx),
+    /// A record's constructor, called as in `Span(lo: 1, hi: 4)`.
+    Ctor(AdtId, VariantIdx),
+    /// `r.with(...)`. The fields it replaces are in `Program::with_fields`.
+    With,
 }
 
 pub struct FnInfo {
@@ -80,19 +89,24 @@ pub struct ParamInfo {
 /// What the checker learned about a module.
 #[derive(Default)]
 pub struct Program {
+    pub decls: Decls,
     pub fns: Vec<FnInfo>,
     pub main: Option<FnId>,
     pub expr_ty: SideTable<Expr, Ty>,
     pub res: SideTable<Expr, Res>,
+    /// The fields each `with` replaces, in the order of its arguments.
+    pub with_fields: SideTable<Expr, Box<[FieldIdx]>>,
     pub let_local: SideTable<Stmt, LocalId>,
     pub for_local: SideTable<Expr, LocalId>,
     /// The loop each `break` or `continue` leaves.
     pub jump_target: SideTable<Stmt, ExprId>,
 }
 
+static ERROR: Ty = Ty::Error;
+
 impl Program {
-    pub fn ty(&self, e: ExprId) -> Ty {
-        self.expr_ty.get(e).copied().unwrap_or(Ty::Error)
+    pub fn ty(&self, e: ExprId) -> &Ty {
+        self.expr_ty.get(e).unwrap_or(&ERROR)
     }
 
     pub fn res(&self, e: ExprId) -> Option<Res> {
@@ -108,12 +122,19 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         p: Program::default(),
         fn_names: HashMap::new(),
         imports: HashMap::new(),
+        record_names: HashMap::new(),
+        poisoned: m.poisoned.clone(),
+        records: Vec::new(),
         f: FnState::new(Ty::Unit, None),
         in_chain: false,
         tries: Vec::new(),
     };
     checker.imports();
+    checker.record_names();
+    checker.record_fields();
     checker.signatures();
+    checker.record_derives();
+    checker.record_predicates();
     checker.check_main();
     for id in 0..checker.p.fns.len() {
         checker.body(id);
@@ -121,7 +142,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     checker.p
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Import {
     Type(Ty),
     /// `use a.b` makes `b` usable as a qualifier.
@@ -145,25 +166,27 @@ struct FnState {
     scopes: Vec<Vec<(Symbol, LocalId)>>,
     locals: Vec<Local>,
     loops: Vec<LoopState>,
+    /// False in a refinement, which is an expression with no function to return from.
+    returns: bool,
 }
 
 impl FnState {
     fn new(ret: Ty, fails: Option<Ty>) -> FnState {
-        FnState { ret, fails, scopes: Vec::new(), locals: Vec::new(), loops: Vec::new() }
+        FnState { ret, fails, scopes: Vec::new(), locals: Vec::new(), loops: Vec::new(), returns: true }
     }
 }
 
 /// Whether an `if` is used for its value, as a statement, or as the last statement of a
 /// function that returns this type.
 #[derive(Clone, Copy)]
-enum Mode {
+enum Mode<'t> {
     Stmt,
-    Value(Option<Ty>),
-    Tail(Ty),
+    Value(Option<&'t Ty>),
+    Tail(&'t Ty),
 }
 
-const NO_PARAMS: &[(&str, Ty)] = &[];
-const WRITE_LINE_PARAMS: &[(&str, Ty)] = &[("text", Ty::Text)];
+/// The fields of `System` that phase 3 adds (REFERENCE §9.1).
+const LATER_SYSTEM_FIELDS: &[&str] = &["fs", "net", "clock", "random", "env", "stdin", "stderr", "process"];
 
 struct Checker<'a> {
     m: &'a Module,
@@ -172,7 +195,13 @@ struct Checker<'a> {
     p: Program,
     fn_names: HashMap<Symbol, FnId>,
     imports: HashMap<Symbol, Import>,
-    /// The function being checked.
+    record_names: HashMap<Symbol, AdtId>,
+    /// Names whose declarations were rejected, so their uses aren't reported again: those the
+    /// parser rejected, and records whose names the checker rejects.
+    poisoned: HashSet<Symbol>,
+    /// Every record declaration, including those whose name is rejected, with its visibility.
+    records: Vec<(AdtId, &'a RecordDecl, Visibility)>,
+    /// The function being checked, or the record whose refinements are.
     f: FnState,
     /// Set while checking the postfix chain a `try` covers (REFERENCE §6.1).
     in_chain: bool,
@@ -193,6 +222,11 @@ impl Checker<'_> {
         self.m.exprs[e].span
     }
 
+    /// How diagnostics write `ty`.
+    fn show<'s>(&'s self, ty: &'s Ty) -> impl std::fmt::Display + 's {
+        self.p.decls.display(ty)
+    }
+
     // ---- module level ----
 
     fn imports(&mut self) {
@@ -211,6 +245,7 @@ impl Checker<'_> {
         let text = m.text(name.name.sym);
         let mut others = m.items.iter().flat_map(|item| match &item.kind {
             ItemKind::Fn(decl) => vec![decl.name],
+            ItemKind::Record(decl) => vec![decl.name],
             ItemKind::Use(decl) if decl.names.is_empty() => vec![decl.path[decl.path.len() - 1]],
             ItemKind::Use(decl) => decl
                 .names
@@ -227,8 +262,8 @@ impl Checker<'_> {
         let path: Vec<&str> = decl.path.iter().map(|i| m.text(i.sym)).collect();
         let joined = path.join(".");
         let span = decl.path[0].span.to(decl.path[decl.path.len() - 1].span);
-        let available: Option<&[(&str, Ty)]> = match path.as_slice() {
-            ["std", "io"] => Some(&[("IoError", Ty::IoError), ("Out", Ty::Out)]),
+        let available: Option<Vec<(&str, Ty)>> = match path.as_slice() {
+            ["std", "io"] => Some(vec![("IoError", Ty::IoError), ("Out", Ty::out())]),
             ["std", module] => {
                 let planned = match *module {
                     "fs" | "test" => Planned::Phase(3),
@@ -255,9 +290,9 @@ impl Checker<'_> {
         }
         for name in &decl.names {
             let text = m.text(name.name.sym);
-            let ty = match available {
+            let ty = match &available {
                 Some(items) => match items.iter().find(|(n, _)| *n == text) {
-                    Some((_, ty)) => *ty,
+                    Some((_, ty)) => ty.clone(),
                     None => {
                         self.error(codes::UNKNOWN_IMPORT, name.name.span, format!("`{joined}` has no item `{text}`"));
                         Ty::Error
@@ -271,7 +306,7 @@ impl Checker<'_> {
                 self.error(
                     codes::SHADOWING,
                     bound.span,
-                    format!("this import would shadow the prelude type `{bound_text}` (H4)"),
+                    format!("this import would shadow the prelude name `{bound_text}` (H4)"),
                 );
                 continue;
             }
@@ -282,8 +317,8 @@ impl Checker<'_> {
                         alias.span,
                         format!("nothing else here is named `{text}`, so it needs no `as` (Q24)"),
                     );
-                } else if bound_text.is_ascii() && !is_pascal(bound_text) {
-                    self.error(codes::WRONG_CASE, bound.span, format!("type names are PascalCase: `{bound_text}`"));
+                } else {
+                    self.pascal_case(bound);
                 }
             }
             self.bind_import(bound, Import::Type(ty));
@@ -302,6 +337,200 @@ impl Checker<'_> {
         }
     }
 
+    fn record_names(&mut self) {
+        let m = self.m;
+        for item in &m.items {
+            let ItemKind::Record(decl) = &item.kind else { continue };
+            let name = m.text(decl.name.sym);
+            let id = self.p.decls.push(AdtDef::record(name, Vec::new()));
+            self.records.push((id, decl, item.vis));
+            // A rejected name is reported once. Its uses, and what it collides with, are not.
+            let cased = self.pascal_case(decl.name);
+            if !cased || prelude_type(name) {
+                if cased {
+                    let message = format!("this record would shadow the prelude name `{name}` (H4)");
+                    self.error(codes::SHADOWING, decl.name.span, message);
+                }
+                self.poisoned.insert(decl.name.sym);
+            } else if self.record_names.contains_key(&decl.name.sym) || self.imports.contains_key(&decl.name.sym) {
+                if cased {
+                    self.error(
+                        codes::DUPLICATE_ITEM,
+                        decl.name.span,
+                        format!("`{name}` is defined twice in this module"),
+                    );
+                }
+            } else {
+                self.record_names.insert(decl.name.sym, id);
+            }
+            if m.impls.contains(&decl.name.sym) {
+                let def = self.p.decls.adt_mut(id);
+                def.unknown_interfaces = true;
+                def.unknown_methods = true;
+            }
+        }
+    }
+
+    /// Resolves the fields of every record once every record has a name, so a field's type
+    /// may be declared later in the file (OPEN_QUESTIONS P5).
+    fn record_fields(&mut self) {
+        let m = self.m;
+        for k in 0..self.records.len() {
+            let (id, decl, vis) = self.records[k];
+            let mut fields: Vec<FieldDef> = Vec::new();
+            for field in &decl.fields {
+                let name = m.text(field.name.sym);
+                let cased = self.snake_case(field.name, "field");
+                let ty = self.resolve_type(field.ty);
+                if let Some(first) = fields.iter_mut().find(|f| &*f.name == name) {
+                    if cased {
+                        self.error(codes::DUPLICATE_NAME, field.name.span, format!("field `{name}` is declared twice"));
+                    }
+                    // The record keeps the first, but which one a use means is unclear, so
+                    // its uses aren't checked.
+                    first.ty = Ty::Error;
+                    continue;
+                }
+                self.exposes(decl.name, vis, &ty, field.ty);
+                fields.push(FieldDef { name: name.into(), ty });
+            }
+            self.p.decls.adt_mut(id).variant_mut().fields = fields;
+        }
+    }
+
+    /// Reports a type that `item`, declared with `vis`, may not mention because it is less
+    /// visible (REFERENCE §3).
+    fn exposes(&mut self, item: Ident, vis: Visibility, ty: &Ty, at: TypeId) {
+        let describe = |vis| match vis {
+            Visibility::Private => "private",
+            Visibility::PubPkg => "`pub(pkg)`",
+            Visibility::Pub => "`pub`",
+        };
+        let Some((record, record_vis)) = self.least_visible(ty) else { return };
+        if reach(record_vis) < reach(vis) {
+            let message = format!(
+                "`{}` is {}, so it may not mention `{}`, which is {} (§3)",
+                self.m.text(item.sym),
+                describe(vis),
+                self.p.decls.adt(record).name,
+                describe(record_vis),
+            );
+            let span = self.m.types[at].span;
+            self.error(codes::PRIVATE_IN_PUBLIC, span, message);
+        }
+    }
+
+    /// The least visible module record that `ty` mentions.
+    fn least_visible(&self, ty: &Ty) -> Option<(AdtId, Visibility)> {
+        let Ty::Adt(id, args) = ty else { return None };
+        let own = self.records.iter().find(|(r, ..)| r == id).map(|&(_, _, vis)| (*id, vis));
+        let inner = args.iter().filter_map(|arg| self.least_visible(arg));
+        own.into_iter().chain(inner).min_by_key(|&(_, vis)| reach(vis))
+    }
+
+    /// Resolves every `derives` list, then checks that each field implements what its
+    /// record derives, so a field's record type answers wherever it is declared.
+    fn record_derives(&mut self) {
+        let m = self.m;
+        for k in 0..self.records.len() {
+            let (id, decl, _) = self.records[k];
+            let mut seen: Vec<&str> = Vec::new();
+            let mut derives = Vec::new();
+            // A rejected entry may have named any interface, so it is taken to name each.
+            let mut unknown = false;
+            for name in &decl.derives {
+                let text = m.text(name.sym);
+                if seen.contains(&text) {
+                    self.error(codes::DUPLICATE_NAME, name.span, format!("`{text}` is derived twice"));
+                    continue;
+                }
+                seen.push(text);
+                match text {
+                    "Eq" => derives.push(IfaceId::EQ),
+                    "Show" => derives.push(IfaceId::SHOW),
+                    // It still counts, unchecked, so `<` on the record isn't reported again.
+                    "Ord" => {
+                        self.not_implemented(name.span, "the `Ord` and `Hash` derives", Planned::Phase(2));
+                        derives.push(IfaceId::ORD);
+                    }
+                    "Hash" => self.not_implemented(name.span, "the `Ord` and `Hash` derives", Planned::Phase(2)),
+                    _ if prelude_interface(text) => {
+                        unknown = true;
+                        self.error(
+                            codes::NOT_DERIVABLE,
+                            name.span,
+                            format!("`{text}` can't be derived; a record can derive `Eq`, `Ord`, `Hash` and `Show`"),
+                        );
+                    }
+                    _ => {
+                        unknown = true;
+                        self.error(
+                            codes::UNKNOWN_TYPE,
+                            name.span,
+                            format!("unknown interface `{text}`; a record can derive `Eq`, `Ord`, `Hash` and `Show`"),
+                        );
+                    }
+                }
+            }
+            let def = self.p.decls.adt_mut(id);
+            def.derives = derives;
+            def.unknown_interfaces |= unknown;
+        }
+        for k in 0..self.records.len() {
+            let (id, decl, _) = self.records[k];
+            let def = self.p.decls.adt(id);
+            let mut missing = Vec::new();
+            for &iface in def.derives.iter().filter(|&&iface| iface != IfaceId::ORD) {
+                for (field, field_decl) in def.variant().fields.iter().zip(kept_fields(decl)) {
+                    if !field.ty.is_unknown() && !self.p.decls.implements(&field.ty, iface) {
+                        let message = format!(
+                            "field `{}` has type `{}`, which does not implement `{}`, so `{}` cannot derive it",
+                            field.name,
+                            self.show(&field.ty),
+                            iface.name(),
+                            def.name
+                        );
+                        missing.push((m.types[field_decl.ty].span, message));
+                    }
+                }
+            }
+            for (span, message) in missing {
+                self.error(codes::MISSING_IMPLEMENTATION, span, message);
+            }
+        }
+    }
+
+    /// Checks each refinement as a `Bool` in a scope of the fields it sees: its own field for
+    /// a field's `where`, every field for the record's (OPEN_QUESTIONS P5).
+    fn record_predicates(&mut self) {
+        for k in 0..self.records.len() {
+            let (id, decl, _) = self.records[k];
+            let kept = kept_fields(decl);
+            let fields = &self.p.decls.adt(id).variant().fields;
+            let mut state = FnState::new(Ty::Unit, None);
+            state.returns = false;
+            state.locals = fields.iter().map(|f| Local { ty: f.ty.clone(), mutable: false }).collect();
+            self.f = state;
+            let mut preds = Vec::new();
+            for (i, field) in kept.iter().enumerate() {
+                if let Some(expr) = field.refinement {
+                    self.f.scopes = vec![vec![(field.name.sym, LocalId(i as u32))]];
+                    self.check(expr, &Ty::Bool);
+                    preds.push(Pred { expr, field: Some(FieldIdx(i as u32)) });
+                }
+            }
+            if let Some(expr) = decl.refinement {
+                let all = kept.iter().enumerate().map(|(i, f)| (f.name.sym, LocalId(i as u32)));
+                self.f.scopes = vec![all.collect()];
+                self.check(expr, &Ty::Bool);
+                preds.push(Pred { expr, field: None });
+            }
+            let variant = self.p.decls.adt_mut(id).variant_mut();
+            variant.preds = preds;
+            variant.locals = self.f.locals.len();
+        }
+    }
+
     fn signatures(&mut self) {
         let m = self.m;
         for (index, item) in m.items.iter().enumerate() {
@@ -310,7 +539,10 @@ impl Checker<'_> {
             // A wrongly cased name is reported once, not again for what it collides with.
             let cased = self.snake_case(decl.name, "function");
             let id = self.p.fns.len();
-            if self.fn_names.contains_key(&decl.name.sym) || self.imports.contains_key(&decl.name.sym) {
+            if self.fn_names.contains_key(&decl.name.sym)
+                || self.imports.contains_key(&decl.name.sym)
+                || self.record_names.contains_key(&decl.name.sym)
+            {
                 if cased {
                     self.error(
                         codes::DUPLICATE_ITEM,
@@ -334,7 +566,7 @@ impl Checker<'_> {
                 let ty = self.resolve_type(param.ty);
                 match param.mode {
                     ParamMode::Borrow => {}
-                    ParamMode::Keep if matches!(ty, Ty::System | Ty::Error) => {}
+                    ParamMode::Keep if matches!(ty, Ty::Adt(AdtId::SYSTEM, _) | Ty::Error) => {}
                     ParamMode::Keep => {
                         self.not_implemented(param.span, "`keep` parameters other than `System`", Planned::Phase(2))
                     }
@@ -347,7 +579,17 @@ impl Checker<'_> {
             }
             let ret = decl.ret.map_or(Ty::Unit, |t| self.resolve_type(t));
             // `Never` has no values, so a function that fails with it cannot fail.
-            let fails = decl.fails.map(|t| self.resolve_type(t)).filter(|&t| t != Ty::Never);
+            let fails = decl.fails.map(|t| self.resolve_type(t)).filter(|t| *t != Ty::Never);
+            // `main` is `pub` so the runtime can call it, not to export it (OPEN_QUESTIONS P5).
+            if name != "main" {
+                let typed = decl.params.iter().map(|p| p.ty).chain(decl.ret).chain(decl.fails);
+                let types = params.iter().map(|p| p.ty.clone()).chain(decl.ret.map(|_| ret.clone()));
+                let types: Vec<(Ty, TypeId)> =
+                    types.chain(decl.fails.map(|_| fails.clone().unwrap_or(Ty::Never))).zip(typed).collect();
+                for (ty, at) in types {
+                    self.exposes(decl.name, item.vis, &ty, at);
+                }
+            }
             self.p.fns.push(FnInfo { item: index, name: decl.name.sym, params, ret, fails, locals: 0 });
         }
     }
@@ -368,10 +610,10 @@ impl Checker<'_> {
         let span = item.name().map_or(item.span, |n| n.span);
         let signature_ok = item.vis == Visibility::Pub
             && info.params.len() == 1
-            && matches!(info.params[0].ty, Ty::System | Ty::Error)
+            && matches!(info.params[0].ty, Ty::Adt(AdtId::SYSTEM, _) | Ty::Error)
             && info.params[0].mode == ParamMode::Keep
             && matches!(info.ret, Ty::Unit | Ty::Error);
-        let fails = info.fails;
+        let fails = info.fails.clone();
         if !signature_ok {
             self.error(
                 codes::INVALID_MAIN,
@@ -380,13 +622,13 @@ impl Checker<'_> {
             );
         }
         if let Some(err) = fails
-            && !err.is_show()
+            && !self.p.decls.implements(&err, IfaceId::SHOW)
             && err != Ty::Error
         {
             self.error(
                 codes::MAIN_ERROR_NOT_SHOW,
                 span,
-                format!("`main` fails with `{err}`, which does not implement `Show`"),
+                format!("`main` fails with `{}`, which does not implement `Show`", self.show(&err)),
             );
         }
     }
@@ -398,6 +640,15 @@ impl Checker<'_> {
             TypeExprKind::Named(name) => self.type_name(name),
             TypeExprKind::Applied(name) => {
                 let text = m.text(name.sym);
+                if self.poisoned.contains(&name.sym) {
+                    return Ty::Error;
+                }
+                if self.record_names.contains_key(&name.sym)
+                    || matches!(self.imports.get(&name.sym), Some(Import::Type(_)))
+                {
+                    self.error(codes::UNKNOWN_TYPE, te.span, format!("`{text}` takes no type arguments"));
+                    return Ty::Error;
+                }
                 match builtin_type(text) {
                     Some(Ty::Int(_) | Ty::Float(_)) => {
                         self.not_implemented(te.span, "units of measure", Planned::PastV1)
@@ -415,11 +666,18 @@ impl Checker<'_> {
 
     fn type_name(&mut self, name: Ident) -> Ty {
         let text = self.m.text(name.sym);
+        // Before the prelude, which a rejected record may have tried to shadow.
+        if self.poisoned.contains(&name.sym) {
+            return Ty::Error;
+        }
         if let Some(ty) = builtin_type(text) {
             return ty;
         }
+        if let Some(&id) = self.record_names.get(&name.sym) {
+            return Ty::adt(id);
+        }
         match self.imports.get(&name.sym) {
-            Some(Import::Type(ty)) => return *ty,
+            Some(Import::Type(ty)) => return ty.clone(),
             Some(Import::Module) => {
                 self.error(codes::UNKNOWN_TYPE, name.span, format!("`{text}` is a module, not a type"));
                 return Ty::Error;
@@ -431,6 +689,20 @@ impl Checker<'_> {
             None => self.error(codes::UNKNOWN_TYPE, name.span, format!("unknown type `{text}`")),
         }
         Ty::Error
+    }
+
+    /// Reports a type name that isn't PascalCase, and returns whether it is. A non-ASCII name
+    /// is already reported by the lexer.
+    fn pascal_case(&mut self, name: Ident) -> bool {
+        let text = self.m.text(name.sym);
+        if !text.is_ascii() {
+            return false;
+        }
+        if !is_pascal(text) {
+            self.error(codes::WRONG_CASE, name.span, format!("type names are PascalCase: `{text}`"));
+            return false;
+        }
+        true
     }
 
     /// Reports a name that isn't snake_case, and returns whether it is. A non-ASCII name is
@@ -453,10 +725,10 @@ impl Checker<'_> {
         let m = self.m;
         let info = &self.p.fns[id];
         let Some(decl) = m.fn_decl(info.item) else { return };
-        let mut state = FnState::new(info.ret, info.fails);
+        let mut state = FnState::new(info.ret.clone(), info.fails.clone());
         let mut scope = Vec::new();
         for (i, param) in info.params.iter().enumerate() {
-            state.locals.push(Local { ty: param.ty, mutable: false });
+            state.locals.push(Local { ty: param.ty.clone(), mutable: false });
             scope.push((param.name, LocalId(i as u32)));
         }
         state.scopes.push(scope);
@@ -470,12 +742,12 @@ impl Checker<'_> {
 
     fn fn_body(&mut self, decl: &FnDecl) {
         let m = self.m;
-        let ret = self.f.ret;
+        let ret = self.f.ret.clone();
         self.f.scopes.push(Vec::new());
         let diverges = if ret == Ty::Unit {
             decl.body.stmts.iter().fold(false, |diverges, &s| self.stmt(s) | diverges)
         } else {
-            self.tail_stmts(&decl.body, ret)
+            self.tail_stmts(&decl.body, &ret)
         };
         self.f.scopes.pop();
         // A body that needed parse recovery has unknown control flow.
@@ -484,7 +756,7 @@ impl Checker<'_> {
             self.error(
                 codes::MISSING_RETURN,
                 decl.body.span.end(),
-                format!("`{name}` returns `{ret}`, so every path must end with `return`"),
+                format!("`{name}` returns `{}`, so every path must end with `return`", self.show(&ret)),
             );
         }
     }
@@ -492,7 +764,7 @@ impl Checker<'_> {
     /// Checks the statements of a body that returns `ret`, or of a branch that ends one. A
     /// final value there is a missing `return`, not an unused value. Returns whether the
     /// statements always diverge, counting such a value as a return.
-    fn tail_stmts(&mut self, block: &Block, ret: Ty) -> bool {
+    fn tail_stmts(&mut self, block: &Block, ret: &Ty) -> bool {
         let m = self.m;
         let mut diverges = false;
         let count = block.stmts.len();
@@ -500,7 +772,7 @@ impl Checker<'_> {
             if i + 1 == count
                 && let StmtKind::Expr(e) = m.stmts[s].kind
             {
-                if is_bare_value(&m.exprs[e].kind) {
+                if self.is_bare_value(e) {
                     self.check(e, ret);
                     let span = self.span(e);
                     self.error(
@@ -511,7 +783,7 @@ impl Checker<'_> {
                     return true;
                 }
                 if let ExprKind::If { .. } = m.exprs[e].kind {
-                    return diverges | diverges_ty(self.if_expr(e, Mode::Tail(ret)));
+                    return diverges | diverges_ty(&self.if_expr(e, Mode::Tail(ret)));
                 }
             }
             diverges |= self.stmt(s);
@@ -574,27 +846,42 @@ impl Checker<'_> {
             StmtKind::Let { mutable, name, ty, init } => {
                 let declared = ty.map(|t| self.resolve_type(t));
                 let (ty, init_ty) = match declared {
-                    Some(declared) => (declared, self.check(*init, declared)),
+                    Some(declared) => {
+                        let init_ty = self.check(*init, &declared);
+                        (declared, init_ty)
+                    }
                     None => {
                         let ty = self.infer(*init);
-                        (ty, ty)
+                        (ty.clone(), ty)
                     }
                 };
                 let what = if *mutable { "variable" } else { "binding" };
                 let id = self.declare(*name, ty, *mutable, what);
                 self.p.let_local.insert(s, id);
-                diverges_ty(init_ty)
+                diverges_ty(&init_ty)
             }
-            StmtKind::Assign { target, op, value } => diverges_ty(self.assign(*target, *op, *value)),
-            StmtKind::Expr(e) => diverges_ty(self.expr_stmt(*e)),
+            StmtKind::Assign { target, op, value } => diverges_ty(&self.assign(*target, *op, *value)),
+            StmtKind::Expr(e) => diverges_ty(&self.expr_stmt(*e)),
+            StmtKind::Return(value) if !self.f.returns => {
+                if let Some(value) = value {
+                    self.infer(*value);
+                }
+                self.error(
+                    codes::MISPLACED_RETURN,
+                    stmt.span,
+                    "`return` outside a function body; a `where` clause is an expression",
+                );
+                true
+            }
             StmtKind::Return(value) => {
-                let ret = self.f.ret;
+                let ret = self.f.ret.clone();
                 match value {
                     Some(value) => {
-                        self.check(*value, ret);
+                        self.check(*value, &ret);
                     }
                     None if ret != Ty::Unit && ret != Ty::Error => {
-                        self.error(codes::TYPE_MISMATCH, stmt.span, format!("`return` needs a value of type `{ret}`"));
+                        let message = format!("`return` needs a value of type `{}`", self.show(&ret));
+                        self.error(codes::TYPE_MISMATCH, stmt.span, message);
                     }
                     None => {}
                 }
@@ -608,16 +895,17 @@ impl Checker<'_> {
                 self.jump(s, *label, false);
                 true
             }
-            StmtKind::Assert(cond) => diverges_ty(self.check(*cond, Ty::Bool)),
+            StmtKind::Assert(cond) => diverges_ty(&self.check(*cond, &Ty::Bool)),
         }
     }
 
     fn expr_stmt(&mut self, e: ExprId) -> Ty {
-        let kind = &self.m.exprs[e].kind;
-        if let ExprKind::If { .. } = kind {
+        if let ExprKind::If { .. } = self.m.exprs[e].kind {
             return self.if_expr(e, Mode::Stmt);
         }
-        if is_bare_value(kind) {
+        let bare = self.is_bare_value(e);
+        let ty = self.infer(e);
+        if bare {
             let span = self.span(e);
             self.error(
                 codes::BARE_VALUE_STATEMENT,
@@ -625,45 +913,84 @@ impl Checker<'_> {
                 "this value is unused; a statement must be a call, an assignment or a control expression",
             );
         }
-        self.infer(e)
+        ty
     }
 
     /// Checks an assignment and returns the type of the assigned value.
     fn assign(&mut self, target: ExprId, op: AssignOp, value: ExprId) -> Ty {
-        let m = self.m;
         let span = self.span(target);
-        let ExprKind::Name(name) = m.exprs[target].kind else {
-            match m.exprs[target].kind {
-                ExprKind::Field { .. } => self.not_implemented(span, "assignments to fields", Planned::Phase(2)),
-                _ => self.error(codes::INVALID_ASSIGNMENT_TARGET, span, "only variables can be assigned"),
-            }
-            return self.infer(value);
-        };
-        let text = m.text(name.sym);
-        let Some(id) = self.lookup_local(name.sym) else {
-            if !m.poisoned.contains(&name.sym) {
-                self.error(codes::UNKNOWN_NAME, span, format!("unknown variable `{text}`"));
-            }
-            return self.infer(value);
-        };
-        self.p.res.insert(target, Res::Local(id));
-        let Local { ty, mutable } = self.f.locals[id.index()];
-        self.p.expr_ty.insert(target, ty);
-        if !mutable {
+        let Some((root, id, ty)) = self.place(target) else { return self.infer(value) };
+        if !self.f.locals[id.index()].mutable {
+            let text = self.m.text(root.sym);
             self.error(
                 codes::IMMUTABLE_ASSIGNMENT,
                 span,
                 format!("`{text}` is a `let` binding or a parameter; declare it with `var` to assign to it"),
             );
         }
-        let value_ty = self.check(value, ty);
+        let value_ty = self.check(value, &ty);
         if let Some(bin) = op.bin_op()
-            && !arithmetic_defined(bin, ty)
+            && !arithmetic_defined(bin, &ty)
         {
             let symbol = bin.symbol();
-            self.error(codes::UNSUPPORTED_OPERATOR, span, format!("`{symbol}=` is not defined for `{ty}`"));
+            self.error(
+                codes::UNSUPPORTED_OPERATOR,
+                span,
+                format!("`{symbol}=` is not defined for `{}`", self.show(&ty)),
+            );
         }
         value_ty
+    }
+
+    /// Resolves an assignment target, which is a variable or a chain of fields rooted at one.
+    /// Returns the variable and the type of the place, or `None` once it is reported.
+    fn place(&mut self, target: ExprId) -> Option<(Ident, LocalId, Ty)> {
+        let m = self.m;
+        let (root, id, ty) = match m.exprs[target].kind {
+            ExprKind::Name(name) => {
+                let Some(id) = self.lookup_local(name.sym) else {
+                    if !self.poisoned.contains(&name.sym) {
+                        let text = m.text(name.sym);
+                        let span = self.span(target);
+                        self.error(codes::UNKNOWN_NAME, span, format!("unknown variable `{text}`"));
+                    }
+                    return None;
+                };
+                self.p.res.insert(target, Res::Local(id));
+                (name, id, self.f.locals[id.index()].ty.clone())
+            }
+            ExprKind::Field { base, name } => {
+                let (root, id, base_ty) = self.place(base)?;
+                (root, id, self.field(target, &base_ty, name))
+            }
+            _ => {
+                let span = self.span(target);
+                self.error(codes::INVALID_ASSIGNMENT_TARGET, span, "only variables and their fields can be assigned");
+                return None;
+            }
+        };
+        self.p.expr_ty.insert(target, ty.clone());
+        Some((root, id, ty))
+    }
+
+    /// An expression whose only effect is its value, so it is not a statement on its own.
+    /// Constructions and `with` are calls (REFERENCE §2, H3), which may be statements.
+    fn is_bare_value(&self, e: ExprId) -> bool {
+        matches!(
+            &self.m.exprs[e].kind,
+            ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Char(_)
+                | ExprKind::Text(_)
+                | ExprKind::Unit
+                | ExprKind::FText(_)
+                | ExprKind::Name(_)
+                | ExprKind::Field { .. }
+                | ExprKind::Unary { .. }
+                | ExprKind::Binary { .. }
+                | ExprKind::Range { .. }
+        )
     }
 
     fn jump(&mut self, s: StmtId, label: Option<Ident>, is_break: bool) {
@@ -693,7 +1020,7 @@ impl Checker<'_> {
 
     /// Checks a block whose value is unused. Returns `Never` if it always diverges. With
     /// `tail`, the block ends a function that returns that type.
-    fn block_stmt(&mut self, block: &Block, tail: Option<Ty>) -> Ty {
+    fn block_stmt(&mut self, block: &Block, tail: Option<&Ty>) -> Ty {
         self.f.scopes.push(Vec::new());
         let diverges = match tail {
             Some(ret) => self.tail_stmts(block, ret),
@@ -704,7 +1031,7 @@ impl Checker<'_> {
     }
 
     /// Checks a block used for its value: the final expression, if there is one.
-    fn block_value(&mut self, block: &Block, expected: Option<Ty>) -> Ty {
+    fn block_value(&mut self, block: &Block, expected: Option<&Ty>) -> Ty {
         let m = self.m;
         self.f.scopes.push(Vec::new());
         let mut diverges = false;
@@ -718,7 +1045,7 @@ impl Checker<'_> {
                     Some(expected) => self.check(e, expected),
                     None => self.infer(e),
                 };
-                diverges |= diverges_ty(ty);
+                diverges |= diverges_ty(&ty);
                 value = Some(ty);
                 continue;
             }
@@ -728,13 +1055,17 @@ impl Checker<'_> {
         if diverges {
             return Ty::Never;
         }
+        // Its value may have come from the code that is missing.
+        if block.unclosed {
+            return Ty::Error;
+        }
         match (value, expected) {
             (Some(ty), _) => ty,
-            (None, Some(expected)) if expected != Ty::Unit && expected != Ty::Error => {
+            (None, Some(expected)) if *expected != Ty::Unit && *expected != Ty::Error => {
                 self.error(
                     codes::TYPE_MISMATCH,
                     block.span.end(),
-                    format!("expected a value of type `{expected}`, but this block ends without one"),
+                    format!("expected a value of type `{}`, but this block ends without one", self.show(expected)),
                 );
                 Ty::Error
             }
@@ -749,32 +1080,33 @@ impl Checker<'_> {
     }
 
     /// Checks `e` against `expected`, reports a mismatch, and returns the actual type.
-    fn check(&mut self, e: ExprId, expected: Ty) -> Ty {
+    fn check(&mut self, e: ExprId, expected: &Ty) -> Ty {
         let actual = self.expr(e, Some(expected));
-        if !expected.accepts(actual) {
+        if !expected.accepts(&actual) {
             let span = self.span(e);
-            self.error(codes::TYPE_MISMATCH, span, format!("expected `{expected}`, found `{actual}`"));
+            let message = format!("expected `{}`, found `{}`", self.show(expected), self.show(&actual));
+            self.error(codes::TYPE_MISMATCH, span, message);
         }
         actual
     }
 
     /// Infers the type of `e`. `expected` guides literals and `if` branches, but mismatches
     /// against it are reported by [`Checker::check`].
-    fn expr(&mut self, e: ExprId, expected: Option<Ty>) -> Ty {
+    fn expr(&mut self, e: ExprId, expected: Option<&Ty>) -> Ty {
         let chain = std::mem::replace(&mut self.in_chain, false);
         let ty = self.expr_kind(e, expected, chain);
-        self.p.expr_ty.insert(e, ty);
+        self.p.expr_ty.insert(e, ty.clone());
         ty
     }
 
-    fn expr_kind(&mut self, e: ExprId, expected: Option<Ty>, chain: bool) -> Ty {
+    fn expr_kind(&mut self, e: ExprId, expected: Option<&Ty>, chain: bool) -> Ty {
         let m = self.m;
         let span = self.span(e);
         match &m.exprs[e].kind {
             ExprKind::Int(value) => self.int_literal(*value, false, expected, span),
             ExprKind::Float(text) => {
                 let ft = match expected {
-                    Some(Ty::Float(ft)) => ft,
+                    Some(Ty::Float(ft)) => *ft,
                     _ => FloatTy::F64,
                 };
                 if !ft.holds(text) {
@@ -790,12 +1122,12 @@ impl Checker<'_> {
                 for part in parts {
                     if let FTextPart::Expr(x) = part {
                         let ty = self.infer(*x);
-                        if !ty.is_show() && !ty.is_unknown() {
+                        if !self.p.decls.implements(&ty, IfaceId::SHOW) && !ty.is_unknown() {
                             let span = self.span(*x);
                             self.error(
                                 codes::UNSUPPORTED_OPERATOR,
                                 span,
-                                format!("`{ty}` does not implement `Show`, so it cannot be interpolated"),
+                                format!("`{}` does not implement `Show`, so it cannot be interpolated", self.show(&ty)),
                             );
                         }
                     }
@@ -810,10 +1142,10 @@ impl Checker<'_> {
             ExprKind::Field { base, name } => {
                 self.in_chain = chain;
                 let base_ty = self.infer(*base);
-                self.field(e, base_ty, *name)
+                self.field(e, &base_ty, *name)
             }
             ExprKind::Unary { op: UnaryOp::Not, operand } => {
-                self.check(*operand, Ty::Bool);
+                self.check(*operand, &Ty::Bool);
                 Ty::Bool
             }
             ExprKind::Unary { op: UnaryOp::Neg, operand } => self.negate(*operand, expected, span),
@@ -825,7 +1157,7 @@ impl Checker<'_> {
             ExprKind::Try(inner) => self.try_expr(*inner, expected, span),
             ExprKind::If { .. } => self.if_expr(e, Mode::Value(expected)),
             ExprKind::While { label, cond, body } => {
-                self.check(*cond, Ty::Bool);
+                self.check(*cond, &Ty::Bool);
                 self.loop_body(e, *label, body);
                 Ty::Unit
             }
@@ -857,9 +1189,9 @@ impl Checker<'_> {
         }
     }
 
-    fn int_literal(&mut self, magnitude: u128, negative: bool, expected: Option<Ty>, span: Span) -> Ty {
+    fn int_literal(&mut self, magnitude: u128, negative: bool, expected: Option<&Ty>, span: Span) -> Ty {
         let it = match expected {
-            Some(Ty::Int(it)) => it,
+            Some(Ty::Int(it)) => *it,
             Some(Ty::Float(ft)) => {
                 self.error(
                     codes::TYPE_MISMATCH,
@@ -890,11 +1222,11 @@ impl Checker<'_> {
         Ty::Int(it)
     }
 
-    fn negate(&mut self, operand: ExprId, expected: Option<Ty>, span: Span) -> Ty {
+    fn negate(&mut self, operand: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
         // A negative integer literal is one value, so `-128` fits in `Int8`.
         if let ExprKind::Int(value) = self.m.exprs[operand].kind {
             let ty = self.int_literal(value, true, expected, span);
-            self.p.expr_ty.insert(operand, ty);
+            self.p.expr_ty.insert(operand, ty.clone());
             return ty;
         }
         let ty = self.expr(operand, expected.filter(|t| t.is_numeric()));
@@ -902,7 +1234,8 @@ impl Checker<'_> {
             Ty::Int(it) if it.is_signed() => ty,
             Ty::Float(_) | Ty::Error | Ty::Never => ty,
             _ => {
-                self.error(codes::UNSUPPORTED_OPERATOR, span, format!("unary `-` is not defined for `{ty}`"));
+                let message = format!("unary `-` is not defined for `{}`", self.show(&ty));
+                self.error(codes::UNSUPPORTED_OPERATOR, span, message);
                 Ty::Error
             }
         }
@@ -910,21 +1243,21 @@ impl Checker<'_> {
 
     /// Checks the operands of a binary operator. An untyped literal takes its type from the
     /// other operand (REFERENCE §2), so the non-literal side is checked first.
-    fn operands(&mut self, lhs: ExprId, rhs: ExprId, hint: Option<Ty>) -> (Ty, Ty) {
+    fn operands(&mut self, lhs: ExprId, rhs: ExprId, hint: Option<&Ty>) -> (Ty, Ty) {
         // An operand that already has an error gives the other no type, so a literal there
         // isn't reported again against the hint.
-        let numeric_or = |ty: Ty| match ty {
+        let numeric_or = |ty: &Ty| match ty {
             Ty::Error => None,
-            ty if ty.is_numeric() => Some(ty),
-            _ => hint,
+            ty if ty.is_numeric() => Some(ty.clone()),
+            _ => hint.cloned(),
         };
         if self.is_untyped_literal(lhs) && !self.is_untyped_literal(rhs) {
             let rt = self.expr(rhs, hint);
-            let lt = self.expr(lhs, numeric_or(rt));
+            let lt = self.expr(lhs, numeric_or(&rt).as_ref());
             (lt, rt)
         } else {
             let lt = self.expr(lhs, hint);
-            let rt = self.expr(rhs, numeric_or(lt));
+            let rt = self.expr(rhs, numeric_or(&lt).as_ref());
             (lt, rt)
         }
     }
@@ -945,32 +1278,34 @@ impl Checker<'_> {
     fn unify_operands(&mut self, lt: Ty, rt: Ty, span: Span) -> Ty {
         match (lt, rt) {
             (Ty::Error, _) | (_, Ty::Error) => Ty::Error,
-            _ if lt == rt => lt,
+            (lt, rt) if lt == rt => lt,
             (Ty::Never, other) | (other, Ty::Never) => other,
-            _ => {
-                self.error(
-                    codes::TYPE_MISMATCH,
-                    span,
-                    format!("mismatched operand types `{lt}` and `{rt}`; Proviso has no implicit conversions"),
+            (lt, rt) => {
+                let message = format!(
+                    "mismatched operand types `{}` and `{}`; Proviso has no implicit conversions",
+                    self.show(&lt),
+                    self.show(&rt)
                 );
+                self.error(codes::TYPE_MISMATCH, span, message);
                 Ty::Error
             }
         }
     }
 
-    fn binary(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId, expected: Option<Ty>, span: Span) -> Ty {
+    fn binary(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
         let symbol = op.symbol();
         match op {
             BinOp::And | BinOp::Or => {
-                self.check(lhs, Ty::Bool);
-                self.check(rhs, Ty::Bool);
+                self.check(lhs, &Ty::Bool);
+                self.check(rhs, &Ty::Bool);
                 Ty::Bool
             }
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 let (lt, rt) = self.operands(lhs, rhs, expected.filter(|t| t.is_numeric()));
                 let ty = self.unify_operands(lt, rt, span);
-                if !arithmetic_defined(op, ty) {
-                    self.error(codes::UNSUPPORTED_OPERATOR, span, format!("`{symbol}` is not defined for `{ty}`"));
+                if !arithmetic_defined(op, &ty) {
+                    let message = format!("`{symbol}` is not defined for `{}`", self.show(&ty));
+                    self.error(codes::UNSUPPORTED_OPERATOR, span, message);
                     return Ty::Error;
                 }
                 ty
@@ -979,11 +1314,13 @@ impl Checker<'_> {
                 let (lt, rt) = self.operands(lhs, rhs, None);
                 let ty = self.unify_operands(lt, rt, span);
                 let defined = match op {
-                    BinOp::Eq | BinOp::Ne => ty.has_equality(),
-                    _ => ty.has_ordering(),
+                    // Floats have IEEE `==` and `<` without implementing `Eq` or `Ord` (REFERENCE §12.2).
+                    BinOp::Eq | BinOp::Ne => matches!(ty, Ty::Float(_)) || self.p.decls.implements(&ty, IfaceId::EQ),
+                    _ => matches!(ty, Ty::Float(_)) || self.p.decls.implements(&ty, IfaceId::ORD),
                 };
                 if !defined && !ty.is_unknown() {
-                    self.error(codes::UNSUPPORTED_OPERATOR, span, format!("`{symbol}` is not defined for `{ty}`"));
+                    let message = format!("`{symbol}` is not defined for `{}`", self.show(&ty));
+                    self.error(codes::UNSUPPORTED_OPERATOR, span, message);
                 }
                 Ty::Bool
             }
@@ -995,13 +1332,17 @@ impl Checker<'_> {
         let text = m.text(name.sym);
         if let Some(id) = self.lookup_local(name.sym) {
             self.p.res.insert(e, Res::Local(id));
-            return self.f.locals[id.index()].ty;
+            return self.f.locals[id.index()].ty.clone();
         }
         if self.fn_names.contains_key(&name.sym) {
             self.not_implemented(name.span, "functions used as values", Planned::Phase(2));
-        } else if self.imports.contains_key(&name.sym) || builtin_type(text).is_some() {
+        } else if self.poisoned.contains(&name.sym) {
+        } else if self.imports.contains_key(&name.sym)
+            || self.record_names.contains_key(&name.sym)
+            || builtin_type(text).is_some()
+        {
             self.error(codes::UNKNOWN_NAME, name.span, format!("`{text}` is a type or module, not a value"));
-        } else if !m.poisoned.contains(&name.sym) {
+        } else {
             self.error(codes::UNKNOWN_NAME, name.span, format!("unknown name `{text}`"));
         }
         Ty::Error
@@ -1009,6 +1350,11 @@ impl Checker<'_> {
 
     fn call(&mut self, callee: ExprId, args: &[Arg], span: Span, chain: bool) -> Ty {
         let m = self.m;
+        if let ExprKind::Name(name) = m.exprs[callee].kind
+            && let Some(&id) = self.record_names.get(&name.sym)
+        {
+            return self.construct(callee, id, args, span);
+        }
         let resolved = match m.exprs[callee].kind {
             ExprKind::Name(name) => match self.fn_names.get(&name.sym) {
                 Some(&id) => Ok(id),
@@ -1024,10 +1370,14 @@ impl Checker<'_> {
                     Some(name) if self.lookup_local(name.sym).is_some() => {
                         self.not_implemented(callee_span, "calls of function values", Planned::Phase(2))
                     }
+                    Some(name) if self.poisoned.contains(&name.sym) => {}
+                    // Phase 3 gives `System` the rest of its fields (REFERENCE §9.1).
+                    Some(name) if m.text(name.sym) == "System" => {
+                        self.not_implemented(callee_span, "constructions of `System`", Planned::Phase(3))
+                    }
                     Some(name) if builtin_type(m.text(name.sym)).is_some() => {
                         self.not_implemented(callee_span, "conversions such as `Int64(x)`", Planned::Phase(2))
                     }
-                    Some(name) if m.poisoned.contains(&name.sym) => {}
                     Some(name) => {
                         let text = m.text(name.sym);
                         self.error(codes::UNKNOWN_NAME, name.span, format!("unknown function `{text}`"));
@@ -1043,29 +1393,79 @@ impl Checker<'_> {
         self.p.res.insert(callee, Res::Fn(id));
         let info = &self.p.fns[id];
         let name = m.text(info.name);
-        let params: Vec<(&str, Ty)> = info.params.iter().map(|p| (m.text(p.name), p.ty)).collect();
-        let (ret, fails) = (info.ret, info.fails);
+        let params: Vec<(&str, Ty)> = info.params.iter().map(|p| (m.text(p.name), p.ty.clone())).collect();
+        let (ret, fails) = (info.ret.clone(), info.fails.clone());
         self.args(name, &params, args, span);
         if let Some(err) = fails {
-            self.fallible_call(name, err, span, chain);
+            self.fallible_call(name, &err, span, chain);
         }
         ret
     }
 
+    /// A record's constructor takes its fields as parameters, so a construction follows the
+    /// rules of a call (REFERENCE §4.4).
+    fn construct(&mut self, callee: ExprId, id: AdtId, args: &[Arg], span: Span) -> Ty {
+        self.p.res.insert(callee, Res::Ctor(id, VariantIdx::RECORD));
+        let def = self.p.decls.adt(id);
+        let name = def.name.clone();
+        let params: Vec<(Box<str>, Ty)> = def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+        self.args(&name, &params, args, span);
+        Ty::adt(id)
+    }
+
     fn method_call(&mut self, e: ExprId, receiver: ExprId, method: Ident, args: &[Arg], span: Span, chain: bool) -> Ty {
+        let m = self.m;
+        let name = m.text(method.sym);
+        if let ExprKind::Name(receiver_name) = m.exprs[receiver].kind
+            && self.lookup_local(receiver_name.sym).is_none()
+            && self.record_names.contains_key(&receiver_name.sym)
+        {
+            let record = m.text(receiver_name.sym);
+            let what = format!("associated functions such as `{record}.{name}`");
+            self.not_implemented(span, &what, Planned::Phase(2));
+            for arg in args {
+                self.infer(arg.value);
+            }
+            return Ty::Error;
+        }
+        if let ExprKind::Name(receiver_name) = m.exprs[receiver].kind
+            && self.lookup_local(receiver_name.sym).is_none()
+            && prelude_interface(m.text(receiver_name.sym))
+        {
+            let iface = m.text(receiver_name.sym);
+            let what = format!("calls through an interface, such as `{iface}.{name}(x)`,");
+            self.not_implemented(span, &what, Planned::Phase(2));
+            for arg in args {
+                self.infer(arg.value);
+            }
+            return Ty::Error;
+        }
         self.in_chain = chain;
         let receiver_ty = self.infer(receiver);
-        let name = self.m.text(method.sym);
-        let signature = match (receiver_ty, name) {
-            (Ty::Out, "write_line") => Some((Builtin::WriteLine, WRITE_LINE_PARAMS, Ty::Unit, Some(Ty::IoError))),
-            (ty, "show") if ty.is_show() => Some((Builtin::Show, NO_PARAMS, Ty::Text, None)),
-            (Ty::Text, "byte_len") => Some((Builtin::ByteLen, NO_PARAMS, Ty::INT, None)),
-            (Ty::Text, "is_empty") => Some((Builtin::IsEmpty, NO_PARAMS, Ty::Bool, None)),
+        if let (Ty::Adt(id, _), "with") = (&receiver_ty, name) {
+            self.p.res.insert(e, Res::With);
+            self.with_args(e, *id, args, span);
+            return receiver_ty;
+        }
+        let decls = &self.p.decls;
+        let signature = match (&receiver_ty, name) {
+            (Ty::Cap(cap), "write_line") if cap.iface == IfaceId::OUT => {
+                Some((Builtin::WriteLine, vec![("text", Ty::Text)], Ty::Unit, Some(Ty::IoError)))
+            }
+            (ty, "show") if decls.implements(ty, IfaceId::SHOW) => Some((Builtin::Show, vec![], Ty::Text, None)),
+            (ty, "eq") if decls.implements(ty, IfaceId::EQ) => {
+                Some((Builtin::Eq, vec![("other", ty.clone())], Ty::Bool, None))
+            }
+            (Ty::Text, "byte_len") => Some((Builtin::ByteLen, vec![], Ty::INT, None)),
+            (Ty::Text, "is_empty") => Some((Builtin::IsEmpty, vec![], Ty::Bool, None)),
             _ => None,
         };
         let Some((builtin, params, ret, fails)) = signature else {
-            if receiver_ty != Ty::Error {
-                self.error(codes::UNKNOWN_MEMBER, method.span, format!("`{receiver_ty}` has no method `{name}`"));
+            // A rejected `impl` block may have declared the method.
+            let unknown_methods = matches!(&receiver_ty, Ty::Adt(id, _) if self.p.decls.adt(*id).unknown_methods);
+            if receiver_ty != Ty::Error && !unknown_methods {
+                let message = format!("`{}` has no method `{name}`", self.show(&receiver_ty));
+                self.error(codes::UNKNOWN_MEMBER, method.span, message);
             }
             for arg in args {
                 self.infer(arg.value);
@@ -1073,21 +1473,24 @@ impl Checker<'_> {
             return Ty::Error;
         };
         self.p.res.insert(e, Res::Method(builtin));
-        self.args(name, params, args, span);
+        self.args(name, &params, args, span);
         if let Some(err) = fails {
-            self.fallible_call(name, err, span, chain);
+            self.fallible_call(name, &err, span, chain);
         }
         ret
     }
 
-    fn field(&mut self, e: ExprId, base_ty: Ty, name: Ident) -> Ty {
+    fn field(&mut self, e: ExprId, base_ty: &Ty, name: Ident) -> Ty {
         let text = self.m.text(name.sym);
+        if let Ty::Adt(id, _) = base_ty
+            && let Some((i, field)) = self.p.decls.adt(*id).field(text)
+        {
+            let ty = field.ty.clone();
+            self.p.res.insert(e, Res::Field(i));
+            return ty;
+        }
         match (base_ty, text) {
-            (Ty::System, "stdout") => {
-                self.p.res.insert(e, Res::Stdout);
-                Ty::Out
-            }
-            (Ty::System, "fs" | "net" | "clock" | "random" | "env" | "stdin" | "stderr" | "process") => {
+            (Ty::Adt(AdtId::SYSTEM, _), text) if LATER_SYSTEM_FIELDS.contains(&text) => {
                 self.not_implemented(
                     name.span,
                     &format!("`System` fields other than `stdout`, such as `{text}`,"),
@@ -1097,14 +1500,85 @@ impl Checker<'_> {
             }
             (Ty::Error, _) => Ty::Error,
             (ty, _) => {
-                self.error(codes::UNKNOWN_MEMBER, name.span, format!("`{ty}` has no field `{text}`"));
+                let message = format!("`{}` has no field `{text}`", self.show(ty));
+                self.error(codes::UNKNOWN_MEMBER, name.span, message);
                 Ty::Error
             }
         }
     }
 
+    /// Checks the arguments of `with`. They label the fields they replace, at least one, once
+    /// each and in declaration order, even on a one-field record (OPEN_QUESTIONS P5). One
+    /// label problem is reported per call.
+    fn with_args(&mut self, e: ExprId, id: AdtId, args: &[Arg], span: Span) {
+        let m = self.m;
+        let def = self.p.decls.adt(id);
+        let record = def.name.clone();
+        let fields: Vec<(Box<str>, Ty)> = def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+        if args.is_empty() {
+            let message = format!("`with` names at least one field of `{record}` to replace");
+            self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
+            return;
+        }
+        let labelled = fields.iter().map(|(name, _)| format!("{name}: …")).collect::<Vec<_>>().join(", ");
+        let mut replaced: Vec<FieldIdx> = Vec::new();
+        let mut labels_reported = false;
+        for arg in args {
+            if arg.inout {
+                let span = self.span(arg.value);
+                self.not_implemented(span, "`&` (inout) arguments", Planned::Phase(2));
+            }
+            let label = arg.label.map(|label| (label, m.text(label.sym)));
+            let index = label.and_then(|(_, text)| fields.iter().position(|(name, _)| **name == *text));
+            let problem = match (label, index) {
+                _ if labels_reported => None,
+                (None, _) => Some((
+                    codes::MISSING_LABEL,
+                    self.span(arg.value),
+                    "each argument of `with` is labelled with the field it replaces".to_string(),
+                )),
+                (Some((label, text)), None) if id == AdtId::SYSTEM && LATER_SYSTEM_FIELDS.contains(&text) => {
+                    let what = format!("`System` fields other than `stdout`, such as `{text}`,");
+                    self.not_implemented(label.span, &what, Planned::Phase(3));
+                    labels_reported = true;
+                    None
+                }
+                (Some((label, text)), None) => {
+                    Some((codes::UNKNOWN_MEMBER, label.span, format!("`{record}` has no field `{text}`")))
+                }
+                (Some((label, text)), Some(i)) if replaced.iter().any(|r| r.index() == i) => {
+                    Some((codes::DUPLICATE_NAME, label.span, format!("`with` replaces `{text}` twice")))
+                }
+                (Some((label, text)), Some(i)) if replaced.last().is_some_and(|r| r.index() > i) => Some((
+                    codes::WRONG_LABEL,
+                    label.span,
+                    format!(
+                        "`{text}:` is out of order; labels follow the declaration order, as in `{record}({labelled})`"
+                    ),
+                )),
+                _ => None,
+            };
+            if let Some((code, span, message)) = problem {
+                self.error(code, span, message);
+                labels_reported = true;
+            }
+            match index {
+                Some(i) => {
+                    replaced.push(FieldIdx(i as u32));
+                    self.check(arg.value, &fields[i].1);
+                }
+                None => {
+                    self.infer(arg.value);
+                }
+            }
+        }
+        if !labels_reported {
+            self.p.with_fields.insert(e, replaced.into());
+        }
+    }
+
     /// Checks arguments against parameters, including the label rules (REFERENCE §3, H3).
-    fn args(&mut self, callee: &str, params: &[(&str, Ty)], args: &[Arg], span: Span) {
+    fn args<S: AsRef<str>>(&mut self, callee: &str, params: &[(S, Ty)], args: &[Arg], span: Span) {
         let m = self.m;
         if args.len() != params.len() {
             let (n, given) = (params.len(), args.len());
@@ -1121,9 +1595,10 @@ impl Checker<'_> {
             return;
         }
         // One label problem is reported per call, with the labels the call needs.
-        let labelled = params.iter().map(|(param, _)| format!("{param}: …")).collect::<Vec<_>>().join(", ");
+        let labelled = params.iter().map(|(param, _)| format!("{}: …", param.as_ref())).collect::<Vec<_>>().join(", ");
         let mut labels_reported = false;
-        for (i, (arg, &(param, ty))) in args.iter().zip(params).enumerate() {
+        for (i, (arg, (param, ty))) in args.iter().zip(params).enumerate() {
+            let param = param.as_ref();
             if arg.inout {
                 let span = self.span(arg.value);
                 self.not_implemented(span, "`&` (inout) arguments", Planned::Phase(2));
@@ -1159,18 +1634,20 @@ impl Checker<'_> {
         }
     }
 
-    fn fallible_call(&mut self, callee: &str, err: Ty, span: Span, chain: bool) {
+    fn fallible_call(&mut self, callee: &str, err: &Ty, span: Span, chain: bool) {
         match self.tries.last_mut() {
-            Some(errors) if chain => errors.push(err),
-            _ => self.error(
-                codes::UNMARKED_FALLIBLE_CALL,
-                span,
-                format!("`{callee}` can fail with `{err}`, so the call must be marked, for example with `try` (§7.2)"),
-            ),
+            Some(errors) if chain => errors.push(err.clone()),
+            _ => {
+                let message = format!(
+                    "`{callee}` can fail with `{}`, so the call must be marked, for example with `try` (§7.2)",
+                    self.show(err)
+                );
+                self.error(codes::UNMARKED_FALLIBLE_CALL, span, message);
+            }
         }
     }
 
-    fn try_expr(&mut self, inner: ExprId, expected: Option<Ty>, span: Span) -> Ty {
+    fn try_expr(&mut self, inner: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
         self.tries.push(Vec::new());
         self.in_chain = true;
         let ty = self.expr(inner, expected);
@@ -1181,19 +1658,19 @@ impl Checker<'_> {
             self.error(codes::TRY_WITHOUT_FAILURE, span, "`try` marks no call that can fail");
         }
         for err in errors {
-            match self.f.fails {
-                None => self.error(
-                    codes::TRY_ERROR_MISMATCH,
-                    span,
-                    format!("`try` propagates `{err}`, but this function does not declare `fails {err}`"),
+            let message = match &self.f.fails {
+                None => {
+                    let err = self.show(&err);
+                    format!("`try` propagates `{err}`, but this function does not declare `fails {err}`")
+                }
+                Some(own) if *own != err && *own != Ty::Error && err != Ty::Error => format!(
+                    "`try` needs equal error types, but the call fails with `{}` and this function fails with `{}`",
+                    self.show(&err),
+                    self.show(own)
                 ),
-                Some(own) if own != err && own != Ty::Error && err != Ty::Error => self.error(
-                    codes::TRY_ERROR_MISMATCH,
-                    span,
-                    format!("`try` needs equal error types, but the call fails with `{err}` and this function fails with `{own}`"),
-                ),
-                Some(_) => {}
-            }
+                Some(_) => continue,
+            };
+            self.error(codes::TRY_ERROR_MISMATCH, span, message);
         }
         ty
     }
@@ -1203,7 +1680,7 @@ impl Checker<'_> {
         let ExprKind::If { cond, then_block, else_branch } = &m.exprs[e].kind else {
             unreachable!("if_expr is called on `if` expressions")
         };
-        self.check(*cond, Ty::Bool);
+        self.check(*cond, &Ty::Bool);
         let ty = match (mode, else_branch) {
             (Mode::Stmt | Mode::Tail(_), _) => {
                 let tail = match mode {
@@ -1219,22 +1696,28 @@ impl Checker<'_> {
                 if then_ty == Ty::Never && else_ty == Ty::Never { Ty::Never } else { Ty::Unit }
             }
             (Mode::Value(_), None) => {
-                self.block_value(then_block, None);
-                let span = self.span(e);
-                self.error(codes::TYPE_MISMATCH, span, "an `if` without `else` has no value; add an `else` branch");
+                // A block that was never closed may have been followed by an `else`.
+                if !self.block_value(then_block, None).is_unknown() {
+                    let span = self.span(e);
+                    self.error(codes::TYPE_MISMATCH, span, "an `if` without `else` has no value; add an `else` branch");
+                }
                 Ty::Error
             }
             (Mode::Value(expected), Some(branch)) => {
                 let then_ty = self.block_value(then_block, expected);
-                let expected = expected.or(Some(then_ty).filter(|t| !t.is_unknown()));
+                let expected = expected.or(Some(&then_ty).filter(|t| !t.is_unknown()));
                 let else_ty = match branch {
                     ElseBranch::Block(block) => self.block_value(block, expected),
                     ElseBranch::If(nested) => self.if_expr(*nested, Mode::Value(expected)),
                 };
-                if then_ty == Ty::Never && else_ty == Ty::Never { Ty::Never } else { expected.unwrap_or(else_ty) }
+                match expected {
+                    _ if then_ty == Ty::Never && else_ty == Ty::Never => Ty::Never,
+                    Some(expected) => expected.clone(),
+                    None => else_ty,
+                }
             }
         };
-        self.p.expr_ty.insert(e, ty);
+        self.p.expr_ty.insert(e, ty.clone());
         ty
     }
 
@@ -1258,11 +1741,8 @@ impl Checker<'_> {
                     Ty::Int(it) => Ty::Int(it),
                     ty if ty.is_unknown() => Ty::Error,
                     ty => {
-                        self.error(
-                            codes::UNSUPPORTED_OPERATOR,
-                            span,
-                            format!("a `for` range needs integer bounds, not `{ty}`"),
-                        );
+                        let message = format!("a `for` range needs integer bounds, not `{}`", self.show(&ty));
+                        self.error(codes::UNSUPPORTED_OPERATOR, span, message);
                         Ty::Error
                     }
                 }
@@ -1274,7 +1754,7 @@ impl Checker<'_> {
                 Ty::Error
             }
         };
-        self.p.expr_ty.insert(iter, element);
+        self.p.expr_ty.insert(iter, element.clone());
         self.f.scopes.push(Vec::new());
         let id = self.declare(binding, element, false, "loop variable");
         self.p.for_local.insert(e, id);
@@ -1284,32 +1764,13 @@ impl Checker<'_> {
     }
 }
 
-/// An expression whose only effect is its value, so it is not a statement on its own.
-fn is_bare_value(kind: &ExprKind) -> bool {
-    matches!(
-        kind,
-        ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::Bool(_)
-            | ExprKind::Char(_)
-            | ExprKind::Text(_)
-            | ExprKind::Unit
-            | ExprKind::FText(_)
-            | ExprKind::Name(_)
-            | ExprKind::Field { .. }
-            | ExprKind::Unary { .. }
-            | ExprKind::Binary { .. }
-            | ExprKind::Range { .. }
-    )
-}
-
 /// Whether a statement or block of this type may never finish. An error counts, because the
 /// code it stands for might diverge, and reporting a missing `return` would depend on it.
-fn diverges_ty(ty: Ty) -> bool {
+fn diverges_ty(ty: &Ty) -> bool {
     matches!(ty, Ty::Never | Ty::Error)
 }
 
-fn arithmetic_defined(op: BinOp, ty: Ty) -> bool {
+fn arithmetic_defined(op: BinOp, ty: &Ty) -> bool {
     match ty {
         Ty::Int(_) => true,
         // Floats have no `%` (OPEN_QUESTIONS P5).
@@ -1337,9 +1798,37 @@ fn builtin_type(name: &str) -> Option<Ty> {
         "Text" => Ty::Text,
         "Unit" => Ty::Unit,
         "Never" => Ty::Never,
-        "System" => Ty::System,
+        "System" => Ty::system(),
         _ => return None,
     })
+}
+
+/// How far an item's visibility reaches, so that a wider one is greater.
+fn reach(vis: Visibility) -> u8 {
+    match vis {
+        Visibility::Private => 0,
+        Visibility::PubPkg => 1,
+        Visibility::Pub => 2,
+    }
+}
+
+/// The fields of `decl` that its record keeps: the first of each name, in order.
+fn kept_fields(decl: &RecordDecl) -> Vec<&FieldDecl> {
+    let mut kept: Vec<&FieldDecl> = Vec::new();
+    for field in &decl.fields {
+        if !kept.iter().any(|k| k.name.sym == field.name.sym) {
+            kept.push(field);
+        }
+    }
+    kept
+}
+
+/// The interfaces of the prelude (REFERENCE §3).
+fn prelude_interface(name: &str) -> bool {
+    matches!(
+        name,
+        "Eq" | "Ord" | "Hash" | "Show" | "Copy" | "Index" | "Abandon" | "Add" | "Sub" | "Mul" | "Div" | "Neg"
+    )
 }
 
 fn prelude_type(name: &str) -> bool {

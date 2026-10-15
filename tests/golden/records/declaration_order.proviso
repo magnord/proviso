@@ -1,0 +1,21 @@
+// phase: 2.1
+// A record may name records and functions declared later in the file, in its fields, its
+// derives and its refinements (OPEN_QUESTIONS P5).
+use std.io { IoError }
+
+record Outer derives(Eq, Show) {
+    inner: Inner where positive(inner)
+}
+
+record Inner derives(Eq, Show) {
+    n: Int
+}
+
+fn positive(i: Inner) -> Bool {
+    return i.n > 0
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let a = Outer(Inner(1))
+    try sys.stdout.write_line(f"{a} {a == Outer(Inner(2))}")
+}

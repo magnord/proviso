@@ -1,0 +1,25 @@
+// phase: 2.1
+// expect-error: E0203
+// A record may not reuse a prelude name, whether a type or an interface (REFERENCE §3, H4).
+// The name stays ambiguous, so its uses aren't reported again (§15.1).
+record List {                                       // <- E0203
+    items: Int
+}
+
+record Text {                                       // <- E0203
+    x: Int
+}
+
+record System {                                     // <- E0203
+    x: Int
+}
+
+record Show {                                       // <- E0203
+    x: Int
+}
+
+fn uses_them(t: Text, l: List) -> Int {
+    let a = Text(x: 1)
+    let s = System(x: 2)
+    return t.x + a.x + s.x + l.items
+}

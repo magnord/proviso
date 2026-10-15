@@ -1,6 +1,8 @@
-//! The types of the phase-1 subset.
+//! The types the checker assigns.
 
-use std::fmt;
+use std::sync::Arc;
+
+use crate::decls::{AdtId, IfaceId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum IntTy {
@@ -83,7 +85,10 @@ impl FloatTy {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// A type. Compound types own their parts, so a `Ty` means the same thing wherever it is
+/// held, and equality needs no context. A nominal type is named by id, and what it declares
+/// is in [`Decls`](crate::decls::Decls).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Ty {
     Int(IntTy),
     Float(FloatTy),
@@ -92,65 +97,49 @@ pub enum Ty {
     Text,
     Unit,
     Never,
-    /// The stub `System` record. Phase 1 provides only its `stdout` field.
-    System,
-    /// The `Out` capability of `std.io`.
-    Out,
-    /// The error of `Out` operations.
+    /// A record declared in Proviso: the module's, or the prelude's `System`.
+    Adt(AdtId, Arc<[Ty]>),
+    /// The error of `std.io` operations.
     IoError,
+    /// A capability interface type such as `Out`. Copies of its values share state (REFERENCE §9.6).
+    Cap(Arc<CapTy>),
     /// The type of an expression that already has an error; it is compatible with
     /// everything, so one mistake is reported once.
     Error,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct CapTy {
+    pub iface: IfaceId,
+}
+
 impl Ty {
     pub const INT: Ty = Ty::Int(IntTy::I64);
 
-    pub fn is_numeric(self) -> bool {
+    pub fn adt(id: AdtId) -> Ty {
+        Ty::Adt(id, Arc::from([]))
+    }
+
+    pub fn system() -> Ty {
+        Ty::adt(AdtId::SYSTEM)
+    }
+
+    pub fn out() -> Ty {
+        Ty::Cap(Arc::new(CapTy { iface: IfaceId::OUT }))
+    }
+
+    pub fn is_numeric(&self) -> bool {
         matches!(self, Ty::Int(_) | Ty::Float(_))
     }
 
     /// Whether the type has no value yet to report against: an error or a diverging expression.
-    pub fn is_unknown(self) -> bool {
+    pub fn is_unknown(&self) -> bool {
         matches!(self, Ty::Error | Ty::Never)
-    }
-
-    pub fn is_show(self) -> bool {
-        matches!(self, Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Text | Ty::IoError)
-    }
-
-    /// `==` and `!=`; built into scalars, including IEEE equality on floats (REFERENCE §4.9).
-    pub fn has_equality(self) -> bool {
-        matches!(self, Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Text | Ty::Unit)
-    }
-
-    /// `<`, `<=`, `>` and `>=`. Text compares by code point (REFERENCE §12.3).
-    pub fn has_ordering(self) -> bool {
-        matches!(self, Ty::Int(_) | Ty::Float(_) | Ty::Char | Ty::Text)
     }
 
     /// Whether `actual` may be used where `self` is expected. `Never` is a subtype of every
     /// type (REFERENCE §9.2).
-    pub fn accepts(self, actual: Ty) -> bool {
-        self == actual || actual.is_unknown() || self == Ty::Error
-    }
-}
-
-impl fmt::Display for Ty {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Ty::Int(it) => it.name(),
-            Ty::Float(ft) => ft.name(),
-            Ty::Bool => "Bool",
-            Ty::Char => "Char",
-            Ty::Text => "Text",
-            Ty::Unit => "Unit",
-            Ty::Never => "Never",
-            Ty::System => "System",
-            Ty::Out => "Out",
-            Ty::IoError => "IoError",
-            Ty::Error => "{unknown}",
-        };
-        f.write_str(name)
+    pub fn accepts(&self, actual: &Ty) -> bool {
+        self == actual || actual.is_unknown() || *self == Ty::Error
     }
 }

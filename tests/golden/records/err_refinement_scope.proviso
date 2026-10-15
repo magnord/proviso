@@ -1,0 +1,13 @@
+// phase: 2.1
+// expect-error: E0108
+// expect-error: E0201
+// A field's `where` sees only that field. The record-level `where` sees every field
+// (OPEN_QUESTIONS P5). A refinement is an expression, so it has nothing to `return` from.
+record Span {
+    lo: Int where lo <= hi                          // <- E0201
+    hi: Int where 0 <= hi
+} where lo <= hi
+
+record Checked {
+    n: Int where if n > 0 { return } else { true }  // <- E0108
+}
