@@ -1,0 +1,61 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this repository is
+
+Proviso is a draft programming language designed for coding agents. The repository holds the design and a Rust implementation that is being built in phases:
+
+- `REFERENCE.md` is the language spec. It is meant to stay small enough (about 15K tokens) for an agent to keep in context, so keep additions tight.
+- `RATIONALE.md` explains why the design is the way it is.
+- `OPEN_QUESTIONS.md` holds unresolved design questions (§A–§D), the experiment plan (§E), the acceptance counterexamples (§F), and spec gaps found while writing tests (§G). Its **P3** table defines the six v1 delivery phases.
+- `crates/` is the v1 toolchain: a checker plus a tree-walking interpreter. Phase 1 (scalar types, functions, control flow, `fails`/`try`, a stub `System` with only `stdout`) is done.
+
+Code and test comments cite these documents by section and ID, such as `REFERENCE §7.3`, `OPEN_QUESTIONS P5`, `Q25`, `T10` or `H2`. Follow that convention when a rule comes from the spec.
+
+## Commands
+
+Rust 1.99 or later. The workspace has no dependencies outside the standard library. `rustfmt.toml` sets `max_width = 120`.
+
+```bash
+cargo build
+cargo test                                   # unit tests, CLI tests, catalog check, and every golden file
+cargo test -p proviso-syntax                 # one crate (proviso-syntax, proviso-check, proviso-interp, proviso)
+cargo test -p proviso --test golden          # golden files only
+PROVISO_BLESS=1 cargo test                   # rewrite .out/.err goldens from actual output; review the diff
+cargo run -- check [--incomplete] [--json] <file.proviso>
+cargo run -- run [--incomplete] <file.proviso>
+cargo run -- explain <code>                  # e.g. E0901
+```
+
+All golden files run inside a single test (`crates/proviso/tests/golden.rs`), and there is no per-file filter. To work on one golden file, run `cargo run -- check` or `cargo run -- run` on it directly.
+
+## Architecture
+
+The pipeline is split into one crate per stage, and each crate depends only on the ones before it:
+
+1. **`syntax`** (`proviso-syntax`): lexer, parser, AST, source spans, interning, and the diagnostic code catalog (`diag.rs`). AST nodes live in append-only arenas addressed by typed `Id<T>`s (`arena.rs`).
+2. **`check`** (`proviso-check`): name resolution and type checking. It **never rewrites the tree**. What it learns goes into `SideTable`s on `Program`, keyed by AST ids.
+3. **`interp`** (`proviso-interp`): tree-walking interpreter over the AST plus the checker's `Program`. It trusts the checker, so a missing side-table entry is an interpreter bug, not a user error. Copy values are shared behind `Arc` so later phases can hand them to task threads.
+4. **`proviso`**: the CLI (`main.rs`), the `compile`/`run` driver (`lib.rs`), and the golden test runner (`golden.rs`).
+
+Points that span several files:
+
+- **Phase gating.** `proviso::IMPLEMENTED_PHASE` (in `crates/proviso/src/lib.rs`) is the last P3 phase the toolchain implements. The golden runner reports tests for later phases as pending. When the checker meets a construct from a later phase, it reports `E0901 not_implemented` through `Diagnostics::not_implemented` with a `Planned` value (`Phase(n)`, `PastV1` or `Unscheduled`). Use that path for anything not built yet instead of panicking or silently accepting it.
+- **Stacks.** Parsing and checking recurse once per nesting level, so `compile` runs them on a 64 MiB thread. The interpreter runs on its own 1 GiB thread, checks how much stack is left, and turns exhaustion into a defect (`MAX_CALL_DEPTH`, `STACK_RESERVE`) rather than a crash.
+- **Exit codes** live in `proviso::exit`: 0 ok, 1 `main` failed with an error, 65 check errors, 70 defect, 64/66 usage/no input, 101 toolchain bug.
+- **No cascades** (REFERENCE §15.1). A diagnostic that depends on an already-rejected construct must be suppressed. Golden tests fail if an extra error is reported.
+
+## Diagnostics
+
+Codes are stable, so a code's meaning never changes once assigned. They are defined in two places that must agree: `tests/DIAGNOSTICS.md` and `crates/syntax/src/diag.rs`. `crates/syntax/tests/catalog.rs` fails if the two disagree. A new code goes into both when a golden test first expects it, even if the checker can't report it until a later phase. Ranges map to REFERENCE sections (E00xx lexical, E01xx syntax, E02xx names, E03xx types, E04xx refinements/contracts, E05xx ownership/resources, E06xx capabilities, E07xx errors, E08xx concurrency, E09xx implementation limits).
+
+## Golden tests
+
+`tests/golden/README.md` is the authoritative spec of the format. In short:
+
+- Each `.proviso` file opens with a comment header. `// phase: N` is required, and directives are read only from the header. A misspelled or misplaced directive fails the test.
+- `// expect-error: <code>` and a trailing `// <- <code>` on the offending line mark rejected programs. Lines without markers must check cleanly.
+- Programs that run are compared with `.out` (stdout) and `.err` (stderr). A missing file means no output.
+- `basics/` holds the phase-1 tests. The `fNN_*.proviso` files are the §F acceptance counterexamples. They were written strictly to REFERENCE.md before the compiler existed, so they test the spec, not the implementation. Record spec gaps in OPEN_QUESTIONS §G rather than bending a test to fit the code.
+- If an active golden file uses a directive the runner doesn't support yet (`expect-report`, `expect-log`, `run`, `schedules`, `sig` from phase 4), the test fails instead of passing unchecked. Implement the directive before raising `IMPLEMENTED_PHASE` to that phase.
