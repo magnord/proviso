@@ -133,6 +133,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Open:** `select` and timeouts.
 - **Now:** loop back-edges are cancellation points. **Open:** their cost in tight loops, and how many delivery points replay must record.
 - **Found by the goldens (§G):** the signatures of `spawn` and `join`: what reach a spawned closure may have, and whether `join` on a task that cannot fail is marked. f18 never joins its infallible task and relies on the scope to wait for it.
+- **Found by the goldens (§G):** only `proviso test` can explore schedules (`--schedules N`). `proviso run` can neither explore nor pin one, yet f18's cancellation half means something only on some schedules. The goldens use a `schedules` directive until `run` has an option.
 
 **Q16 — `supervise`.** Does catching defects at task boundaries bring back exceptions as control flow? Options:
 - restrict it to top-level server loops;
@@ -210,7 +211,8 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
   - whether a call marked with an `else` form (§7.2), such as `out.write_line(t) else ()` or `save(x) else fail E.Io(cause: it)`, counts as a call statement;
   - whether a closure body may use `return`, and what it returns from. §F row 13 writes `{ w(); return "t" }`;
   - how far an unbraced closure body extends: `|| f() else ()` could parse as `(|| f()) else ()`;
-  - whether `it` is bound in `e else { … }` when `e` is a fallible call.
+  - whether `it` is bound in `e else { … }` when `e` is a fallible call;
+  - whether a path that ends in `fail` meets the rule that a non-`Unit` body ends every path with `return` (f07).
 - **Goldens:** use `try` statements, discard an error with `let _ = attempt f()`, and give a closure with statements a braced body that ends in its value.
 
 **Q34 — Closures bound to locals.** Found by the goldens (§G).
@@ -221,13 +223,14 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Now:** a resource is consumed by a `take` parameter or a `take self` method (ref §10). The reference's `Txn.abandon` consumes `self` without visibly consuming the `Txn` itself.
 - **Unclear:** what finally ends a resource that holds no resource fields. The goldens assume that a `take self` method in the type's own `impl`, `abandon` included, consumes `self` when it returns.
 - **Options:** that rule; explicit destructuring (`let Txn(..) = self`); a dedicated form allowed only in the type's module.
+- **Also unclear:** whether a resource moved out of an `inout` container, as `probes.pop()` does, is owned by the caller or still lent (§10 rule 6). §F row 14 needs it to be owned, so that it can be closed.
 
 **Q36 — The standard library the reference assumes.** Found by the goldens (§G).
 - **Now:** the reference names some std items in passing. The rest is meant to come from `proviso sig std` (ref §16, P4), which doesn't exist yet.
 - **Need, for the goldens:**
   - the module of `Out` and `In`; the goldens assume `std.io`, where `IoError` lives;
   - `List.pop` and `List.len`;
-  - the `ensures` of `List.push`. Row 17 is `refuted` only if they let the verifier build a counterexample; otherwise it is `unknown`;
+  - the `ensures` of `List.push`. Row 17 is `refuted` only if they let the verifier build a counterexample; otherwise it is `unknown`, which needs a code of its own;
   - `Pool.insert` and `Pool.get`;
   - a way to open a file as a resource. Rows 8 and 14 use a test-local resource instead.
 - **Proposal:** write the `sig` of the std items that phases 1–3 need before phase 1 ends, so goldens and the P4 trial can use them.
@@ -254,6 +257,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Need:** the log format, how arguments are digested or stored, and how precisely divergence is reported.
 - **Acceptance test:** two tasks write different contents to the same file through copies of a `Dir`, and both are joined in the same order. Replay must reproduce every result the program observed and report the overlapping writes (see §F).
 - **Goldens:** f10 asserts the log entries and the overlap report with provisional directives (`expect-log`, `expect-report`) until this format exists.
+- **Found by the goldens (§G):** simulated replay suppresses external effects, stdout included, so f10 checks replay by "no divergence", not by comparing output. "Overlapped" also needs a definition. If one write completes before the other starts, nothing overlapped in time, yet §F row 10 requires a report. f10 assumes it means calls the program doesn't order (no join, channel or scope boundary between them).
 
 **T6 — `diff-contracts` classification.**
 - **Need:** precise rules for BREAKING, WEAKENED, STRENGTHENED, AUTHORITY and TRUST.
@@ -386,14 +390,14 @@ Writing the §F rows as complete programs ([tests/golden](tests/golden/README.md
 
 | Gap | Goldens | Filed as |
 |---|---|---|
-| Whether a call marked with an `else` form is a valid statement; `return` and body extent in closures; whether `it` is bound in `else { … }` | f05, f08, f13 | Q33 |
+| Whether a call marked with an `else` form is a valid statement; `return` and body extent in closures; whether `it` is bound in `else { … }`; whether a path ending in `fail` counts as returning | f05, f07, f08, f13 | Q33 |
 | The lifetime and captures of a closure bound to a local | f13 | Q34 |
-| What finally consumes a resource that holds no resource fields | f08, f09, f14, f15 | Q35 |
+| What finally consumes a resource that holds no resource fields; whether one popped from an `inout` container is owned | f08, f09, f14, f15 | Q35 |
 | The std items the rows need: `Out`'s module, `List.pop`, `List.push`'s contract, `Pool`'s operations, opening a file | f07, f08, f09, f14, f17 | Q36 |
 | `Dir`'s full operation list; narrowing a capability that has no permission list (`Out`); `create` for new files; the root of `sys.fs` | f04, f10, f11 | Q6 |
 | Whether `&span.lo` drops facts about `span.hi` | f03, f16 | Q28 |
-| The signatures of `spawn`, `join` and `supervise` | f10, f18 | Q15, Q16 |
-| How defects, leaks and replay overlaps are reported | f09, f10 | T9, T10 |
+| The signatures of `spawn`, `join` and `supervise`; `run` can't explore schedules | f10, f18 | Q15, Q16 |
+| How defects, leaks and replay overlaps are reported; simulated replay suppresses stdout; what counts as overlapping | f09, f10 | T9, T10 |
 | How `sig` shows an `inout` that holds a resource | f14 | T11 |
 | Row 13 as written calls the fallible `w` unmarked, and its `try` adds a second reason for rejection. The golden makes `w` infallible so that reach is the only reason. | f13 | the row's wording |
-| P3 places neither `check` and `assert` (needed in phase 2 by §17's `parse_user` and by f09) nor `supervise` (f18, phase 6) | f09, f18 | P3 |
+| P3's phase 2 lacks features its own rows need: `check` and `assert` (§17's `parse_user`, f09), closures and function types with modes (row 15), and `keep` parameters and capability-typed fields (f08, f09, f14 print through a stored `Out`; retention can still wait for phase 3). P3 also places `supervise` in no phase (f18, phase 6). | f08, f09, f14, f15, f18 | P3 |

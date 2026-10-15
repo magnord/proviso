@@ -9,9 +9,12 @@
 // Two tasks write different contents to one file through copies of a Dir,
 // and are joined in a fixed order. The file ends up with whichever write
 // completed last, so either output is correct. `--record` logs both writes
-// with their start and completion order (§9.8). Replay is simulated: it must
-// print exactly what the recorded run printed, including the later read, and
-// report the two writes as overlapping.
+// with their start and completion order (§9.8). Replay is simulated: it
+// serves the later read from the log and suppresses external effects, stdout
+// included. It must report no divergence, which shows that it reproduced the
+// read, because the printed line is an argument of a logged call. It must
+// also report the two writes as overlapping. That assumes "overlapping"
+// means the program doesn't order them (OPEN_QUESTIONS T9).
 
 use std.fs { Dir, Path, FsError }
 use std.io { IoError }

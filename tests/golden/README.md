@@ -29,14 +29,16 @@ followed by any directives, each a full-line comment, then a comment explaining 
 | `// <- <code>` | Trailing comment marking the line where `<code>` is reported; for an expression that spans lines, the line where it starts. Runners may check it; the code set is what must match. |
 | `// expect-exit: <n>` | The exit code of `proviso run`; 0 if absent, 1 when `main` fails with an error, 70 for a defect. |
 | `// expect-report: <kind> <detail>` | The run must report this event; see the runtime reports in DIAGNOSTICS.md. |
-| `// run: record-replay` | Run with `proviso run --record`, then `proviso replay` the log. Both runs must match the `.out`, and print the same text. |
+| `// run: record-replay` | Run with `proviso run --record`, whose stdout must match the `.out`. Then `proviso replay` the log, which must report no divergence. Simulated replay suppresses external effects, stdout included (§9.8), so a clean replay is what shows that every observed result was reproduced. |
 | `// expect-log: <operation>` | The recorded log holds a call to this capability operation, with its start and completion order. Write one line per expected call. |
+| `// schedules: <n>` | Run under `n` seeded schedules, as `proviso test --schedules` explores them (§11 rule 6). Every run must match. `proviso run` has no such option yet (Q15). |
 | `// sig: <symbol>` | Compare `proviso sig <symbol>` with the `.sig` file. |
 
 ## Rules
 
 - **Rejected rows.** A file with `expect-error` must fail `proviso check`, and the set of reported error codes must equal the expected set. A diagnostic that depends on a rejected construct is suppressed (§15.1, no cascades), so it doesn't count. Warnings are ignored.
 - **Accepted rows.** A file without `expect-error` must pass `proviso check`. If it has `main`, `proviso run` must print the `.out` file and exit with the expected code.
+- **Reports.** `expect-report` lists the reports that must appear. Other reports don't fail the test.
 - **Alternatives.** Where the language allows several results, the `.out` lists them separated by a line `--- or ---`, and the run must match one of them (f10).
 - **Environment.** Each run starts in a new, empty working directory, and `sys.fs` is taken to be rooted there (gap: Q6).
 - **`.sig` files** are checked from phase 4, when `sig` exists. Until the canonical format covers what they test (T11), each line of the `.sig` must occur in the output in order, as a substring of a line, with runs of whitespace collapsed. After that they become exact goldens.

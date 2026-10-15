@@ -1,5 +1,6 @@
 // §F row 18: capability state never shows a half-finished operation
 // phase: 6
+// schedules: 32
 //
 // `transfer` moves an amount between two `state` fields in two steps (§9.6).
 // - A defect halfway discards the operation's state changes, so the ledger
@@ -8,6 +9,10 @@
 //   done, then fails, which cancels `mover`. Cancellation is masked inside the
 //   operation and delivered after it returns, so the transfer completes: 93/7.
 // A half-finished update would read 95/0 or 93/0.
+//
+// The cancellation half tests masking only on schedules where `stopper`
+// fails between the two steps. On other schedules `transfer` has already
+// returned, so the test runs under several seeded schedules (§11 rule 6).
 //
 // The flag is a separate capability object, so `stopper` can read it while
 // `transfer` runs. The signatures of `spawn` and `supervise` are not given
