@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 use std::io::Write;
 use std::sync::Arc;
 
+use proviso_check::decls::{AdtId, Decls, VariantIdx};
 use proviso_check::types::{FloatTy, IntTy, Ty};
 use proviso_check::{Builtin, FnId, Program, Res};
 use proviso_syntax::ast::*;
@@ -25,19 +26,43 @@ const STACK_SIZE: usize = 1 << 30;
 /// The stack kept free for the deepest work between two checks.
 const STACK_RESERVE: usize = 1 << 20;
 
-#[derive(Clone, PartialEq, Debug)]
+/// A runtime value. It describes itself: an integer knows its type and a record knows its
+/// declaration, so arithmetic, `show` and `==` need no static types.
+#[derive(Clone, Debug)]
 pub enum Value {
-    /// Every integer type, range-checked against its static type after each operation.
-    Int(i128),
+    /// Every integer type, range-checked against its type after each operation.
+    Int(i128, IntTy),
     F64(f64),
     F32(f32),
     Bool(bool),
     Char(char),
     Text(Arc<str>),
     Unit,
-    System,
-    Out,
+    Adt(Adt),
     IoError(Arc<str>),
+    Cap(Cap),
+}
+
+// Phase 6 hands values to task threads.
+const _: () = {
+    const fn send_sync<T: Send + Sync>() {}
+    send_sync::<Value>()
+};
+
+/// A record value. Writes go through `Arc::make_mut`, so a shared record is copied one level
+/// at the first write (value semantics, REFERENCE §5.1).
+#[derive(Clone, Debug)]
+pub struct Adt {
+    pub def: AdtId,
+    pub variant: VariantIdx,
+    pub fields: Arc<[Value]>,
+}
+
+/// A capability. Copies share the underlying state, the one exception to value semantics
+/// (REFERENCE §9.6).
+#[derive(Clone, Debug)]
+pub enum Cap {
+    Stdout,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -144,9 +169,11 @@ impl Interp<'_> {
     fn main(&mut self) -> Outcome {
         let main = self.p.main.expect("the driver checks that `main` exists");
         let site = self.m.fn_decl(self.p.fns[main].item).expect("`main` is a function").name.span;
-        match self.call(main, vec![Value::System], site) {
+        let fields = Arc::from([Value::Cap(Cap::Stdout)]);
+        let sys = Value::Adt(Adt { def: AdtId::SYSTEM, variant: VariantIdx::RECORD, fields });
+        match self.call(main, vec![sys], site) {
             Ok(_) => Outcome::Done,
-            Err(Unwind::Fail(error)) => Outcome::Failed(show(&error)),
+            Err(Unwind::Fail(error)) => Outcome::Failed(show(&error, &self.p.decls)),
             Err(Unwind::Defect(mut defect)) => {
                 // The last caller is the synthetic call of `main` itself.
                 defect.callers.pop();
@@ -222,7 +249,7 @@ impl Interp<'_> {
                     None => value,
                     Some(op) => {
                         let old = frame[id.index()].clone();
-                        self.arithmetic(op, old, value, self.p.ty(*target), stmt.span)?
+                        self.arithmetic(op, old, value, stmt.span)?
                     }
                 };
                 frame[id.index()] = new;
@@ -260,10 +287,18 @@ impl Interp<'_> {
         }
     }
 
-    fn int(&mut self, e: ExprId, frame: &mut Frame) -> Flow<i128> {
+    fn int(&mut self, e: ExprId, frame: &mut Frame) -> Flow<(i128, IntTy)> {
         match self.expr(e, frame)? {
-            Value::Int(i) => Ok(i),
+            Value::Int(i, it) => Ok((i, it)),
             other => unreachable!("expected an integer, found {other:?}"),
+        }
+    }
+
+    /// The type of an integer literal, which comes from its context.
+    fn int_ty(&self, e: ExprId) -> IntTy {
+        match self.p.ty(e) {
+            Ty::Int(it) => *it,
+            other => unreachable!("integer literals have an integer type, not {other:?}"),
         }
     }
 
@@ -272,7 +307,7 @@ impl Interp<'_> {
         let span = m.exprs[e].span;
         self.check_stack(span)?;
         Ok(match &m.exprs[e].kind {
-            ExprKind::Int(value) => Value::Int(*value as i128),
+            ExprKind::Int(value) => Value::Int(*value as i128, self.int_ty(e)),
             ExprKind::Float(text) => match self.p.ty(e) {
                 Ty::Float(FloatTy::F32) => Value::F32(text.parse().expect("the checker validated the literal")),
                 _ => Value::F64(text.parse().expect("the checker validated the literal")),
@@ -286,7 +321,7 @@ impl Interp<'_> {
                 for part in parts {
                     match part {
                         FTextPart::Lit(text) => out.push_str(text),
-                        FTextPart::Expr(x) => out.push_str(&show(&self.expr(*x, frame)?)),
+                        FTextPart::Expr(x) => out.push_str(&show(&self.expr(*x, frame)?, &self.p.decls)),
                     }
                 }
                 Value::Text(out.into())
@@ -313,23 +348,18 @@ impl Interp<'_> {
                 return self.builtin(builtin, receiver, values);
             }
             ExprKind::Field { base, .. } => {
-                self.expr(*base, frame)?;
-                match self.p.res(e) {
-                    Some(Res::Stdout) => Value::Out,
-                    other => unreachable!("fields are resolved, not {other:?}"),
-                }
+                let Some(Res::Field(i)) = self.p.res(e) else { unreachable!("fields are resolved") };
+                let Value::Adt(adt) = self.expr(*base, frame)? else { unreachable!("fields are read from records") };
+                adt.fields[i.index()].clone()
             }
             ExprKind::Unary { op: UnaryOp::Not, operand } => Value::Bool(!self.bool(*operand, frame)?),
             ExprKind::Unary { op: UnaryOp::Neg, operand } => {
                 if let ExprKind::Int(value) = m.exprs[*operand].kind {
                     // The checker treats `-128` as one literal, so it never overflows here.
-                    return Ok(Value::Int(-(value as i128)));
+                    return Ok(Value::Int(-(value as i128), self.int_ty(e)));
                 }
                 match self.expr(*operand, frame)? {
-                    Value::Int(x) => {
-                        let Ty::Int(it) = self.p.ty(e) else {
-                            unreachable!("negation of an integer has an integer type")
-                        };
+                    Value::Int(x, it) => {
                         let negated = -x;
                         if !it.contains(negated) {
                             return Err(defect(
@@ -338,7 +368,7 @@ impl Interp<'_> {
                                 span,
                             ));
                         }
-                        Value::Int(negated)
+                        Value::Int(negated, it)
                     }
                     Value::F64(x) => Value::F64(-x),
                     Value::F32(x) => Value::F32(-x),
@@ -355,7 +385,7 @@ impl Interp<'_> {
                 let a = self.expr(*lhs, frame)?;
                 let b = self.expr(*rhs, frame)?;
                 if op.is_arithmetic() {
-                    return self.arithmetic(*op, a, b, self.p.ty(e), span);
+                    return self.arithmetic(*op, a, b, span);
                 }
                 Value::Bool(compare(*op, &a, &b))
             }
@@ -388,13 +418,13 @@ impl Interp<'_> {
                 let ExprKind::Range { lo, hi, inclusive } = m.exprs[*iter].kind else {
                     unreachable!("phase 1 loops over ranges")
                 };
-                let lo = self.int(lo, frame)?;
-                let hi = self.int(hi, frame)?;
+                let (lo, it) = self.int(lo, frame)?;
+                let (hi, _) = self.int(hi, frame)?;
                 let end = if inclusive { hi + 1 } else { hi };
                 let slot = self.p.for_local.get(e).expect("loop variables are resolved").index();
                 let mut i = lo;
                 while i < end {
-                    frame[slot] = Value::Int(i);
+                    frame[slot] = Value::Int(i, it);
                     if self.loop_body(e, body, frame)?.is_break() {
                         break;
                     }
@@ -414,7 +444,7 @@ impl Interp<'_> {
             ExprKind::Debug(values) => {
                 let mut parts = Vec::with_capacity(values.len());
                 for value in values {
-                    parts.push(debug_repr(&self.expr(*value, frame)?));
+                    parts.push(debug_repr(&self.expr(*value, frame)?, &self.p.decls));
                 }
                 let (line, col) = self.file.line_col(span.lo);
                 // `debug` output is best effort; a failed write is not a program error.
@@ -434,12 +464,11 @@ impl Interp<'_> {
         }
     }
 
-    fn arithmetic(&mut self, op: BinOp, a: Value, b: Value, ty: Ty, span: Span) -> Flow<Value> {
+    fn arithmetic(&mut self, op: BinOp, a: Value, b: Value, span: Span) -> Flow<Value> {
         Ok(match (a, b) {
-            (Value::Int(x), Value::Int(y)) => {
-                let Ty::Int(it) = ty else { unreachable!("integer arithmetic has an integer type") };
+            (Value::Int(x, it), Value::Int(y, _)) => {
                 let (kind, message) = match int_arithmetic(op, x, y, it) {
-                    Ok(value) => return Ok(Value::Int(value)),
+                    Ok(value) => return Ok(Value::Int(value, it)),
                     Err(problem) => problem,
                 };
                 return Err(defect(kind, message, span));
@@ -464,7 +493,7 @@ impl Interp<'_> {
 
     fn builtin(&mut self, builtin: Builtin, receiver: Value, args: Vec<Value>) -> Flow<Value> {
         Ok(match (builtin, &receiver) {
-            (Builtin::WriteLine, Value::Out) => {
+            (Builtin::WriteLine, Value::Cap(Cap::Stdout)) => {
                 let Some(Value::Text(text)) = args.first() else { unreachable!("write_line takes Text") };
                 if let Err(err) = writeln!(self.stdout, "{text}") {
                     let message = format!("cannot write to stdout: {err}");
@@ -472,8 +501,8 @@ impl Interp<'_> {
                 }
                 Value::Unit
             }
-            (Builtin::Show, value) => Value::Text(show(value).into()),
-            (Builtin::ByteLen, Value::Text(text)) => Value::Int(text.len() as i128),
+            (Builtin::Show, value) => Value::Text(show(value, &self.p.decls).into()),
+            (Builtin::ByteLen, Value::Text(text)) => Value::Int(text.len() as i128, IntTy::I64),
             (Builtin::IsEmpty, Value::Text(text)) => Value::Bool(text.is_empty()),
             (builtin, receiver) => unreachable!("{builtin:?} does not apply to {receiver:?}"),
         })
@@ -523,8 +552,13 @@ fn int_arithmetic(op: BinOp, x: i128, y: i128, it: IntTy) -> Result<i128, (Defec
 /// Comparison of two values of the same type. Floats follow IEEE, so NaN is unequal to
 /// everything; text compares by code point, which UTF-8 byte order preserves.
 fn compare(op: BinOp, a: &Value, b: &Value) -> bool {
+    match op {
+        BinOp::Eq => return equal(a, b),
+        BinOp::Ne => return !equal(a, b),
+        _ => {}
+    }
     let ordering = match (a, b) {
-        (Value::Int(x), Value::Int(y)) => x.partial_cmp(y),
+        (Value::Int(x, _), Value::Int(y, _)) => x.partial_cmp(y),
         (Value::F64(x), Value::F64(y)) => x.partial_cmp(y),
         (Value::F32(x), Value::F32(y)) => x.partial_cmp(y),
         (Value::Bool(x), Value::Bool(y)) => x.partial_cmp(y),
@@ -534,8 +568,6 @@ fn compare(op: BinOp, a: &Value, b: &Value) -> bool {
         (a, b) => unreachable!("cannot compare {a:?} and {b:?}"),
     };
     match op {
-        BinOp::Eq => ordering == Some(Ordering::Equal),
-        BinOp::Ne => ordering != Some(Ordering::Equal),
         BinOp::Lt => ordering == Some(Ordering::Less),
         BinOp::Le => matches!(ordering, Some(Ordering::Less | Ordering::Equal)),
         BinOp::Gt => ordering == Some(Ordering::Greater),
@@ -544,30 +576,56 @@ fn compare(op: BinOp, a: &Value, b: &Value) -> bool {
     }
 }
 
+/// `==`, built into scalars and derived for records, which are equal when every field is.
+fn equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Int(x, _), Value::Int(y, _)) => x == y,
+        (Value::F64(x), Value::F64(y)) => x == y,
+        (Value::F32(x), Value::F32(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Char(x), Value::Char(y)) => x == y,
+        (Value::Text(x), Value::Text(y)) => x == y,
+        (Value::Unit, Value::Unit) => true,
+        (Value::Adt(x), Value::Adt(y)) => {
+            x.variant == y.variant && x.fields.iter().zip(y.fields.iter()).all(|(x, y)| equal(x, y))
+        }
+        (a, b) => unreachable!("cannot compare {a:?} and {b:?}"),
+    }
+}
+
 /// The `Show` text of a value. Floats print the shortest text that reads back as the same
-/// value, always with a fraction or exponent, such as `1.0`, `0.1` and `1e21`.
-pub fn show(value: &Value) -> String {
+/// value, always with a fraction or exponent, such as `1.0`, `0.1` and `1e21`. A record
+/// writes the expression that builds it, as a derived `Show` does (STD.md).
+pub fn show(value: &Value, decls: &Decls) -> String {
     match value {
-        Value::Int(x) => x.to_string(),
+        Value::Int(x, _) => x.to_string(),
         Value::F64(x) => format!("{x:?}"),
         Value::F32(x) => format!("{x:?}"),
         Value::Bool(b) => b.to_string(),
         Value::Char(c) => c.to_string(),
         Value::Text(text) => text.to_string(),
         Value::Unit => "()".to_string(),
-        Value::System => "System".to_string(),
-        Value::Out => "Out".to_string(),
+        Value::Adt(adt) => {
+            let def = decls.adt(adt.def);
+            let variant = &def.variants[adt.variant.index()];
+            let fields: Vec<String> = (variant.fields.iter().zip(adt.fields.iter()))
+                .map(|(field, value)| format!("{}: {}", field.name, debug_repr(value, decls)))
+                .collect();
+            format!("{}({})", variant.name, fields.join(", "))
+        }
         Value::IoError(message) => message.to_string(),
+        Value::Cap(Cap::Stdout) => "Out".to_string(),
     }
 }
 
 /// The `debug` text of a value: like `show`, but text and chars are quoted and written with
-/// Proviso's escapes, so the output reads as a literal.
-fn debug_repr(value: &Value) -> String {
+/// Proviso's escapes, so the output reads as a literal. A record is written as `show` writes
+/// it, whether or not it derives `Show` (OPEN_QUESTIONS P5).
+fn debug_repr(value: &Value, decls: &Decls) -> String {
     match value {
         Value::Text(text) => quote(text, '"'),
         Value::Char(c) => quote(c.encode_utf8(&mut [0; 4]), '\''),
-        other => show(other),
+        other => show(other, decls),
     }
 }
 
@@ -617,17 +675,17 @@ mod tests {
 
     #[test]
     fn float_show_is_shortest_round_trip() {
-        assert_eq!(show(&Value::F64(1.0)), "1.0");
-        assert_eq!(show(&Value::F64(0.1 + 0.2)), "0.30000000000000004");
-        assert_eq!(show(&Value::F32(0.1)), "0.1");
-        assert_eq!(show(&Value::F64(f64::NAN)), "NaN");
+        assert_eq!(show(&Value::F64(1.0), &Decls::default()), "1.0");
+        assert_eq!(show(&Value::F64(0.1 + 0.2), &Decls::default()), "0.30000000000000004");
+        assert_eq!(show(&Value::F32(0.1), &Decls::default()), "0.1");
+        assert_eq!(show(&Value::F64(f64::NAN), &Decls::default()), "NaN");
     }
 
     #[test]
     fn debug_quotes_with_proviso_escapes() {
-        assert_eq!(debug_repr(&Value::Text("a\"\\\n\t\r\0é".into())), r#""a\"\\\n\t\u{d}\u{0}é""#);
-        assert_eq!(debug_repr(&Value::Char('\'')), r"'\''");
-        assert_eq!(debug_repr(&Value::Char('"')), "'\"'");
+        assert_eq!(debug_repr(&Value::Text("a\"\\\n\t\r\0é".into()), &Decls::default()), r#""a\"\\\n\t\u{d}\u{0}é""#);
+        assert_eq!(debug_repr(&Value::Char('\''), &Decls::default()), r"'\''");
+        assert_eq!(debug_repr(&Value::Char('"'), &Decls::default()), "'\"'");
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! Name resolution and type checking for the phase-1 subset: scalar types, functions,
-//! control flow, `fails` and `try`, and the stub `System` with only `stdout`.
+//! control flow, `fails` and `try`, and the prelude's `System` with only `stdout`.
 //!
 //! The checker never rewrites the tree. It records what it learns in side tables of
 //! [`Program`], which the interpreter reads.
 
+pub mod decls;
 pub mod types;
 
 use std::collections::HashMap;
@@ -15,6 +16,7 @@ use proviso_syntax::diag::{Code, Diagnostics, Planned, codes};
 use proviso_syntax::intern::Symbol;
 use proviso_syntax::source::Span;
 
+use crate::decls::{AdtId, Decls, FieldIdx, IfaceId};
 use crate::types::{FloatTy, IntTy, Ty};
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -56,8 +58,8 @@ pub enum Res {
     Local(LocalId),
     Fn(FnId),
     Method(Builtin),
-    /// `System.stdout`
-    Stdout,
+    /// `base.name` on a record.
+    Field(FieldIdx),
 }
 
 pub struct FnInfo {
@@ -80,6 +82,7 @@ pub struct ParamInfo {
 /// What the checker learned about a module.
 #[derive(Default)]
 pub struct Program {
+    pub decls: Decls,
     pub fns: Vec<FnInfo>,
     pub main: Option<FnId>,
     pub expr_ty: SideTable<Expr, Ty>,
@@ -90,9 +93,11 @@ pub struct Program {
     pub jump_target: SideTable<Stmt, ExprId>,
 }
 
+static ERROR: Ty = Ty::Error;
+
 impl Program {
-    pub fn ty(&self, e: ExprId) -> Ty {
-        self.expr_ty.get(e).copied().unwrap_or(Ty::Error)
+    pub fn ty(&self, e: ExprId) -> &Ty {
+        self.expr_ty.get(e).unwrap_or(&ERROR)
     }
 
     pub fn res(&self, e: ExprId) -> Option<Res> {
@@ -121,7 +126,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     checker.p
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Import {
     Type(Ty),
     /// `use a.b` makes `b` usable as a qualifier.
@@ -156,10 +161,10 @@ impl FnState {
 /// Whether an `if` is used for its value, as a statement, or as the last statement of a
 /// function that returns this type.
 #[derive(Clone, Copy)]
-enum Mode {
+enum Mode<'t> {
     Stmt,
-    Value(Option<Ty>),
-    Tail(Ty),
+    Value(Option<&'t Ty>),
+    Tail(&'t Ty),
 }
 
 const NO_PARAMS: &[(&str, Ty)] = &[];
@@ -191,6 +196,11 @@ impl Checker<'_> {
 
     fn span(&self, e: ExprId) -> Span {
         self.m.exprs[e].span
+    }
+
+    /// How diagnostics write `ty`.
+    fn show<'s>(&'s self, ty: &'s Ty) -> impl std::fmt::Display + 's {
+        self.p.decls.display(ty)
     }
 
     // ---- module level ----
@@ -227,8 +237,8 @@ impl Checker<'_> {
         let path: Vec<&str> = decl.path.iter().map(|i| m.text(i.sym)).collect();
         let joined = path.join(".");
         let span = decl.path[0].span.to(decl.path[decl.path.len() - 1].span);
-        let available: Option<&[(&str, Ty)]> = match path.as_slice() {
-            ["std", "io"] => Some(&[("IoError", Ty::IoError), ("Out", Ty::Out)]),
+        let available: Option<Vec<(&str, Ty)>> = match path.as_slice() {
+            ["std", "io"] => Some(vec![("IoError", Ty::IoError), ("Out", Ty::out())]),
             ["std", module] => {
                 let planned = match *module {
                     "fs" | "test" => Planned::Phase(3),
@@ -255,9 +265,9 @@ impl Checker<'_> {
         }
         for name in &decl.names {
             let text = m.text(name.name.sym);
-            let ty = match available {
+            let ty = match &available {
                 Some(items) => match items.iter().find(|(n, _)| *n == text) {
-                    Some((_, ty)) => *ty,
+                    Some((_, ty)) => ty.clone(),
                     None => {
                         self.error(codes::UNKNOWN_IMPORT, name.name.span, format!("`{joined}` has no item `{text}`"));
                         Ty::Error
@@ -334,7 +344,7 @@ impl Checker<'_> {
                 let ty = self.resolve_type(param.ty);
                 match param.mode {
                     ParamMode::Borrow => {}
-                    ParamMode::Keep if matches!(ty, Ty::System | Ty::Error) => {}
+                    ParamMode::Keep if matches!(ty, Ty::Adt(AdtId::SYSTEM, _) | Ty::Error) => {}
                     ParamMode::Keep => {
                         self.not_implemented(param.span, "`keep` parameters other than `System`", Planned::Phase(2))
                     }
@@ -347,7 +357,7 @@ impl Checker<'_> {
             }
             let ret = decl.ret.map_or(Ty::Unit, |t| self.resolve_type(t));
             // `Never` has no values, so a function that fails with it cannot fail.
-            let fails = decl.fails.map(|t| self.resolve_type(t)).filter(|&t| t != Ty::Never);
+            let fails = decl.fails.map(|t| self.resolve_type(t)).filter(|t| *t != Ty::Never);
             self.p.fns.push(FnInfo { item: index, name: decl.name.sym, params, ret, fails, locals: 0 });
         }
     }
@@ -368,10 +378,10 @@ impl Checker<'_> {
         let span = item.name().map_or(item.span, |n| n.span);
         let signature_ok = item.vis == Visibility::Pub
             && info.params.len() == 1
-            && matches!(info.params[0].ty, Ty::System | Ty::Error)
+            && matches!(info.params[0].ty, Ty::Adt(AdtId::SYSTEM, _) | Ty::Error)
             && info.params[0].mode == ParamMode::Keep
             && matches!(info.ret, Ty::Unit | Ty::Error);
-        let fails = info.fails;
+        let fails = info.fails.clone();
         if !signature_ok {
             self.error(
                 codes::INVALID_MAIN,
@@ -380,13 +390,13 @@ impl Checker<'_> {
             );
         }
         if let Some(err) = fails
-            && !err.is_show()
+            && !self.p.decls.implements(&err, IfaceId::SHOW)
             && err != Ty::Error
         {
             self.error(
                 codes::MAIN_ERROR_NOT_SHOW,
                 span,
-                format!("`main` fails with `{err}`, which does not implement `Show`"),
+                format!("`main` fails with `{}`, which does not implement `Show`", self.show(&err)),
             );
         }
     }
@@ -419,7 +429,7 @@ impl Checker<'_> {
             return ty;
         }
         match self.imports.get(&name.sym) {
-            Some(Import::Type(ty)) => return *ty,
+            Some(Import::Type(ty)) => return ty.clone(),
             Some(Import::Module) => {
                 self.error(codes::UNKNOWN_TYPE, name.span, format!("`{text}` is a module, not a type"));
                 return Ty::Error;
@@ -453,10 +463,10 @@ impl Checker<'_> {
         let m = self.m;
         let info = &self.p.fns[id];
         let Some(decl) = m.fn_decl(info.item) else { return };
-        let mut state = FnState::new(info.ret, info.fails);
+        let mut state = FnState::new(info.ret.clone(), info.fails.clone());
         let mut scope = Vec::new();
         for (i, param) in info.params.iter().enumerate() {
-            state.locals.push(Local { ty: param.ty, mutable: false });
+            state.locals.push(Local { ty: param.ty.clone(), mutable: false });
             scope.push((param.name, LocalId(i as u32)));
         }
         state.scopes.push(scope);
@@ -470,12 +480,12 @@ impl Checker<'_> {
 
     fn fn_body(&mut self, decl: &FnDecl) {
         let m = self.m;
-        let ret = self.f.ret;
+        let ret = self.f.ret.clone();
         self.f.scopes.push(Vec::new());
         let diverges = if ret == Ty::Unit {
             decl.body.stmts.iter().fold(false, |diverges, &s| self.stmt(s) | diverges)
         } else {
-            self.tail_stmts(&decl.body, ret)
+            self.tail_stmts(&decl.body, &ret)
         };
         self.f.scopes.pop();
         // A body that needed parse recovery has unknown control flow.
@@ -484,7 +494,7 @@ impl Checker<'_> {
             self.error(
                 codes::MISSING_RETURN,
                 decl.body.span.end(),
-                format!("`{name}` returns `{ret}`, so every path must end with `return`"),
+                format!("`{name}` returns `{}`, so every path must end with `return`", self.show(&ret)),
             );
         }
     }
@@ -492,7 +502,7 @@ impl Checker<'_> {
     /// Checks the statements of a body that returns `ret`, or of a branch that ends one. A
     /// final value there is a missing `return`, not an unused value. Returns whether the
     /// statements always diverge, counting such a value as a return.
-    fn tail_stmts(&mut self, block: &Block, ret: Ty) -> bool {
+    fn tail_stmts(&mut self, block: &Block, ret: &Ty) -> bool {
         let m = self.m;
         let mut diverges = false;
         let count = block.stmts.len();
@@ -511,7 +521,7 @@ impl Checker<'_> {
                     return true;
                 }
                 if let ExprKind::If { .. } = m.exprs[e].kind {
-                    return diverges | diverges_ty(self.if_expr(e, Mode::Tail(ret)));
+                    return diverges | diverges_ty(&self.if_expr(e, Mode::Tail(ret)));
                 }
             }
             diverges |= self.stmt(s);
@@ -574,27 +584,31 @@ impl Checker<'_> {
             StmtKind::Let { mutable, name, ty, init } => {
                 let declared = ty.map(|t| self.resolve_type(t));
                 let (ty, init_ty) = match declared {
-                    Some(declared) => (declared, self.check(*init, declared)),
+                    Some(declared) => {
+                        let init_ty = self.check(*init, &declared);
+                        (declared, init_ty)
+                    }
                     None => {
                         let ty = self.infer(*init);
-                        (ty, ty)
+                        (ty.clone(), ty)
                     }
                 };
                 let what = if *mutable { "variable" } else { "binding" };
                 let id = self.declare(*name, ty, *mutable, what);
                 self.p.let_local.insert(s, id);
-                diverges_ty(init_ty)
+                diverges_ty(&init_ty)
             }
-            StmtKind::Assign { target, op, value } => diverges_ty(self.assign(*target, *op, *value)),
-            StmtKind::Expr(e) => diverges_ty(self.expr_stmt(*e)),
+            StmtKind::Assign { target, op, value } => diverges_ty(&self.assign(*target, *op, *value)),
+            StmtKind::Expr(e) => diverges_ty(&self.expr_stmt(*e)),
             StmtKind::Return(value) => {
-                let ret = self.f.ret;
+                let ret = self.f.ret.clone();
                 match value {
                     Some(value) => {
-                        self.check(*value, ret);
+                        self.check(*value, &ret);
                     }
                     None if ret != Ty::Unit && ret != Ty::Error => {
-                        self.error(codes::TYPE_MISMATCH, stmt.span, format!("`return` needs a value of type `{ret}`"));
+                        let message = format!("`return` needs a value of type `{}`", self.show(&ret));
+                        self.error(codes::TYPE_MISMATCH, stmt.span, message);
                     }
                     None => {}
                 }
@@ -608,7 +622,7 @@ impl Checker<'_> {
                 self.jump(s, *label, false);
                 true
             }
-            StmtKind::Assert(cond) => diverges_ty(self.check(*cond, Ty::Bool)),
+            StmtKind::Assert(cond) => diverges_ty(&self.check(*cond, &Ty::Bool)),
         }
     }
 
@@ -647,8 +661,9 @@ impl Checker<'_> {
             return self.infer(value);
         };
         self.p.res.insert(target, Res::Local(id));
-        let Local { ty, mutable } = self.f.locals[id.index()];
-        self.p.expr_ty.insert(target, ty);
+        let Local { ty, mutable } = &self.f.locals[id.index()];
+        let (ty, mutable) = (ty.clone(), *mutable);
+        self.p.expr_ty.insert(target, ty.clone());
         if !mutable {
             self.error(
                 codes::IMMUTABLE_ASSIGNMENT,
@@ -656,12 +671,16 @@ impl Checker<'_> {
                 format!("`{text}` is a `let` binding or a parameter; declare it with `var` to assign to it"),
             );
         }
-        let value_ty = self.check(value, ty);
+        let value_ty = self.check(value, &ty);
         if let Some(bin) = op.bin_op()
-            && !arithmetic_defined(bin, ty)
+            && !arithmetic_defined(bin, &ty)
         {
             let symbol = bin.symbol();
-            self.error(codes::UNSUPPORTED_OPERATOR, span, format!("`{symbol}=` is not defined for `{ty}`"));
+            self.error(
+                codes::UNSUPPORTED_OPERATOR,
+                span,
+                format!("`{symbol}=` is not defined for `{}`", self.show(&ty)),
+            );
         }
         value_ty
     }
@@ -693,7 +712,7 @@ impl Checker<'_> {
 
     /// Checks a block whose value is unused. Returns `Never` if it always diverges. With
     /// `tail`, the block ends a function that returns that type.
-    fn block_stmt(&mut self, block: &Block, tail: Option<Ty>) -> Ty {
+    fn block_stmt(&mut self, block: &Block, tail: Option<&Ty>) -> Ty {
         self.f.scopes.push(Vec::new());
         let diverges = match tail {
             Some(ret) => self.tail_stmts(block, ret),
@@ -704,7 +723,7 @@ impl Checker<'_> {
     }
 
     /// Checks a block used for its value: the final expression, if there is one.
-    fn block_value(&mut self, block: &Block, expected: Option<Ty>) -> Ty {
+    fn block_value(&mut self, block: &Block, expected: Option<&Ty>) -> Ty {
         let m = self.m;
         self.f.scopes.push(Vec::new());
         let mut diverges = false;
@@ -718,7 +737,7 @@ impl Checker<'_> {
                     Some(expected) => self.check(e, expected),
                     None => self.infer(e),
                 };
-                diverges |= diverges_ty(ty);
+                diverges |= diverges_ty(&ty);
                 value = Some(ty);
                 continue;
             }
@@ -730,11 +749,11 @@ impl Checker<'_> {
         }
         match (value, expected) {
             (Some(ty), _) => ty,
-            (None, Some(expected)) if expected != Ty::Unit && expected != Ty::Error => {
+            (None, Some(expected)) if *expected != Ty::Unit && *expected != Ty::Error => {
                 self.error(
                     codes::TYPE_MISMATCH,
                     block.span.end(),
-                    format!("expected a value of type `{expected}`, but this block ends without one"),
+                    format!("expected a value of type `{}`, but this block ends without one", self.show(expected)),
                 );
                 Ty::Error
             }
@@ -749,32 +768,33 @@ impl Checker<'_> {
     }
 
     /// Checks `e` against `expected`, reports a mismatch, and returns the actual type.
-    fn check(&mut self, e: ExprId, expected: Ty) -> Ty {
+    fn check(&mut self, e: ExprId, expected: &Ty) -> Ty {
         let actual = self.expr(e, Some(expected));
-        if !expected.accepts(actual) {
+        if !expected.accepts(&actual) {
             let span = self.span(e);
-            self.error(codes::TYPE_MISMATCH, span, format!("expected `{expected}`, found `{actual}`"));
+            let message = format!("expected `{}`, found `{}`", self.show(expected), self.show(&actual));
+            self.error(codes::TYPE_MISMATCH, span, message);
         }
         actual
     }
 
     /// Infers the type of `e`. `expected` guides literals and `if` branches, but mismatches
     /// against it are reported by [`Checker::check`].
-    fn expr(&mut self, e: ExprId, expected: Option<Ty>) -> Ty {
+    fn expr(&mut self, e: ExprId, expected: Option<&Ty>) -> Ty {
         let chain = std::mem::replace(&mut self.in_chain, false);
         let ty = self.expr_kind(e, expected, chain);
-        self.p.expr_ty.insert(e, ty);
+        self.p.expr_ty.insert(e, ty.clone());
         ty
     }
 
-    fn expr_kind(&mut self, e: ExprId, expected: Option<Ty>, chain: bool) -> Ty {
+    fn expr_kind(&mut self, e: ExprId, expected: Option<&Ty>, chain: bool) -> Ty {
         let m = self.m;
         let span = self.span(e);
         match &m.exprs[e].kind {
             ExprKind::Int(value) => self.int_literal(*value, false, expected, span),
             ExprKind::Float(text) => {
                 let ft = match expected {
-                    Some(Ty::Float(ft)) => ft,
+                    Some(Ty::Float(ft)) => *ft,
                     _ => FloatTy::F64,
                 };
                 if !ft.holds(text) {
@@ -790,12 +810,12 @@ impl Checker<'_> {
                 for part in parts {
                     if let FTextPart::Expr(x) = part {
                         let ty = self.infer(*x);
-                        if !ty.is_show() && !ty.is_unknown() {
+                        if !self.p.decls.implements(&ty, IfaceId::SHOW) && !ty.is_unknown() {
                             let span = self.span(*x);
                             self.error(
                                 codes::UNSUPPORTED_OPERATOR,
                                 span,
-                                format!("`{ty}` does not implement `Show`, so it cannot be interpolated"),
+                                format!("`{}` does not implement `Show`, so it cannot be interpolated", self.show(&ty)),
                             );
                         }
                     }
@@ -810,10 +830,10 @@ impl Checker<'_> {
             ExprKind::Field { base, name } => {
                 self.in_chain = chain;
                 let base_ty = self.infer(*base);
-                self.field(e, base_ty, *name)
+                self.field(e, &base_ty, *name)
             }
             ExprKind::Unary { op: UnaryOp::Not, operand } => {
-                self.check(*operand, Ty::Bool);
+                self.check(*operand, &Ty::Bool);
                 Ty::Bool
             }
             ExprKind::Unary { op: UnaryOp::Neg, operand } => self.negate(*operand, expected, span),
@@ -825,7 +845,7 @@ impl Checker<'_> {
             ExprKind::Try(inner) => self.try_expr(*inner, expected, span),
             ExprKind::If { .. } => self.if_expr(e, Mode::Value(expected)),
             ExprKind::While { label, cond, body } => {
-                self.check(*cond, Ty::Bool);
+                self.check(*cond, &Ty::Bool);
                 self.loop_body(e, *label, body);
                 Ty::Unit
             }
@@ -857,9 +877,9 @@ impl Checker<'_> {
         }
     }
 
-    fn int_literal(&mut self, magnitude: u128, negative: bool, expected: Option<Ty>, span: Span) -> Ty {
+    fn int_literal(&mut self, magnitude: u128, negative: bool, expected: Option<&Ty>, span: Span) -> Ty {
         let it = match expected {
-            Some(Ty::Int(it)) => it,
+            Some(Ty::Int(it)) => *it,
             Some(Ty::Float(ft)) => {
                 self.error(
                     codes::TYPE_MISMATCH,
@@ -890,11 +910,11 @@ impl Checker<'_> {
         Ty::Int(it)
     }
 
-    fn negate(&mut self, operand: ExprId, expected: Option<Ty>, span: Span) -> Ty {
+    fn negate(&mut self, operand: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
         // A negative integer literal is one value, so `-128` fits in `Int8`.
         if let ExprKind::Int(value) = self.m.exprs[operand].kind {
             let ty = self.int_literal(value, true, expected, span);
-            self.p.expr_ty.insert(operand, ty);
+            self.p.expr_ty.insert(operand, ty.clone());
             return ty;
         }
         let ty = self.expr(operand, expected.filter(|t| t.is_numeric()));
@@ -902,7 +922,8 @@ impl Checker<'_> {
             Ty::Int(it) if it.is_signed() => ty,
             Ty::Float(_) | Ty::Error | Ty::Never => ty,
             _ => {
-                self.error(codes::UNSUPPORTED_OPERATOR, span, format!("unary `-` is not defined for `{ty}`"));
+                let message = format!("unary `-` is not defined for `{}`", self.show(&ty));
+                self.error(codes::UNSUPPORTED_OPERATOR, span, message);
                 Ty::Error
             }
         }
@@ -910,21 +931,21 @@ impl Checker<'_> {
 
     /// Checks the operands of a binary operator. An untyped literal takes its type from the
     /// other operand (REFERENCE §2), so the non-literal side is checked first.
-    fn operands(&mut self, lhs: ExprId, rhs: ExprId, hint: Option<Ty>) -> (Ty, Ty) {
+    fn operands(&mut self, lhs: ExprId, rhs: ExprId, hint: Option<&Ty>) -> (Ty, Ty) {
         // An operand that already has an error gives the other no type, so a literal there
         // isn't reported again against the hint.
-        let numeric_or = |ty: Ty| match ty {
+        let numeric_or = |ty: &Ty| match ty {
             Ty::Error => None,
-            ty if ty.is_numeric() => Some(ty),
-            _ => hint,
+            ty if ty.is_numeric() => Some(ty.clone()),
+            _ => hint.cloned(),
         };
         if self.is_untyped_literal(lhs) && !self.is_untyped_literal(rhs) {
             let rt = self.expr(rhs, hint);
-            let lt = self.expr(lhs, numeric_or(rt));
+            let lt = self.expr(lhs, numeric_or(&rt).as_ref());
             (lt, rt)
         } else {
             let lt = self.expr(lhs, hint);
-            let rt = self.expr(rhs, numeric_or(lt));
+            let rt = self.expr(rhs, numeric_or(&lt).as_ref());
             (lt, rt)
         }
     }
@@ -945,32 +966,34 @@ impl Checker<'_> {
     fn unify_operands(&mut self, lt: Ty, rt: Ty, span: Span) -> Ty {
         match (lt, rt) {
             (Ty::Error, _) | (_, Ty::Error) => Ty::Error,
-            _ if lt == rt => lt,
+            (lt, rt) if lt == rt => lt,
             (Ty::Never, other) | (other, Ty::Never) => other,
-            _ => {
-                self.error(
-                    codes::TYPE_MISMATCH,
-                    span,
-                    format!("mismatched operand types `{lt}` and `{rt}`; Proviso has no implicit conversions"),
+            (lt, rt) => {
+                let message = format!(
+                    "mismatched operand types `{}` and `{}`; Proviso has no implicit conversions",
+                    self.show(&lt),
+                    self.show(&rt)
                 );
+                self.error(codes::TYPE_MISMATCH, span, message);
                 Ty::Error
             }
         }
     }
 
-    fn binary(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId, expected: Option<Ty>, span: Span) -> Ty {
+    fn binary(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
         let symbol = op.symbol();
         match op {
             BinOp::And | BinOp::Or => {
-                self.check(lhs, Ty::Bool);
-                self.check(rhs, Ty::Bool);
+                self.check(lhs, &Ty::Bool);
+                self.check(rhs, &Ty::Bool);
                 Ty::Bool
             }
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 let (lt, rt) = self.operands(lhs, rhs, expected.filter(|t| t.is_numeric()));
                 let ty = self.unify_operands(lt, rt, span);
-                if !arithmetic_defined(op, ty) {
-                    self.error(codes::UNSUPPORTED_OPERATOR, span, format!("`{symbol}` is not defined for `{ty}`"));
+                if !arithmetic_defined(op, &ty) {
+                    let message = format!("`{symbol}` is not defined for `{}`", self.show(&ty));
+                    self.error(codes::UNSUPPORTED_OPERATOR, span, message);
                     return Ty::Error;
                 }
                 ty
@@ -979,11 +1002,12 @@ impl Checker<'_> {
                 let (lt, rt) = self.operands(lhs, rhs, None);
                 let ty = self.unify_operands(lt, rt, span);
                 let defined = match op {
-                    BinOp::Eq | BinOp::Ne => ty.has_equality(),
+                    BinOp::Eq | BinOp::Ne => self.p.decls.implements(&ty, IfaceId::EQ),
                     _ => ty.has_ordering(),
                 };
                 if !defined && !ty.is_unknown() {
-                    self.error(codes::UNSUPPORTED_OPERATOR, span, format!("`{symbol}` is not defined for `{ty}`"));
+                    let message = format!("`{symbol}` is not defined for `{}`", self.show(&ty));
+                    self.error(codes::UNSUPPORTED_OPERATOR, span, message);
                 }
                 Ty::Bool
             }
@@ -995,7 +1019,7 @@ impl Checker<'_> {
         let text = m.text(name.sym);
         if let Some(id) = self.lookup_local(name.sym) {
             self.p.res.insert(e, Res::Local(id));
-            return self.f.locals[id.index()].ty;
+            return self.f.locals[id.index()].ty.clone();
         }
         if self.fn_names.contains_key(&name.sym) {
             self.not_implemented(name.span, "functions used as values", Planned::Phase(2));
@@ -1043,11 +1067,11 @@ impl Checker<'_> {
         self.p.res.insert(callee, Res::Fn(id));
         let info = &self.p.fns[id];
         let name = m.text(info.name);
-        let params: Vec<(&str, Ty)> = info.params.iter().map(|p| (m.text(p.name), p.ty)).collect();
-        let (ret, fails) = (info.ret, info.fails);
+        let params: Vec<(&str, Ty)> = info.params.iter().map(|p| (m.text(p.name), p.ty.clone())).collect();
+        let (ret, fails) = (info.ret.clone(), info.fails.clone());
         self.args(name, &params, args, span);
         if let Some(err) = fails {
-            self.fallible_call(name, err, span, chain);
+            self.fallible_call(name, &err, span, chain);
         }
         ret
     }
@@ -1056,16 +1080,21 @@ impl Checker<'_> {
         self.in_chain = chain;
         let receiver_ty = self.infer(receiver);
         let name = self.m.text(method.sym);
-        let signature = match (receiver_ty, name) {
-            (Ty::Out, "write_line") => Some((Builtin::WriteLine, WRITE_LINE_PARAMS, Ty::Unit, Some(Ty::IoError))),
-            (ty, "show") if ty.is_show() => Some((Builtin::Show, NO_PARAMS, Ty::Text, None)),
+        let signature = match (&receiver_ty, name) {
+            (Ty::Cap(cap), "write_line") if cap.iface == IfaceId::OUT => {
+                Some((Builtin::WriteLine, WRITE_LINE_PARAMS, Ty::Unit, Some(Ty::IoError)))
+            }
+            (ty, "show") if self.p.decls.implements(ty, IfaceId::SHOW) => {
+                Some((Builtin::Show, NO_PARAMS, Ty::Text, None))
+            }
             (Ty::Text, "byte_len") => Some((Builtin::ByteLen, NO_PARAMS, Ty::INT, None)),
             (Ty::Text, "is_empty") => Some((Builtin::IsEmpty, NO_PARAMS, Ty::Bool, None)),
             _ => None,
         };
         let Some((builtin, params, ret, fails)) = signature else {
             if receiver_ty != Ty::Error {
-                self.error(codes::UNKNOWN_MEMBER, method.span, format!("`{receiver_ty}` has no method `{name}`"));
+                let message = format!("`{}` has no method `{name}`", self.show(&receiver_ty));
+                self.error(codes::UNKNOWN_MEMBER, method.span, message);
             }
             for arg in args {
                 self.infer(arg.value);
@@ -1075,19 +1104,22 @@ impl Checker<'_> {
         self.p.res.insert(e, Res::Method(builtin));
         self.args(name, params, args, span);
         if let Some(err) = fails {
-            self.fallible_call(name, err, span, chain);
+            self.fallible_call(name, &err, span, chain);
         }
         ret
     }
 
-    fn field(&mut self, e: ExprId, base_ty: Ty, name: Ident) -> Ty {
+    fn field(&mut self, e: ExprId, base_ty: &Ty, name: Ident) -> Ty {
         let text = self.m.text(name.sym);
+        if let Ty::Adt(id, _) = base_ty
+            && let Some((i, field)) = self.p.decls.adt(*id).field(text)
+        {
+            let ty = field.ty.clone();
+            self.p.res.insert(e, Res::Field(i));
+            return ty;
+        }
         match (base_ty, text) {
-            (Ty::System, "stdout") => {
-                self.p.res.insert(e, Res::Stdout);
-                Ty::Out
-            }
-            (Ty::System, "fs" | "net" | "clock" | "random" | "env" | "stdin" | "stderr" | "process") => {
+            (Ty::Adt(AdtId::SYSTEM, _), "fs" | "net" | "clock" | "random" | "env" | "stdin" | "stderr" | "process") => {
                 self.not_implemented(
                     name.span,
                     &format!("`System` fields other than `stdout`, such as `{text}`,"),
@@ -1097,7 +1129,8 @@ impl Checker<'_> {
             }
             (Ty::Error, _) => Ty::Error,
             (ty, _) => {
-                self.error(codes::UNKNOWN_MEMBER, name.span, format!("`{ty}` has no field `{text}`"));
+                let message = format!("`{}` has no field `{text}`", self.show(ty));
+                self.error(codes::UNKNOWN_MEMBER, name.span, message);
                 Ty::Error
             }
         }
@@ -1123,7 +1156,7 @@ impl Checker<'_> {
         // One label problem is reported per call, with the labels the call needs.
         let labelled = params.iter().map(|(param, _)| format!("{param}: …")).collect::<Vec<_>>().join(", ");
         let mut labels_reported = false;
-        for (i, (arg, &(param, ty))) in args.iter().zip(params).enumerate() {
+        for (i, (arg, &(param, ref ty))) in args.iter().zip(params).enumerate() {
             if arg.inout {
                 let span = self.span(arg.value);
                 self.not_implemented(span, "`&` (inout) arguments", Planned::Phase(2));
@@ -1159,18 +1192,20 @@ impl Checker<'_> {
         }
     }
 
-    fn fallible_call(&mut self, callee: &str, err: Ty, span: Span, chain: bool) {
+    fn fallible_call(&mut self, callee: &str, err: &Ty, span: Span, chain: bool) {
         match self.tries.last_mut() {
-            Some(errors) if chain => errors.push(err),
-            _ => self.error(
-                codes::UNMARKED_FALLIBLE_CALL,
-                span,
-                format!("`{callee}` can fail with `{err}`, so the call must be marked, for example with `try` (§7.2)"),
-            ),
+            Some(errors) if chain => errors.push(err.clone()),
+            _ => {
+                let message = format!(
+                    "`{callee}` can fail with `{}`, so the call must be marked, for example with `try` (§7.2)",
+                    self.show(err)
+                );
+                self.error(codes::UNMARKED_FALLIBLE_CALL, span, message);
+            }
         }
     }
 
-    fn try_expr(&mut self, inner: ExprId, expected: Option<Ty>, span: Span) -> Ty {
+    fn try_expr(&mut self, inner: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
         self.tries.push(Vec::new());
         self.in_chain = true;
         let ty = self.expr(inner, expected);
@@ -1181,19 +1216,19 @@ impl Checker<'_> {
             self.error(codes::TRY_WITHOUT_FAILURE, span, "`try` marks no call that can fail");
         }
         for err in errors {
-            match self.f.fails {
-                None => self.error(
-                    codes::TRY_ERROR_MISMATCH,
-                    span,
-                    format!("`try` propagates `{err}`, but this function does not declare `fails {err}`"),
+            let message = match &self.f.fails {
+                None => {
+                    let err = self.show(&err);
+                    format!("`try` propagates `{err}`, but this function does not declare `fails {err}`")
+                }
+                Some(own) if *own != err && *own != Ty::Error && err != Ty::Error => format!(
+                    "`try` needs equal error types, but the call fails with `{}` and this function fails with `{}`",
+                    self.show(&err),
+                    self.show(own)
                 ),
-                Some(own) if own != err && own != Ty::Error && err != Ty::Error => self.error(
-                    codes::TRY_ERROR_MISMATCH,
-                    span,
-                    format!("`try` needs equal error types, but the call fails with `{err}` and this function fails with `{own}`"),
-                ),
-                Some(_) => {}
-            }
+                Some(_) => continue,
+            };
+            self.error(codes::TRY_ERROR_MISMATCH, span, message);
         }
         ty
     }
@@ -1203,7 +1238,7 @@ impl Checker<'_> {
         let ExprKind::If { cond, then_block, else_branch } = &m.exprs[e].kind else {
             unreachable!("if_expr is called on `if` expressions")
         };
-        self.check(*cond, Ty::Bool);
+        self.check(*cond, &Ty::Bool);
         let ty = match (mode, else_branch) {
             (Mode::Stmt | Mode::Tail(_), _) => {
                 let tail = match mode {
@@ -1226,15 +1261,19 @@ impl Checker<'_> {
             }
             (Mode::Value(expected), Some(branch)) => {
                 let then_ty = self.block_value(then_block, expected);
-                let expected = expected.or(Some(then_ty).filter(|t| !t.is_unknown()));
+                let expected = expected.or(Some(&then_ty).filter(|t| !t.is_unknown()));
                 let else_ty = match branch {
                     ElseBranch::Block(block) => self.block_value(block, expected),
                     ElseBranch::If(nested) => self.if_expr(*nested, Mode::Value(expected)),
                 };
-                if then_ty == Ty::Never && else_ty == Ty::Never { Ty::Never } else { expected.unwrap_or(else_ty) }
+                match expected {
+                    _ if then_ty == Ty::Never && else_ty == Ty::Never => Ty::Never,
+                    Some(expected) => expected.clone(),
+                    None => else_ty,
+                }
             }
         };
-        self.p.expr_ty.insert(e, ty);
+        self.p.expr_ty.insert(e, ty.clone());
         ty
     }
 
@@ -1258,11 +1297,8 @@ impl Checker<'_> {
                     Ty::Int(it) => Ty::Int(it),
                     ty if ty.is_unknown() => Ty::Error,
                     ty => {
-                        self.error(
-                            codes::UNSUPPORTED_OPERATOR,
-                            span,
-                            format!("a `for` range needs integer bounds, not `{ty}`"),
-                        );
+                        let message = format!("a `for` range needs integer bounds, not `{}`", self.show(&ty));
+                        self.error(codes::UNSUPPORTED_OPERATOR, span, message);
                         Ty::Error
                     }
                 }
@@ -1274,7 +1310,7 @@ impl Checker<'_> {
                 Ty::Error
             }
         };
-        self.p.expr_ty.insert(iter, element);
+        self.p.expr_ty.insert(iter, element.clone());
         self.f.scopes.push(Vec::new());
         let id = self.declare(binding, element, false, "loop variable");
         self.p.for_local.insert(e, id);
@@ -1305,11 +1341,11 @@ fn is_bare_value(kind: &ExprKind) -> bool {
 
 /// Whether a statement or block of this type may never finish. An error counts, because the
 /// code it stands for might diverge, and reporting a missing `return` would depend on it.
-fn diverges_ty(ty: Ty) -> bool {
+fn diverges_ty(ty: &Ty) -> bool {
     matches!(ty, Ty::Never | Ty::Error)
 }
 
-fn arithmetic_defined(op: BinOp, ty: Ty) -> bool {
+fn arithmetic_defined(op: BinOp, ty: &Ty) -> bool {
     match ty {
         Ty::Int(_) => true,
         // Floats have no `%` (OPEN_QUESTIONS P5).
@@ -1337,7 +1373,7 @@ fn builtin_type(name: &str) -> Option<Ty> {
         "Text" => Ty::Text,
         "Unit" => Ty::Unit,
         "Never" => Ty::Never,
-        "System" => Ty::System,
+        "System" => Ty::system(),
         _ => return None,
     })
 }
