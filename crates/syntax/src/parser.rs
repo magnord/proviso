@@ -457,6 +457,9 @@ impl Parser<'_> {
                 T::Keyword(Kw::Needs | Kw::Uses | Kw::With) => {
                     return self.not_implemented("`needs`, `uses` and `with` clauses", Planned::Phase(3));
                 }
+                T::Keyword(Kw::Observes | Kw::Effects) => {
+                    return self.not_implemented("`observes` and `effects` permissions", Planned::Phase(3));
+                }
                 T::Keyword(Kw::Where | Kw::Invariant) => {
                     return self.not_implemented("refinement clauses", Planned::Phase(5));
                 }
@@ -1099,12 +1102,14 @@ fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
         Kw::Record => ("`record` declarations", Planned::Phase(2)),
         Kw::Enum => ("`enum` declarations", Planned::Phase(2)),
         Kw::Type => ("`type` declarations", Planned::Phase(2)),
+        Kw::Distinct => ("distinct types", Planned::Phase(2)),
         Kw::Unique | Kw::Opaque | Kw::Resource => ("`unique`, `opaque` and `resource` records", Planned::Phase(2)),
         Kw::Impl => ("`impl` blocks", Planned::Phase(2)),
         Kw::Interface => ("interfaces", Planned::Phase(2)),
         Kw::Example => ("`example` declarations", Planned::Phase(2)),
         Kw::Test => ("`test` blocks", Planned::Phase(2)),
         Kw::Cap => ("capability declarations", Planned::Phase(3)),
+        Kw::Effect => ("effect parameters", Planned::Phase(3)),
         Kw::Pred => ("`pred` functions", Planned::Phase(5)),
         Kw::Unit | Kw::Tag => ("units and tags", Planned::PastV1),
         Kw::Extern => ("`extern` functions", Planned::Unscheduled),
