@@ -3953,7 +3953,11 @@ fn infer_targs(declared: &Ty, actual: &Ty, targs: &mut [Option<Ty>], fixed: &[bo
             let i = *i as usize;
             match targs.get(i) {
                 Some(None) => targs[i] = Some(actual.clone()),
-                Some(Some(known)) if !fixed.get(i).copied().unwrap_or(false) => {
+                // Only a `Never` in what is known yet can widen, and joining a type without one
+                // would rebuild it at every level of `Some(Some(…))` for nothing.
+                Some(Some(known))
+                    if !fixed.get(i).copied().unwrap_or(false) && (*known == Ty::Never || known.has_never_arg()) =>
+                {
                     if let Some(joined) = known.join(actual) {
                         targs[i] = Some(joined);
                     }
