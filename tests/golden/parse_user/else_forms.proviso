@@ -3,7 +3,7 @@
 // chain to their left (REFERENCE §6.6, §7.2). The fallback runs only when there is nothing
 // to unwrap. `it` is the error, in every form on a fallible call, and in nested forms it is
 // the error of the innermost one on a fallible call (OPEN_QUESTIONS Q33). `else` binds
-// loosest and groups to the right, so `o else 0 + 1` is `o else (0 + 1)` (§6.1). A call
+// loosest (§6.1) and groups to the right, so `o else 0 + 1` is `o else (0 + 1)` (P5). A call
 // whose result is an `Option` and that can fail has its failure handled, not the `Option`
 // unwrapped (P5). A `try` in an argument still fails the function. A call marked with an
 // `else` form is a statement (Q33), and a statement continues on a line that starts with

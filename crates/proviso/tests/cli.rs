@@ -59,6 +59,21 @@ fn json_applies_only_to_check() {
 }
 
 #[test]
+fn test_runs_examples_without_a_main() {
+    let file = source(
+        "examples.proviso",
+        "fn double(n: Int) -> Int {\n    return n * 2\n}\n\nexample double(2) == 4\nexample double(2) == 5\n",
+    );
+    let output = run(&["test"], &file);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stdout.ends_with("2 examples: 1 passed, 1 failed\n"), "{stdout}");
+    assert!(stdout.contains("example failed: expected `5`, found `4`"), "{stdout}");
+    assert_eq!(run(&["run"], &file).status.code(), Some(65));
+    assert_eq!(run(&["test", "--json"], &file).status.code(), Some(64));
+}
+
+#[test]
 fn unknown_options_are_usage_errors() {
     let file = source("hello.proviso", HELLO);
     for flag in ["-x", "--frobnicate"] {

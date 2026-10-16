@@ -779,5 +779,18 @@ mod tests {
         assert_eq!(decls.display(&Ty::IoError).to_string(), "std.io.IoError");
         assert_eq!(decls.display(&Ty::adt(own)).to_string(), "IoError");
         assert_eq!(decls.display(&Ty::out()).to_string(), "Out");
+        let parse_error = Ty::adt(AdtId::PARSE_ERROR);
+        assert_eq!(decls.display(&parse_error).to_string(), "ParseError");
+        decls.push(AdtDef::record("ParseError", Vec::new()));
+        assert_eq!(decls.display(&parse_error).to_string(), "std.text.ParseError");
+    }
+
+    #[test]
+    fn tuples_are_written_as_their_literals() {
+        let mut decls = Decls::default();
+        let triple = decls.tuple_ty(vec![Ty::INT, Ty::Text, Ty::option(Ty::Bool)]);
+        assert_eq!(decls.display(&triple).to_string(), "(Int, Text, Option[Bool])");
+        assert_eq!(decls.tuple(2), AdtId::PAIR);
+        assert_eq!(decls.tuple(3), decls.tuple(3));
     }
 }

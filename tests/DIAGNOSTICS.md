@@ -32,7 +32,7 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0005 | `invalid_char_literal` | 1 | A char literal that isn't exactly one Unicode scalar value. | basics/err_lexical |
 | E0006 | `unterminated_interpolation` | 1 | An f-string `{` without a matching `}`, or a lone `}` (write `}}`). | basics/err_text_literals |
 | E0007 | `empty_interpolation` | 1 | An f-string interpolation with no expression in it. | basics/err_text_literals |
-| E0101 | `unexpected_token` | 1 | The parser expected something else here. | basics/err_syntax, records/err_unclosed, enums/err_unclosed, methods/err_syntax |
+| E0101 | `unexpected_token` | 1 | The parser expected something else here, such as `else` after a `check`'s condition, `==` or `fails` after an example's call, or a second element in a tuple. | basics/err_syntax, records/err_unclosed, enums/err_unclosed, methods/err_syntax, parse_user/err_tuples, parse_user/err_check, parse_user/err_examples |
 | E0102 | `bare_value_statement` | 1 | An expression statement that is not a call, an assignment or a control expression (§2). | basics/err_bare_value, enums/err_is, option_result/err_fail_attempt |
 | E0103 | `chained_comparison` | 1 | `a < b < c`: comparisons are non-associative (§6.1). | basics/err_operator_rules |
 | E0104 | `mixed_and_or` | 1 | `and` and `or` mixed without parentheses (§6.1, H2). | basics/err_operator_rules |
@@ -40,7 +40,7 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0106 | `invalid_assignment_target` | 1 | An assignment to something that isn't a variable or one of its parts. | basics/err_assignment_target, records/err_fields |
 | E0107 | `todo_requires_incomplete` | 1 | A `todo` hole without `--incomplete` (§15.2, Q25). | basics/err_todo |
 | E0108 | `misplaced_return` | 2 | `return` outside a function body, such as in a `where` clause. | records/err_refinement_scope |
-| E0201 | `unknown_name` | 1 | A name that resolves to no local, function or import, or a variant used without its enum (§4.5). | basics/err_unknown_name, enums/err_construction, enums/err_is, enums/err_match, option_result/err_types, option_result/err_fail_attempt, methods/err_methods |
+| E0201 | `unknown_name` | 1 | A name that resolves to no local, function or import, a variant used without its enum (§4.5), or an `it` outside the fallback of an `else` form on a call that can fail (Q33). | basics/err_unknown_name, enums/err_construction, enums/err_is, enums/err_match, option_result/err_types, option_result/err_fail_attempt, methods/err_methods, parse_user/err_else |
 | E0202 | `duplicate_item` | 1 | Two items with one name in a module, or a name imported twice (§3). | basics/err_duplicate, enums/err_declarations |
 | E0203 | `shadowing` | 1 | A binding that reuses a name already in scope in the function, including functions and imports, an import, record, enum or interface that reuses a prelude name, such as `Text` or `Show`, or a type parameter that reuses a type's name (§3, H4). | basics/err_shadowing, basics/err_import_alias, records/err_declarations, enums/err_declarations, enums/err_match, option_result/err_fail_attempt, methods/err_generics |
 | E0204 | `wrong_case` | 1 | A type or variant that isn't PascalCase, or any other name that isn't snake_case (§2). | basics/err_case, enums/err_declarations, methods/err_generics |
@@ -120,19 +120,20 @@ Phase 2 adds these kinds:
 | `stale_handle` | `pool[h]` with a stale or wrong-pool handle (§5.5) |
 | `refinement_failed` | a value broke its type's refinement, which the v1 profile checks at runtime (OPEN_QUESTIONS P3) |
 | `no_arm_matched` | no arm of a `match` matched; only integer patterns can leave a gap that the checker accepts, since the v1 profile checks their exhaustiveness at runtime (OPEN_QUESTIONS P5) |
+| `fuel_exhausted` | an example took more than 1,000,000 steps, each a call or a turn of a loop (§14; OPEN_QUESTIONS P5) |
 
 Every report is printed on stderr as `<kind>[<detail>]: <message>`, followed by its location and call sites (OPEN_QUESTIONS P5, T10). A leak comes right after the defect in `abandon` that caused it, and its location is the binding that owned the resource. Output of `debug(…)` also goes to stderr, one line per call, as `[debug <path>:<line>:<col>] <values>`.
 
-Exit codes of `proviso run` and `proviso check`:
+Exit codes of `proviso run`, `proviso test` and `proviso check`:
 
 | Code | Meaning |
 |---|---|
 | 0 | success |
-| 1 | `main` failed with an error (§7.4) |
+| 1 | `main` failed with an error (§7.4), or an example failed |
 | 64 | usage error |
 | 65 | `check` found errors |
 | 66 | unreadable file, or one that isn't UTF-8 |
-| 70 | defect (§7.3) |
+| 70 | defect (§7.3), also in an example |
 | 101 | internal error, which is a bug in the toolchain |
 
 Codes 64, 65, 66 and 101 are provisional (P5).
