@@ -7,9 +7,10 @@
 // expect-error: E0415
 // expect-error: E0503
 // `check P else …` needs a `Bool` and an `else` that doesn't finish, so it has type
-// `Never`, as `fail`, `return`, `break`, `continue`, `unreachable`, a call of a function
-// that returns `Never`, and a block ending in one of those do (REFERENCE §8.4;
-// OPEN_QUESTIONS P5). Because the `else`
+// `Never`, as `fail`, `unreachable`, a call of a function that returns `Never`, and a
+// block with a statement that doesn't finish do (REFERENCE §8.4; OPEN_QUESTIONS P5).
+// `return`, `break` and `continue` are statements, so they go in a block. An `if` without
+// `else` has no value, even when its block leaves. Because the `else`
 // leaves, the code after a `check` runs only when `P` holds, so the bindings of an `is` in
 // `P` scope over the rest of the enclosing block, as an `if`'s scope over its then-block
 // (§6.4, §8.4). They don't scope over the `else`, nor past the block, and an `is` under
@@ -60,5 +61,41 @@ fn diverging(n: Int) -> Int {
     check n > 3 else never()
     check n > 4 else { never() }
     check n > 5 else { return 0 }
+    return n
+}
+
+fn statements(n: Int) -> Int {
+    while true {
+        check n > 0 else break                      // <- E0101
+    }
+    check n > 1 else return 0                       // <- E0101
+    return n
+}
+
+fn valueless(o: Option[Int], c: Bool) -> Int {
+    check o is Some(x) else if c { return 0 }       // <- E0301
+    let v = if c { return 1 }                       // <- E0301
+    check o is Some(y) else {
+        let z = if c { return 2 }                   // <- E0301
+    }
+    return x + v + y
+}
+
+fn broken(o: Option[Int], p: (Option[Int], Option[Int])) -> Int {
+    check o is Some(x1)                             // <- E0101
+    check p is (Some(a1), Some(b1))                 // <- E0101
+    check o is Some(y1) and p.0 > 1 else { return 0 } // <- E0101
+    return x1 + a1 + b1 + y1
+}
+
+fn finishing(n: Int) -> Int {
+    check n > 1 else {
+        return 0
+        debug(n)
+    }
+    check n > 2 else {
+        loop {
+        }
+    }
     return n
 }

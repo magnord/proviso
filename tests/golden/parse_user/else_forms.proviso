@@ -10,7 +10,8 @@
 // `else` form is a statement (Q33), and a statement continues on a line that starts with
 // `else` (§2). An arm's guard ends at `=>`, so it takes an `else` form unparenthesized
 // (§6.1). The type an `else` form is expected to have reaches the call on its left, as it
-// reaches one under `try`, or as an `Option` of it for a call that returns one (P5).
+// reaches one under `try`, or as an `Option` of it for a call that returns one, unless a
+// call before it in the chain can fail, which makes the form's value the call's own (P5).
 use std.io { IoError }
 
 enum Problem derives(Eq, Show) {
@@ -28,6 +29,13 @@ impl Holder {
             fail Problem.Small(n: 0)
         }
         return self.n
+    }
+
+    fn find[T: Copy](self, x: T) -> Option[T] {
+        if self.n == 0 {
+            return None
+        }
+        return Some(x)
     }
 
     fn same[T: Copy](self, x: T) -> T fails Problem {
@@ -60,6 +68,16 @@ fn narrow(ok: Bool) -> Int8 {
 fn narrow_method(n: Int) -> Int8 {
     let h = Holder(n: n)
     let z: Int8 = h.same(x: 7) else -2
+    return z
+}
+
+fn found(n: Int) -> Option[Int8] {
+    let y: Option[Int8] = make(n).find(x: 5) else None
+    return y
+}
+
+fn found_inner(n: Int) -> Int8 {
+    let z: Int8 = make(n).same(x: 9) else -3
     return z
 }
 
@@ -208,6 +226,7 @@ pub fn main(sys: keep System) fails IoError {
     }
     try sys.stdout.write_line(f"{narrow(true)} {narrow(false)} {narrow_method(1)} {narrow_method(0)}")
     try sys.stdout.write_line(f"{wide(true)} {wide(false)}")
+    try sys.stdout.write_line(f"{found(1)} {found(0)} {found(-1)} {found_inner(1)} {found_inner(0)} {found_inner(-1)}")
     try sys.stdout.write_line(f"{guarded(n: 0, o: Some(true))} {guarded(n: 0, o: None)} {guarded(n: 0, o: Some(false))}")
 }
 

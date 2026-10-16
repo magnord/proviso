@@ -197,7 +197,7 @@ pub mod codes {
         IMPL_REQUIRES_MISMATCH = "E0414", "impl_requires_mismatch",
             "An implementation takes the interface method's `requires` clauses exactly as written (REFERENCE §4.9).";
         CHECK_FALLS_THROUGH = "E0415", "check_falls_through",
-            "The `else` of a `check` must not finish, so it has type `Never`, as `fail`, `return`, `break` and `continue` do (REFERENCE §8.4).";
+            "The `else` of a `check` must not finish, so it has type `Never`, as `fail` and a block that returns, breaks or continues do (REFERENCE §8.4).";
         USE_AFTER_MOVE = "E0501", "use_after_move",
             "A unique or resource value is used after it moved (REFERENCE §5.1).";
         LENT_RESOURCE_CONSUMED = "E0502", "lent_resource_consumed",

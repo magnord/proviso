@@ -1994,7 +1994,7 @@ impl Checker<'_> {
                     self.error(
                         codes::CHECK_FALLS_THROUGH,
                         span,
-                        "the `else` of a `check` must not finish; end it with `fail`, `return`, `break` or `continue`",
+                        "the `else` of a `check` must not finish; use `fail`, or a block that returns, breaks or continues",
                     );
                 }
                 if let Some(scope) = self.f.scopes.last_mut() {
@@ -2227,15 +2227,16 @@ impl Checker<'_> {
         let mut diverges = false;
         let mut value = None;
         let count = block.stmts.len();
-        // The last statement of a block that is never closed, or lost one, may not be its end.
+        // The last statement of a block that is never closed, or lost one, may not be its end,
+        // so the expected type only guides it, and a mismatch isn't reported.
         let missing = block.unclosed || block.lost;
-        let expected = if missing { None } else { expected };
         for (i, &s) in block.stmts.iter().enumerate() {
             if i + 1 == count
                 && let StmtKind::Expr(e) = m.stmts[s].kind
             {
                 self.copying = copying;
                 let ty = match expected {
+                    Some(_) if missing => self.expr(e, expected),
                     // A `Never` argument may stand for a type argument not known yet, which
                     // the value widens, as a variant's field does (OPEN_QUESTIONS P5).
                     Some(expected) if expected.has_never_arg() => {
@@ -2570,11 +2571,34 @@ impl Checker<'_> {
             ExprKind::MethodCall { receiver, method, .. } => self.method_named(receiver, method)?,
             _ => return None,
         };
-        let info = &self.p.fns[f];
-        match (&info.fails, &info.ret) {
-            (Some(_), _) => Some(expected.clone()),
-            (None, Ty::Adt(AdtId::OPTION, _)) => Some(Ty::option(expected.clone())),
+        // A call that can fail anywhere in the chain makes the form handle that failure, so
+        // its value is the outer call's, unwrapped or not (OPEN_QUESTIONS P5).
+        match (self.chain_fails(value)?, &self.p.fns[f].ret) {
+            (true, _) => Some(expected.clone()),
+            (false, Ty::Adt(AdtId::OPTION, _)) => Some(Ty::option(expected.clone())),
             _ => None,
+        }
+    }
+
+    /// Whether a call of the postfix chain that ends in `e` can fail, where each of its calls
+    /// shows without checking it, as [`Checker::method_named`] tells. `None` when one doesn't.
+    fn chain_fails(&self, mut e: ExprId) -> Option<bool> {
+        let mut fails = false;
+        loop {
+            match self.m.exprs[e].kind {
+                ExprKind::Call { callee, .. } => {
+                    let f = self.fn_named(callee)?;
+                    return Some(fails || self.p.fns[f].fails.is_some());
+                }
+                ExprKind::MethodCall { receiver, method, .. } => {
+                    let f = self.method_named(receiver, method)?;
+                    fails |= self.p.fns[f].fails.is_some();
+                    e = receiver;
+                }
+                ExprKind::Field { base, .. } => e = base,
+                ExprKind::Name(_) => return Some(fails),
+                _ => return None,
+            }
         }
     }
 
@@ -3888,8 +3912,9 @@ impl Checker<'_> {
                 if then_ty == Ty::Never && else_ty == Ty::Never { Ty::Never } else { Ty::Unit }
             }
             (Mode::Value(_), None) => {
-                // A block that was never closed may have been followed by an `else`.
-                if !then_ty.is_unknown() {
+                // A block that was never closed may have been followed by an `else`. One that
+                // diverges still gives the `if` no value when the condition is false.
+                if then_ty != Ty::Error {
                     let span = self.span(e);
                     self.error(codes::TYPE_MISMATCH, span, "an `if` without `else` has no value; add an `else` branch");
                 }

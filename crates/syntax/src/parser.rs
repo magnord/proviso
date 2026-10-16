@@ -880,15 +880,48 @@ impl Parser<'_> {
     fn example_decl(&mut self) -> PResult<ExampleDecl> {
         self.bump();
         let call = self.nested(Self::range)?;
-        if !matches!(self.m.exprs[call].kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. }) {
+        // What is called, which a construction such as `Some(1)` or `Shape.Circle(r: 1)`
+        // names in PascalCase.
+        let called = match self.m.exprs[call].kind {
+            ExprKind::Call { callee, .. } => match self.m.exprs[callee].kind {
+                ExprKind::Name(name) => Some(name),
+                _ => None,
+            },
+            ExprKind::MethodCall { method, .. } => Some(method),
+            _ => None,
+        };
+        let construction = |name: Ident| self.m.text(name.sym).starts_with(|c: char| c.is_ascii_uppercase());
+        if !called.is_some_and(|name| !construction(name)) {
             let span = self.span_of(call);
-            self.error(codes::UNEXPECTED_TOKEN, span, "an example tests a call, as in `example f(…) == v`");
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "an example tests a function or method call, as in `example f(…) == v`",
+            );
             return Err(());
         }
         let expect = match self.kind() {
             T::EqEq => {
                 self.bump();
-                Expectation::Equals(self.expr()?)
+                // The expected value is an operand of `==`, as the call is, or an `else` form
+                // on one, so `f(x) == o else 0` compares with `o else 0` (OPEN_QUESTIONS P5).
+                let value = self.nested(Self::range)?;
+                if self.comparison_op()?.is_some() {
+                    let span = self.peek().span;
+                    self.error(
+                        codes::CHAINED_COMPARISON,
+                        span,
+                        "comparisons cannot be chained; parenthesize the expected value",
+                    );
+                    return Err(());
+                }
+                if self.eat(T::Keyword(Kw::Else)) {
+                    let fallback = self.fallback()?;
+                    let span = self.span_of(value).to(self.prev_span());
+                    Expectation::Equals(self.alloc(ExprKind::Else { value, fallback }, span))
+                } else {
+                    Expectation::Equals(value)
+                }
             }
             T::Keyword(Kw::Fails) => {
                 self.bump();
@@ -1236,6 +1269,12 @@ impl Parser<'_> {
                 let pat = self.placeholder_pattern(start + 1);
                 StmtKind::Let { mutable: kw == Kw::Var, pat, ty: None, init }
             }
+            // A `check`'s `is` bindings scope over the rest of the block, so they are bound
+            // here as a broken `let`'s are.
+            T::Keyword(Kw::Check) => {
+                let pat = self.placeholder_is_pattern(start + 1);
+                StmtKind::Let { mutable: false, pat, ty: None, init }
+            }
             _ => StmtKind::Expr(init),
         };
         self.m.stmts.alloc(Stmt { kind, span })
@@ -1287,6 +1326,40 @@ impl Parser<'_> {
             PatKind::Tuple(parts)
         };
         self.m.pats.alloc(Pat { kind, span })
+    }
+
+    /// The names the `is` tests of a broken `check` condition starting at token `start`
+    /// bind: the snake_case names of each pattern after an `is`, up to its `else`, other than
+    /// field labels and constructors, as [`Parser::placeholder_pattern`] reads them.
+    fn placeholder_is_pattern(&mut self, start: usize) -> PatId {
+        let mut parts = Vec::new();
+        let mut depth = 0usize;
+        let mut in_pattern = false;
+        let mut i = start;
+        while let Some(token) = self.tokens.get(i) {
+            match token.kind {
+                T::LParen | T::LBracket | T::LBrace => depth += 1,
+                T::RParen | T::RBracket | T::RBrace => depth = depth.saturating_sub(1),
+                T::Keyword(Kw::Else) | T::Newline | T::Eof if depth == 0 => break,
+                T::Keyword(Kw::Is) => in_pattern = true,
+                T::Keyword(Kw::And | Kw::Or) if depth == 0 => in_pattern = false,
+                T::Ident if in_pattern => {
+                    let next = self.nth_from(i + 1);
+                    let label = depth > 0 && next == T::Colon;
+                    let after_dot = self.tokens[i - 1].kind == T::Dot;
+                    let text = self.file.slice(token.span);
+                    let snake = text.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') && text != "_";
+                    if snake && !label && !after_dot && !matches!(next, T::Dot | T::LParen) {
+                        let name = self.intern(token.span);
+                        parts.push(self.m.pats.alloc(Pat { kind: PatKind::Bind(name), span: name.span }));
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let span = self.tokens.get(start).map_or(self.prev_span(), |t| t.span);
+        self.m.pats.alloc(Pat { kind: PatKind::Tuple(parts), span })
     }
 
     fn nth_from(&self, i: usize) -> T {

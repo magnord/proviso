@@ -70,3 +70,41 @@ fn arm_if(n: Int) -> Int {
     }
     return x
 }
+
+fn lost_if(c: Bool) -> Option[Int] {
+    let x: Option[Int] = if c {
+        log() log()                                 // <- E0101
+        None
+    } else {
+        None
+    }
+    return x
+}
+
+fn lost_else(o: Option[Option[Int]]) -> Option[Int] {
+    let y = o else {
+        log() log()                                 // <- E0101
+        None
+    }
+    return y
+}
+
+fn lost_arm(c: Bool) -> Result[Int, Text] {
+    return match c {
+        true => {
+            log() log()                             // <- E0101
+            Ok(1)
+        }
+        false => Err("x")
+    }
+}
+
+fn unclosed_arm(n: Int, o: Option[Option[Int]]) -> Option[Int] {
+    let z: Option[Int] = match n {
+        1 => None
+        0 => o else {                               // <- E0101
+            None
+        _ => None
+    }
+    return z
+}

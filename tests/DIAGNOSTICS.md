@@ -73,7 +73,7 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0412 | `refinement_refuted` | 5 | A refinement obligation is refuted: the verifier found values, consistent with every admissible fact, that violate it (§8.3, §8.5). The diagnostic carries the counterexample. | f01, f02, f03, f17 |
 | E0413 | `partial_inout_of_refined_part` | 5 | A part of a refined value is passed as `inout(partial)` (§5.4). | f16 |
 | E0414 | `impl_requires_mismatch` | 4 | An implementation's `requires` clauses differ from the interface method's as written (§4.9). | f12 |
-| E0415 | `check_falls_through` | 2 | The `else` of a `check` can finish, so the code after it would run although the check failed. It must have type `Never`, as `fail`, `return`, `break`, `continue` and `unreachable` do (§8.4; OPEN_QUESTIONS P5). | parse_user/err_check |
+| E0415 | `check_falls_through` | 2 | The `else` of a `check` can finish, so the code after it would run although the check failed. It must have type `Never`, as `fail`, `unreachable` and a block that returns, breaks or continues do (§8.4; OPEN_QUESTIONS P5). | parse_user/err_check |
 | E0501 | `use_after_move` | 2 | A unique or resource value is used after it moved (§5.1). | f06 |
 | E0502 | `lent_resource_consumed` | 2 | A borrowed or `inout` resource is passed to `take`, or used by a `take self` method (§10 rule 6). | f15 |
 | E0503 | `not_copyable` | 2 | A borrowed value of a type parameter without `Copy`, or of a type built from one such as `Option[T]`, is copied: bound to a new name, assigned, stored in a value, returned or failed with (§4.8). | methods/err_copy, parse_user/err_tuples |
