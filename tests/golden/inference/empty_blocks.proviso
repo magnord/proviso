@@ -4,8 +4,8 @@
 // in `match` arms, inside a constructor and a tuple, and beside a branch that leaves
 // (issue #10). A `check` whose fallback is a value settles the value's type before it tests
 // that the fallback can't finish, so a type argument that only `Never` gives makes the
-// fallback one that leaves (OPEN_QUESTIONS P5). Each `dN` runs its fallback when `c` is
-// false.
+// fallback one that leaves (OPEN_QUESTIONS P5). In `d6` that type argument comes before a
+// statement inside the fallback. Each `dN` runs its fallback when `c` is false.
 use std.io { IoError }
 
 fn id[T: Copy](x: T) -> T {
@@ -72,11 +72,21 @@ fn d5(c: Bool, d: Bool) -> Int fails Text {
     return 5
 }
 
+fn d6(c: Bool, d: Bool) -> Int fails Text {
+    check c else id(if d {
+        let n = 6
+        fail "d6"
+    } else {
+        fail "d6b"
+    })
+    return 6
+}
+
 pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(blocks(c: true, d: true))
     try sys.stdout.write_line(blocks(c: false, d: false))
     try sys.stdout.write_line(f"{attempt leaves(true)} {attempt leaves(false)}")
-    try sys.stdout.write_line(f"{attempt d1(true)} {attempt d2(true)} {attempt d3(true)} {attempt d4(c: true, d: true)} {attempt d5(c: true, d: true)}")
-    try sys.stdout.write_line(f"{attempt d1(false)} {attempt d2(false)} {attempt d3(false)} {attempt d4(c: false, d: true)} {attempt d5(c: false, d: true)}")
-    try sys.stdout.write_line(f"{attempt d4(c: false, d: false)} {attempt d5(c: false, d: false)}")
+    try sys.stdout.write_line(f"{attempt d1(true)} {attempt d2(true)} {attempt d3(true)} {attempt d4(c: true, d: true)} {attempt d5(c: true, d: true)} {attempt d6(c: true, d: true)}")
+    try sys.stdout.write_line(f"{attempt d1(false)} {attempt d2(false)} {attempt d3(false)} {attempt d4(c: false, d: true)} {attempt d5(c: false, d: true)} {attempt d6(c: false, d: true)}")
+    try sys.stdout.write_line(f"{attempt d4(c: false, d: false)} {attempt d5(c: false, d: false)} {attempt d6(c: false, d: false)}")
 }

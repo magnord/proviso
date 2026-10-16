@@ -246,6 +246,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         borrowed_values: HashSet::new(),
         vars: Vars::default(),
         pending: Vec::new(),
+        stmt_start: (0, 0),
         typed: Vec::new(),
     };
     checker.imports();
@@ -463,6 +464,9 @@ struct Checker<'a> {
     vars: Vars,
     /// Checks that wait until the variables they read are solved.
     pending: Vec<Pending>,
+    /// Where the statement being checked began: the variable count and the trail mark that
+    /// [`Checker::solve`] takes.
+    stmt_start: (u32, usize),
     /// The expressions whose recorded type has a variable, which the side table gets
     /// without once the body is checked.
     typed: Vec<ExprId>,
@@ -564,6 +568,24 @@ impl Checker<'_> {
     fn force(&mut self, ty: &Ty) -> Ty {
         let mut open = Vec::new();
         self.vars.open_in(ty, &mut open);
+        self.settle_vars(open);
+        self.vars.zonk(ty)
+    }
+
+    /// Settles the open variables in `ty` that the statement being checked made, as its end
+    /// would, so a type argument that only `Never` gave is `Never` when it is asked whether
+    /// the statement can finish. Those the expression around the statement may still give
+    /// stay open, such as the error type of `it`, which the `let` around a fallback settles
+    /// (OPEN_QUESTIONS P5). A type with one counts as one that can finish.
+    fn settle_own(&mut self, ty: &Ty) -> Ty {
+        if !self.vars.has_var(ty) {
+            return ty.clone();
+        }
+        let (since, mark) = self.stmt_start;
+        let outer = self.vars.outer(since, mark);
+        let mut open = Vec::new();
+        self.vars.open_in(ty, &mut open);
+        open.retain(|&v| v >= since && !outer.contains(&v));
         self.settle_vars(open);
         self.vars.zonk(ty)
     }
@@ -2233,7 +2255,9 @@ impl Checker<'_> {
     /// solved at its end, since nothing after it can give it (OPEN_QUESTIONS P5).
     fn stmt(&mut self, s: StmtId) -> bool {
         let (vars, pending, bound) = (self.vars.count(), self.pending.len(), self.vars.bound());
+        let outer = std::mem::replace(&mut self.stmt_start, (vars, bound));
         let diverges = self.stmt_kind(s);
+        self.stmt_start = outer;
         self.solve(vars, pending, bound);
         diverges
     }
@@ -2274,12 +2298,9 @@ impl Checker<'_> {
                 self.condition(*cond);
                 let bindings = self.f.scopes.pop().unwrap_or_default();
                 let (ty, span) = match fallback {
-                    // Nothing after the fallback gives its type, so it is settled before it is
-                    // tested, as a statement's is. A type argument only `Never` gave is then
-                    // `Never` (OPEN_QUESTIONS P5).
                     Fallback::Value(value) => {
                         let ty = self.infer(*value);
-                        (self.force(&ty), self.span(*value))
+                        (self.settle_own(&ty), self.span(*value))
                     }
                     Fallback::Block(block) => (self.block_stmt(block, None), block.span),
                 };
@@ -2298,7 +2319,7 @@ impl Checker<'_> {
             StmtKind::Assign { target, op, value } => diverges_ty(&self.assign(*target, *op, *value)),
             StmtKind::Expr(e) => {
                 let ty = self.expr_stmt(*e);
-                diverges_ty(&self.force(&ty))
+                diverges_ty(&self.settle_own(&ty))
             }
             StmtKind::Return(value) if !self.f.returns => {
                 if let Some(value) = value {
