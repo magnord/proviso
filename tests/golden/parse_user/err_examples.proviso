@@ -3,6 +3,7 @@
 // expect-error: E0103
 // expect-error: E0108
 // expect-error: E0201
+// expect-error: E0204
 // expect-error: E0301
 // expect-error: E0306
 // expect-error: E0701
@@ -31,6 +32,10 @@ fn sure(n: Int) -> Int {
 }
 
 fn risky(n: Int) -> Int fails Text {
+    return n
+}
+
+fn Misnamed(n: Int) -> Int {                        // <- E0204
     return n
 }
 
@@ -79,3 +84,4 @@ example Some(1) == Some(1)                          // <- E0101
 example Plain(n: 1) == plain(1)                     // <- E0101
 example Mode.Fast(n: 1) == Mode.Fast(n: 1)          // <- E0101
 example sure(10) == (1 + 9)
+example Misnamed(1) == 1

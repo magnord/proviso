@@ -880,18 +880,8 @@ impl Parser<'_> {
     fn example_decl(&mut self) -> PResult<ExampleDecl> {
         self.bump();
         let call = self.nested(Self::range)?;
-        // What is called, which a construction such as `Some(1)` or `Shape.Circle(r: 1)`
-        // names in PascalCase.
-        let called = match self.m.exprs[call].kind {
-            ExprKind::Call { callee, .. } => match self.m.exprs[callee].kind {
-                ExprKind::Name(name) => Some(name),
-                _ => None,
-            },
-            ExprKind::MethodCall { method, .. } => Some(method),
-            _ => None,
-        };
-        let construction = |name: Ident| self.m.text(name.sym).starts_with(|c: char| c.is_ascii_uppercase());
-        if !called.is_some_and(|name| !construction(name)) {
+        // Whether it builds a value instead, as `Some(1)` does, the checker tells.
+        if !matches!(self.m.exprs[call].kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. }) {
             let span = self.span_of(call);
             self.error(
                 codes::UNEXPECTED_TOKEN,
@@ -1329,20 +1319,39 @@ impl Parser<'_> {
     }
 
     /// The names the `is` tests of a broken `check` condition starting at token `start`
-    /// bind: the snake_case names of each pattern after an `is`, up to its `else`, other than
-    /// field labels and constructors, as [`Parser::placeholder_pattern`] reads them.
+    /// bind, as [`Parser::placeholder_pattern`] reads a pattern's names, up to the `else` or
+    /// the end of the line. An `is` under `not` binds nothing, and neither does any when the
+    /// condition is an `or` (OPEN_QUESTIONS P5).
     fn placeholder_is_pattern(&mut self, start: usize) -> PatId {
-        let mut parts = Vec::new();
+        let mut names: Vec<Ident> = Vec::new();
         let mut depth = 0usize;
         let mut in_pattern = false;
+        // The depth of a `not` whose operand is still being read.
+        let mut negated: Option<usize> = None;
         let mut i = start;
         while let Some(token) = self.tokens.get(i) {
             match token.kind {
                 T::LParen | T::LBracket | T::LBrace => depth += 1,
-                T::RParen | T::RBracket | T::RBrace => depth = depth.saturating_sub(1),
-                T::Keyword(Kw::Else) | T::Newline | T::Eof if depth == 0 => break,
-                T::Keyword(Kw::Is) => in_pattern = true,
-                T::Keyword(Kw::And | Kw::Or) if depth == 0 => in_pattern = false,
+                T::RParen | T::RBracket | T::RBrace => {
+                    depth = depth.saturating_sub(1);
+                    if negated.is_some_and(|d| depth < d) {
+                        negated = None;
+                    }
+                }
+                T::Newline | T::Eof => break,
+                T::Keyword(Kw::Else) if depth == 0 => break,
+                T::Keyword(Kw::Or) if depth == 0 => {
+                    names.clear();
+                    break;
+                }
+                T::Keyword(Kw::Not) => negated = negated.or(Some(depth)),
+                T::Keyword(Kw::Is) => in_pattern = negated.is_none(),
+                T::Keyword(Kw::And | Kw::Or) => {
+                    in_pattern = false;
+                    if negated.is_some_and(|d| depth <= d) {
+                        negated = None;
+                    }
+                }
                 T::Ident if in_pattern => {
                     let next = self.nth_from(i + 1);
                     let label = depth > 0 && next == T::Colon;
@@ -1351,13 +1360,19 @@ impl Parser<'_> {
                     let snake = text.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') && text != "_";
                     if snake && !label && !after_dot && !matches!(next, T::Dot | T::LParen) {
                         let name = self.intern(token.span);
-                        parts.push(self.m.pats.alloc(Pat { kind: PatKind::Bind(name), span: name.span }));
+                        if !names.iter().any(|n| n.sym == name.sym) {
+                            names.push(name);
+                        }
                     }
                 }
                 _ => {}
             }
             i += 1;
         }
+        let parts = names
+            .into_iter()
+            .map(|name| self.m.pats.alloc(Pat { kind: PatKind::Bind(name), span: name.span }))
+            .collect();
         let span = self.tokens.get(start).map_or(self.prev_span(), |t| t.span);
         self.m.pats.alloc(Pat { kind: PatKind::Tuple(parts), span })
     }

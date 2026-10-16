@@ -30,6 +30,11 @@ fn it_unclosed() -> Int {
     log()
 }
 
+fn unclosed_leaving_if(c: Bool) -> Int {
+    let v = if c {                                  // <- E0101
+        return 1
+}
+
 fn check_lost(n: Int) -> Int {
     check n > 5 else {
         log() return 0                              // <- E0101

@@ -1809,6 +1809,17 @@ impl Checker<'_> {
                 }
             }
             let span = self.span(decl.call);
+            // Only the checker knows whether `Sure(1)` calls a misnamed function or builds a
+            // value, so the parser leaves this to it (REFERENCE §14).
+            let callee = match m.exprs[decl.call].kind {
+                ExprKind::Call { callee, .. } => callee,
+                _ => decl.call,
+            };
+            if [callee, decl.call].iter().any(|&e| matches!(self.p.res.get(e), Some(Res::Ctor(..)))) {
+                let message = "an example tests a function or method call, not a construction";
+                self.error(codes::UNEXPECTED_TOKEN, span, message);
+                continue;
+            }
             let err = match errors.as_slice() {
                 [] => None,
                 [err] => Some(err.clone()),
@@ -3911,10 +3922,13 @@ impl Checker<'_> {
                 };
                 if then_ty == Ty::Never && else_ty == Ty::Never { Ty::Never } else { Ty::Unit }
             }
+            // Where `()` is expected, an `if` without `else` is the statement §6.2 makes it.
+            (Mode::Value(Some(Ty::Unit)), None) => Ty::Unit,
             (Mode::Value(_), None) => {
-                // A block that was never closed may have been followed by an `else`. One that
-                // diverges still gives the `if` no value when the condition is false.
-                if then_ty != Ty::Error {
+                // A block that was never closed, or lost a statement, may have been followed
+                // by an `else`. One that diverges still gives the `if` no value when the
+                // condition is false.
+                if then_ty != Ty::Error && !then_block.unclosed && !then_block.lost {
                     let span = self.span(e);
                     self.error(codes::TYPE_MISMATCH, span, "an `if` without `else` has no value; add an `else` branch");
                 }
