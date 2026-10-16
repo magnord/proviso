@@ -1,6 +1,6 @@
 //! Name resolution and type checking for the phase-1 subset (scalar types, functions,
 //! control flow, `fails` and `try`, and the prelude's `System` with only `stdout`), for
-//! records, and for enums, `match` and patterns.
+//! records, for enums, `match` and patterns, and for `Option`, `Result`, `fail` and `attempt`.
 //!
 //! The checker never rewrites the tree. It records what it learns in side tables of
 //! [`Program`], which the interpreter reads.
@@ -18,7 +18,9 @@ use proviso_syntax::diag::{Code, Diagnostics, Planned, codes};
 use proviso_syntax::intern::Symbol;
 use proviso_syntax::source::Span;
 
-use crate::decls::{AdtDef, AdtId, AdtKind, Decls, FieldDef, FieldIdx, IfaceId, Pred, VariantDef, VariantIdx};
+use crate::decls::{
+    AdtDef, AdtId, AdtKind, Decls, FieldDef, FieldIdx, IfaceId, Inhabited, Pred, VariantDef, VariantIdx,
+};
 use crate::exhaust::{Ctor, Space};
 use crate::types::{FloatTy, IntTy, Ty};
 
@@ -115,6 +117,9 @@ pub struct Program {
     pub for_local: SideTable<Expr, LocalId>,
     /// The loop each `break` or `continue` leaves.
     pub jump_target: SideTable<Stmt, ExprId>,
+    /// The `attempt` that marks each fallible call it covers, which reifies the call's
+    /// failure as an `Err` (REFERENCE §7.2).
+    pub attempt_of: SideTable<Expr, ExprId>,
 }
 
 static ERROR: Ty = Ty::Error;
@@ -142,13 +147,13 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         adts: Vec::new(),
         f: FnState::new(Ty::Unit, None),
         in_chain: false,
-        tries: Vec::new(),
-        inhabited: Vec::new(),
+        markers: Vec::new(),
+        inhabited: None,
     };
     checker.imports();
     checker.adt_names();
     checker.adt_fields();
-    checker.inhabited = checker.p.decls.inhabited();
+    checker.inhabited = Some(checker.p.decls.inhabited());
     checker.signatures();
     checker.adt_derives();
     checker.adt_predicates();
@@ -206,6 +211,13 @@ impl FnState {
     }
 }
 
+/// An enclosing `try` or `attempt`, and the error types of the fallible calls it marks.
+struct Marker {
+    /// The `attempt`, or `None` for a `try`.
+    attempt: Option<ExprId>,
+    errors: Vec<Ty>,
+}
+
 /// Whether an `if` is used for its value, as a statement, or as the last statement of a
 /// function that returns this type.
 #[derive(Clone, Copy)]
@@ -234,12 +246,12 @@ struct Checker<'a> {
     adts: Vec<AdtSrc<'a>>,
     /// The function being checked, or the record whose refinements are.
     f: FnState,
-    /// Set while checking the postfix chain a `try` covers (REFERENCE §6.1).
+    /// Set while checking the postfix chain a `try` or `attempt` covers (REFERENCE §6.1).
     in_chain: bool,
-    /// For each enclosing `try`, the error types of the fallible calls it marks.
-    tries: Vec<Vec<Ty>>,
-    /// For each record and enum, whether it has values (see [`Decls::inhabited`]).
-    inhabited: Vec<bool>,
+    /// The enclosing `try` and `attempt` markers, innermost last.
+    markers: Vec<Marker>,
+    /// Which types have values (see [`Decls::inhabited`]), once every declaration is known.
+    inhabited: Option<Inhabited>,
 }
 
 impl Checker<'_> {
@@ -714,10 +726,22 @@ impl Checker<'_> {
         let te = &m.types[t];
         match te.kind {
             TypeExprKind::Named(name) => self.type_name(name),
-            TypeExprKind::Applied(name) => {
+            TypeExprKind::Applied { name, ref args } => {
                 let text = m.text(name.sym);
                 if self.poisoned.contains(&name.sym) {
                     return Ty::Error;
+                }
+                if let Some(id) = prelude_adt(text) {
+                    let args = args.as_deref().unwrap_or_default();
+                    let tys: Vec<Ty> = args.iter().map(|&arg| self.resolve_type(arg)).collect();
+                    let n = self.p.decls.adt(id).params;
+                    if tys.len() != n {
+                        let verb = if tys.len() == 1 { "was" } else { "were" };
+                        let message = format!("`{text}` takes {}, but {} {verb} given", type_args(n), tys.len());
+                        self.error(codes::UNKNOWN_TYPE, te.span, message);
+                        return Ty::Error;
+                    }
+                    return Ty::applied(id, tys);
                 }
                 if self.adt_names.contains_key(&name.sym)
                     || matches!(self.imports.get(&name.sym), Some(Import::Type(_)))
@@ -751,6 +775,12 @@ impl Checker<'_> {
         }
         if let Some(&id) = self.adt_names.get(&name.sym) {
             return Ty::adt(id);
+        }
+        if let Some(id) = prelude_adt(text) {
+            let n = self.p.decls.adt(id).params;
+            let message = format!("`{text}` takes {}, as in `{}`", type_args(n), example_type(text));
+            self.error(codes::UNKNOWN_TYPE, name.span, message);
+            return Ty::Error;
         }
         match self.imports.get(&name.sym) {
             Some(Import::Type(ty)) => return ty.clone(),
@@ -984,7 +1014,9 @@ impl Checker<'_> {
             _ => {}
         }
         let bare = self.is_bare_value(e);
-        let ty = self.infer(e);
+        // An unused value needs no type, so a `None` there isn't also reported as one whose
+        // type can't be inferred.
+        let ty = self.expr(e, bare.then_some(&Ty::Error));
         if bare {
             let span = self.span(e);
             self.error(
@@ -1071,6 +1103,7 @@ impl Checker<'_> {
                 | ExprKind::Binary { .. }
                 | ExprKind::Range { .. }
                 | ExprKind::Is { .. }
+                | ExprKind::Attempt(_)
         )
     }
 
@@ -1215,14 +1248,14 @@ impl Checker<'_> {
                 }
                 Ty::Text
             }
-            ExprKind::Name(name) => self.name(e, *name),
-            ExprKind::Call { callee, args } => self.call(*callee, args, span, chain),
+            ExprKind::Name(name) => self.name(e, *name, expected),
+            ExprKind::Call { callee, args } => self.call(e, *callee, args, span, chain, expected),
             ExprKind::MethodCall { receiver, method, args } => {
-                self.method_call(e, *receiver, *method, args, span, chain)
+                self.method_call(e, *receiver, *method, args, span, chain, expected)
             }
             ExprKind::Field { base, name } => {
                 if let Some(id) = self.enum_named(*base) {
-                    return self.unit_variant(e, id, *name);
+                    return self.unit_variant(e, id, *name, expected);
                 }
                 self.in_chain = chain;
                 let base_ty = self.infer(*base);
@@ -1245,6 +1278,24 @@ impl Checker<'_> {
                 Ty::Error
             }
             ExprKind::Try(inner) => self.try_expr(*inner, expected, span),
+            ExprKind::Attempt(inner) => self.attempt_expr(e, *inner, expected, span),
+            ExprKind::Fail(value) => {
+                match self.f.fails.clone() {
+                    Some(err) => {
+                        self.check(*value, &err);
+                    }
+                    None => {
+                        self.infer(*value);
+                        let message = if self.f.returns {
+                            "`fail` needs a `fails` clause, and this function declares none"
+                        } else {
+                            "`fail` in a `where` clause, which has no function to fail"
+                        };
+                        self.error(codes::FAIL_WITHOUT_FAILS, span, message);
+                    }
+                }
+                Ty::Never
+            }
             ExprKind::If { .. } => self.if_expr(e, Mode::Value(expected)),
             ExprKind::Match { .. } => self.match_expr(e, Mode::Value(expected)),
             ExprKind::Is { value, pat } => {
@@ -1346,12 +1397,13 @@ impl Checker<'_> {
     fn operands(&mut self, lhs: ExprId, rhs: ExprId, hint: Option<&Ty>) -> (Ty, Ty) {
         // An operand that already has an error gives the other no type, so a literal there
         // isn't reported again against the hint.
+        // `Some(1)` and `None` also take their type arguments from the other operand.
         let numeric_or = |ty: &Ty| match ty {
             Ty::Error => None,
-            ty if ty.is_numeric() => Some(ty.clone()),
+            ty if ty.is_numeric() || matches!(ty, Ty::Adt(..)) => Some(ty.clone()),
             _ => hint.cloned(),
         };
-        if self.is_untyped_literal(lhs) && !self.is_untyped_literal(rhs) {
+        if self.needs_context(lhs) && !self.needs_context(rhs) {
             let rt = self.expr(rhs, hint);
             let lt = self.expr(lhs, numeric_or(&rt).as_ref());
             (lt, rt)
@@ -1359,6 +1411,26 @@ impl Checker<'_> {
             let lt = self.expr(lhs, hint);
             let rt = self.expr(rhs, numeric_or(&lt).as_ref());
             (lt, rt)
+        }
+    }
+
+    /// A literal, or a variant of `Option` or `Result`, whose type comes from its context
+    /// when it has one (OPEN_QUESTIONS P5).
+    fn needs_context(&self, e: ExprId) -> bool {
+        let m = self.m;
+        let prelude_variant =
+            |name: Ident| bare_variant(m.text(name.sym)).is_some() && self.lookup_local(name.sym).is_none();
+        let prelude_enum = |base: ExprId| match m.exprs[base].kind {
+            ExprKind::Name(name) => prelude_adt(m.text(name.sym)).is_some() && !self.poisoned.contains(&name.sym),
+            _ => false,
+        };
+        match m.exprs[e].kind {
+            ExprKind::Name(name) => prelude_variant(name),
+            ExprKind::Call { callee, .. } => {
+                matches!(m.exprs[callee].kind, ExprKind::Name(name) if prelude_variant(name))
+            }
+            ExprKind::Field { base, .. } | ExprKind::MethodCall { receiver: base, .. } => prelude_enum(base),
+            _ => self.is_untyped_literal(e),
         }
     }
 
@@ -1418,6 +1490,18 @@ impl Checker<'_> {
                     BinOp::Eq | BinOp::Ne => matches!(ty, Ty::Float(_)) || self.p.decls.implements(&ty, IfaceId::EQ),
                     _ => matches!(ty, Ty::Float(_)) || self.p.decls.implements(&ty, IfaceId::ORD),
                 };
+                // Their ordering comes with the `Ord` derives.
+                if defined
+                    && !matches!(op, BinOp::Eq | BinOp::Ne)
+                    && let Ty::Adt(id, _) = &ty
+                    && self.p.decls.adt(*id).bare_variants
+                {
+                    self.not_implemented(
+                        span,
+                        "comparisons of `Option` and `Result` values by order",
+                        Planned::Phase(2),
+                    );
+                }
                 if !defined && !ty.is_unknown() {
                     let message = format!("`{symbol}` is not defined for `{}`", self.show(&ty));
                     self.error(codes::UNSUPPORTED_OPERATOR, span, message);
@@ -1427,20 +1511,20 @@ impl Checker<'_> {
         }
     }
 
-    fn name(&mut self, e: ExprId, name: Ident) -> Ty {
+    fn name(&mut self, e: ExprId, name: Ident, expected: Option<&Ty>) -> Ty {
         let m = self.m;
         let text = m.text(name.sym);
         if let Some(id) = self.lookup_local(name.sym) {
             self.p.res.insert(e, Res::Local(id));
             return self.f.locals[id.index()].ty.clone();
         }
+        if let Some(id) = bare_variant(text) {
+            return self.unit_variant(e, id, name, expected);
+        }
         if self.fn_names.contains_key(&name.sym) {
             self.not_implemented(name.span, "functions used as values", Planned::Phase(2));
         } else if self.unqualified_variant(name) || self.poisoned.contains(&name.sym) {
-        } else if self.imports.contains_key(&name.sym)
-            || self.adt_names.contains_key(&name.sym)
-            || builtin_type(text).is_some()
-        {
+        } else if self.imports.contains_key(&name.sym) || self.adt_named(name.sym).is_some() || prelude_type(text) {
             self.error(codes::UNKNOWN_NAME, name.span, format!("`{text}` is a type or module, not a value"));
         } else {
             self.error(codes::UNKNOWN_NAME, name.span, format!("unknown name `{text}`"));
@@ -1448,10 +1532,16 @@ impl Checker<'_> {
         Ty::Error
     }
 
-    fn call(&mut self, callee: ExprId, args: &[Arg], span: Span, chain: bool) -> Ty {
+    fn call(&mut self, e: ExprId, callee: ExprId, args: &[Arg], span: Span, chain: bool, expected: Option<&Ty>) -> Ty {
         let m = self.m;
         if let ExprKind::Name(name) = m.exprs[callee].kind
-            && let Some(&id) = self.adt_names.get(&name.sym)
+            && self.lookup_local(name.sym).is_none()
+            && let Some(id) = bare_variant(m.text(name.sym))
+        {
+            return self.construct_variant(callee, id, name, args, span, expected);
+        }
+        if let ExprKind::Name(name) = m.exprs[callee].kind
+            && let Some(id) = self.adt_named(name.sym)
         {
             if self.p.decls.adt(id).is_enum() {
                 let text = m.text(name.sym);
@@ -1507,7 +1597,7 @@ impl Checker<'_> {
         let (ret, fails) = (info.ret.clone(), info.fails.clone());
         self.args(name, &params, args, span);
         if let Some(err) = fails {
-            self.fallible_call(name, &err, span, chain);
+            self.fallible_call(e, name, &err, span, chain);
         }
         ret
     }
@@ -1523,17 +1613,27 @@ impl Checker<'_> {
         Ty::adt(id)
     }
 
-    fn method_call(&mut self, e: ExprId, receiver: ExprId, method: Ident, args: &[Arg], span: Span, chain: bool) -> Ty {
+    #[allow(clippy::too_many_arguments)]
+    fn method_call(
+        &mut self,
+        e: ExprId,
+        receiver: ExprId,
+        method: Ident,
+        args: &[Arg],
+        span: Span,
+        chain: bool,
+        expected: Option<&Ty>,
+    ) -> Ty {
         let m = self.m;
         let name = m.text(method.sym);
         if let Some(id) = self.enum_named(receiver)
             && (self.p.decls.adt(id).variant_named(name).is_some() || is_pascal(name))
         {
-            return self.construct_variant(e, id, method, args, span);
+            return self.construct_variant(e, id, method, args, span, expected);
         }
         if let ExprKind::Name(receiver_name) = m.exprs[receiver].kind
             && self.lookup_local(receiver_name.sym).is_none()
-            && self.adt_names.contains_key(&receiver_name.sym)
+            && self.adt_named(receiver_name.sym).is_some()
         {
             let record = m.text(receiver_name.sym);
             let what = format!("associated functions such as `{record}.{name}`");
@@ -1592,7 +1692,7 @@ impl Checker<'_> {
         self.p.res.insert(e, Res::Method(builtin));
         self.args(name, &params, args, span);
         if let Some(err) = fails {
-            self.fallible_call(name, &err, span, chain);
+            self.fallible_call(e, name, &err, span, chain);
         }
         ret
     }
@@ -1696,6 +1796,20 @@ impl Checker<'_> {
 
     /// Checks arguments against parameters, including the label rules (REFERENCE §3, H3).
     fn args<S: AsRef<str>>(&mut self, callee: &str, params: &[(S, Ty)], args: &[Arg], span: Span) {
+        self.generic_args(callee, params, &mut [], args, span);
+    }
+
+    /// Checks arguments against parameters whose types may mention the type parameters
+    /// `targs` stands for. An argument whose parameter is a type parameter not yet known
+    /// gives it its own type. Returns whether the number of arguments was right.
+    fn generic_args<S: AsRef<str>>(
+        &mut self,
+        callee: &str,
+        params: &[(S, Ty)],
+        targs: &mut [Option<Ty>],
+        args: &[Arg],
+        span: Span,
+    ) -> bool {
         let m = self.m;
         if args.len() != params.len() {
             let (n, given) = (params.len(), args.len());
@@ -1709,7 +1823,7 @@ impl Checker<'_> {
             for arg in args {
                 self.infer(arg.value);
             }
-            return;
+            return false;
         }
         // One label problem is reported per call, with the labels the call needs.
         let labelled = params.iter().map(|(param, _)| format!("{}: …", param.as_ref())).collect::<Vec<_>>().join(", ");
@@ -1747,13 +1861,25 @@ impl Checker<'_> {
                 }
                 _ => {}
             }
-            self.check(arg.value, ty);
+            match ty {
+                Ty::Param(i) if targs[*i as usize].is_none() => targs[*i as usize] = Some(self.infer(arg.value)),
+                ty => {
+                    let known: Vec<Ty> = targs.iter().map(|t| t.clone().unwrap_or(Ty::Error)).collect();
+                    self.check(arg.value, &ty.subst(&known));
+                }
+            }
         }
+        true
     }
 
-    fn fallible_call(&mut self, callee: &str, err: &Ty, span: Span, chain: bool) {
-        match self.tries.last_mut() {
-            Some(errors) if chain => errors.push(err.clone()),
+    fn fallible_call(&mut self, call: ExprId, callee: &str, err: &Ty, span: Span, chain: bool) {
+        match self.markers.last_mut() {
+            Some(marker) if chain => {
+                marker.errors.push(err.clone());
+                if let Some(attempt) = marker.attempt {
+                    self.p.attempt_of.insert(call, attempt);
+                }
+            }
             _ => {
                 let message = format!(
                     "`{callee}` can fail with `{}`, so the call must be marked, for example with `try` (§7.2)",
@@ -1765,10 +1891,10 @@ impl Checker<'_> {
     }
 
     fn try_expr(&mut self, inner: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
-        self.tries.push(Vec::new());
+        self.markers.push(Marker { attempt: None, errors: Vec::new() });
         self.in_chain = true;
         let ty = self.expr(inner, expected);
-        let mut errors = self.tries.pop().unwrap_or_default();
+        let mut errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
         errors.dedup();
         // A chain with an error may hold the fallible call that didn't resolve.
         if errors.is_empty() && ty != Ty::Error {
@@ -1790,6 +1916,45 @@ impl Checker<'_> {
             self.error(codes::TRY_ERROR_MISMATCH, span, message);
         }
         ty
+    }
+
+    /// `attempt f(…)`: a `Result` of the chain's value and the error of the calls it marks
+    /// (REFERENCE §7.2).
+    fn attempt_expr(&mut self, e: ExprId, inner: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
+        let value_expected = match expected {
+            Some(Ty::Adt(AdtId::RESULT, args)) => Some(args[0].clone()),
+            _ => None,
+        };
+        self.markers.push(Marker { attempt: Some(e), errors: Vec::new() });
+        self.in_chain = true;
+        let ty = self.expr(inner, value_expected.as_ref());
+        let mut errors: Vec<Ty> = Vec::new();
+        for err in self.markers.pop().map(|m| m.errors).unwrap_or_default() {
+            if !errors.contains(&err) {
+                errors.push(err);
+            }
+        }
+        match errors.as_slice() {
+            // A chain with an error may hold the fallible call that didn't resolve.
+            [] => {
+                if ty != Ty::Error {
+                    self.error(codes::ATTEMPT_WITHOUT_FAILURE, span, "`attempt` marks no call that can fail");
+                }
+                Ty::Error
+            }
+            [err] => Ty::result(ty, err.clone()),
+            _ if errors.contains(&Ty::Error) => Ty::Error,
+            // Calls with errors of their own need methods, which come in a later slice.
+            [first, second, ..] => {
+                let message = format!(
+                    "the calls this `attempt` marks fail with `{}` and `{}`, but its `Result` has one error type",
+                    self.show(first),
+                    self.show(second)
+                );
+                self.error(codes::TYPE_MISMATCH, span, message);
+                Ty::Error
+            }
+        }
     }
 
     fn if_expr(&mut self, e: ExprId, mode: Mode) -> Ty {
@@ -1874,18 +2039,69 @@ impl Checker<'_> {
         self.pattern(pat, &ty);
     }
 
+    /// The record or enum named `sym`: the module's, or `Option` or `Result` from the prelude.
+    fn adt_named(&self, sym: Symbol) -> Option<AdtId> {
+        if self.poisoned.contains(&sym) {
+            return None;
+        }
+        self.adt_names.get(&sym).copied().or_else(|| prelude_adt(self.m.text(sym)))
+    }
+
     /// The enum that `e` names, when it is a name that is not a local.
     fn enum_named(&self, e: ExprId) -> Option<AdtId> {
         let ExprKind::Name(name) = self.m.exprs[e].kind else { return None };
         if self.lookup_local(name.sym).is_some() {
             return None;
         }
-        let id = *self.adt_names.get(&name.sym)?;
+        let id = self.adt_named(name.sym)?;
         self.p.decls.adt(id).is_enum().then_some(id)
     }
 
-    /// `Shape.Empty`, a variant without fields (REFERENCE §4.5).
-    fn unit_variant(&mut self, e: ExprId, id: AdtId, name: Ident) -> Ty {
+    /// The type arguments of a variant of `id` that `expected` gives, one per parameter.
+    fn expected_args(&self, id: AdtId, expected: Option<&Ty>) -> Vec<Option<Ty>> {
+        match expected {
+            Some(Ty::Adt(other, args)) if *other == id => args.iter().cloned().map(Some).collect(),
+            _ => vec![None; self.p.decls.adt(id).params],
+        }
+    }
+
+    /// The type of a variant of `id` built with type arguments `targs`. One that neither the
+    /// expected type nor the fields gave is reported, unless `reported` says the construction
+    /// already has an error (OPEN_QUESTIONS P5).
+    fn variant_type(
+        &mut self,
+        id: AdtId,
+        targs: Vec<Option<Ty>>,
+        expected: Option<&Ty>,
+        span: Span,
+        reported: bool,
+    ) -> Ty {
+        if let Some(args) = targs.iter().cloned().collect::<Option<Vec<Ty>>>() {
+            return Ty::applied(id, args);
+        }
+        let name = self.p.decls.adt(id).name.clone();
+        match expected {
+            _ if reported => {}
+            Some(Ty::Error) => {}
+            Some(expected) if !matches!(expected, Ty::Adt(other, _) if *other == id) => {
+                let message = format!("expected `{}`, found an `{name}`", self.show(expected));
+                self.error(codes::TYPE_MISMATCH, span, message);
+            }
+            _ => {
+                let missing = targs.iter().filter(|t| t.is_none()).count();
+                let message = format!(
+                    "the {} of this `{name}` can't be inferred; give the binding a type, such as `{}`",
+                    if missing == 1 { "type argument" } else { "type arguments" },
+                    example_type(&name)
+                );
+                self.error(codes::CANNOT_INFER, span, message);
+            }
+        }
+        Ty::Error
+    }
+
+    /// `Shape.Empty` or `None`, a variant without fields (REFERENCE §4.5).
+    fn unit_variant(&mut self, e: ExprId, id: AdtId, name: Ident, expected: Option<&Ty>) -> Ty {
         let text = self.m.text(name.sym);
         let def = self.p.decls.adt(id);
         let Some((v, variant)) = def.variant_named(text) else {
@@ -1899,12 +2115,23 @@ impl Checker<'_> {
             return Ty::Error;
         }
         self.p.res.insert(e, Res::Ctor(id, v));
-        Ty::adt(id)
+        let targs = self.expected_args(id, expected);
+        let span = self.span(e);
+        self.variant_type(id, targs, expected, span, false)
     }
 
-    /// `Shape.Circle(radius: 2)`: a variant's fields are passed as the arguments of a call
-    /// (REFERENCE §4.5, §3).
-    fn construct_variant(&mut self, e: ExprId, id: AdtId, name: Ident, args: &[Arg], span: Span) -> Ty {
+    /// `Shape.Circle(radius: 2)` or `Some(3)`: a variant's fields are passed as the arguments
+    /// of a call (REFERENCE §4.5, §3). The type arguments of `Option` and `Result` come from
+    /// the expected type, or else from the fields.
+    fn construct_variant(
+        &mut self,
+        e: ExprId,
+        id: AdtId,
+        name: Ident,
+        args: &[Arg],
+        span: Span,
+        expected: Option<&Ty>,
+    ) -> Ty {
         let text = self.m.text(name.sym);
         let def = self.p.decls.adt(id);
         let Some((v, variant)) = def.variant_named(text) else {
@@ -1916,11 +2143,12 @@ impl Checker<'_> {
             return Ty::Error;
         };
         let ctor = def.ctor_name(v);
+        let mut targs = self.expected_args(id, expected);
         if variant.rejected {
             for arg in args {
                 self.infer(arg.value);
             }
-            return Ty::adt(id);
+            return self.variant_type(id, targs, expected, span, true);
         }
         if variant.fields.is_empty() {
             let message = format!("`{ctor}` has no fields, so it is written without parentheses");
@@ -1928,24 +2156,19 @@ impl Checker<'_> {
             for arg in args {
                 self.infer(arg.value);
             }
-            return Ty::adt(id);
+            return self.variant_type(id, targs, expected, span, true);
         }
         let params: Vec<(Box<str>, Ty)> = variant.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
         self.p.res.insert(e, Res::Ctor(id, v));
-        self.args(&ctor, &params, args, span);
-        Ty::adt(id)
+        let counted = self.generic_args(&ctor, &params, &mut targs, args, span);
+        self.variant_type(id, targs, expected, span, !counted)
     }
 
-    /// Reports a variant used without its enum, and returns whether `name` is one. Only
-    /// `Some`, `None`, `Ok` and `Err` may be (REFERENCE §3, §4.5), and those come with
-    /// `Option` and `Result`.
+    /// Reports a variant of the module's enums used without its enum, and returns whether
+    /// `name` is one. Only `Some`, `None`, `Ok` and `Err` may be (REFERENCE §3, §4.5).
     fn unqualified_variant(&mut self, name: Ident) -> bool {
         let m = self.m;
         let text = m.text(name.sym);
-        if matches!(text, "Some" | "None" | "Ok" | "Err") {
-            self.not_implemented(name.span, "`Option` and `Result` values", Planned::Phase(2));
-            return true;
-        }
         let owner = self.adts.iter().find(|adt| {
             self.adt_names.get(&adt.name.sym) == Some(&adt.id) && self.p.decls.adt(adt.id).variant_named(text).is_some()
         });
@@ -1998,7 +2221,8 @@ impl Checker<'_> {
         // An arm that failed to parse may have covered what seems to be missing.
         if *complete && !scrutinee_ty.is_unknown() {
             let span = m.exprs[e].span;
-            match exhaust::uncovered(&self.p.decls, &self.inhabited, &scrutinee_ty, &rows) {
+            let inhabited = self.inhabited.as_ref().expect("match is checked after the declarations");
+            match exhaust::uncovered(&self.p.decls, inhabited, &scrutinee_ty, &rows) {
                 Ok(None) => {}
                 Ok(Some(missing)) => {
                     let message = format!("this `match` does not cover `{missing}`; add an arm for it, or `_`");
@@ -2109,10 +2333,8 @@ impl Checker<'_> {
         let m = self.m;
         let text = m.text(name.sym);
         let span = m.pats[pat].span;
-        let Ty::Adt(id, _) = ty else {
-            if matches!(text, "Some" | "None" | "Ok" | "Err") && qualifier.is_none() {
-                self.not_implemented(name.span, "`Option` and `Result` patterns", Planned::Phase(2));
-            } else if !ty.is_unknown() && !qualifier.is_some_and(|q| self.poisoned.contains(&q.sym)) {
+        let Ty::Adt(id, targs) = ty else {
+            if !ty.is_unknown() && !qualifier.is_some_and(|q| self.poisoned.contains(&q.sym)) {
                 let message = format!("expected a pattern for `{}`, found the variant pattern `{text}`", self.show(ty));
                 self.error(codes::TYPE_MISMATCH, span, message);
             }
@@ -2122,10 +2344,10 @@ impl Checker<'_> {
         if let Some(q) = qualifier {
             let q_text = m.text(q.sym);
             let def = self.p.decls.adt(id);
-            let problem = match self.adt_names.get(&q.sym) {
+            let problem = match self.adt_named(q.sym) {
                 _ if self.poisoned.contains(&q.sym) => None,
-                Some(&other) if other == id && def.is_enum() => None,
-                Some(&other) => Some((
+                Some(other) if other == id && def.is_enum() => None,
+                Some(other) => Some((
                     codes::TYPE_MISMATCH,
                     q.span,
                     format!("expected a pattern for `{}`, found one for `{}`", def.name, self.p.decls.adt(other).name),
@@ -2151,9 +2373,7 @@ impl Checker<'_> {
             AdtKind::Record => (*def.name == *text).then_some(VariantIdx::RECORD),
         };
         let Some(v) = found else {
-            if matches!(text, "Some" | "None" | "Ok" | "Err") && qualifier.is_none() {
-                self.not_implemented(name.span, "`Option` and `Result` patterns", Planned::Phase(2));
-            } else if self.poisoned.contains(&name.sym) {
+            if self.poisoned.contains(&name.sym) {
             } else if let Some(&other) = self.adt_names.get(&name.sym).filter(|_| !def.is_enum()) {
                 let message =
                     format!("expected a pattern for `{}`, found one for `{}`", def.name, self.p.decls.adt(other).name);
@@ -2171,7 +2391,8 @@ impl Checker<'_> {
             return self.unknown_parts(fields);
         }
         let ctor = def.ctor_name(v);
-        let declared: Vec<(Box<str>, Ty)> = variant.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+        let declared: Vec<(Box<str>, Ty)> =
+            variant.fields.iter().map(|f| (f.name.clone(), f.ty.subst(targs))).collect();
         let Some(fields) = fields else {
             if declared.is_empty() {
                 self.p.pat_ctor.insert(pat, CtorPat { adt: id, variant: v, fields: Box::new([]) });
@@ -2393,6 +2614,37 @@ fn kept_fields(fields: &[FieldDecl]) -> Vec<&FieldDecl> {
     fields.iter().filter(|field| seen.insert(field.name.sym)).collect()
 }
 
+/// `Option` and `Result`, the prelude's generic enums (STD.md).
+fn prelude_adt(name: &str) -> Option<AdtId> {
+    match name {
+        "Option" => Some(AdtId::OPTION),
+        "Result" => Some(AdtId::RESULT),
+        _ => None,
+    }
+}
+
+/// The enum of `Some`, `None`, `Ok` and `Err`, the variants that may be used unqualified in
+/// expressions (REFERENCE §3).
+fn bare_variant(name: &str) -> Option<AdtId> {
+    match name {
+        "Some" | "None" => Some(AdtId::OPTION),
+        "Ok" | "Err" => Some(AdtId::RESULT),
+        _ => None,
+    }
+}
+
+/// How to write the prelude's generic type `name` with its type arguments.
+fn example_type(name: &str) -> &'static str {
+    if name == "Result" { "Result[T, E]" } else { "Option[T]" }
+}
+
+fn type_args(n: usize) -> String {
+    match n {
+        1 => "1 type argument".to_string(),
+        n => format!("{n} type arguments"),
+    }
+}
+
 /// The interfaces of the prelude (REFERENCE §3).
 fn prelude_interface(name: &str) -> bool {
     matches!(
@@ -2402,15 +2654,13 @@ fn prelude_interface(name: &str) -> bool {
 }
 
 fn prelude_type(name: &str) -> bool {
-    builtin_type(name).is_some() || later_type(name).is_some()
+    builtin_type(name).is_some() || prelude_adt(name).is_some() || later_type(name).is_some()
 }
 
 /// Prelude types that later phases implement.
 fn later_type(name: &str) -> Option<Planned> {
     match name {
-        "List" | "Map" | "Set" | "Array" | "Option" | "Result" | "Bytes" | "Ordering" | "Rounding" | "Invalid" => {
-            Some(Planned::Phase(2))
-        }
+        "List" | "Map" | "Set" | "Array" | "Bytes" | "Ordering" | "Rounding" | "Invalid" => Some(Planned::Phase(2)),
         "Eq" | "Ord" | "Hash" | "Show" | "Copy" | "Index" | "Abandon" | "Add" | "Sub" | "Mul" | "Div" | "Neg" => {
             Some(Planned::Phase(2))
         }

@@ -1,0 +1,113 @@
+// phase: 2.3
+// `Option` and `Result` are enums (STD.md), so `match` and `is` take their variants, written
+// unqualified or qualified (REFERENCE §6.4). A one-field variant binds its field with a bare
+// name, or by the field's name, `value` or `error`. A `match` covers them without `_`, and a
+// variant whose field has no values needs no arm: `Err` of a `Result[Int, Never]`, `Some` of
+// an `Option[Never]`, or a variant with a field of type `Result[Void, Never]`, so a `match` on
+// an enum whose only variant holds a `Result[Void, Void]` needs none at all (OPEN_QUESTIONS
+// P5). `Never` has no values, so as a type argument it takes nothing from `Eq` or `Show`. A pattern names the variants of the scrutinee's type, so on an enum that declares its
+// own `Some`, `Some(x)` matches that variant.
+use std.io { IoError }
+
+enum Maybe derives(Show) {
+    Some(n: Int)
+    Nothing
+}
+
+enum Void {}
+
+enum Job {
+    Done(code: Int)
+    Stuck(why: Result[Void, Never])
+}
+
+enum Impossible {
+    Only(both: Result[Void, Void])
+}
+
+fn absurd(i: Impossible) -> Int {
+    return match i {}
+}
+
+fn describe(o: Option[Option[Int]]) -> Text {
+    return match o {
+        Some(Some(n)) if n > 9 => f"big {n}"
+        Some(Some(n)) => f"small {n}"
+        Some(None) => "inner none"
+        None => "none"
+    }
+}
+
+fn total(r: Result[Int, Text]) -> Int {
+    match r {
+        Ok(value: v) => return v
+        Result.Err(error) => return error.byte_len()
+    }
+}
+
+fn only_ok(r: Result[Int, Never]) -> Int {
+    return match r {
+        Ok(v) => v
+    }
+}
+
+fn only_none(o: Option[Never]) -> Int {
+    return match o {
+        None => 0
+    }
+}
+
+fn only_err(r: Result[Void, Text]) -> Text {
+    return match r {
+        Err(e) => e
+    }
+}
+
+fn code(j: Job) -> Int {
+    return match j {
+        Done(c) => c
+    }
+}
+
+fn own_some(m: Maybe) -> Int {
+    return match m {
+        Some(x) => x
+        Nothing => -1
+    }
+}
+
+fn first_positive(a: Option[Int], b: Option[Int]) -> Option[Int] {
+    if a is Some(x) and x > 0 {
+        return a
+    }
+    if b is Option.Some(y) and y > 0 {
+        return Some(y)
+    }
+    return None
+}
+
+fn countdown(start: Int) -> Int {
+    var steps = 0
+    var cur: Option[Int] = Some(start)
+    while cur is Some(n) {
+        steps += 1
+        cur = if n > 0 { Some(n - 1) } else { None }
+    }
+    return steps
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let d = f"{describe(Some(Some(10)))}, {describe(Some(Some(9)))}, {describe(Some(None))}, {describe(None)}"
+    try sys.stdout.write_line(d)
+    try sys.stdout.write_line(f"{total(Ok(7))} {total(Err("four"))} {only_ok(Ok(5))} {code(Job.Done(code: 3))}")
+    try sys.stdout.write_line(f"{own_some(Maybe.Some(n: 4))} {own_some(Maybe.Nothing)} {Maybe.Some(n: 1)}")
+    let p = first_positive(a: Some(-1), b: Some(2))
+    let q = first_positive(a: Some(1), b: None)
+    let r = first_positive(a: None, b: Some(0))
+    try sys.stdout.write_line(f"{p} {q} {r}")
+    let none: Option[Int] = None
+    let s = f"{countdown(3)} {Some(2) is Some(2)} {none is Some(_)} {only_none(None)} {only_err(Err("e"))}"
+    try sys.stdout.write_line(s)
+    let sure: Result[Int, Never] = Ok(5)
+    try sys.stdout.write_line(f"{sure} {sure == Ok(5)}")
+}

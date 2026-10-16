@@ -1,0 +1,5 @@
+Ok(Ok(11)) Ok(Err(Code.Outer)) Err(Code.Inner(n: -3))
+Ok(Ok(6)) Err(Code.Inner(n: 0))
+2 -1 true
+written
+true false

@@ -171,6 +171,10 @@ enum Unwind {
     Break(ExprId),
     Continue(ExprId),
     Fail(Value),
+    /// A call that this `attempt` marks failed with this error. Only that `attempt` catches
+    /// it, so a failure from anywhere else, such as a `try` in an argument, passes it by
+    /// (REFERENCE §7.2).
+    Attempted(ExprId, Value),
     Defect(Defect),
 }
 
@@ -209,8 +213,8 @@ impl Interp<'_> {
                 defect.callers.pop();
                 Outcome::Defect(defect)
             }
-            Err(Unwind::Return(_) | Unwind::Break(_) | Unwind::Continue(_)) => {
-                unreachable!("returns and jumps do not escape a function")
+            Err(Unwind::Return(_) | Unwind::Break(_) | Unwind::Continue(_) | Unwind::Attempted(..)) => {
+                unreachable!("returns, jumps and attempted failures do not escape a function")
             }
         }
     }
@@ -418,6 +422,7 @@ impl Interp<'_> {
             }
             ExprKind::Name(_) => match self.p.res(e) {
                 Some(Res::Local(id)) => frame[id.index()].clone(),
+                Some(Res::Ctor(def, variant)) => Value::Adt(Adt { def, variant, fields: Arc::from([]) }),
                 other => unreachable!("names evaluate to locals, not {other:?}"),
             },
             ExprKind::Call { callee, args } => {
@@ -426,7 +431,10 @@ impl Interp<'_> {
                     values.push(self.expr(arg.value, frame)?);
                 }
                 match self.p.res(*callee) {
-                    Some(Res::Fn(f)) => return self.call(f, values, span),
+                    Some(Res::Fn(f)) => {
+                        let result = self.call(f, values, span);
+                        return self.attempted(e, result);
+                    }
                     // Labels follow the declaration order, so argument `i` is field `i`.
                     Some(Res::Ctor(def, variant)) => {
                         let value = Value::Adt(Adt { def, variant, fields: values.into() });
@@ -447,7 +455,10 @@ impl Interp<'_> {
                     values.push(self.expr(arg.value, frame)?);
                 }
                 match self.p.res(e) {
-                    Some(Res::Method(builtin)) => return self.builtin(builtin, receiver, values),
+                    Some(Res::Method(builtin)) => {
+                        let result = self.builtin(builtin, receiver, values);
+                        return self.attempted(e, result);
+                    }
                     // Labels follow the declaration order, so argument `i` is field `i`.
                     Some(Res::Ctor(def, variant)) => {
                         let value = Value::Adt(Adt { def, variant, fields: values.into() });
@@ -515,6 +526,15 @@ impl Interp<'_> {
             }
             ExprKind::Range { .. } => unreachable!("ranges appear only in `for` loops"),
             ExprKind::Try(inner) => return self.expr(*inner, frame),
+            ExprKind::Attempt(inner) => {
+                let (variant, value) = match self.expr(*inner, frame) {
+                    Ok(value) => (VariantIdx::OK, value),
+                    Err(Unwind::Attempted(attempt, error)) if attempt == e => (VariantIdx::ERR, error),
+                    Err(other) => return Err(other),
+                };
+                Value::Adt(Adt { def: AdtId::RESULT, variant, fields: Arc::from([value]) })
+            }
+            ExprKind::Fail(value) => return Err(Unwind::Fail(self.expr(*value, frame)?)),
             ExprKind::If { cond, then_block, else_branch } => {
                 if self.bool(*cond, frame)? {
                     self.block(then_block, frame)?
@@ -597,6 +617,14 @@ impl Interp<'_> {
                 Value::Unit
             }
         })
+    }
+
+    /// Hands the failure of call `e` to the `attempt` that marks it, if one does.
+    fn attempted(&self, e: ExprId, result: Flow<Value>) -> Flow<Value> {
+        match (result, self.p.attempt_of.get(e)) {
+            (Err(Unwind::Fail(error)), Some(&attempt)) => Err(Unwind::Attempted(attempt, error)),
+            (result, _) => result,
+        }
     }
 
     /// Whether `value` matches `pat`. Binds the pattern's names as it goes, so after a failed
@@ -853,6 +881,11 @@ fn write_value(value: &Value, quoted: bool, decls: &Decls) -> String {
                 out.push('(');
                 // Pushed in reverse, so they are written in order.
                 parts.push(Part::Text(")"));
+                // `Some(3)` and `Err(e)` are written in literal form, without a label (STD.md).
+                if def.bare_variants {
+                    parts.push(Part::Value(&adt.fields[0], true));
+                    continue;
+                }
                 for (i, (field, value)) in variant.fields.iter().zip(adt.fields.iter()).enumerate().rev() {
                     parts.push(Part::Value(value, true));
                     parts.push(Part::Text(": "));

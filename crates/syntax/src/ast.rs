@@ -162,8 +162,9 @@ pub struct TypeExpr {
 pub enum TypeExprKind {
     /// `Int`, `System`
     Named(Ident),
-    /// `List[Int]` or `Float[m]`. The arguments are skipped until generics and units exist.
-    Applied(Ident),
+    /// `Option[Int]` or `Float[m]`. The arguments of a numeric type are units, which are
+    /// skipped until units exist, so they are `None`.
+    Applied { name: Ident, args: Option<Vec<TypeId>> },
 }
 
 pub struct Block {
@@ -253,6 +254,11 @@ pub enum ExprKind {
         inclusive: bool,
     },
     Try(ExprId),
+    /// `attempt f(…)`, which reifies the outcome of the calls in the chain as a `Result`
+    /// (REFERENCE §7.2).
+    Attempt(ExprId),
+    /// `fail e`, which exits the function with error `e` (REFERENCE §7.1).
+    Fail(ExprId),
     If {
         cond: ExprId,
         then_block: Block,

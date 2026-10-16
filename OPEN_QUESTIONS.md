@@ -406,6 +406,10 @@ All 18 §F rows are already written as `tests/golden/fNN_*.proviso`, each tagged
 - **Exhaustiveness limit** (phase 2). Checking exhaustiveness can take exponential work in the number of arms, so the check stops after 10 million steps and reports E0903, as Rust does with its pattern complexity limit. The limit allows a record of a million fields, but not, say, twenty `Bool` fields each matched both ways in arms of their own.
 - **Literal patterns** (phase 2) are integer, char, text, `Bool` and `()` literals, with a leading `-` allowed on numbers. A float literal pattern is an error, since float equality is not a sound way to choose a branch. Ranges take integers and chars only.
 - **`is` bindings** (phase 2) scope as §6.4 says, and in a `while` condition they also scope over the loop body. They are not in scope after `or`, under `not`, in an `else` or after the `if`. An `is` in a `match` guard binds only within the guard, not in the arm's body.
+- **Type arguments** (phase 2). `Some`, `None`, `Ok` and `Err` take their type arguments from the expected type, which for an operand of `==` or `!=` is the other operand's type. A type argument the expected type doesn't give comes from the field that has it, so `Some(3)` is an `Option[Int]`. One that neither gives is an error (E0312), so `let x = None` needs a type. Rust and Swift infer it from later uses instead.
+- **`Option` and `Result` values** (phase 2). `Show` and `debug` write them in literal form, as `Some("a")` and `Err(e)`. They implement `Eq` and `Show` when their type arguments do, and `Never` counts as implementing both, since it has no values. Ordering them with `<` waits for the `Ord` derives.
+- **`attempt`** (phase 2) reifies only the failures of the calls it marks, which are the calls of its postfix chain (§6.1). A `try` or `fail` in an argument still exits the function, and a defect is never caught. An `attempt` that marks no fallible call is an error (E0706), as a `try` is (E0703).
+- **`fail` in a `where` clause** (phase 2) is an error (E0705), as `return` is (E0108), since there is no function to fail.
 
 ## E. Experiment plan
 

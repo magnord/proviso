@@ -1,0 +1,39 @@
+// phase: 2.3
+// expect-exit: 1
+// `fail e` exits the function with error `e` (REFERENCE §7.1). It takes everything to its
+// right (§6.1), so `fail 1 + n` fails with `1 + n`. A path that ends in `fail` meets the rule
+// that a non-`Unit` body ends every path with `return` (Q33), in a statement or a `match`
+// arm. When `main` fails, the program prints the error's `show()` to stderr and exits with
+// code 1 (§7.4). Here `attempt` makes the earlier failures visible on stdout.
+enum Problem derives(Show) {
+    TooBig(limit: Int)
+    Negative
+}
+
+fn check_size(n: Int) -> Int fails Problem {
+    if n < 0 {
+        fail Problem.Negative
+    }
+    if n > 10 {
+        fail Problem.TooBig(limit: 10)
+    }
+    return n * 2
+}
+
+fn pick(n: Int) -> Int fails Problem {
+    return match n {
+        0 => fail Problem.Negative
+        _ => try check_size(n)
+    }
+}
+
+fn sum(n: Int) -> Int fails Int {
+    fail 1 + n
+}
+
+pub fn main(sys: keep System) fails Problem {
+    let _ = attempt sys.stdout.write_line(f"{attempt check_size(3)} {attempt check_size(-1)} {attempt check_size(11)}")
+    let _ = attempt sys.stdout.write_line(f"{attempt pick(0)} {attempt pick(4)} {attempt sum(2)}")
+    let n = try pick(12)
+    let _ = attempt sys.stdout.write_line("not reached")
+}

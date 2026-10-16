@@ -171,6 +171,8 @@ pub mod codes {
             "A `derives` list names a prelude interface that can't be derived, such as `Copy` or `Add` (REFERENCE §4.4).";
         NON_EXHAUSTIVE_MATCH = "E0311", "non_exhaustive_match",
             "A `match` does not cover every value of its type; add the missing arms or `_` (REFERENCE §6.3).";
+        CANNOT_INFER = "E0312", "cannot_infer",
+            "A value whose type arguments neither its expected type nor its fields give, such as `let x = None` (OPEN_QUESTIONS P5).";
 
         // Reserved for later phases: the §F goldens already expect these.
         REFINEMENT_REFUTED = "E0412", "refinement_refuted",
@@ -196,6 +198,10 @@ pub mod codes {
             "`try` marks no call that can fail.";
         MAIN_ERROR_NOT_SHOW = "E0704", "main_error_not_show",
             "`main`'s error type must implement `Show` (REFERENCE §7.4).";
+        FAIL_WITHOUT_FAILS = "E0705", "fail_without_fails",
+            "`fail` in a function that declares no `fails`, or in a `where` clause (REFERENCE §7.1).";
+        ATTEMPT_WITHOUT_FAILURE = "E0706", "attempt_without_failure",
+            "`attempt` marks no call that can fail.";
 
         NOT_IMPLEMENTED = "E0901", "not_implemented",
             "A construct the language has that this implementation does not support yet.";
