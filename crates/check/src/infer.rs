@@ -6,6 +6,9 @@
 //! binds the variables, so no operand, branch or argument has to go first (OPEN_QUESTIONS
 //! P5; issue #10). Each statement then solves what it leaves open.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
 use proviso_syntax::source::Span;
@@ -49,9 +52,45 @@ enum State {
     Bound(Ty),
 }
 
+/// What a type holds anywhere in it, which tells a walk whether it has anything to do.
+#[derive(Clone, Copy, Default)]
+pub struct Shape {
+    pub var: bool,
+    pub never: bool,
+}
+
 #[derive(Default)]
 pub struct Vars {
     states: Vec<State>,
+    /// The shape of each type argument list seen since the last [`Vars::clear`], by address.
+    /// A type never changes, so a list keeps its shape, and the entry holds the list so its
+    /// address isn't reused. A statement then walks only the parts of its types that are new,
+    /// not the whole of a deep type it got from a local.
+    shapes: RefCell<HashMap<usize, (Arc<[Ty]>, Shape), BuildHasherDefault<AddressHasher>>>,
+    /// What each bound variable stands for once nothing in it is open, by variable. A bound
+    /// variable never changes, so a walk need not go through it again, and a chain of calls
+    /// whose types hold the one before costs each call its own part only.
+    ground: RefCell<Vec<Option<Ty>>>,
+}
+
+/// Hashes an address with one multiply, which is all a key that is already unique needs.
+#[derive(Default)]
+struct AddressHasher(u64);
+
+impl Hasher for AddressHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(byte)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.0 = (n as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(29);
+    }
 }
 
 impl Vars {
@@ -61,6 +100,45 @@ impl Vars {
 
     pub fn clear(&mut self) {
         self.states.clear();
+        self.shapes.get_mut().clear();
+        self.ground.get_mut().clear();
+    }
+
+    fn ground_of(&self, v: u32) -> Option<Ty> {
+        self.ground.borrow().get(v as usize).cloned().flatten()
+    }
+
+    fn keep_ground(&self, v: u32, ty: Ty) {
+        let mut ground = self.ground.borrow_mut();
+        if ground.len() <= v as usize {
+            ground.resize(v as usize + 1, None);
+        }
+        ground[v as usize] = Some(ty);
+    }
+
+    pub fn shape(&self, ty: &Ty) -> Shape {
+        match ty {
+            Ty::Var(_) => Shape { var: true, never: false },
+            Ty::Never => Shape { var: false, never: true },
+            Ty::Adt(_, args) if !args.is_empty() => {
+                let key = Arc::as_ptr(args) as *const Ty as usize;
+                if let Some((_, shape)) = self.shapes.borrow().get(&key) {
+                    return *shape;
+                }
+                let shape = args.iter().fold(Shape::default(), |acc, arg| {
+                    let part = self.shape(arg);
+                    Shape { var: acc.var || part.var, never: acc.never || part.never }
+                });
+                self.shapes.borrow_mut().insert(key, (args.clone(), shape));
+                shape
+            }
+            _ => Shape::default(),
+        }
+    }
+
+    /// Whether `ty` has a variable in it, bound or open.
+    pub fn has_var(&self, ty: &Ty) -> bool {
+        self.shape(ty).var
     }
 
     pub fn fresh(&mut self, kind: Kind, origin: Origin) -> Ty {
@@ -109,11 +187,20 @@ impl Vars {
 
     fn zonk_part(&self, ty: &Ty) -> Option<Ty> {
         match ty {
-            Ty::Var(_) => match self.resolve(ty) {
-                Ty::Var(v) => Some(Ty::Var(self.root(v))),
-                resolved => Some(self.zonk_part(&resolved).unwrap_or(resolved)),
+            Ty::Var(v) => match &self.states[*v as usize] {
+                State::Open(_) => None,
+                State::Bound(next) => {
+                    if let Some(ty) = self.ground_of(*v) {
+                        return Some(ty);
+                    }
+                    let ty = self.zonk(next);
+                    if !self.has_var(&ty) {
+                        self.keep_ground(*v, ty.clone());
+                    }
+                    Some(ty)
+                }
             },
-            Ty::Adt(id, args) => {
+            Ty::Adt(id, args) if self.has_var(ty) => {
                 let parts: Vec<Option<Ty>> = args.iter().map(|arg| self.zonk_part(arg)).collect();
                 if parts.iter().all(Option::is_none) {
                     return None;
@@ -134,7 +221,7 @@ impl Vars {
                 Some(Kind::Float) => Ty::Float(FloatTy::F64),
                 _ => Ty::Var(self.root(v)),
             },
-            Ty::Adt(id, args) if !args.is_empty() => {
+            Ty::Adt(id, args) if self.has_var(ty) => {
                 Ty::applied(id, args.iter().map(|arg| self.defaulted(arg)).collect())
             }
             ty => ty,
@@ -143,15 +230,36 @@ impl Vars {
 
     /// The open variables in `ty`, by their roots, each once and in order.
     pub fn open_in(&self, ty: &Ty, found: &mut Vec<u32>) {
-        match self.resolve(ty) {
-            Ty::Var(v) => {
-                let root = self.root(v);
-                if !found.contains(&root) {
-                    found.push(root);
+        self.open_part(ty, found);
+    }
+
+    /// [`Vars::open_in`], which also says whether it found any, so a bound variable with none
+    /// in it is kept as ground.
+    fn open_part(&self, ty: &Ty, found: &mut Vec<u32>) -> bool {
+        if !self.has_var(ty) {
+            return false;
+        }
+        match ty {
+            Ty::Var(v) => match &self.states[*v as usize] {
+                State::Open(_) => {
+                    if !found.contains(v) {
+                        found.push(*v);
+                    }
+                    true
                 }
-            }
-            Ty::Adt(_, args) => args.iter().for_each(|arg| self.open_in(arg, found)),
-            _ => {}
+                State::Bound(next) => {
+                    if self.ground_of(*v).is_some() {
+                        return false;
+                    }
+                    let open = self.open_part(next, found);
+                    if !open {
+                        self.keep_ground(*v, self.zonk(next));
+                    }
+                    open
+                }
+            },
+            Ty::Adt(_, args) => args.iter().fold(false, |open, arg| self.open_part(arg, found) || open),
+            _ => false,
         }
     }
 
@@ -187,7 +295,7 @@ impl Vars {
     fn open_nevers_part(&mut self, ty: &Ty) -> Option<Ty> {
         match ty {
             Ty::Never => Some(self.never()),
-            Ty::Adt(id, args) if !args.is_empty() => {
+            Ty::Adt(id, args) if self.shape(ty).never => {
                 let parts: Vec<Option<Ty>> = args.iter().map(|arg| self.open_nevers_part(arg)).collect();
                 if parts.iter().all(Option::is_none) {
                     return None;
@@ -201,8 +309,14 @@ impl Vars {
 
     /// Whether variable `v` occurs in `ty`, which would make it part of itself.
     fn occurs(&self, v: u32, ty: &Ty) -> bool {
-        match self.resolve(ty) {
-            Ty::Var(w) => self.root(w) == v,
+        if !self.has_var(ty) {
+            return false;
+        }
+        match ty {
+            Ty::Var(w) => match &self.states[*w as usize] {
+                State::Open(_) => *w == v,
+                State::Bound(next) => self.ground_of(*w).is_none() && self.occurs(v, next),
+            },
             Ty::Adt(_, args) => args.iter().any(|arg| self.occurs(v, arg)),
             _ => false,
         }

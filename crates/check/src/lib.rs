@@ -2533,14 +2533,14 @@ impl Checker<'_> {
         let copying = std::mem::replace(&mut self.copying, false);
         let expected = expected.map(|ty| {
             let ty = self.vars.resolve(ty);
-            if mentions_never(&ty) { self.vars.open_nevers(&ty) } else { ty }
+            if self.vars.shape(&ty).never { self.vars.open_nevers(&ty) } else { ty }
         });
         let ty = self.expr_kind(e, expected.as_ref(), chain, copying);
         let ty = self.vars.resolve(&ty);
         if copying {
             self.copied(e, &ty);
         }
-        if self.vars.count() > 0 && has_var(&ty) {
+        if self.vars.count() > 0 && self.vars.has_var(&ty) {
             self.typed.push(e);
         }
         self.p.expr_ty.insert(e, ty.clone());
@@ -4673,24 +4673,6 @@ fn mentions_targ(ty: &Ty, targs: &[Ty]) -> bool {
     match ty {
         Ty::Param(i) => (*i as usize) < targs.len(),
         Ty::Adt(_, args) => args.iter().any(|arg| mentions_targ(arg, targs)),
-        _ => false,
-    }
-}
-
-/// Whether `ty` has an inference variable in it.
-fn has_var(ty: &Ty) -> bool {
-    match ty {
-        Ty::Var(_) => true,
-        Ty::Adt(_, args) => args.iter().any(has_var),
-        _ => false,
-    }
-}
-
-/// Whether `ty` has `Never` in it, outside the variables it holds.
-fn mentions_never(ty: &Ty) -> bool {
-    match ty {
-        Ty::Never => true,
-        Ty::Adt(_, args) => args.iter().any(mentions_never),
         _ => false,
     }
 }
