@@ -23,7 +23,7 @@ Where the transcript lives depends on your harness:
   ```
 
   That covers the legacy flat (`<id>.jsonl`), current nested (`<id>/<id>.jsonl`), and subagent (`<parent>/subagents/<child>.jsonl`) layouts. For each candidate, read the first JSONL line. Take the file whose `message.content[0].text` contains the conversation's opening user prompt.
-- **Claude Code:** `~/.claude/projects/<slug>/<session-id>.jsonl`, where `<slug>` is the workspace path with every character that isn't a letter or digit turned into "-".
+- **Claude Code:** `~/.claude/projects/<slug>/<session-id>.jsonl`, where `<slug>` is the workspace path with every character that isn't a letter or digit turned into "-". When the work ran in sessions this one started, each of those has its own transcript in the slug folder of its own worktree, with its subagents under `<session-id>/subagents/`. Gather them too. The desktop app's `local_` session IDs don't match transcript file names, so match each by its `gitBranch` field or its title.
 - **Pi:** `~/.pi/agent/sessions/--<slug>--/*.jsonl`, where `<slug>` is the workspace path with the leading slash dropped and each "/" turned into "-".
 - **Codex:** `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Keep only files whose first line has `payload.cwd` equal to the workspace path.
 - **Other harnesses:** check the harness's session directory for this workspace.
@@ -58,7 +58,7 @@ Move any Accepted item that a lint rule, script, metadata flag, or runtime check
 
 Present the synthesizer's full Accepted / Rejected / Backlog output and wait for explicit approval before applying any Accepted edit. The user picks the subset and may redirect routings. Skill changes affect every future agent in the org. Do not auto-apply.
 
-File each Backlog item to your team's devex or backlog tracker without waiting. Only the Accepted list waits for approval.
+File each Backlog item to your team's devex or backlog tracker without waiting. Only the Accepted list waits for approval. If the project's instructions require approval before filing, present the Backlog with the Accepted list and file only the items the user picks.
 
 Before the first edit, confirm which checkout and branch the skill files are in. Skill edits go on their own branch, never on a branch that belongs to another task.
 

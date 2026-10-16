@@ -22,13 +22,19 @@ cargo build
 cargo test                                   # unit tests, CLI tests, catalog check, and every golden file
 cargo test -p proviso-syntax                 # one crate (proviso-syntax, proviso-check, proviso-interp, proviso)
 cargo test -p proviso --test golden          # golden files only
+cargo test -p proviso --test golden -- --nocapture   # also print the pass/fail/pending summary and pending files
 PROVISO_BLESS=1 cargo test                   # rewrite .out/.err goldens from actual output; review the diff
 cargo run -- check [--incomplete] [--json] <file.proviso>
 cargo run -- run [--incomplete] <file.proviso>
 cargo run -- explain <code>                  # e.g. E0901
+cargo fmt --all --check                      # CI runs this and the next two on every PR
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
-All golden files run inside a single test (`crates/proviso/tests/golden.rs`), and there is no per-file filter. To work on one golden file, run `cargo run -- check` or `cargo run -- run` on it directly.
+All golden files run inside a single test (`crates/proviso/tests/golden.rs`), and there is no per-file filter. To work on one golden file, run `cargo run -- check` or `cargo run -- run` on it directly. Output paths are printed as given, and `.out`/`.err` files store them relative to `tests/golden`, so reproduce a golden's output from that folder, as in `cd tests/golden && ../../target/debug/proviso run records/x.proviso`.
+
+CI (`.github/workflows/ci.yml`) runs fmt, clippy with `-D warnings`, and the tests on every pull request. Run all three before you call a branch clean. Checks take a moment to register, so a PR with no checks right after opening still has CI.
 
 ## Architecture
 
@@ -56,6 +62,21 @@ Codes are stable, so a code's meaning never changes once assigned. They are defi
 
 - Each `.proviso` file opens with a comment header. `// phase: N` is required, and directives are read only from the header. A misspelled or misplaced directive fails the test.
 - `// expect-error: <code>` and a trailing `// <- <code>` on the offending line mark rejected programs. Lines without markers must check cleanly.
+- Check each new golden with `cargo run -- check` before writing the code it tests. An error on a line without a marker is a bug in the test, such as a keyword used as a name. The runner never parses a golden for a later phase, so this is the only early check it gets.
 - Programs that run are compared with `.out` (stdout) and `.err` (stderr). A missing file means no output.
 - `basics/` holds the phase-1 tests. The `fNN_*.proviso` files are the §F acceptance counterexamples. They were written strictly to REFERENCE.md before the compiler existed, so they test the spec, not the implementation. Record spec gaps in OPEN_QUESTIONS §G rather than bending a test to fit the code.
 - If an active golden file uses a directive the runner doesn't support yet (`expect-report`, `expect-log`, `run`, `schedules`, `sig` from phase 4), the test fails instead of passing unchecked. Implement the directive before raising `IMPLEMENTED_PHASE` to that phase.
+
+## Tracking work
+
+- The roadmap is OPEN_QUESTIONS P3, and a phase's PRs are the slice table in `tests/golden/README.md`. Pending golden tests are what is left.
+- Design questions and spec gaps go in OPEN_QUESTIONS (§A–§D, §G, P5), never in issues, so they stay next to the spec they change.
+- Other work that outlives a session goes in a GitHub issue on magnord/proviso. Examples are a review finding left unfixed, a follow-up a PR defers, a commit no one reviewed, or a tooling or skill problem. Link the PR it came from, and close the issue from the PR that fixes it.
+- Ask the user before opening an issue.
+- A PR that adds a provisional decision to OPEN_QUESTIONS P5 lists each one in its body, so the user can confirm or overturn it.
+
+## Working with the user
+
+- Commit freely on your own branch. Ask before you push or open a PR.
+- Write replies, PR bodies, commit messages and docs in short declarative sentences. Use no em dashes, and no colon as a connector in the middle of a sentence.
+- Give each claim its evidence, or label it as measured, inferred or a guess.
