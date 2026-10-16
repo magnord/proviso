@@ -16,6 +16,7 @@ big
 5 -1 7 -2
 200 0
 Some(5) None None 9 -3 -3
+true true true
 1 2 0 0
 1 0 0
 1 2 2

@@ -12,7 +12,8 @@
 // (§6.1). The type an `else` form is expected to have reaches the call on its left, as it
 // reaches one under `try`, or as an `Option` of it for a call that returns one, unless a
 // call before it in the chain can fail, which makes the form's value the call's own (P5).
-// An `if` without `else` in a fallback that gives `()` is a statement (§6.2).
+// An `if` without `else` in a fallback that gives `()` is a statement (§6.2), so the
+// fallback's value is `()` whatever its branches' calls return.
 use std.io { IoError }
 
 enum Problem derives(Eq, Show) {
@@ -99,6 +100,20 @@ fn leave_or_mark(n: Int, c: Bool) -> Int {
         }
     }
     return seen
+}
+
+fn five_value() -> Int {
+    return 5
+}
+
+fn unit_tail(n: Int, c: Bool) {
+    return even(n) else {
+        if c {
+            five_value()
+        } else if not c {
+            five_value()
+        }
+    }
 }
 
 fn chained(n: Int) -> Int {
@@ -254,6 +269,10 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(f"{narrow(true)} {narrow(false)} {narrow_method(1)} {narrow_method(0)}")
     try sys.stdout.write_line(f"{wide(true)} {wide(false)}")
     try sys.stdout.write_line(f"{found(1)} {found(0)} {found(-1)} {found_inner(1)} {found_inner(0)} {found_inner(-1)}")
+    let u1 = unit_tail(n: 3, c: true) == ()
+    let u2 = unit_tail(n: 3, c: false) == ()
+    let u3 = unit_tail(n: 4, c: true) == ()
+    try sys.stdout.write_line(f"{u1} {u2} {u3}")
     try sys.stdout.write_line(f"{chained(3)} {chained(-7)} {chained(-1)} {chained(4)}")
     try sys.stdout.write_line(f"{leave_or_mark(n: 3, c: true)} {leave_or_mark(n: 3, c: false)} {leave_or_mark(n: 4, c: true)}")
     try sys.stdout.write_line(f"{guarded(n: 0, o: Some(true))} {guarded(n: 0, o: None)} {guarded(n: 0, o: Some(false))}")

@@ -39,6 +39,14 @@ fn Misnamed(n: Int) -> Int {                        // <- E0204
     return n
 }
 
+fn ident[T: Copy](x: T) -> T {
+    return x
+}
+
+fn label(n: Int) -> Text {
+    return "n"
+}
+
 fn yes(n: Int) -> Bool {
     return true
 }
@@ -91,3 +99,5 @@ example Plain(m: 1) == plain(1)                     // <- E0101
 example Mode(1) == 1                                // <- E0201
 example Mode(2) == Mode.Fast(n: 1)                  // <- E0201
 example missing(2) == Mode.Fast(n: 1)               // <- E0201
+example ident(1) == label(1)                        // <- E0301
+example label(1) == ident(1)                        // <- E0301

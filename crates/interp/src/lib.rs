@@ -225,6 +225,17 @@ enum Unwind {
 
 type Flow<T> = Result<T, Unwind>;
 
+/// Whether `e` is an `if`, or a chain of `else if`s, that ends without an `else`.
+fn lacks_final_else(m: &Module, mut e: ExprId) -> bool {
+    loop {
+        match &m.exprs[e].kind {
+            ExprKind::If { else_branch: None, .. } => return true,
+            ExprKind::If { else_branch: Some(ElseBranch::If(nested)), .. } => e = *nested,
+            _ => return false,
+        }
+    }
+}
+
 fn defect(kind: DefectKind, message: impl Into<String>, span: Span) -> Unwind {
     Unwind::Defect(Defect { kind, message: message.into(), span, callers: Vec::new() })
 }
@@ -687,7 +698,7 @@ impl Interp<'_> {
             }
             ExprKind::Fail(value) => return Err(Unwind::Fail(self.expr(*value, frame)?)),
             ExprKind::If { cond, then_block, else_branch } => {
-                if self.bool(*cond, frame)? {
+                let value = if self.bool(*cond, frame)? {
                     self.block(then_block, frame)?
                 } else {
                     match else_branch {
@@ -695,7 +706,10 @@ impl Interp<'_> {
                         Some(ElseBranch::If(nested)) => self.expr(*nested, frame)?,
                         None => Value::Unit,
                     }
-                }
+                };
+                // A chain without a final `else` is a statement, so its value is `()` even
+                // where a block that gives `()` ends in it (REFERENCE §6.2).
+                if lacks_final_else(m, e) { Value::Unit } else { value }
             }
             ExprKind::While { cond, body, .. } => {
                 while self.bool(*cond, frame)? {

@@ -1805,9 +1805,18 @@ impl Checker<'_> {
                 self.error(codes::UNEXPECTED_TOKEN, span, message);
                 continue;
             }
+            // `call == v` reads its operands as `==` does, so the one that says more about its
+            // type is checked first and gives the other its type (OPEN_QUESTIONS P5).
+            let given = match &decl.expect {
+                Expectation::Equals(value) if self.context_rank(decl.call) > self.context_rank(*value) => {
+                    Some(self.infer(*value))
+                }
+                _ => None,
+            };
+            let hint = given.as_ref().filter(|ty| ty.is_numeric() || matches!(ty, Ty::Adt(..)));
             self.markers.push(Marker { handler: Some(decl.call), errors: Vec::new() });
             self.in_chain = true;
-            let ty = self.infer(decl.call);
+            let ty = self.expr(decl.call, hint);
             let mut errors: Vec<Ty> = Vec::new();
             for err in self.markers.pop().map(|m| m.errors).unwrap_or_default() {
                 if !errors.contains(&err) {
@@ -1833,11 +1842,22 @@ impl Checker<'_> {
                 Expectation::Equals(value) => {
                     // A call that was rejected has nothing to compare with (§15.1).
                     if ty == Ty::Error {
-                        self.infer(*value);
+                        if given.is_none() {
+                            self.infer(*value);
+                        }
                         self.p.examples.push(ExampleInfo { item: index, locals: self.f.locals.len() });
                         continue;
                     }
-                    let value_ty = self.check(*value, &ty);
+                    let value_ty = match &given {
+                        Some(given) => {
+                            if given.join(&ty).is_none() && !given.is_unknown() && !ty.is_unknown() {
+                                let message = format!("expected `{}`, found `{}`", self.show(&ty), self.show(given));
+                                self.error(codes::TYPE_MISMATCH, self.span(*value), message);
+                            }
+                            given.clone()
+                        }
+                        None => self.check(*value, &ty),
+                    };
                     let ty = if ty.is_unknown() { value_ty } else { ty };
                     let defined = matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::EQ);
                     if !defined && !ty.is_unknown() {
