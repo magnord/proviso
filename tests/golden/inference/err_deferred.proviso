@@ -5,10 +5,15 @@
 // A check on a type that a later value gives waits until the statement settles it, so it
 // is made in either order (OPEN_QUESTIONS P5; issue #10). A constraint on a type argument
 // (E0309), unary `-` on an integer that turns out unsigned (E0306), and a float literal
-// that turns out too large (E0302) are each reported once, in each order.
+// that turns out too large (E0302) are each reported once, in each order. A type that
+// misses several bounds is one E0309.
 
 fn need_eq[T: Eq](a: T, b: T) -> Bool {
     return true
+}
+
+fn keyed[T: Eq + Ord + Hash](a: T) -> Int {
+    return 0
 }
 
 fn first[T: Copy](a: T, b: T) -> T {
@@ -23,6 +28,10 @@ fn bounds() -> Bool {
     let a1 = need_eq(a: None, b: Some(1.5))         // <- E0309
     let a2 = need_eq(a: Some(1.5), b: None)         // <- E0309
     let a3 = need_eq(a: 1, b: 2)
+    let a4 = keyed(a: Some(1.5))                    // <- E0309
+    let a5 = keyed(a: (1.5, 1))                     // <- E0309
+    let a6 = keyed(a: 1.5)                          // <- E0309
+    let a7 = keyed(a: Some(1))
     return a1 or a2 or a3
 }
 

@@ -1,14 +1,20 @@
 // phase: 2.5
 // expect-error: E0301
 // expect-error: E0701
+// expect-error: E0302
 // One mistake is one error (REFERENCE §15.1). Each line mixes a value whose type argument
 // is open with a value of another type, which is one E0301, in each order. The rejected
 // value was the one to give the type argument, so it is not also E0312. A later value may
 // still give it, and a later mistake is still reported. An unmarked call whose error type
-// only a marker could give is one E0701, which leaves the type unsaid.
+// only a marker could give is one E0701, which leaves the type unsaid. A missing marker
+// doesn't decide the error type, so a separate mistake with it is still reported.
 
 fn first[T: Copy](a: T, b: T) -> T {
     return a
+}
+
+fn second[T: Copy](a: T, b: T) -> T {
+    return b
 }
 
 fn nothing[T]() -> Option[T] {
@@ -25,6 +31,22 @@ fn opt_or[T: Copy](o: Option[T], d: T) -> T {
 
 fn never_fails[E]() -> Int fails E {
     return 1
+}
+
+fn both[T: Copy](x: T) -> T fails T {
+    return x
+}
+
+fn pass[E: Copy]() -> Int fails E {
+    return 1
+}
+
+fn rethrow[E: Copy](e: E) -> Int fails E {
+    fail e
+}
+
+fn int8(x: Int8) -> Int {
+    return 0
 }
 
 fn arguments() {
@@ -64,4 +86,21 @@ fn unmarked() -> Int {
     let u1 = never_fails()                          // <- E0701
     let u2 = never_fails::[Text]() + 1              // <- E0701
     return u1 + u2
+}
+
+fn unmarked_values(small: Int8) -> Int8 {
+    let v1: Int8 = both(x: 300)                     // <- E0701, E0302
+    let v2 = both(x: 300) + small                   // <- E0701, E0302
+    let v3 = small + both(x: 300)                   // <- E0701, E0302
+    return v1 + v2 + v3
+}
+
+fn unmarked_it(small: Int8) -> Int {
+    let r = pass() else {
+        let t = rethrow(e: it)                      // <- E0701
+        let u = int8(second(a: it, b: small))
+        let v: Text = it                            // <- E0301
+        0
+    }
+    return r
 }

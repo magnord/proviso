@@ -76,7 +76,7 @@ fn messages_name_what_they_mean() {
 fn unknown_type_arguments_show_as_underscores() {
     let file = source(
         "unknown.proviso",
-        "fn checked[T: Copy](x: T) -> Result[T, Text] {\n    return Ok(x)\n}\n\nfn value_or[T: Copy](r: Result[Option[T], Text], d: T) -> T {\n    return d\n}\n\nfn f(c: Bool) -> Int {\n    let a = value_or(r: checked(if c { 1 } else { 2 }), d: 5)\n    let b = value_or(r: if c { Ok(1) } else { Err(\"x\") }, d: 0)\n    return a + b\n}\n\nfn g() {\n    let t: Text = Some(1)\n    let u: Text = Some(1.5)\n}\n",
+        "fn checked[T: Copy](x: T) -> Result[T, Text] {\n    return Ok(x)\n}\n\nfn value_or[T: Copy](r: Result[Option[T], Text], d: T) -> T {\n    return d\n}\n\nfn f(c: Bool) -> Int {\n    let a = value_or(r: checked(if c { 1 } else { 2 }), d: 5)\n    let b = value_or(r: if c { Ok(1) } else { Err(\"x\") }, d: 0)\n    return a + b\n}\n\nfn g() {\n    let t: Text = Some(1)\n    let u: Text = Some(1.5)\n}\n\nfn both[T: Copy](x: T) -> T fails T {\n    return x\n}\n\nfn h(small: Int8) -> Int8 {\n    return both(x: 5) + small\n}\n",
     );
     let errors = stderr(&run(&["check"], &file));
     assert_eq!(errors.matches("expected `Option[_]`, found `Int`").count(), 3, "{errors}");
@@ -84,6 +84,8 @@ fn unknown_type_arguments_show_as_underscores() {
     // A literal's type has a default, so it is no unknown.
     assert!(errors.contains("expected `Text`, found `Option[Int]`"), "{errors}");
     assert!(errors.contains("expected `Text`, found `Option[Float]`"), "{errors}");
+    // An unmarked call names the error type its statement settles.
+    assert!(errors.contains("`both` can fail with `Int8`"), "{errors}");
 }
 
 #[test]

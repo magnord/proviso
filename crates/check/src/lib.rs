@@ -474,13 +474,16 @@ enum Pending {
     Int { ty: Ty, magnitude: u128, negative: bool, span: Span },
     /// A float literal that must be finite in its type.
     Float { ty: Ty, lit: ExprId },
-    /// A type argument of a call of `callee` that must implement `iface`, which the
-    /// callee's parameter `param` is constrained by.
-    Bound { ty: Ty, iface: IfaceId, callee: Box<str>, param: Box<str>, span: Span },
+    /// A type argument of a call of `callee` that must implement each of `ifaces`, which the
+    /// callee's parameter `param` is constrained by. The first it misses is reported.
+    Bound { ty: Ty, ifaces: Vec<IfaceId>, callee: Box<str>, param: Box<str>, span: Span },
     /// The operand of unary `-`, which must be a signed integer or a float.
     Neg { ty: Ty, span: Span },
     /// The operands of arithmetic operator `op`.
     Arith { op: BinOp, ty: Ty, span: Span },
+    /// A call of `callee` that can fail with `ty` but has no marker, which is reported with
+    /// the error type the statement settles (E0701).
+    Unmarked { ty: Ty, callee: Box<str>, span: Span },
 }
 
 impl Pending {
@@ -491,7 +494,8 @@ impl Pending {
             | Pending::Float { ty, .. }
             | Pending::Bound { ty, .. }
             | Pending::Neg { ty, .. }
-            | Pending::Arith { ty, .. } => ty,
+            | Pending::Arith { ty, .. }
+            | Pending::Unmarked { ty, .. } => ty,
         }
     }
 }
@@ -638,9 +642,12 @@ impl Checker<'_> {
                     self.error(codes::LITERAL_OUT_OF_RANGE, span, format!("`{text}` is too large for `{}`", ft.name()));
                 }
             }
-            Pending::Bound { ty, iface, callee, param, span } => {
+            Pending::Bound { ty, ifaces, callee, param, span } => {
                 let ty = self.vars.zonk(&ty);
-                if !ty.is_unknown() && !self.vars.has_open(&ty) && !self.implements(&ty, iface) {
+                if ty.is_unknown() || self.vars.has_open(&ty) {
+                    return;
+                }
+                if let Some(&iface) = ifaces.iter().find(|&&iface| !self.implements(&ty, iface)) {
                     let message = format!(
                         "`{}` does not implement `{}`, which `{callee}` needs of `{param}`",
                         self.show(&ty),
@@ -656,6 +663,10 @@ impl Checker<'_> {
             Pending::Arith { op, ty, span } => {
                 let ty = self.vars.zonk(&ty);
                 self.arithmetic(op, &ty, span);
+            }
+            Pending::Unmarked { ty, callee, span } => {
+                let ty = self.vars.zonk(&ty);
+                self.unmarked(&callee, &ty, span);
             }
         }
     }
@@ -3349,9 +3360,9 @@ impl Checker<'_> {
             // One with a variable in it is checked once the statement settles it, which
             // also walks a deep argument once rather than at each call around it.
             if self.vars.has_var(&ty) {
-                for &iface in bounds {
-                    let (callee, param) = (name.into(), param.clone());
-                    self.pending.push(Pending::Bound { ty: ty.clone(), iface, callee, param, span });
+                if !bounds.is_empty() {
+                    let (ifaces, callee, param) = (bounds.clone(), name.into(), param.clone());
+                    self.pending.push(Pending::Bound { ty: ty.clone(), ifaces, callee, param, span });
                 }
                 continue;
             }
@@ -3942,15 +3953,23 @@ impl Checker<'_> {
             }
             _ => {
                 // An error type that only a marker could give is left unsaid, and nothing
-                // else reports it (§15.1).
-                let with = if self.vars.has_open(err) { String::new() } else { format!(" with `{}`", self.show(err)) };
-                let message = format!(
-                    "`{callee}` can fail{with}, so the call must be marked with `try`, `else` or `attempt` (§7.2)"
-                );
-                self.error(codes::UNMARKED_FALLIBLE_CALL, span, message);
-                self.vars.poison(err);
+                // else reports it (§15.1). A later value may still give it, so the message
+                // waits for the statement to settle it.
+                self.vars.quiet(err);
+                if self.vars.has_var(err) {
+                    self.pending.push(Pending::Unmarked { ty: err.clone(), callee: callee.into(), span });
+                } else {
+                    self.unmarked(callee, err, span);
+                }
             }
         }
+    }
+
+    fn unmarked(&mut self, callee: &str, err: &Ty, span: Span) {
+        let with = if err.is_unknown() { String::new() } else { format!(" with `{}`", self.show(err)) };
+        let message =
+            format!("`{callee}` can fail{with}, so the call must be marked with `try`, `else` or `attempt` (§7.2)");
+        self.error(codes::UNMARKED_FALLIBLE_CALL, span, message);
     }
 
     fn try_expr(&mut self, inner: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
