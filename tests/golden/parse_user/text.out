@@ -1,0 +1,19 @@
+36 -5 7 7 0
+empty invalid invalid invalid invalid invalid
+invalid invalid invalid invalid invalid
+9223372036854775807 range
+-9223372036854775808 range
+range
+invalid
+127 range -128 range
+255 range range 0
+18446744073709551615 range
+200 0
+Ok(5) Err(ParseError.Empty) Err(ParseError.Invalid) Err(ParseError.Invalid)
+[ada] [ada] 6
+[a b] [] []
+Some(("a", "b,c")) None Some(("", "abc"))
+Some(("key", "value")) Some(("", "x")) Some(("x", ""))
+true false true
+Some("1.2") None Some("x") Some("")
+2 true false

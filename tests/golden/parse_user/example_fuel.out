@@ -1,0 +1,3 @@
+parse_user/example_fuel.proviso:23:1: example failed: it hit a defect
+parse_user/example_fuel.proviso:24:1: example passed
+2 examples: 1 passed, 1 failed

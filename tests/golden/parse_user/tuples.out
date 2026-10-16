@@ -1,0 +1,19 @@
+(1, "one")
+((1, 'x'), Some((2.5, "two")), Point(x: 3, y: -4))
+("one", 1)
+(-128, 255)
+zero
+big and set
+set
+clear
+less
+less
+equal
+greater
+1 2 3
+5 end
+true
+(9, -8)
+one
+true true
+4 is four

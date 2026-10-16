@@ -1,0 +1,24 @@
+// phase: 2.5
+// run: test
+// expect-exit: 70
+// An example runs with a fuel limit (REFERENCE §14). Each call and each turn of a loop
+// takes a step, and an example that takes more than a million is stopped with a
+// `fuel_exhausted` defect at the step that ran out (OPEN_QUESTIONS P5). Recursion runs out
+// of stack first, as it does under `proviso run`.
+fn spin() -> Int {
+    var n = 0
+    loop {
+        n += 1
+    }
+}
+
+fn short(n: Int) -> Int {
+    var total = 0
+    for i in 0..n {
+        total += i
+    }
+    return total
+}
+
+example spin() == 0
+example short(1000) == 499500

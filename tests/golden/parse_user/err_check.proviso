@@ -1,0 +1,19 @@
+// phase: 2.5
+// expect-error: E0101
+// expect-error: E0201
+// expect-error: E0301
+// expect-error: E0415
+// `check P else …` needs a `Bool` and an `else` that leaves, by `fail`, or by a block that
+// returns, breaks or continues (REFERENCE §8.4; OPEN_QUESTIONS P5). The bindings of an
+// `is` in `P` scope only over `P`. The error must be the function's.
+fn checks(n: Int, o: Option[Int]) -> Int fails Text {
+    check n > 0 else { return 0 }
+    check n > 1 else fail "small"
+    check n > 2                                     // <- E0101
+    check n > 3 else 0                              // <- E0415
+    check n > 4 else { debug(n) }                   // <- E0415
+    check n else fail "int"                         // <- E0301
+    check n > 5 else fail 5                         // <- E0301
+    check o is Some(v) else fail "none"
+    return v                                        // <- E0201
+}

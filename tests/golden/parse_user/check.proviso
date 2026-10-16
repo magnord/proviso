@@ -1,0 +1,53 @@
+// phase: 2.5
+// `check P else …` runs the test the program asks for and, when `P` is false, the `else`,
+// which must leave: `fail`, or a block that returns, breaks or continues (REFERENCE §8.4;
+// OPEN_QUESTIONS P5). The statement continues on a line that starts with `else` (§2).
+use std.io { IoError }
+
+fn grade(score: Int) -> Text fails Text {
+    check score >= 0 else fail "negative"
+    check score <= 100
+        else fail f"too high: {score}"
+    return "ok"
+}
+
+fn first_even(limit: Int) -> Int {
+    var i = 0
+    while i < limit {
+        i += 1
+        check i % 2 != 0 else {
+            return i
+        }
+    }
+    return -1
+}
+
+fn count_odd(limit: Int) -> Int {
+    var n = 0
+    for i in 0..limit {
+        check i % 2 == 1 else { continue }
+        n += 1
+    }
+    return n
+}
+
+fn steps(limit: Int) -> Int {
+    var k = 0
+    loop {
+        check k < limit else { break }
+        k += 1
+    }
+    return k
+}
+
+fn nonempty(name: Text) -> Text fails Text {
+    check not name.is_empty() else fail "empty"
+    return name
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{attempt grade(-1)} {attempt grade(0)} {attempt grade(100)} {attempt grade(101)}")
+    try sys.stdout.write_line(f"{first_even(1)} {first_even(5)}")
+    try sys.stdout.write_line(f"{count_odd(7)} {steps(4)}")
+    try sys.stdout.write_line(f"{attempt nonempty("")} {attempt nonempty("x")}")
+}

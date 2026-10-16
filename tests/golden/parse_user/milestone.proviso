@@ -1,0 +1,32 @@
+// phase: 2.5
+// run: test
+// The worked example of REFERENCE §17, without what needs phase 3: `load_users`, which
+// reads a `Dir`, the `Io` variant, which holds an `FsError`, and the `MemDir` test.
+// `proviso test` runs both examples of `parse_user`, and both pass. This is the milestone
+// of phase 2 in OPEN_QUESTIONS P3.
+pub record User derives(Eq, Show) {
+    name: Text where not name.is_empty()
+    age:  Int  where 0 <= age and age < 150
+}
+
+pub enum LoadError derives(Eq, Show) {
+    MissingComma(line_no: Int)
+    EmptyName(line_no: Int)
+    BadAgeText(line_no: Int, text: Text)
+    AgeOutOfRange(line_no: Int, value: Int)
+}
+
+pub fn parse_user(line: Text, line_no: Int) -> User fails LoadError {
+    let (name_text, age_text) = line.split_once(",")
+        else fail LoadError.MissingComma(line_no: line_no)
+    let name = name_text.trim()
+    check not name.is_empty() else fail LoadError.EmptyName(line_no: line_no)
+    let age = Int.parse(age_text.trim())
+        else fail LoadError.BadAgeText(line_no: line_no, text: age_text)
+    check 0 <= age and age < 150
+        else fail LoadError.AgeOutOfRange(line_no: line_no, value: age)
+    return User(name: name, age: age)     // the two checks discharge User's refinements
+}
+
+example parse_user(line: "ada, 36", line_no: 1) == User(name: "ada", age: 36)
+example parse_user(line: "ada", line_no: 7) fails LoadError.MissingComma(line_no: 7)

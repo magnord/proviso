@@ -1,0 +1,4 @@
+Err("negative") Ok("ok") Ok("ok") Err("too high: 101")
+-1 2
+3 4
+Err("empty") Ok("x")

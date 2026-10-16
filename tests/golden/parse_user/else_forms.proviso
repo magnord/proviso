@@ -1,0 +1,166 @@
+// phase: 2.5
+// The `else` forms unwrap an `Option`, or handle the failure of the calls in the postfix
+// chain to their left (REFERENCE §6.6, §7.2). The fallback runs only when there is nothing
+// to unwrap. `it` is the error, in every form on a fallible call, and in nested forms it is
+// the error of the innermost one on a fallible call (OPEN_QUESTIONS Q33). `else` binds
+// loosest and groups to the right, so `o else 0 + 1` is `o else (0 + 1)` (§6.1). A call
+// whose result is an `Option` and that can fail has its failure handled, not the `Option`
+// unwrapped (P5). A `try` in an argument still fails the function. A call marked with an
+// `else` form is a statement (Q33), and a statement continues on a line that starts with
+// `else` (§2).
+use std.io { IoError }
+
+enum Problem derives(Eq, Show) {
+    Small(n: Int)
+    Wrapped(inner: Text)
+}
+
+record Holder {
+    n: Int
+}
+
+impl Holder {
+    fn get(self) -> Int fails Problem {
+        if self.n == 0 {
+            fail Problem.Small(n: 0)
+        }
+        return self.n
+    }
+}
+
+fn positive(n: Int) -> Int fails Problem {
+    if n <= 0 {
+        fail Problem.Small(n: n)
+    }
+    return n
+}
+
+fn make(n: Int) -> Holder fails Problem {
+    if n < 0 {
+        fail Problem.Small(n: n)
+    }
+    return Holder(n: n)
+}
+
+fn even(n: Int) fails Problem {
+    if n % 2 != 0 {
+        fail Problem.Small(n: n)
+    }
+}
+
+fn label_a(n: Int) -> Text fails Text {
+    if n == 0 {
+        fail "a failed"
+    }
+    return "a ok"
+}
+
+fn label_b(n: Int) -> Text fails Text {
+    if n == 0 {
+        fail "b failed"
+    }
+    return "b ok"
+}
+
+fn join(x: Text, y: Text) -> Text {
+    return f"{x}+{y}"
+}
+
+fn lookup(n: Int) -> Option[Int] fails Problem {
+    if n < 0 {
+        fail Problem.Small(n: n)
+    }
+    if n == 0 {
+        return None
+    }
+    return Some(n * 10)
+}
+
+fn first(o: Option[Int], p: Option[Int]) -> Int {
+    return o else p else 0
+}
+
+fn bumped(o: Option[Int]) -> Int {
+    return o else 0 + 1
+}
+
+fn pick(o: Option[Int], flag: Bool) -> Int {
+    return o else if flag { 1 } else { 2 }
+}
+
+fn rescue(n: Int) -> Int {
+    let v = positive(n) else {
+        if it == Problem.Small(n: 0) {
+            return 100
+        }
+        -1
+    }
+    return v * 2
+}
+
+fn inner_it(a: Int, b: Int) -> Text {
+    return label_a(a) else join(x: label_b(b) else it, y: it)
+}
+
+fn outer_it(a: Int, o: Option[Text]) -> Text {
+    return label_a(a) else (o else it)
+}
+
+fn chain(n: Int) -> Int {
+    return make(n).get() else -1
+}
+
+fn combine(a: Int, b: Int) -> Int fails Problem {
+    if a > 50 {
+        fail Problem.Small(n: a)
+    }
+    return a + b
+}
+
+fn passes(n: Int) -> Int fails Problem {
+    let v = combine(a: try positive(n), b: 1) else 0
+    return v
+}
+
+fn wrapped(a: Int) -> Text fails Problem {
+    let t = label_a(a) else fail Problem.Wrapped(inner: it)
+    return t
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{first(o: None, p: Some(7))} {first(o: Some(1), p: Some(7))} {first(o: None, p: None)}")
+    try sys.stdout.write_line(f"{bumped(Some(5))} {bumped(None)}")
+    try sys.stdout.write_line(f"{pick(o: None, flag: true)} {pick(o: None, flag: false)} {pick(o: Some(9), flag: true)}")
+    try sys.stdout.write_line(f"{rescue(5)} {rescue(0)} {rescue(-3)}")
+    try sys.stdout.write_line(f"{inner_it(a: 0, b: 0)} {inner_it(a: 0, b: 1)} {inner_it(a: 1, b: 0)}")
+    let given = Some("o")
+    try sys.stdout.write_line(f"{outer_it(a: 0, o: None)} {outer_it(a: 0, o: given)}")
+    try sys.stdout.write_line(f"{chain(-5)} {chain(0)} {chain(3)}")
+    try sys.stdout.write_line(f"{attempt passes(-1)} {attempt passes(60)} {attempt passes(2)}")
+    try sys.stdout.write_line(f"{attempt wrapped(0)} {attempt wrapped(1)}")
+    let quiet = positive(4) else {
+        try sys.stdout.write_line("the fallback ran")
+        0
+    }
+    let loud = positive(-4) else {
+        try sys.stdout.write_line(f"the fallback ran for {it}")
+        0
+    }
+    try sys.stdout.write_line(f"{quiet} {loud}")
+    let r = lookup(-1) else None
+    let s = lookup(0) else Some(-1)
+    let t = lookup(2) else None
+    try sys.stdout.write_line(f"{r} {s} {t} {r else 5}")
+    even(3) else ()
+    even(4) else fail_soft()
+    sys.stdout.write_line("written") else ()
+    let spaced = positive(0)
+        else 42
+    try sys.stdout.write_line(f"{spaced}")
+    if (positive(9) else 0) > 3 {
+        try sys.stdout.write_line("big")
+    }
+}
+
+fn fail_soft() {
+}

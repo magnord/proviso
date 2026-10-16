@@ -1,0 +1,44 @@
+// phase: 2.5
+// expect-error: E0101
+// expect-error: E0201
+// expect-error: E0301
+// expect-error: E0306
+// expect-error: E0701
+// expect-error: E0708
+// An example is `example f(…) == v` or `example f(…) fails P` (REFERENCE §14). It marks the
+// calls of its postfix chain, as `attempt` does (§7.2), so another fallible call in it is
+// unmarked. `== v` needs a `v` of the call's type, and a type with `Eq`, or a float, whose
+// `==` is IEEE's (§12.2). `fails P` needs a call that can fail, and a pattern for its
+// error (OPEN_QUESTIONS P5).
+record Plain {
+    n: Int
+}
+
+fn plain(n: Int) -> Plain {
+    return Plain(n: n)
+}
+
+fn sure(n: Int) -> Int {
+    return n
+}
+
+fn risky(n: Int) -> Int fails Text {
+    return n
+}
+
+fn halve(x: Float) -> Float {
+    return x / 2.0
+}
+
+example plain(1) == plain(1)                        // <- E0306
+example sure(1) == "one"                            // <- E0301
+example sure(1) fails _                             // <- E0708
+example sure(risky(1)) == 1                         // <- E0701
+example missing(1) == 1                             // <- E0201
+example risky(1) fails 5                            // <- E0301
+example risky(1)                                    // <- E0101
+example risky(1) != 2                               // <- E0101
+example risky(1) == 1
+example risky(1) fails "boom"
+example halve(1.0) == 0.5
+example sure(3) == 1 + 2

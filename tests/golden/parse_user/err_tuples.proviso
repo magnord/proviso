@@ -1,0 +1,88 @@
+// phase: 2.5
+// expect-error: E0101
+// expect-error: E0211
+// expect-error: E0301
+// expect-error: E0302
+// expect-error: E0306
+// expect-error: E0311
+// expect-error: E0312
+// expect-error: E0503
+// A tuple has at least two elements, so `(a,)` and a parenthesized type are errors, and
+// `(a)` is only grouping (OPEN_QUESTIONS P5). A tuple implements `Eq` and `Ord` only when
+// every element does, and `Float` has IEEE `==` and `<` without implementing either
+// (REFERENCE §12.2). A literal element must fit the type the tuple gives it (§2). Tuple
+// patterns count toward exhaustiveness like any constructor (§6.3). A tuple stores its
+// elements, so it copies them (§4.8). A `pub` function may not mention a private type
+// inside a tuple (§3).
+record Secret {
+    n: Int
+}
+
+fn floats() -> Bool {
+    return (1, 2.5) == (1, 2.5)                     // <- E0306
+}
+
+fn ordered() -> Bool {
+    return (1.0, 2) < (2.0, 1)                      // <- E0306
+}
+
+fn mixed() -> Bool {
+    return (1, 2) < (1, "x")                        // <- E0301
+}
+
+fn grouped() -> Int {
+    let g = (5)
+    return g
+}
+
+fn narrow() {
+    let c: (Int8, Int) = (300, 1)                   // <- E0302
+    let d: (Int, Text) = (1, 2)                     // <- E0301
+    let e: (Int, Int) = (1, 2, 3)                   // <- E0301
+}
+
+fn trailing() {
+    let t = (1,)                                    // <- E0101
+}
+
+fn paren_type(p: (Int)) {                           // <- E0101
+}
+
+fn trailing_type(p: (Int,)) {                       // <- E0101
+}
+
+fn gaps(a: Bool, b: Bool) -> Int {
+    return match (a, b) {                           // <- E0311
+        (true, _) => 1
+        (_, true) => 2
+    }
+}
+
+fn arity(p: (Int, Int)) -> Int {
+    return match p {
+        (x, y, z) => x                              // <- E0301
+    }
+}
+
+fn not_a_tuple(n: Int) -> Int {
+    return match n {
+        (a, b) => a                                 // <- E0301
+        _ => 0
+    }
+}
+
+fn unknown() {
+    let u = (1, None)                               // <- E0312
+}
+
+fn dup[T](x: T) -> (T, T) {
+    return (x, x)                                   // <- E0503, E0503
+}
+
+fn dup_copy[T: Copy](x: T) -> (T, T) {
+    return (x, x)
+}
+
+pub fn leak() -> (Secret, Int) {                    // <- E0211
+    return (Secret(n: 1), 2)
+}

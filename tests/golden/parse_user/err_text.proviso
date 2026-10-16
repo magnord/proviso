@@ -1,0 +1,34 @@
+// phase: 2.5
+// expect-error: E0205
+// expect-error: E0208
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0307
+// expect-error: E0701
+// Only the integer types have `parse`, which takes one `Text` and can fail (STD.md). The
+// `Text` methods take the arguments STD.md declares. `ParseError` is named only after
+// `use std.text { ParseError }`, which is the module's one item so far (OPEN_QUESTIONS P5).
+use std.text { Grapheme }                           // <- E0205
+
+fn parsers(t: Text) -> Int fails Text {
+    let a = Text.parse(t) else 0                    // <- E0303
+    let b = Float.parse(t) else 0.0                 // <- E0303
+    let c = Bool.parse(t) else false                // <- E0303
+    let d = Int.parse(5) else 0                     // <- E0301
+    let e = Int.parse() else 0                      // <- E0208
+    let f = Int.parse(t)                            // <- E0701
+    let g = Int.parse(text: t, base: 10) else 0     // <- E0208
+    let h = Int.parse(t) else fail it               // <- E0301
+    return a
+}
+
+fn methods(t: Text) {
+    let i = t.split_once(1)                         // <- E0301
+    let j = t.trim(1)                               // <- E0208
+    let k = t.starts_with()                         // <- E0208
+    let l = t.strip_prefix(prefix: 'x')             // <- E0301
+    let m = t.reversed()                            // <- E0303
+}
+
+fn unnamed(e: ParseError) {                         // <- E0307
+}

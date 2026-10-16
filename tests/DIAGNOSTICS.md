@@ -69,9 +69,11 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0315 | `orphan_impl` | 2 | An `impl` in neither the module of the interface nor that of the type, such as `impl Int` or `impl Show for Int` (§3, §4.9). | methods/err_methods, methods/err_impls |
 | E0316 | `not_implementable` | 2 | An `impl` of an interface that can't be implemented by hand, such as `Copy`, which copyable types with no reach satisfy (§5.1). | methods/err_impls |
 | E0317 | `type_argument_count` | 2 | A call whose `::[…]` gives a function or method more or fewer type arguments than it has type parameters, or any to one that has none (§4.8). | methods/err_generics |
+| E0318 | `refutable_pattern` | 2 | A `let` pattern that may not match every value of its type: a variant that may be absent, a `Bool` or unit literal that may be the other value, or any integer, char or text literal or range, which the checker can't prove covers the value (§6.4, §6.6; OPEN_QUESTIONS P5). Use `match`, `is` or an `else` form. | parse_user/err_let |
 | E0412 | `refinement_refuted` | 5 | A refinement obligation is refuted: the verifier found values, consistent with every admissible fact, that violate it (§8.3, §8.5). The diagnostic carries the counterexample. | f01, f02, f03, f17 |
 | E0413 | `partial_inout_of_refined_part` | 5 | A part of a refined value is passed as `inout(partial)` (§5.4). | f16 |
 | E0414 | `impl_requires_mismatch` | 4 | An implementation's `requires` clauses differ from the interface method's as written (§4.9). | f12 |
+| E0415 | `check_falls_through` | 2 | The `else` of a `check` doesn't leave: it must `fail`, or be a block that returns, breaks or continues (§8.4; OPEN_QUESTIONS P5). | parse_user/err_check |
 | E0501 | `use_after_move` | 2 | A unique or resource value is used after it moved (§5.1). | f06 |
 | E0502 | `lent_resource_consumed` | 2 | A borrowed or `inout` resource is passed to `take`, or used by a `take self` method (§10 rule 6). | f15 |
 | E0503 | `not_copyable` | 2 | A borrowed value of a type parameter without `Copy`, or of a type built from one such as `Option[T]`, is copied: bound to a new name, assigned, stored in a value, returned or failed with (§4.8). | methods/err_copy |
@@ -83,6 +85,8 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0704 | `main_error_not_show` | 1 | `main`'s error type doesn't implement `Show` (§7.4). | basics/err_main_error_not_show |
 | E0705 | `fail_without_fails` | 2 | A `fail` in a function that declares no `fails`, or in a `where` clause, which has no function to fail (§7.1). | option_result/err_fail_attempt |
 | E0706 | `attempt_without_failure` | 2 | An `attempt` that marks no call that can fail. | option_result/err_fail_attempt |
+| E0707 | `nothing_to_unwrap` | 2 | An `else` form whose left side is neither an `Option` nor a call that can fail, such as a `Result` from `attempt` or a call a `try` already marks (§6.6; OPEN_QUESTIONS P5). | parse_user/err_else |
+| E0708 | `example_cannot_fail` | 2 | An `example … fails P` whose call can't fail (§14). | parse_user/err_examples |
 | E0901 | `not_implemented` | 1 | A construct the language has but this implementation doesn't support yet. The message says whether it is planned for a v1 phase, deferred past v1, or not yet scheduled. | basics/err_not_implemented, records/err_not_yet, enums/err_not_yet, enums/err_construction, option_result/err_types, option_result/err_not_yet, methods/err_not_yet |
 | E0902 | `nesting_too_deep` | 1 | Expressions and blocks nested more than 1,000 levels deep, counting each operator of a chain such as `a + b + c` (OPEN_QUESTIONS P5). | basics/err_nesting_too_deep |
 | E0903 | `match_too_complex` | 2 | A `match` whose exhaustiveness takes more than 10 million steps to check, as some sets of arms take exponential work (OPEN_QUESTIONS P5). | enums/err_match_too_complex |

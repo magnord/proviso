@@ -1,0 +1,83 @@
+// phase: 2.5
+// Tuples `(A, B)` are built with parentheses and taken apart with tuple patterns, in a
+// `match`, an `is` test or a `let` (REFERENCE §4.2, §6.4, §6.6). A literal element takes
+// its type from the expected tuple type (§2). Tuples implement `Eq`, `Ord`, `Hash` and
+// `Show` when their elements do. `Show` and `debug` write the literal form with text and
+// chars quoted, and `Ord` compares element by element from the left (OPEN_QUESTIONS P5).
+// A `var` pattern makes each of its bindings mutable.
+use std.io { IoError }
+
+record Point derives(Eq, Show) {
+    x: Int
+    y: Int
+}
+
+fn swap[A: Copy, B: Copy](pair: (A, B)) -> (B, A) {
+    let (a, b) = pair
+    return (b, a)
+}
+
+fn classify(p: (Int, Bool)) -> Text {
+    return match p {
+        (0, _) => "zero"
+        (n, true) if n > 100 => "big and set"
+        (_, true) => "set"
+        (_, false) => "clear"
+    }
+}
+
+fn order_name(a: (Int, Text), b: (Int, Text)) -> Text {
+    if a < b {
+        return "less"
+    }
+    if a == b {
+        return "equal"
+    }
+    return "greater"
+}
+
+fn corner(p: Point) -> (Int, Int) {
+    let Point(x, y: down) = p
+    return (x, -down)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let pair = (1, "one")
+    try sys.stdout.write_line(f"{pair}")
+    let nested = ((1, 'x'), Some((2.5, "two")), Point(x: 3, y: -4))
+    try sys.stdout.write_line(f"{nested}")
+    debug(nested)
+    let swapped = swap(pair)
+    try sys.stdout.write_line(f"{swapped}")
+    let small: (Int8, UInt8) = (-128, 255)
+    try sys.stdout.write_line(f"{small}")
+    try sys.stdout.write_line(classify((0, true)))
+    try sys.stdout.write_line(classify((101, true)))
+    try sys.stdout.write_line(classify((100, true)))
+    try sys.stdout.write_line(classify((7, false)))
+    try sys.stdout.write_line(order_name(a: (1, "b"), b: (2, "a")))
+    try sys.stdout.write_line(order_name(a: (2, "a"), b: (2, "b")))
+    try sys.stdout.write_line(order_name(a: (2, "b"), b: (2, "b")))
+    try sys.stdout.write_line(order_name(a: (3, "a"), b: (2, "z")))
+    let (left, (mid, right)) = (1, (2, 3))
+    try sys.stdout.write_line(f"{left} {mid} {right}")
+    var (count, label) = (0, "start")
+    count += 5
+    label = "end"
+    try sys.stdout.write_line(f"{count} {label}")
+    let (_, kept) = ("dropped", true)
+    try sys.stdout.write_line(f"{kept}")
+    let shifted = corner(Point(x: 9, y: 8))
+    try sys.stdout.write_line(f"{shifted}")
+    if pair is (1, word) {
+        try sys.stdout.write_line(word)
+    }
+    let same = (Point(x: 1, y: 2), "p") == (Point(x: 1, y: 2), "p")
+    let differs = (1, "one") != (1, "uno")
+    try sys.stdout.write_line(f"{same} {differs}")
+    let maybe: Option[(Int, Text)] = Some((4, "four"))
+    match maybe {
+        Some((n, text)) => try sys.stdout.write_line(f"{n} is {text}")
+        None => try sys.stdout.write_line("none")
+    }
+}
