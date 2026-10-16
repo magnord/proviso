@@ -106,14 +106,17 @@ pub struct FnInfo {
 /// A type parameter.
 pub struct GenericInfo {
     /// How diagnostics write it: its name, or for a parameter of interface type such as
-    /// `x: Show`, the interface's.
+    /// `x: Show`, `type of x`.
     pub name: Box<str>,
-    /// `None` for the parameter that an interface type stands for (REFERENCE §4.9), which
-    /// `::[…]` doesn't give and nothing can name.
+    /// The name the signature and body use for it. `None` for a parameter declared twice,
+    /// and for the one an interface type stands for, which nothing can name.
     pub sym: Option<Symbol>,
+    /// For the type parameter that a parameter of interface type stands for (REFERENCE
+    /// §4.9), that parameter's name. `::[…]` gives only the others.
+    pub param: Option<Symbol>,
     /// The interfaces its argument must implement.
     pub bounds: Vec<IfaceId>,
-    /// A constraint was rejected, so it stands for an unknown type.
+    /// The declaration or a constraint was rejected, so it stands for an unknown type.
     pub rejected: bool,
 }
 
@@ -300,6 +303,9 @@ struct FnState {
     returns: bool,
     /// The interfaces each of the function's type parameters implements.
     bounds: Vec<Vec<IfaceId>>,
+    /// For each type parameter that a parameter of interface type stands for, that
+    /// parameter's name and the interface, which diagnostics suggest a declaration with.
+    anonymous: Vec<Option<(Box<str>, Box<str>)>>,
 }
 
 impl FnState {
@@ -312,6 +318,7 @@ impl FnState {
             loops: Vec::new(),
             returns: true,
             bounds: Vec::new(),
+            anonymous: Vec::new(),
         }
     }
 }
@@ -963,16 +970,22 @@ impl Checker<'_> {
             let text = m.text(param.name.sym);
             // A wrongly cased name is reported once, not again for what it collides with.
             let cased = self.pascal_case(param.name, "type parameter");
+            // A rejected parameter keeps its place, so `::[…]` still gives it, and stands for
+            // an unknown type (§15.1). Its name means the first declaration of it.
+            let rejected = GenericInfo { name: text.into(), sym: None, param: None, bounds: Vec::new(), rejected: true };
             if self.generic_scope.iter().any(|(sym, _)| *sym == param.name.sym) {
                 if cased {
                     let message = format!("type parameter `{text}` is declared twice");
                     self.error(codes::DUPLICATE_NAME, param.name.span, message);
                 }
+                generics.push(rejected);
                 continue;
             }
             if cased && self.names_type(param.name.sym) {
                 let message = format!("type parameter `{text}` would shadow the type `{text}` (H4)");
                 self.error(codes::SHADOWING, param.name.span, message);
+                self.generic_scope.push((param.name.sym, None));
+                generics.push(GenericInfo { sym: Some(param.name.sym), ..rejected });
                 continue;
             }
             let mut bounds = Vec::new();
@@ -986,7 +999,7 @@ impl Checker<'_> {
             }
             let index = generics.len() as u32;
             self.generic_scope.push((param.name.sym, (!rejected).then_some(index)));
-            generics.push(GenericInfo { name: text.into(), sym: Some(param.name.sym), bounds, rejected });
+            generics.push(GenericInfo { name: text.into(), sym: Some(param.name.sym), param: None, bounds, rejected });
         }
         self.param_names = generics.iter().map(|g| g.name.clone()).collect();
         self.self_ty = owner.clone();
@@ -1010,9 +1023,10 @@ impl Checker<'_> {
                 Some(name) => match self.bound(name, decl.name, vis) {
                     Some(iface) => {
                         let index = generics.len() as u32;
-                        let name: Box<str> = self.iface_name(iface).into();
+                        let name: Box<str> = format!("type of {}", m.text(param.name.sym)).into();
                         self.param_names.push(name.clone());
-                        generics.push(GenericInfo { name, sym: None, bounds: vec![iface], rejected: false });
+                        let sym = Some(param.name.sym);
+                        generics.push(GenericInfo { name, sym: None, param: sym, bounds: vec![iface], rejected: false });
                         Ty::Param(index)
                     }
                     None => Ty::Error,
@@ -1460,7 +1474,10 @@ impl Checker<'_> {
         let info = &self.p.fns[id];
         let item = &self.m.items[info.item];
         let span = item.name().map_or(item.span, |n| n.span);
+        // The runtime gives `main` no type arguments.
+        let generic = !info.generics.is_empty();
         let signature_ok = item.vis == Visibility::Pub
+            && !generic
             && info.params.len() == 1
             && matches!(info.params[0].ty, Ty::Adt(AdtId::SYSTEM, _) | Ty::Error)
             && info.params[0].mode == ParamMode::Keep
@@ -1474,6 +1491,7 @@ impl Checker<'_> {
             );
         }
         if let Some(err) = fails
+            && !generic
             && !self.p.decls.implements(&err, IfaceId::SHOW, &[])
             && err != Ty::Error
         {
@@ -1626,6 +1644,9 @@ impl Checker<'_> {
         }
         let mut state = FnState::new(info.ret.clone(), info.fails.clone());
         state.bounds = info.generics.iter().map(|g| g.bounds.clone()).collect();
+        state.anonymous = (info.generics.iter())
+            .map(|g| Some((m.text(g.param?).into(), self.iface_name(*g.bounds.first()?).into())))
+            .collect();
         self.generic_scope = (info.generics.iter().enumerate())
             .filter_map(|(i, g)| Some((g.sym?, (!g.rejected).then_some(i as u32))))
             .collect();
@@ -2037,15 +2058,25 @@ impl Checker<'_> {
     /// Reports a copy of a borrowed value whose type has a type parameter that isn't `Copy`,
     /// such as `x` or `o` in `return x` or `let y = o` (REFERENCE §4.8).
     fn copied(&mut self, e: ExprId, ty: &Ty) {
-        let Some(param) = self.uncopyable(ty) else { return };
-        if !self.borrowed_place(e) {
+        // Only a generic function's types mention type parameters, and the borrowed place is
+        // the cheap test, so a deep type is walked only where it can matter.
+        if self.f.bounds.is_empty() || !self.borrowed_place(e) {
             return;
         }
-        let name = self.param_names.get(param as usize).cloned().unwrap_or_else(|| "_".into());
-        let message = format!(
-            "this copies a borrowed `{}`, which needs `{name}: Copy`; pass it on instead, or add the constraint (§4.8)",
-            self.show(ty)
-        );
+        let Some(param) = self.uncopyable(ty) else { return };
+        let message = match self.f.anonymous.get(param as usize).cloned().flatten() {
+            Some((name, iface)) => format!(
+                "this copies a borrowed `{}`, which needs `Copy`; pass it on instead, or declare the parameter as `[T: {iface} + Copy]({name}: T)` (§4.8)",
+                self.show(ty)
+            ),
+            None => {
+                let name = self.param_names.get(param as usize).cloned().unwrap_or_else(|| "_".into());
+                format!(
+                    "this copies a borrowed `{}`, which needs `{name}: Copy`; pass it on instead, or add the constraint (§4.8)",
+                    self.show(ty)
+                )
+            }
+        };
         let span = self.span(e);
         self.error(codes::NOT_COPYABLE, span, message);
     }
@@ -2271,13 +2302,9 @@ impl Checker<'_> {
         };
         // A variant with fields can give its own type, as `Some(1)` and `Option.Some(1)` do,
         // so in `None == Some(1)` it goes first.
-        let has_fields = |e: ExprId| match &self.m.exprs[e].kind {
-            ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. } => !args.is_empty(),
-            _ => false,
-        };
         let lhs_needs = self.needs_context(lhs);
         let rhs_needs = self.needs_context(rhs);
-        if lhs_needs && (!rhs_needs || (!has_fields(lhs) && has_fields(rhs))) {
+        if lhs_needs && (!rhs_needs || (!self.has_fields(lhs) && self.has_fields(rhs))) {
             let rt = self.expr(rhs, hint);
             let lt = self.expr(lhs, numeric_or(&rt).as_ref());
             (lt, rt)
@@ -2288,8 +2315,18 @@ impl Checker<'_> {
         }
     }
 
-    /// A literal, or a variant of `Option` or `Result`, whose type comes from its context
-    /// when it has one (OPEN_QUESTIONS P5).
+    /// Whether `e` is a call with arguments, such as a variant with fields, which can give
+    /// its own type as `Some(1)` and `Option.Some(1)` do.
+    fn has_fields(&self, e: ExprId) -> bool {
+        match &self.m.exprs[e].kind {
+            ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. } => !args.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// A literal, a variant of `Option` or `Result`, or a call of a generic function whose
+    /// result type only its context can give, as in `id(1)` or `nothing()`, whose type comes
+    /// from its context when it has one (OPEN_QUESTIONS P5).
     fn needs_context(&self, e: ExprId) -> bool {
         let m = self.m;
         let prelude_variant =
@@ -2298,12 +2335,18 @@ impl Checker<'_> {
             ExprKind::Name(name) => prelude_adt(m.text(name.sym)).is_some() && !self.poisoned.contains(&name.sym),
             _ => false,
         };
-        match m.exprs[e].kind {
-            ExprKind::Name(name) => prelude_variant(name),
-            ExprKind::Call { callee, .. } => {
-                matches!(m.exprs[callee].kind, ExprKind::Name(name) if prelude_variant(name))
+        match &m.exprs[e].kind {
+            ExprKind::Name(name) => prelude_variant(*name),
+            ExprKind::Call { callee, targs: None, args } if let Some(f) = self.fn_named(*callee) => {
+                let info = &self.p.fns[f];
+                !info.generics.is_empty()
+                    && mentions_param(&info.ret)
+                    && args.iter().all(|arg| self.needs_context(arg.value))
             }
-            ExprKind::Field { base, .. } | ExprKind::MethodCall { receiver: base, .. } => prelude_enum(base),
+            ExprKind::Call { callee, .. } => {
+                matches!(m.exprs[*callee].kind, ExprKind::Name(name) if prelude_variant(name))
+            }
+            ExprKind::Field { base, .. } | ExprKind::MethodCall { receiver: base, .. } => prelude_enum(*base),
             _ => self.is_untyped_literal(e),
         }
     }
@@ -2525,9 +2568,11 @@ impl Checker<'_> {
         let (ret, fails) = (info.ret.clone(), info.fails.clone());
         let generics: Vec<(Box<str>, Vec<IfaceId>)> =
             info.generics.iter().map(|g| (g.name.clone(), g.bounds.clone())).collect();
-        // A parameter whose constraint is rejected stands for an unknown type.
+        // A parameter whose declaration or constraint is rejected stands for an unknown type.
         let mut tvars: Vec<Option<Ty>> = info.generics.iter().map(|g| g.rejected.then_some(Ty::Error)).collect();
-        let declared = info.generics.iter().filter(|g| g.sym.is_some()).count();
+        // `::[…]` gives the declared parameters, which come before those of interface types.
+        let declared = info.generics.iter().filter(|g| g.param.is_none()).count();
+        let mut fixed = vec![false; tvars.len()];
         match targs {
             Some(targs) => {
                 let tys: Vec<Ty> = targs.iter().map(|&t| self.resolve_type(t)).collect();
@@ -2549,9 +2594,9 @@ impl Checker<'_> {
                     }
                     return Ty::Error;
                 }
-                // The parameters `::[…]` gives come before those of interface types.
-                for (slot, ty) in tvars.iter_mut().zip(tys) {
-                    *slot = Some(ty);
+                for ((slot, fixed), ty) in tvars.iter_mut().zip(&mut fixed).zip(tys) {
+                    *fixed = true;
+                    slot.get_or_insert(ty);
                 }
             }
             None => {
@@ -2560,7 +2605,13 @@ impl Checker<'_> {
                 }
             }
         }
-        let counted = self.generic_args(name, &params, &mut tvars, args, span, false);
+        let counted = self.generic_args(name, &params, &mut tvars, &fixed, args, span, false);
+        // An expected type with an error may have given them (§15.1).
+        if expected == Some(&Ty::Error) {
+            for slot in tvars.iter_mut().filter(|slot| slot.is_none()) {
+                *slot = Some(Ty::Error);
+            }
+        }
         let Some(tvars) = tvars.iter().cloned().collect::<Option<Vec<Ty>>>() else {
             if counted {
                 let missing: Vec<String> = (tvars.iter().zip(&generics))
@@ -2602,7 +2653,7 @@ impl Checker<'_> {
         let def = self.p.decls.adt(id);
         let name = def.name.clone();
         let params: Vec<(Box<str>, Ty)> = def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-        self.generic_args(&name, &params, &mut [], args, span, true);
+        self.generic_args(&name, &params, &mut [], &[], args, span, true);
         Ty::adt(id)
     }
 
@@ -3009,18 +3060,21 @@ impl Checker<'_> {
 
     /// Checks arguments against parameters, including the label rules (REFERENCE §3, H3).
     fn args<S: AsRef<str>>(&mut self, callee: &str, params: &[(S, Ty)], args: &[Arg], span: Span) {
-        self.generic_args(callee, params, &mut [], args, span, false);
+        self.generic_args(callee, params, &mut [], &[], args, span, false);
     }
 
     /// Checks arguments against parameters whose types may mention the type parameters
-    /// `targs` stands for. An argument whose parameter mentions a type parameter not yet
-    /// known gives it the part of its own type in that place. A construction, which stores
-    /// its arguments, `copy`s them. Returns whether the number of arguments was right.
+    /// `targs` stands for, of which `::[…]` gave those `fixed` marks. An argument whose
+    /// parameter mentions a type parameter not yet known gives it the part of its own type
+    /// in that place. A construction, which stores its arguments, `copy`s them. Returns
+    /// whether the number of arguments was right.
+    #[allow(clippy::too_many_arguments)]
     fn generic_args<S: AsRef<str>>(
         &mut self,
         callee: &str,
         params: &[(S, Ty)],
         targs: &mut [Option<Ty>],
+        fixed: &[bool],
         args: &[Arg],
         span: Span,
         copy: bool,
@@ -3043,7 +3097,7 @@ impl Checker<'_> {
         // One label problem is reported per call, with the labels the call needs.
         let labelled = params.iter().map(|(param, _)| format!("{}: …", param.as_ref())).collect::<Vec<_>>().join(", ");
         let mut labels_reported = false;
-        for (i, (arg, (param, ty))) in args.iter().zip(params).enumerate() {
+        for (i, (arg, (param, _))) in args.iter().zip(params).enumerate() {
             let param = param.as_ref();
             if arg.inout {
                 let span = self.span(arg.value);
@@ -3076,48 +3130,42 @@ impl Checker<'_> {
                 }
                 _ => {}
             }
+        }
+        // Arguments that need no context go first, then variants with fields, so that a
+        // literal or a `None` takes the type the others give, in any position (OPEN_QUESTIONS
+        // P5).
+        let mut order: Vec<usize> = (0..args.len()).collect();
+        if targs.iter().any(Option::is_none) {
+            order.sort_by_key(|&i| match args[i].value {
+                e if !self.needs_context(e) => 0,
+                e if self.has_fields(e) => 1,
+                _ => 2,
+            });
+        }
+        for i in order {
+            let (arg, ty) = (&args[i], &params[i].1);
             self.copying = copy;
             // A type parameter that `targs` doesn't cover is the caller's own, such as the `T`
             // that `Self` stands for in `x.bigger(y)` where `x: T`, so it is a type like any.
-            let targ = |i: &u32| targs.get(*i as usize);
-            match ty {
-                Ty::Param(i) if targ(i).is_some_and(Option::is_none) => {
-                    targs[*i as usize] = Some(self.infer(arg.value))
-                }
-                // An expected `Never`, also inside a type argument, says less than the field,
-                // which widens it, so `Some(Some(1))` is an `Option[Option[Int]]` where an
-                // `Option[Option[Never]]` was expected (OPEN_QUESTIONS P5).
-                Ty::Param(i)
-                    if targ(i).and_then(Option::as_ref).is_some_and(|t| *t == Ty::Never || t.has_never_arg()) =>
-                {
-                    let i = *i as usize;
-                    let expected = targs[i].clone().expect("the guard saw a type");
-                    let actual = self.expr(arg.value, Some(&expected).filter(|t| **t != Ty::Never));
-                    targs[i] = Some(expected.join(&actual).unwrap_or_else(|| {
-                        let span = self.span(arg.value);
-                        let message = format!("expected `{}`, found `{}`", self.show(&expected), self.show(&actual));
-                        self.error(codes::TYPE_MISMATCH, span, message);
-                        Ty::Error
-                    }));
-                }
-                ty if mentions_unknown(ty, targs) => {
-                    let actual = self.infer(arg.value);
-                    unify(ty, &actual, targs);
-                    let known: Vec<Ty> = targs.iter().map(|t| t.clone().unwrap_or(Ty::Error)).collect();
-                    let expected = ty.subst(&known);
-                    if !expected.accepts(&actual) {
-                        let span = self.span(arg.value);
-                        let message = format!("expected `{}`, found `{}`", self.show(&expected), self.show(&actual));
-                        self.error(codes::TYPE_MISMATCH, span, message);
-                    }
-                }
-                ty if targs.is_empty() => {
-                    self.check(arg.value, ty);
-                }
-                ty => {
-                    let known: Vec<Ty> = targs.iter().map(|t| t.clone().unwrap_or(Ty::Error)).collect();
-                    self.check(arg.value, &ty.subst(&known));
-                }
+            if !mentions_targ(ty, targs) {
+                self.check(arg.value, ty);
+                continue;
+            }
+            // A type argument not known yet is `Never` in the expected type, which the argument
+            // widens, as a field widens a `Never` the expected type gives, so `Ok(1)` meets a
+            // `Result[T, Text]` and `Some(1)` widens an `Option[Never]` (OPEN_QUESTIONS P5). An
+            // expected type that says nothing more is left out, so `None` alone gives no `T`.
+            let open: Vec<Ty> = targs.iter().map(|t| t.clone().unwrap_or(Ty::Never)).collect();
+            let expected = ty.subst(&open);
+            let informative = expected != Ty::Never && says_more(ty, targs);
+            let actual = self.expr(arg.value, Some(&expected).filter(|_| informative));
+            infer_targs(ty, &actual, targs, fixed);
+            let known: Vec<Ty> = targs.iter().map(|t| t.clone().unwrap_or(Ty::Error)).collect();
+            let expected = ty.subst(&known);
+            if !expected.accepts(&actual) {
+                let span = self.span(arg.value);
+                let message = format!("expected `{}`, found `{}`", self.show(&expected), self.show(&actual));
+                self.error(codes::TYPE_MISMATCH, span, message);
             }
         }
         true
@@ -3438,7 +3486,7 @@ impl Checker<'_> {
         }
         let params: Vec<(Box<str>, Ty)> = variant.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
         self.p.res.insert(e, Res::Ctor(id, v));
-        let counted = self.generic_args(&ctor, &params, &mut targs, args, span, true);
+        let counted = self.generic_args(&ctor, &params, &mut targs, &[], args, span, true);
         self.variant_type(id, targs, expected, span, !counted)
     }
 
@@ -3854,12 +3902,64 @@ impl Checker<'_> {
     }
 }
 
-/// Whether `ty` mentions a type parameter that `targs` doesn't know yet.
-fn mentions_unknown(ty: &Ty, targs: &[Option<Ty>]) -> bool {
+/// Whether `ty` mentions one of the type parameters `targs` stands for.
+fn mentions_targ(ty: &Ty, targs: &[Option<Ty>]) -> bool {
     match ty {
-        Ty::Param(i) => targs.get(*i as usize).is_some_and(Option::is_none),
-        Ty::Adt(_, args) => args.iter().any(|arg| mentions_unknown(arg, targs)),
+        Ty::Param(i) => (*i as usize) < targs.len(),
+        Ty::Adt(_, args) => args.iter().any(|arg| mentions_targ(arg, targs)),
         _ => false,
+    }
+}
+
+/// Whether `ty` mentions a type parameter.
+fn mentions_param(ty: &Ty) -> bool {
+    match ty {
+        Ty::Param(_) => true,
+        Ty::Adt(_, args) => args.iter().any(mentions_param),
+        _ => false,
+    }
+}
+
+/// Whether `ty`, with the type parameters `targs` knows, says more about an argument than
+/// that it is any type, as `Result[T, Text]` does and `Option[T]` doesn't while `T` is open.
+fn says_more(ty: &Ty, targs: &[Option<Ty>]) -> bool {
+    match ty {
+        Ty::Param(i) => targs.get(*i as usize).is_none_or(Option::is_some),
+        Ty::Adt(_, args) => args.is_empty() || args.iter().any(|arg| says_more(arg, targs)),
+        _ => true,
+    }
+}
+
+/// Learns the type parameters in `declared` from an argument of type `actual`. One not known
+/// yet takes the part of `actual` in its place, and one known as `Never`, or with a `Never`
+/// inside, widens to it, unless `::[…]` gave it (`fixed`). An error gives every one it
+/// covers, so nothing more is reported about them (§15.1). Parts that differ are left for
+/// the caller to report.
+fn infer_targs(declared: &Ty, actual: &Ty, targs: &mut [Option<Ty>], fixed: &[bool]) {
+    match (declared, actual) {
+        (Ty::Param(i), actual) => {
+            let i = *i as usize;
+            match targs.get(i) {
+                Some(None) => targs[i] = Some(actual.clone()),
+                Some(Some(known)) if !fixed.get(i).copied().unwrap_or(false) => {
+                    if let Some(joined) = known.join(actual) {
+                        targs[i] = Some(joined);
+                    }
+                }
+                _ => {}
+            }
+        }
+        (Ty::Adt(id, args), Ty::Adt(other, actual_args)) if id == other && args.len() == actual_args.len() => {
+            for (arg, actual) in args.iter().zip(actual_args.iter()) {
+                infer_targs(arg, actual, targs, fixed);
+            }
+        }
+        (Ty::Adt(_, args), Ty::Error | Ty::Never) => {
+            for arg in args.iter() {
+                infer_targs(arg, actual, targs, fixed);
+            }
+        }
+        _ => {}
     }
 }
 
