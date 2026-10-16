@@ -50,6 +50,25 @@ fn run_needs_a_main() {
     assert_eq!(run(&["check"], &file).status.code(), Some(0));
 }
 
+/// Golden files check only codes, so the wording that tells std's `ParseError` from a
+/// module's, and an example from a function, is checked here (OPEN_QUESTIONS P5).
+#[test]
+fn messages_name_what_they_mean() {
+    let file = source(
+        "names.proviso",
+        "use std.text { ParseError as PE }\n\nenum ParseError {\n    Mine\n}\n\nfn arms(t: Text) -> Int {\n    return Int.parse(t) else match it {\n        PE.Empty => 0\n        PE.Invalid => 1\n    }\n}\n\nfn wrong(e: PE) -> Int {\n    return match e {\n        ParseError.Mine => 1\n    }\n}\n\nfn gone(e: PE) -> Int {\n    return match e {\n        PE.Gone => 1\n        _ => 0\n    }\n}\n\nfn risky(n: Int) -> Int fails Text {\n    return n\n}\n\nfn id(n: Int) -> Int {\n    return n\n}\n\nexample id(try risky(1)) == 1\n",
+    );
+    let errors = stderr(&run(&["check"], &file));
+    for expected in [
+        "does not cover `std.text.ParseError.OutOfRange`",
+        "expected a pattern for `std.text.ParseError`, found one for `ParseError`",
+        "`std.text.ParseError` has no variant `Gone`",
+        "`try` in an example, which has no function to propagate `Text` to",
+    ] {
+        assert!(errors.contains(expected), "missing {expected:?} in:\n{errors}");
+    }
+}
+
 #[test]
 fn json_applies_only_to_check() {
     let file = source("hello.proviso", HELLO);
