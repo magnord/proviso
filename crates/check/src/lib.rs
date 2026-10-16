@@ -1799,6 +1799,12 @@ impl Checker<'_> {
             (state.returns, state.example) = (false, true);
             state.scopes.push(Vec::new());
             self.f = state;
+            if self.names_construction(decl.call) {
+                let span = self.span(decl.call);
+                let message = "an example tests a function or method call, not a construction";
+                self.error(codes::UNEXPECTED_TOKEN, span, message);
+                continue;
+            }
             self.markers.push(Marker { handler: Some(decl.call), errors: Vec::new() });
             self.in_chain = true;
             let ty = self.infer(decl.call);
@@ -1809,18 +1815,6 @@ impl Checker<'_> {
                 }
             }
             let span = self.span(decl.call);
-            // Only the checker knows whether `Sure(1)` calls a misnamed function or builds a
-            // value, so the parser leaves this to it (REFERENCE §14).
-            // A record's construction is resolved at its callee, and a variant's at the call.
-            let callee = match m.exprs[decl.call].kind {
-                ExprKind::Call { callee, .. } => callee,
-                _ => decl.call,
-            };
-            if [callee, decl.call].iter().any(|&e| matches!(self.p.res.get(e), Some(Res::Ctor(..)))) {
-                let message = "an example tests a function or method call, not a construction";
-                self.error(codes::UNEXPECTED_TOKEN, span, message);
-                continue;
-            }
             let err = match errors.as_slice() {
                 [] => None,
                 [err] => Some(err.clone()),
@@ -1862,6 +1856,27 @@ impl Checker<'_> {
                 }
             }
             self.p.examples.push(ExampleInfo { item: index, locals: self.f.locals.len() });
+        }
+    }
+
+    /// Whether an example's call builds a value, as `Some(1)`, `Point(x: 1)` and
+    /// `Shape.Circle(r: 1)` do. Only the checker knows whether `Sure(1)` calls a misnamed
+    /// function instead, so the parser leaves this to it (REFERENCE §14). It is told from
+    /// the names alone, so a rejected construction isn't checked.
+    fn names_construction(&self, call: ExprId) -> bool {
+        let m = self.m;
+        match m.exprs[call].kind {
+            ExprKind::Call { callee, .. } => match m.exprs[callee].kind {
+                ExprKind::Name(name) => {
+                    !self.fn_names.contains_key(&name.sym)
+                        && (bare_variant(m.text(name.sym)).is_some() || self.adt_named(name.sym).is_some())
+                }
+                _ => false,
+            },
+            ExprKind::MethodCall { receiver, method, .. } => self
+                .enum_named(receiver)
+                .is_some_and(|id| self.p.decls.adt(id).variant_named(m.text(method.sym)).is_some()),
+            _ => false,
         }
     }
 
@@ -2247,6 +2262,14 @@ impl Checker<'_> {
                 && let StmtKind::Expr(e) = m.stmts[s].kind
             {
                 self.copying = copying;
+                // A block that gives `()` may end in an `if` without `else`, which is then the
+                // statement §6.2 makes it, as in a fallback that only sometimes leaves.
+                if expected == Some(&Ty::Unit) && matches!(m.exprs[e].kind, ExprKind::If { else_branch: None, .. }) {
+                    let ty = self.expr_stmt(e);
+                    diverges |= diverges_ty(&ty);
+                    value = Some(Ty::Unit);
+                    continue;
+                }
                 let ty = match expected {
                     Some(_) if missing => self.expr(e, expected),
                     // A `Never` argument may stand for a type argument not known yet, which
@@ -3923,8 +3946,6 @@ impl Checker<'_> {
                 };
                 if then_ty == Ty::Never && else_ty == Ty::Never { Ty::Never } else { Ty::Unit }
             }
-            // Where `()` is expected, an `if` without `else` is the statement §6.2 makes it.
-            (Mode::Value(Some(Ty::Unit)), None) => Ty::Unit,
             (Mode::Value(_), None) => {
                 // A block that was never closed may have been followed by an `else`. One that
                 // diverges still gives the `if` no value when the condition is false.

@@ -1328,25 +1328,42 @@ impl Parser<'_> {
         let mut in_pattern = false;
         // The depth of a `not` whose operand is still being read.
         let mut negated: Option<usize> = None;
+        // For each open bracket, how many names were bound before it, and whether an `or`
+        // in it means its group binds none.
+        let mut groups: Vec<(usize, bool)> = Vec::new();
         let mut i = start;
         while let Some(token) = self.tokens.get(i) {
             match token.kind {
-                T::LParen | T::LBracket | T::LBrace => depth += 1,
+                T::LParen | T::LBracket | T::LBrace => {
+                    depth += 1;
+                    groups.push((names.len(), false));
+                }
                 T::RParen | T::RBracket | T::RBrace => {
                     depth = depth.saturating_sub(1);
+                    if let Some((before, true)) = groups.pop() {
+                        names.truncate(before);
+                    }
                     if negated.is_some_and(|d| depth < d) {
                         negated = None;
                     }
                 }
-                T::Newline | T::Eof => break,
+                T::Eof => break,
+                // A newline inside brackets, as in a multi-line `match`, doesn't end it.
+                T::Newline if depth == 0 => break,
                 T::Keyword(Kw::Else) if depth == 0 => break,
                 T::Keyword(Kw::Or) if depth == 0 => {
                     names.clear();
                     break;
                 }
+                T::Keyword(Kw::Or) => {
+                    in_pattern = false;
+                    if let Some(group) = groups.last_mut() {
+                        group.1 = true;
+                    }
+                }
                 T::Keyword(Kw::Not) => negated = negated.or(Some(depth)),
-                T::Keyword(Kw::Is) => in_pattern = negated.is_none(),
-                T::Keyword(Kw::And | Kw::Or) => {
+                T::Keyword(Kw::Is) => in_pattern = negated.is_none() && !groups.iter().any(|g| g.1),
+                T::Keyword(Kw::And) => {
                     in_pattern = false;
                     if negated.is_some_and(|d| depth <= d) {
                         negated = None;

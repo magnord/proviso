@@ -85,3 +85,6 @@ example Plain(n: 1) == plain(1)                     // <- E0101
 example Mode.Fast(n: 1) == Mode.Fast(n: 1)          // <- E0101
 example sure(10) == (1 + 9)
 example Misnamed(1) == 1
+example Ok(1) == Ok(1)                              // <- E0101
+example Some() == Some(1)                           // <- E0101
+example Plain(m: 1) == plain(1)                     // <- E0101

@@ -75,3 +75,18 @@ fn unknown_left(n: Int, t: Text) -> Int {
     }
     return 0
 }
+
+fn unused_in_fallback(n: Int) -> Int {
+    even_or_fail(n) else {
+        if n > 0 {
+            5                                       // <- E0102
+        }
+    }
+    return 0
+}
+
+fn even_or_fail(n: Int) fails Text {
+    if n % 2 == 0 {
+        fail "even"
+    }
+}
