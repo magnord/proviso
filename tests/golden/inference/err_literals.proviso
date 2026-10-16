@@ -4,7 +4,8 @@
 // A literal takes the type of whatever it meets, in any order and at any depth (REFERENCE
 // §2; OPEN_QUESTIONS P5; issue #10). So `300` that meets `small` doesn't fit `Int8`
 // (E0302) in each rewrite, where reading it as an `Int` first would report E0301 instead.
-// A literal that meets a type of another kind is E0301 in each order.
+// A literal that meets a type of another kind is E0301 in each order, and a value that
+// doesn't fit isn't also reported for the type arguments it leaves open (§15.1).
 
 fn first[T: Copy](a: T, b: T) -> T {
     return a
@@ -58,5 +59,8 @@ fn kinds(c: Bool, f: Float) -> Bool {
     let e6 = Some("x") == Some(1)                   // <- E0301
     let e7 = if c { 1 } else { "x" }                // <- E0301
     let e8 = if c { "x" } else { 1 }                // <- E0301
+    let e9: Int = (1, None)                         // <- E0301
+    let e10 = (1, None) == "x"                      // <- E0301
+    let e11 = "x" == (None, 1)                      // <- E0301
     return e1 or e2
 }

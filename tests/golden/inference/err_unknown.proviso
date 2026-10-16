@@ -22,6 +22,14 @@ fn never_fails[E]() -> Int fails E {
     return 1
 }
 
+fn both[T, U]() -> Result[T, U] {
+    return Result.Err(fail_never())
+}
+
+fn fail_never() -> Never {
+    unreachable
+}
+
 fn opt(x: Option[Int]) -> Option[Int] {
     return x
 }
@@ -51,6 +59,7 @@ fn joined(c: Bool) -> Bool {
     let b6 = first(a: None, b: nothing())           // <- E0312
     let b7 = first(a: nothing(), b: None)           // <- E0312
     let b8 = id(None) == id(None)                   // <- E0312
+    let b9 = both() == both()                       // <- E0312
     return b1 or b2 or b3 or b4 or b5 or b8
 }
 
