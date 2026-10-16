@@ -36,6 +36,9 @@ fn arguments() {
     let a6 = first(a: (None, 1), b: (2, 1))         // <- E0301
     let a7 = first(a: Option.None, b: "s")          // <- E0301
     let a8 = three(a: None, b: "s", c: Some("t"))   // <- E0301
+    let a10 = three(a: None, b: "s", c: Some("t"))  // <- E0301
+    let a11: Option[Int] = a10                      // <- E0301
+    let a12 = three(a: Some(None), b: 5, c: Some(Some("t"))) // <- E0301
     let a9 = three(
         a: None,
         b: "s",                                     // <- E0301

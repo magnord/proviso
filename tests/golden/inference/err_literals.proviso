@@ -37,6 +37,9 @@ fn arguments(c: Bool, small: Int8) -> Int8 {
     let b3 = first(a: if c { 300 } else { 1 }, b: small) // <- E0302
     let b4 = first(a: Some(300), b: Some(small))    // <- E0302
     let b5 = first(a: (None, 300), b: (Some(1), small)) // <- E0302
+    let b6 = first(a: -200, b: small)               // <- E0302
+    let b7 = first(a: small, b: -200)               // <- E0302
+    let b8 = first(a: -128, b: small)
     return b1 + b2 + b3
 }
 
