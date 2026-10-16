@@ -18,7 +18,8 @@
 // construction, and an example has no name, so it is never `pub`. An example is an expression with no function around it, so
 // `return`, `fail` and `try` have nothing to leave (E0108, E0705, E0702). The expected
 // value is an operand of `==`, as the call is, or an `else` form on one, so a comparison
-// after it is chained (E0103).
+// after it is chained (E0103). The two sides are read as the operands of `==` are, and
+// compared at their join, so a `Never` part of either widens to the other's (§12.2).
 record Plain {
     n: Int
 }
@@ -45,6 +46,22 @@ fn ident[T: Copy](x: T) -> T {
 
 fn label(n: Int) -> Text {
     return "n"
+}
+
+fn ok_any[T: Copy](x: T) -> Result[T, Never] {
+    return Ok(x)
+}
+
+fn ok_fixed() -> Result[Int, Never] {
+    return Ok(1)
+}
+
+fn float_err() -> Result[Int, Float] {
+    return Ok(1)
+}
+
+fn text_err() -> Result[Int, Text] {
+    return Ok(1)
 }
 
 fn yes(n: Int) -> Bool {
@@ -101,3 +118,8 @@ example Mode(2) == Mode.Fast(n: 1)                  // <- E0201
 example missing(2) == Mode.Fast(n: 1)               // <- E0201
 example ident(1) == label(1)                        // <- E0301
 example label(1) == ident(1)                        // <- E0301
+example ok_any(1) == float_err()                    // <- E0306
+example float_err() == ok_any(1)                    // <- E0306
+example ok_fixed() == float_err()                   // <- E0306
+example ok_fixed() == text_err()
+example ok_any(1) == text_err()

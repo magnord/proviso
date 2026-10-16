@@ -1807,7 +1807,7 @@ impl Checker<'_> {
             }
             // `call == v` reads its operands as `==` does, so the one that says more about its
             // type is checked first and gives the other its type (OPEN_QUESTIONS P5).
-            let given = match &decl.expect {
+            let mut given = match &decl.expect {
                 Expectation::Equals(value) if self.context_rank(decl.call) > self.context_rank(*value) => {
                     Some(self.infer(*value))
                 }
@@ -1848,17 +1848,24 @@ impl Checker<'_> {
                         self.p.examples.push(ExampleInfo { item: index, locals: self.f.locals.len() });
                         continue;
                     }
-                    let value_ty = match &given {
-                        Some(given) => {
-                            if given.join(&ty).is_none() && !given.is_unknown() && !ty.is_unknown() {
-                                let message = format!("expected `{}`, found `{}`", self.show(&ty), self.show(given));
-                                self.error(codes::TYPE_MISMATCH, self.span(*value), message);
-                            }
-                            given.clone()
+                    // The type compared is the two operands' join, which a `Never` part of
+                    // either may widen, as for `==` (§12.2).
+                    let value_ty = match given.take() {
+                        Some(given) => given,
+                        None => {
+                            // As in `operands`, the call gives the value its type.
+                            let hint = (ty.is_numeric() || matches!(ty, Ty::Adt(..))).then_some(&ty);
+                            self.expr(*value, hint)
                         }
-                        None => self.check(*value, &ty),
                     };
-                    let ty = if ty.is_unknown() { value_ty } else { ty };
+                    let ty = match value_ty.join(&ty) {
+                        Some(joined) => joined,
+                        None => {
+                            let message = format!("expected `{}`, found `{}`", self.show(&ty), self.show(&value_ty));
+                            self.error(codes::TYPE_MISMATCH, self.span(*value), message);
+                            Ty::Error
+                        }
+                    };
                     let defined = matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::EQ);
                     if !defined && !ty.is_unknown() {
                         let message =
