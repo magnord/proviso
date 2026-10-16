@@ -1,0 +1,69 @@
+// phase: 2.4
+// expect-error: E0212
+// A method call resolves to exactly one method among the type's own and those of the
+// interfaces it implements (REFERENCE §3). When two interfaces give it one name, the call
+// is ambiguous, also on a type parameter, and `I.f(x)` picks one. A type can't have a
+// method of its own with the name of a method of an interface it implements, whether the
+// interface is implemented by hand or derived. Calls of that name then take the
+// interface's method, and aren't reported again (§15.1).
+interface Front {
+    fn label(self) -> Text
+}
+
+interface Back {
+    fn label(self) -> Text
+    fn weight(self) -> Int
+}
+
+record Card {
+    n: Int
+}
+
+record Tag derives(Show) {
+    n: Int
+}
+
+impl Front for Card {
+    fn label(self) -> Text {
+        return "front"
+    }
+}
+
+impl Card {
+    fn weight(self) -> Int {                        // <- E0212
+        return 0
+    }
+
+    fn name(self) -> Text {
+        return "card"
+    }
+}
+
+impl Back for Card {
+    fn label(self) -> Text {
+        return "back"
+    }
+
+    fn weight(self) -> Int {
+        return self.n
+    }
+}
+
+impl Tag {
+    fn show(self) -> Text {                         // <- E0212
+        return "tag"
+    }
+}
+
+fn generic[T: Front + Back](x: T) -> Text {
+    let a = x.label()                               // <- E0212
+    return Front.label(x)
+}
+
+fn calls(c: Card, t: Tag) -> Text {
+    let a = c.label()                               // <- E0212
+    let b = Front.label(c)
+    let w = c.weight() + c.name().byte_len()
+    let s = t.show()
+    return Back.label(c)
+}

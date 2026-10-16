@@ -1,0 +1,22 @@
+// phase: 2.4
+// expect-exit: 70
+// expect-report: defect integer_overflow
+// A defect in a hand-written `show` is traced through the interpolation that ran it, as a
+// defect in any call is traced to its call (OPEN_QUESTIONS P5). What was printed before it
+// stays printed.
+use std.io { IoError }
+
+record Gauge {
+    level: Int8
+}
+
+impl Show for Gauge {
+    fn show(self) -> Text {
+        return f"{self.level * 2}"
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{Gauge(level: 10)}")
+    try sys.stdout.write_line(f"level {Gauge(level: 100)}")
+}

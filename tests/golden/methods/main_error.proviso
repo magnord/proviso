@@ -1,0 +1,25 @@
+// phase: 2.4
+// expect-exit: 1
+// When `main` fails, the program prints the error's `show()` to stderr and exits with code
+// 1 (REFERENCE §7.4). For an error that implements `Show` by hand, that is its text.
+record Refusal {
+    code: Int
+}
+
+impl Show for Refusal {
+    fn show(self) -> Text {
+        return f"refused with code {self.code}"
+    }
+}
+
+fn open(n: Int) -> Int fails Refusal {
+    if n > 2 {
+        fail Refusal(code: n * 100)
+    }
+    return n
+}
+
+pub fn main(sys: keep System) fails Refusal {
+    let a = try open(1)
+    let b = try open(a + 4)
+}

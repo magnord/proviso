@@ -1,0 +1,80 @@
+// phase: 2.4
+// expect-error: E0901
+// Receivers that mutate or take `self`, generic records and `impl` blocks, implementations
+// for generic types such as `Option[Int]`, a hand-written `Ord`, `Hash` or `Abandon`, `cmp`,
+// interface functions without `self`, generic interface methods and `Self` in expressions
+// come later. Uses of what they declare aren't reported again (REFERENCE §15.1), and an
+// `impl` may declare the methods its interface couldn't.
+record Counter {
+    n: Int
+}
+
+impl Counter {
+    fn bump(inout self) {                           // <- E0901
+        self.n += 1
+    }
+
+    fn close(take self) -> Int {                    // <- E0901
+        return self.n
+    }
+
+    fn fresh() -> Self {
+        return Self(n: 0)                           // <- E0901
+    }
+}
+
+record Pair[A, B] {                                 // <- E0901
+    first: A
+    second: B
+}
+
+impl[T] Pair[T, T] {                                // <- E0901
+    fn swap(self) -> Int {
+        return 0
+    }
+}
+
+interface Size {
+    fn size(self) -> Int
+    fn zero() -> Int                                // <- E0901
+    fn convert[U](self, u: U) -> Int                // <- E0901
+}
+
+impl Size for Option[Int] {                         // <- E0901
+    fn size(self) -> Int {
+        return 1
+    }
+}
+
+impl Size for Counter {
+    fn size(self) -> Int {
+        return self.n
+    }
+
+    fn zero() -> Int {
+        return 0
+    }
+}
+
+impl Ord for Counter {                              // <- E0901
+    fn cmp(self, other: Self) -> Ordering {
+        return Ordering.Less
+    }
+}
+
+impl Hash for Counter {                             // <- E0901
+}
+
+impl Abandon for Counter {                          // <- E0901
+    fn abandon(take self) {
+    }
+}
+
+fn calls(c: Counter, o: Option[Int], p: Pair) -> Int {
+    var d = c
+    d.bump()
+    let e = c.close() + o.size() + p.swap() + Counter.fresh().n + c.size()
+    let f = c < c
+    let g = c.n.cmp(2)                              // <- E0901
+    return e
+}

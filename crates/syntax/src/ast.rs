@@ -40,6 +40,14 @@ impl Module {
         }
     }
 
+    /// Method `method` of the `impl` block at `item`.
+    pub fn method_decl(&self, item: usize, method: usize) -> Option<&FnDecl> {
+        match &self.items.get(item)?.kind {
+            ItemKind::Impl(decl) => Some(&decl.methods.get(method)?.decl),
+            _ => None,
+        }
+    }
+
     pub fn record_decl(&self, item: usize) -> Option<&RecordDecl> {
         match &self.items.get(item)?.kind {
             ItemKind::Record(decl) => Some(decl),
@@ -74,7 +82,8 @@ impl Item {
             ItemKind::Fn(decl) => Some(decl.name),
             ItemKind::Record(decl) => Some(decl.name),
             ItemKind::Enum(decl) => Some(decl.name),
-            ItemKind::Use(_) => None,
+            ItemKind::Interface(decl) => Some(decl.name),
+            ItemKind::Use(_) | ItemKind::Impl(_) => None,
         }
     }
 }
@@ -84,15 +93,61 @@ pub enum ItemKind {
     Use(UseDecl),
     Record(RecordDecl),
     Enum(EnumDecl),
+    Impl(ImplDecl),
+    Interface(InterfaceDecl),
 }
 
 pub struct FnDecl {
     pub name: Ident,
+    /// `[T: Ord + Copy, U]` (REFERENCE §4.8).
+    pub generics: Vec<GenericParam>,
+    /// A method's `self`, which comes before its other parameters (REFERENCE §5.2).
+    pub receiver: Option<Receiver>,
     pub params: Vec<Param>,
     pub ret: Option<TypeId>,
     pub fails: Option<TypeId>,
-    pub body: Block,
+    /// `None` for an interface's method, which has no body (Q13).
+    pub body: Option<Block>,
     /// The body needed error recovery, so its control flow is unknown.
+    pub recovered: bool,
+}
+
+/// `T: Ord + Copy`, a type parameter and the interfaces it must implement.
+pub struct GenericParam {
+    pub name: Ident,
+    pub bounds: Vec<Ident>,
+}
+
+/// `self`, `inout self` or `take self`.
+#[derive(Clone, Copy, Debug)]
+pub struct Receiver {
+    pub mode: ParamMode,
+    pub span: Span,
+}
+
+/// `impl Span { … }` or `impl Show for Span { … }` (REFERENCE §3, §4.9).
+pub struct ImplDecl {
+    /// The interface it implements, or `None` for the type's own methods.
+    pub iface: Option<Ident>,
+    pub target: TypeId,
+    pub methods: Vec<Method>,
+    /// A method failed to parse, so one the block meant to have may be missing.
+    pub recovered: bool,
+}
+
+/// A method or associated function of an `impl` block.
+pub struct Method {
+    pub vis: Visibility,
+    pub decl: FnDecl,
+    pub span: Span,
+}
+
+/// `interface Show { fn show(self) -> Text }` (REFERENCE §4.9).
+pub struct InterfaceDecl {
+    pub name: Ident,
+    pub methods: Vec<FnDecl>,
+    /// A method's declaration was rejected, so implementations may have methods it doesn't
+    /// list, and calls of them aren't reported.
     pub recovered: bool,
 }
 
@@ -165,6 +220,8 @@ pub enum TypeExprKind {
     /// `Option[Int]` or `Float[m]`. The arguments of a numeric type are units, which are
     /// skipped until units exist, so they are `None`.
     Applied { name: Ident, args: Option<Vec<TypeId>> },
+    /// `Self`, the type of an `impl` block, or the implementing type in an interface.
+    SelfType,
 }
 
 pub struct Block {
@@ -228,11 +285,14 @@ pub enum ExprKind {
     Name(Ident),
     Call {
         callee: ExprId,
+        /// Explicit type arguments, as in `max::[Int](a: 1, b: 2)` (REFERENCE §4.8).
+        targs: Option<Vec<TypeId>>,
         args: Vec<Arg>,
     },
     MethodCall {
         receiver: ExprId,
         method: Ident,
+        targs: Option<Vec<TypeId>>,
         args: Vec<Arg>,
     },
     Field {

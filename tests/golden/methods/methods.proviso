@@ -1,0 +1,122 @@
+// phase: 2.4
+// An `impl T` block gives a record or enum its methods and associated functions (REFERENCE
+// §3). A method takes `self` and is called on a value, whose receiver takes no label; with
+// one other parameter, that label is optional too (H3). An associated function has no
+// `self` and is called through its type, as in `Span.point(3)`. Inside the block, `Self` is
+// the type. Two types may have methods of one name, and a call takes the one of its
+// receiver's type. A method may call others on `self`, recurse, be called in a refinement,
+// and be generic, with type arguments inferred or given with `::[…]` (§4.8).
+use std.io { IoError }
+
+record Span derives(Show) {
+    lo: Int
+    hi: Int
+} where lo <= hi
+
+record Window {
+    span: Span where span.width() > 0
+}
+
+enum Shape {
+    Circle(r: Int)
+    Rect(w: Int, h: Int)
+    Dot
+}
+
+enum Chain {
+    Link(next: Chain)
+    End
+}
+
+fn smaller(a: Int, b: Int) -> Int {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn larger(a: Int, b: Int) -> Int {
+    if a < b {
+        return b
+    }
+    return a
+}
+
+impl Span {
+    fn width(self) -> Int {
+        return self.hi - self.lo
+    }
+
+    fn grown(self, by: Int) -> Self {
+        return Span(lo: self.lo - by, hi: self.hi + by)
+    }
+
+    fn contains(self, n: Int) -> Bool {
+        return self.lo <= n and n < self.hi
+    }
+
+    fn point(at: Int) -> Span {
+        return Span(lo: at, hi: at + 1)
+    }
+
+    fn joined(self, other: Self) -> Span {
+        return Span(lo: smaller(a: self.lo, b: other.lo), hi: larger(a: self.hi, b: other.hi))
+    }
+
+    fn area(self) -> Int {
+        return self.width() * 10
+    }
+
+    fn pick[T: Copy](self, low: T, high: T) -> T {
+        if self.width() > 2 {
+            return high
+        }
+        return low
+    }
+}
+
+impl Shape {
+    fn area(self) -> Int {
+        return match self {
+            Circle(r) => 3 * r * r
+            Rect(w, h) => w * h
+            Dot => 0
+        }
+    }
+
+    fn scaled(self, k: Int) -> Shape {
+        return match self {
+            Circle(r) => Shape.Circle(r: r * k)
+            Rect(w, h) => Shape.Rect(w: w * k, h: h * k)
+            Dot => Shape.Dot
+        }
+    }
+
+    fn square(side: Int) -> Self {
+        return Shape.Rect(w: side, h: side)
+    }
+}
+
+impl Chain {
+    fn len(self) -> Int {
+        return match self {
+            Link(next) => 1 + next.len()
+            End => 0
+        }
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let s = Span(lo: 2, hi: 5)
+    let u = Span.point(at: 7)
+    try sys.stdout.write_line(f"{s.width()} {s.grown(by: 1)} {s.contains(5)} {s.contains(n: 2)} {u}")
+    try sys.stdout.write_line(f"{Span.point(3).grown(by: 2).width()} {s.joined(u)} {s.joined(other: u).width()}")
+    let c = Shape.Circle(r: 2)
+    let r = Shape.square(side: 3)
+    try sys.stdout.write_line(f"{c.area()} {r.area()} {Shape.Dot.area()} {c.scaled(k: 3).area()} {s.area()}")
+    let chain = Chain.Link(Chain.Link(next: Chain.End))
+    let w = Window(span: s)
+    let narrow = Span.point(0).pick(low: 1, high: 2)
+    try sys.stdout.write_line(f"{chain.len()} {s.pick(low: "narrow", high: "wide")} {narrow} {w.span.width()}")
+    try sys.stdout.write_line(f"{s.pick::[Text](low: "a", high: "b")} {u.pick::[Int8](low: -1, high: 1)}")
+}

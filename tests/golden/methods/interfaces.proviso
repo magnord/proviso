@@ -1,0 +1,123 @@
+// phase: 2.4
+// An interface lists methods, and `impl I for T` gives a type each of them (REFERENCE §4.9).
+// A generic function constrained by `I` calls them on any type that implements it, and each
+// call runs the implementation for the value it gets. An interface of the module may be
+// implemented for its records and enums and for prelude types such as `Int` and `Text`.
+// `Self` in an interface's method is the implementing type, which an implementation may
+// also write out. A method that can fail is marked at each call, through an interface as
+// anywhere else (§7.2). When two interfaces give a type methods of one name, `I.f(x)`
+// picks one (§3); its receiver takes no label.
+use std.io { IoError }
+
+interface Describe {
+    fn describe(self) -> Text
+}
+
+interface Label {
+    fn describe(self) -> Text
+}
+
+interface Measure {
+    fn size(self) -> Int
+    fn bigger(self, other: Self) -> Bool
+}
+
+interface Digit {
+    fn digit(self) -> Int fails Text
+}
+
+record Point {
+    x: Int
+    y: Int
+}
+
+enum Coin {
+    Penny
+    Dime
+}
+
+impl Describe for Point {
+    fn describe(self) -> Text {
+        return f"point {self.x},{self.y}"
+    }
+}
+
+impl Describe for Coin {
+    fn describe(self) -> Text {
+        return match self {
+            Penny => "penny"
+            Dime => "dime"
+        }
+    }
+}
+
+impl Describe for Int {
+    fn describe(self) -> Text {
+        return f"int {self}"
+    }
+}
+
+impl Label for Int {
+    fn describe(self) -> Text {
+        return f"label {self}"
+    }
+}
+
+impl Measure for Point {
+    fn size(self) -> Int {
+        return self.x * self.x + self.y * self.y
+    }
+
+    fn bigger(self, other: Self) -> Bool {
+        return self.size() > other.size()
+    }
+}
+
+impl Measure for Text {
+    fn size(self) -> Int {
+        return self.byte_len()
+    }
+
+    fn bigger(self, other: Text) -> Bool {
+        return self.byte_len() > other.byte_len()
+    }
+}
+
+impl Digit for Text {
+    fn digit(self) -> Int fails Text {
+        return match self {
+            "0" => 0
+            "1" => 1
+            _ => fail f"not a digit: {self}"
+        }
+    }
+}
+
+fn tell[T: Describe](x: T) -> Text {
+    return x.describe()
+}
+
+fn largest[T: Measure + Copy](a: T, b: T, c: T) -> T {
+    var best = a
+    if b.bigger(best) {
+        best = b
+    }
+    if c.bigger(other: best) {
+        best = c
+    }
+    return best
+}
+
+fn digits[T: Digit](a: T, b: T) -> Int fails Text {
+    return try a.digit() * 10 + try b.digit()
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let p = Point(x: 3, y: 4)
+    let q = Point(x: 1, y: 1)
+    try sys.stdout.write_line(f"{tell(p)} / {tell(Coin.Dime)} / {tell(7)} / {p.describe()} / {Coin.Penny.describe()}")
+    try sys.stdout.write_line(f"{Describe.describe(5)} {Label.describe(5)}")
+    let far = largest(a: q, b: p, c: Point(x: 0, y: 2))
+    try sys.stdout.write_line(f"{far.x} {largest(a: "ab", b: "abcd", c: "abc")} {p.bigger(q)} {Measure.size(p)} {"hello".size()}")
+    try sys.stdout.write_line(f"{attempt digits(a: "1", b: "0")} {attempt digits(a: "0", b: "x")} {attempt "1".digit()}")
+}

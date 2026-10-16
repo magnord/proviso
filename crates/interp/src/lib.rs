@@ -6,10 +6,11 @@
 //! other task threads unchanged.
 
 use std::cmp::Ordering;
+use std::convert::Infallible;
 use std::io::Write;
 use std::sync::Arc;
 
-use proviso_check::decls::{AdtId, Decls, FieldIdx, VariantIdx};
+use proviso_check::decls::{AdtId, Decls, FieldIdx, IfaceId, ImplKey, VariantIdx};
 use proviso_check::types::{FloatTy, IntTy, Ty};
 use proviso_check::{Builtin, FnId, LocalId, Program, Res};
 use proviso_syntax::ast::*;
@@ -202,12 +203,17 @@ type Frame = Vec<Value>;
 impl Interp<'_> {
     fn main(&mut self) -> Outcome {
         let main = self.p.main.expect("the driver checks that `main` exists");
-        let site = self.m.fn_decl(self.p.fns[main].item).expect("`main` is a function").name.span;
+        let site = self.p.decl(self.m, main).name.span;
         let fields = Arc::from([Value::Cap(Cap::Stdout)]);
         let sys = Value::Adt(Adt { def: AdtId::SYSTEM, variant: VariantIdx::RECORD, fields });
         match self.call(main, vec![sys], site) {
             Ok(_) => Outcome::Done,
-            Err(Unwind::Fail(error)) => Outcome::Failed(show(&error, &self.p.decls)),
+            // The error's `show` runs on behalf of `main`, so a defect in it is traced to there.
+            Err(Unwind::Fail(error)) => match self.show(&error, site) {
+                Ok(text) => Outcome::Failed(text),
+                Err(Unwind::Defect(defect)) => Outcome::Defect(defect),
+                Err(_) => unreachable!("`show` doesn't fail"),
+            },
             Err(Unwind::Defect(mut defect)) => {
                 // The last caller is the synthetic call of `main` itself.
                 defect.callers.pop();
@@ -234,12 +240,11 @@ impl Interp<'_> {
 
     fn call(&mut self, f: FnId, args: Vec<Value>, site: Span) -> Flow<Value> {
         self.check_stack(site)?;
-        let info = &self.p.fns[f];
-        let decl = self.m.fn_decl(info.item).expect("functions are declared by `fn` items");
+        let body = self.p.decl(self.m, f).body.as_ref().expect("functions that run have bodies");
         let mut frame = args;
-        frame.resize(info.locals, Value::Unit);
+        frame.resize(self.p.fns[f].locals, Value::Unit);
         self.depth += 1;
-        let result = self.block(&decl.body, &mut frame);
+        let result = self.block(body, &mut frame);
         self.depth -= 1;
         match result {
             Ok(_) => Ok(Value::Unit),
@@ -415,7 +420,10 @@ impl Interp<'_> {
                 for part in parts {
                     match part {
                         FTextPart::Lit(text) => out.push_str(text),
-                        FTextPart::Expr(x) => out.push_str(&show(&self.expr(*x, frame)?, &self.p.decls)),
+                        FTextPart::Expr(x) => {
+                            let value = self.expr(*x, frame)?;
+                            out.push_str(&self.show(&value, m.exprs[*x].span)?);
+                        }
                     }
                 }
                 Value::Text(out.into())
@@ -425,7 +433,7 @@ impl Interp<'_> {
                 Some(Res::Ctor(def, variant)) => Value::Adt(Adt { def, variant, fields: Arc::from([]) }),
                 other => unreachable!("names evaluate to locals, not {other:?}"),
             },
-            ExprKind::Call { callee, args } => {
+            ExprKind::Call { callee, args, .. } => {
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.expr(arg.value, frame)?);
@@ -445,28 +453,44 @@ impl Interp<'_> {
                 }
             }
             ExprKind::MethodCall { receiver, args, .. } => {
-                // The receiver of a variant's construction is the enum's name, not a value.
-                let receiver = match self.p.res(e) {
-                    Some(Res::Ctor(..)) => Value::Unit,
-                    _ => self.expr(*receiver, frame)?,
+                let res = self.p.res(e).expect("methods are resolved");
+                // The receiver of a variant's construction or an associated function is a type's
+                // name, and that of `I.f(x)` an interface's, not a value. Otherwise the receiver
+                // comes first.
+                let named = match res {
+                    Res::Ctor(..) | Res::Dispatch { qualified: true, .. } => true,
+                    Res::Fn(f) => self.p.fns[f].receiver.is_none(),
+                    _ => false,
                 };
-                let mut values = Vec::with_capacity(args.len());
+                let mut values = Vec::with_capacity(args.len() + 1);
+                if !named {
+                    values.push(self.expr(*receiver, frame)?);
+                }
                 for arg in args {
                     values.push(self.expr(arg.value, frame)?);
                 }
-                match self.p.res(e) {
-                    Some(Res::Method(builtin)) => {
-                        let result = self.builtin(builtin, receiver, values);
+                match res {
+                    Res::Method(builtin) => {
+                        let result = self.builtin(builtin, values);
+                        return self.attempted(e, result);
+                    }
+                    Res::Fn(f) => {
+                        let result = self.call(f, values, span);
+                        return self.attempted(e, result);
+                    }
+                    Res::Dispatch { iface, method, .. } => {
+                        let result = self.dispatch(iface, method, values, span);
                         return self.attempted(e, result);
                     }
                     // Labels follow the declaration order, so argument `i` is field `i`.
-                    Some(Res::Ctor(def, variant)) => {
+                    Res::Ctor(def, variant) => {
                         let value = Value::Adt(Adt { def, variant, fields: values.into() });
                         self.refine(&value, span)?;
                         value
                     }
-                    Some(Res::With) => {
-                        let Value::Adt(mut adt) = receiver else { unreachable!("`with` copies a record") };
+                    Res::With => {
+                        let mut values = values.into_iter();
+                        let Some(Value::Adt(mut adt)) = values.next() else { unreachable!("`with` copies a record") };
                         let replaced = self.p.with_fields.get(e).expect("`with` is resolved");
                         let fields = Arc::make_mut(&mut adt.fields);
                         for (i, value) in replaced.iter().zip(values) {
@@ -519,10 +543,12 @@ impl Interp<'_> {
             ExprKind::Binary { op, lhs, rhs } => {
                 let a = self.expr(*lhs, frame)?;
                 let b = self.expr(*rhs, frame)?;
-                if op.is_arithmetic() {
-                    return self.arithmetic(*op, a, b, span);
+                match op {
+                    _ if op.is_arithmetic() => return self.arithmetic(*op, a, b, span),
+                    BinOp::Eq => Value::Bool(self.equal(&a, &b, span)?),
+                    BinOp::Ne => Value::Bool(!self.equal(&a, &b, span)?),
+                    _ => Value::Bool(compare(*op, &a, &b)),
                 }
-                Value::Bool(compare(*op, &a, &b))
             }
             ExprKind::Range { .. } => unreachable!("ranges appear only in `for` loops"),
             ExprKind::Try(inner) => return self.expr(*inner, frame),
@@ -697,23 +723,87 @@ impl Interp<'_> {
         })
     }
 
-    fn builtin(&mut self, builtin: Builtin, receiver: Value, args: Vec<Value>) -> Flow<Value> {
-        Ok(match (builtin, &receiver) {
-            (Builtin::WriteLine, Value::Cap(Cap::Stdout)) => {
-                let Some(Value::Text(text)) = args.first() else { unreachable!("write_line takes Text") };
+    /// Runs a built-in method. `values` holds the receiver, then the arguments.
+    fn builtin(&mut self, builtin: Builtin, values: Vec<Value>) -> Flow<Value> {
+        Ok(match (builtin, values.as_slice()) {
+            (Builtin::WriteLine, [Value::Cap(Cap::Stdout), Value::Text(text)]) => {
                 if let Err(err) = writeln!(self.stdout, "{text}") {
                     let message = format!("cannot write to stdout: {err}");
                     return Err(Unwind::Fail(Value::IoError(message.into())));
                 }
                 Value::Unit
             }
-            (Builtin::Show, value) => Value::Text(show(value, &self.p.decls).into()),
-            (Builtin::Eq, value) => Value::Bool(equal(value, &args[0])),
-            (Builtin::ByteLen, Value::Text(text)) => Value::Int(text.len() as i128, IntTy::I64),
-            (Builtin::IsEmpty, Value::Text(text)) => Value::Bool(text.is_empty()),
-            (builtin, receiver) => unreachable!("{builtin:?} does not apply to {receiver:?}"),
+            (Builtin::ByteLen, [Value::Text(text)]) => Value::Int(text.len() as i128, IntTy::I64),
+            (Builtin::IsEmpty, [Value::Text(text)]) => Value::Bool(text.is_empty()),
+            (builtin, values) => unreachable!("{builtin:?} does not apply to {values:?}"),
         })
     }
+
+    /// Runs method `method` of `iface` as the implementation for the receiver's type does.
+    /// Values describe themselves, so the receiver tells which one, also in generic code
+    /// (REFERENCE §4.9). `values` holds the receiver, then the arguments.
+    fn dispatch(&mut self, iface: IfaceId, method: usize, values: Vec<Value>, site: Span) -> Flow<Value> {
+        match (iface, values.as_slice()) {
+            (IfaceId::SHOW, [value]) => Ok(Value::Text(self.show(value, site)?.into())),
+            (IfaceId::EQ, [a, b]) => Ok(Value::Bool(self.equal(a, b, site)?)),
+            _ => {
+                let key = impl_key(&values[0]);
+                let f = self.p.decls.impl_method(iface, key, method).expect("the checker found an implementation");
+                self.call(f, values, site)
+            }
+        }
+    }
+
+    /// The `Show` text of `value`. A record or enum whose type implements `Show` by hand is
+    /// written by its `show`, also inside a value whose `Show` is derived (OPEN_QUESTIONS P5).
+    /// A defect in it is traced to `site`.
+    fn show(&mut self, value: &Value, site: Span) -> Flow<String> {
+        let p = self.p;
+        write_value(value, false, &p.decls, |value| {
+            let Some(f) = hand_written(value, IfaceId::SHOW, &p.decls) else { return Ok(None) };
+            match self.call(f, vec![value.clone()], site)? {
+                Value::Text(text) => Ok(Some(text)),
+                other => unreachable!("`show` returns Text, not {other:?}"),
+            }
+        })
+    }
+
+    /// `==`. A record or enum whose type implements `Eq` by hand is compared by its `eq`, also
+    /// inside a value whose `Eq` is derived (OPEN_QUESTIONS P5). A defect in it is traced to
+    /// `site`.
+    fn equal(&mut self, a: &Value, b: &Value, site: Span) -> Flow<bool> {
+        let p = self.p;
+        equal_with(a, b, |a, b| {
+            let Some(f) = hand_written(a, IfaceId::EQ, &p.decls) else { return Ok(None) };
+            match self.call(f, vec![a.clone(), b.clone()], site)? {
+                Value::Bool(same) => Ok(Some(same)),
+                other => unreachable!("`eq` returns Bool, not {other:?}"),
+            }
+        })
+    }
+}
+
+/// The type a value's `impl` is for.
+fn impl_key(value: &Value) -> ImplKey {
+    match value {
+        Value::Int(_, it) => ImplKey::Int(*it),
+        Value::F64(_) => ImplKey::Float(FloatTy::F64),
+        Value::F32(_) => ImplKey::Float(FloatTy::F32),
+        Value::Bool(_) => ImplKey::Bool,
+        Value::Char(_) => ImplKey::Char,
+        Value::Text(_) => ImplKey::Text,
+        Value::Unit => ImplKey::Unit,
+        Value::IoError(_) => ImplKey::IoError,
+        Value::Adt(adt) => ImplKey::Adt(adt.def),
+        Value::Cap(_) => unreachable!("capabilities implement no interface"),
+    }
+}
+
+/// The function that implements the one method of `iface` for `value`'s record or enum, when
+/// an `impl` declares it rather than `derives`.
+fn hand_written(value: &Value, iface: IfaceId, decls: &Decls) -> Option<FnId> {
+    let Value::Adt(adt) = value else { return None };
+    decls.impl_method(iface, ImplKey::Adt(adt.def), 0)
 }
 
 fn at<'v>(mut value: &'v Value, path: &[FieldIdx]) -> &'v Value {
@@ -774,37 +864,65 @@ fn int_arithmetic(op: BinOp, x: i128, y: i128, it: IntTy) -> Result<i128, (Defec
     }
 }
 
-/// Comparison of two values of the same type. Floats follow IEEE, so NaN is unequal to
-/// everything; text compares by code point, which UTF-8 byte order preserves.
+/// Ordering of two values of the same type, as `Ord` gives it. Floats follow IEEE, so NaN is
+/// unordered with everything; text compares by code point, which UTF-8 byte order preserves.
 fn compare(op: BinOp, a: &Value, b: &Value) -> bool {
-    match op {
-        BinOp::Eq => return equal(a, b),
-        BinOp::Ne => return !equal(a, b),
-        _ => {}
-    }
-    let ordering = match (a, b) {
-        (Value::Int(x, _), Value::Int(y, _)) => x.partial_cmp(y),
-        (Value::F64(x), Value::F64(y)) => x.partial_cmp(y),
-        (Value::F32(x), Value::F32(y)) => x.partial_cmp(y),
-        (Value::Bool(x), Value::Bool(y)) => x.partial_cmp(y),
-        (Value::Char(x), Value::Char(y)) => x.partial_cmp(y),
-        (Value::Text(x), Value::Text(y)) => x.partial_cmp(y),
-        (Value::Unit, Value::Unit) => Some(Ordering::Equal),
-        (a, b) => unreachable!("cannot compare {a:?} and {b:?}"),
-    };
+    let ordering = order(a, b);
     match op {
         BinOp::Lt => ordering == Some(Ordering::Less),
         BinOp::Le => matches!(ordering, Some(Ordering::Less | Ordering::Equal)),
         BinOp::Gt => ordering == Some(Ordering::Greater),
         BinOp::Ge => matches!(ordering, Some(Ordering::Greater | Ordering::Equal)),
-        _ => unreachable!("`{}` is not a comparison", op.symbol()),
+        _ => unreachable!("`{}` is not an ordering", op.symbol()),
     }
 }
 
-/// `==`, built into scalars and derived for records, which are equal when every field is. It
+/// The derived `Ord` orders a record or enum by variant in declaration order, then field by
+/// field in declaration order (STD.md). No `Ord` is written by hand yet, so this is every
+/// ordering. Like [`equal`], it keeps the pairs still to compare in a list of its own, so no
+/// value is too deep for the native stack.
+fn order(a: &Value, b: &Value) -> Option<Ordering> {
+    let mut pairs = vec![(a, b)];
+    while let Some(pair) = pairs.pop() {
+        let ordering = match pair {
+            (Value::Int(x, _), Value::Int(y, _)) => x.partial_cmp(y),
+            (Value::F64(x), Value::F64(y)) => x.partial_cmp(y),
+            (Value::F32(x), Value::F32(y)) => x.partial_cmp(y),
+            (Value::Bool(x), Value::Bool(y)) => x.partial_cmp(y),
+            (Value::Char(x), Value::Char(y)) => x.partial_cmp(y),
+            (Value::Text(x), Value::Text(y)) => x.partial_cmp(y),
+            (Value::Unit, Value::Unit) => Some(Ordering::Equal),
+            (Value::Adt(x), Value::Adt(y)) => {
+                // Pushed in reverse, so the first field is compared first, with all it holds.
+                pairs.extend(x.fields.iter().zip(y.fields.iter()).rev());
+                x.variant.index().partial_cmp(&y.variant.index())
+            }
+            (a, b) => unreachable!("cannot order {a:?} and {b:?}"),
+        };
+        if ordering != Some(Ordering::Equal) {
+            return ordering;
+        }
+    }
+    Some(Ordering::Equal)
+}
+
+/// `==` as built into scalars and derived for records and enums, which are equal when their
+/// variants and every field are. Floats follow IEEE, so NaN is unequal to everything.
+fn equal(a: &Value, b: &Value) -> bool {
+    match equal_with(a, b, |_, _| Ok::<_, Infallible>(None)) {
+        Ok(same) => same,
+        Err(never) => match never {},
+    }
+}
+
+/// `==`, where `hand_written` decides a pair of records or enums it returns `Some` for. It
 /// walks nested records with a list of its own rather than recursion, so no value is too deep
 /// for the native stack.
-fn equal(a: &Value, b: &Value) -> bool {
+fn equal_with<E>(
+    a: &Value,
+    b: &Value,
+    mut hand_written: impl FnMut(&Value, &Value) -> Result<Option<bool>, E>,
+) -> Result<bool, E> {
     let mut pairs = vec![(a, b)];
     while let Some(pair) = pairs.pop() {
         let same = match pair {
@@ -815,37 +933,54 @@ fn equal(a: &Value, b: &Value) -> bool {
             (Value::Char(x), Value::Char(y)) => x == y,
             (Value::Text(x), Value::Text(y)) => x == y,
             (Value::Unit, Value::Unit) => true,
-            (Value::Adt(x), Value::Adt(y)) => {
-                pairs.extend(x.fields.iter().zip(y.fields.iter()));
-                x.variant == y.variant
-            }
+            (a @ Value::Adt(x), b @ Value::Adt(y)) => match hand_written(a, b)? {
+                Some(same) => same,
+                None => {
+                    pairs.extend(x.fields.iter().zip(y.fields.iter()));
+                    x.variant == y.variant
+                }
+            },
             (a, b) => unreachable!("cannot compare {a:?} and {b:?}"),
         };
         if !same {
-            return false;
+            return Ok(false);
         }
     }
-    true
+    Ok(true)
 }
 
-/// The `Show` text of a value. Floats print the shortest text that reads back as the same
-/// value, always with a fraction or exponent, such as `1.0`, `0.1` and `1e21`. A record or
-/// enum writes the expression that builds it, as a derived `Show` does (STD.md).
+/// The `Show` text of a value as derived and built in. Floats print the shortest text that
+/// reads back as the same value, always with a fraction or exponent, such as `1.0`, `0.1` and
+/// `1e21`. A record or enum writes the expression that builds it, as a derived `Show` does
+/// (STD.md).
 pub fn show(value: &Value, decls: &Decls) -> String {
-    write_value(value, false, decls)
+    match write_value(value, false, decls, |_| Ok::<_, Infallible>(None)) {
+        Ok(text) => text,
+        Err(never) => match never {},
+    }
 }
 
 /// The `debug` text of a value: like `show`, but text and chars are quoted and written with
-/// Proviso's escapes, so the output reads as a literal. A record is written as `show` writes
-/// it, whether or not it derives `Show` (OPEN_QUESTIONS P5).
+/// Proviso's escapes, so the output reads as a literal. A record is written as a derived
+/// `Show` writes it, whether or not it derives or implements `Show` (OPEN_QUESTIONS P5), so
+/// `debug` and defect messages run no code of the program's.
 fn debug_repr(value: &Value, decls: &Decls) -> String {
-    write_value(value, true, decls)
+    match write_value(value, true, decls, |_| Ok::<_, Infallible>(None)) {
+        Ok(text) => text,
+        Err(never) => match never {},
+    }
 }
 
 /// Writes `value` as `show` does, or as `debug` does when `quoted`. A record's fields are
-/// always quoted. Like [`equal`], it keeps the parts still to write in a list of its own, so
-/// no value is too deep for the native stack.
-fn write_value(value: &Value, quoted: bool, decls: &Decls) -> String {
+/// always quoted. A record or enum that `hand_written` returns text for is written as that
+/// text. Like [`equal`], it keeps the parts still to write in a list of its own, so no value
+/// is too deep for the native stack.
+fn write_value<E>(
+    value: &Value,
+    quoted: bool,
+    decls: &Decls,
+    mut hand_written: impl FnMut(&Value) -> Result<Option<Arc<str>>, E>,
+) -> Result<String, E> {
     enum Part<'v> {
         Value(&'v Value, bool),
         Text(&'v str),
@@ -871,6 +1006,11 @@ fn write_value(value: &Value, quoted: bool, decls: &Decls) -> String {
             Value::Text(text) => out.push_str(text),
             Value::Unit => out.push_str("()"),
             Value::Adt(adt) => {
+                // A hand-written `show` decides its own text, so it isn't quoted.
+                if let Some(text) = hand_written(value)? {
+                    out.push_str(&text);
+                    continue;
+                }
                 let def = decls.adt(adt.def);
                 let variant = &def.variants[adt.variant.index()];
                 out.push_str(&def.ctor_name(adt.variant));
@@ -899,7 +1039,7 @@ fn write_value(value: &Value, quoted: bool, decls: &Decls) -> String {
             Value::Cap(Cap::Stdout) => out.push_str("Out"),
         }
     }
-    out
+    Ok(out)
 }
 
 fn quote(text: &str, quote: char) -> String {
@@ -966,9 +1106,9 @@ mod tests {
     #[test]
     fn nan_is_unequal_to_itself() {
         let nan = Value::F64(f64::NAN);
-        assert!(!compare(BinOp::Eq, &nan, &nan));
-        assert!(compare(BinOp::Ne, &nan, &nan));
+        assert!(!equal(&nan, &nan));
         assert!(!compare(BinOp::Lt, &nan, &nan));
+        assert!(!compare(BinOp::Ge, &nan, &nan));
     }
 
     fn field(name: &str, ty: Ty) -> FieldDef {

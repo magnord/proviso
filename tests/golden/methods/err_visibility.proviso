@@ -1,0 +1,38 @@
+// phase: 2.4
+// expect-error: E0211
+// A `pub` method, interface or function may not mention a less visible type in its
+// signature, and a `pub` function's constraints may not name a less visible interface
+// (REFERENCE §3).
+record Secret {
+    n: Int
+}
+
+interface Hidden {
+    fn peek(self) -> Int
+}
+
+pub record Open {
+    n: Int
+}
+
+impl Open {
+    pub fn reveal(self) -> Secret {                 // <- E0211
+        return Secret(n: self.n)
+    }
+
+    fn private_reveal(self) -> Secret {
+        return Secret(n: self.n)
+    }
+}
+
+pub interface Exposed {
+    fn leak(self) -> Secret                         // <- E0211
+}
+
+pub fn constrained[T: Hidden](x: T) -> Int {        // <- E0211
+    return x.peek()
+}
+
+fn fine[T: Hidden](x: T) -> Int {
+    return x.peek()
+}

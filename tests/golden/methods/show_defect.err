@@ -1,0 +1,3 @@
+defect[integer_overflow]: `Int8` multiplication overflowed: 100 * 2
+  at methods/show_defect.proviso:15:19 (show_defect.Gauge.show+2)
+  called from methods/show_defect.proviso:21:40 (show_defect.main+3)

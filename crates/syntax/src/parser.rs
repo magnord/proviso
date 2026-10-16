@@ -27,6 +27,17 @@ enum Stop {
     Item,
 }
 
+/// Where a function is declared, which decides whether it takes `self` and has a body.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FnKind {
+    /// A module's function, which takes no `self`.
+    Free,
+    /// A method or associated function in an `impl` block.
+    Method,
+    /// A method of an interface, declared without a body (Q13).
+    Signature,
+}
+
 pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> Module {
     let tokens = tokenize(&file.text, 0, diags);
     let module = Module {
@@ -209,7 +220,7 @@ impl Parser<'_> {
     fn starts_item(&self) -> bool {
         let T::Keyword(kw) = self.kind() else { return false };
         // `let` also starts a statement, so it never ends one.
-        let item = matches!(kw, Kw::Fn | Kw::Pub | Kw::Use | Kw::Record | Kw::Enum)
+        let item = matches!(kw, Kw::Fn | Kw::Pub | Kw::Use | Kw::Record | Kw::Enum | Kw::Impl | Kw::Interface)
             || (kw != Kw::Let && planned_item(kw).is_some());
         let span = self.peek().span;
         item && self.starts_line(span) && self.indent(span) <= self.item_indent
@@ -393,18 +404,7 @@ impl Parser<'_> {
             return Ok(None);
         }
         let start = self.peek().span;
-        let mut vis = Visibility::Private;
-        if self.eat(T::Keyword(Kw::Pub)) {
-            vis = Visibility::Pub;
-            if self.eat(T::LParen) {
-                let scope = self.ident("`pkg`")?;
-                if self.m.text(scope.sym) != "pkg" {
-                    self.error(codes::UNEXPECTED_TOKEN, scope.span, "the only restricted visibility is `pub(pkg)`");
-                }
-                self.expect(T::RParen, "`)`")?;
-                vis = Visibility::PubPkg;
-            }
-        }
+        let vis = self.visibility()?;
         let kind = match self.kind() {
             T::Keyword(Kw::Fn) => ItemKind::Fn(self.fn_decl()?),
             T::Keyword(Kw::Use) if vis != Visibility::Private => {
@@ -413,12 +413,22 @@ impl Parser<'_> {
             T::Keyword(Kw::Use) => ItemKind::Use(self.use_decl()?),
             T::Keyword(Kw::Record) => ItemKind::Record(self.record_decl()?),
             T::Keyword(Kw::Enum) => ItemKind::Enum(self.enum_decl()?),
+            T::Keyword(Kw::Impl) => {
+                // The block is kept, so its methods are still checked.
+                if vis != Visibility::Private {
+                    let span = start.to(self.prev_span());
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        span,
+                        "an `impl` block has no visibility of its own; mark its methods `pub` instead",
+                    );
+                }
+                ItemKind::Impl(self.impl_decl()?)
+            }
+            T::Keyword(Kw::Interface) => ItemKind::Interface(self.interface_decl()?),
             T::Keyword(kw) => match planned_item(kw) {
                 Some((what, planned)) => {
                     self.poison_declared_type();
-                    if kw == Kw::Impl {
-                        self.note_impl_target();
-                    }
                     return self.not_implemented(what, planned);
                 }
                 None => return self.unexpected("an item such as `fn` or `use`"),
@@ -426,6 +436,22 @@ impl Parser<'_> {
             _ => return self.unexpected("an item such as `fn` or `use`"),
         };
         Ok(Some(Item { kind, vis, doc, span: start.to(self.prev_span()) }))
+    }
+
+    /// `pub`, `pub(pkg)` or nothing.
+    fn visibility(&mut self) -> PResult<Visibility> {
+        if !self.eat(T::Keyword(Kw::Pub)) {
+            return Ok(Visibility::Private);
+        }
+        if self.eat(T::LParen) {
+            let scope = self.ident("`pkg`")?;
+            if self.m.text(scope.sym) != "pkg" {
+                self.error(codes::UNEXPECTED_TOKEN, scope.span, "the only restricted visibility is `pub(pkg)`");
+            }
+            self.expect(T::RParen, "`)`")?;
+            return Ok(Visibility::PubPkg);
+        }
+        Ok(Visibility::Pub)
     }
 
     /// Marks the type a later-phase declaration such as `unique record Token`, `enum Shape`
@@ -459,10 +485,10 @@ impl Parser<'_> {
         }
     }
 
-    /// Notes the type a rejected `impl` block is for: `Point` in `impl Point` and in
-    /// `impl Show for Point`.
-    fn note_impl_target(&mut self) {
-        let mut i = self.pos + 1;
+    /// Notes the type a rejected `impl` block, whose keyword is token `at`, is for: `Point`
+    /// in `impl Point` and in `impl Show for Point`.
+    fn note_impl_target(&mut self, at: usize) {
+        let mut i = at + 1;
         let mut target = None;
         while let Some(token) = self.tokens.get(i) {
             match token.kind {
@@ -665,18 +691,222 @@ impl Parser<'_> {
     fn fn_decl(&mut self) -> PResult<FnDecl> {
         self.bump();
         let name = self.ident("a function name")?;
-        let decl = self.fn_rest(name);
+        let decl = self.fn_rest(name, FnKind::Free);
         if decl.is_err() {
             self.m.poisoned.insert(name.sym);
         }
         decl
     }
 
-    fn fn_rest(&mut self, name: Ident) -> PResult<FnDecl> {
-        if self.at(T::LBracket) {
-            return self.not_implemented("generic functions", Planned::Phase(2));
+    /// `impl Span { … }` or `impl Show for Span { … }`. When the block is rejected, the
+    /// methods it may have given its type aren't reported where they are used (§15.1).
+    fn impl_decl(&mut self) -> PResult<ImplDecl> {
+        let at = self.pos;
+        let decl = self.impl_rest();
+        if decl.is_err() {
+            self.note_impl_target(at);
         }
+        decl
+    }
+
+    fn impl_rest(&mut self) -> PResult<ImplDecl> {
+        self.bump();
+        if self.at(T::LBracket) {
+            return self.not_implemented("generic `impl` blocks", Planned::Phase(2));
+        }
+        let first = self.type_expr()?;
+        let (iface, target) = if self.eat(T::Keyword(Kw::For)) {
+            let TypeExprKind::Named(iface) = self.m.types[first].kind else {
+                let span = self.m.types[first].span;
+                self.error(codes::UNEXPECTED_TOKEN, span, "expected the name of an interface before `for`");
+                return Err(());
+            };
+            (Some(iface), self.type_expr()?)
+        } else {
+            (None, first)
+        };
+        if let TypeExprKind::Applied { args: Some(_), .. } = self.m.types[target].kind {
+            let span = self.m.types[target].span;
+            self.diags.not_implemented(
+                span,
+                "implementations for generic types, such as `Option[Int]`,",
+                Planned::Phase(2),
+            );
+            return Err(());
+        }
+        let open = self.expect(T::LBrace, "`{` and the block's methods")?;
+        let mut methods = Vec::new();
+        let mut recovered = false;
+        let block_indent = self.item_indent;
+        loop {
+            while matches!(self.kind(), T::Newline | T::DocComment) {
+                self.bump();
+            }
+            if self.eat(T::RBrace) {
+                break;
+            }
+            if self.at(T::Eof) || self.starts_item() {
+                return self.unclosed(&open);
+            }
+            let start = self.pos;
+            let indent = self.indent(self.peek().span);
+            // A method's body that is never closed ends before the next method.
+            (self.stmt_indent, self.item_indent, self.unclosed_reported) = (indent, indent, false);
+            match self.method() {
+                Ok(method) => {
+                    methods.push(method);
+                    if !matches!(self.kind(), T::Newline | T::RBrace | T::Eof | T::DocComment) && !self.starts_item() {
+                        let _ = self.unexpected::<()>("end of line after the method");
+                        self.recover(start, Stop::Item);
+                    }
+                }
+                Err(()) => {
+                    recovered = true;
+                    self.recover(start, Stop::Item);
+                }
+            }
+            self.item_indent = block_indent;
+            if self.pos == start {
+                self.bump();
+            }
+        }
+        Ok(ImplDecl { iface, target, methods, recovered })
+    }
+
+    fn method(&mut self) -> PResult<Method> {
+        let start = self.peek().span;
+        let vis = self.visibility()?;
+        if !self.at_kw(Kw::Fn) {
+            return self.unexpected("a method, starting with `fn`");
+        }
+        self.bump();
+        let name = self.ident("a method name")?;
+        let decl = self.fn_rest(name, FnKind::Method)?;
+        Ok(Method { vis, decl, span: start.to(self.prev_span()) })
+    }
+
+    /// `interface Shape { fn area(self) -> Int }` (REFERENCE §4.9).
+    fn interface_decl(&mut self) -> PResult<InterfaceDecl> {
+        self.bump();
+        let name = self.ident("an interface name")?;
+        let decl = self.interface_rest(name);
+        if decl.is_err() {
+            self.m.poisoned.insert(name.sym);
+        }
+        decl
+    }
+
+    fn interface_rest(&mut self, name: Ident) -> PResult<InterfaceDecl> {
+        if self.at(T::LBracket) {
+            return self.not_implemented("generic interfaces", Planned::Phase(2));
+        }
+        let open = self.expect(T::LBrace, "`{` and the interface's methods")?;
+        let mut methods = Vec::new();
+        let mut recovered = false;
+        let block_indent = self.item_indent;
+        loop {
+            while matches!(self.kind(), T::Newline | T::DocComment) {
+                self.bump();
+            }
+            if self.eat(T::RBrace) {
+                break;
+            }
+            if self.at(T::Eof) || self.starts_item() {
+                return self.unclosed(&open);
+            }
+            let start = self.pos;
+            let indent = self.indent(self.peek().span);
+            (self.stmt_indent, self.item_indent, self.unclosed_reported) = (indent, indent, false);
+            let method = if self.at_kw(Kw::Fn) {
+                self.bump();
+                self.ident("a method name").and_then(|name| self.fn_rest(name, FnKind::Signature))
+            } else {
+                self.unexpected("a method, starting with `fn`")
+            };
+            match method {
+                Ok(method) => {
+                    methods.push(method);
+                    if !matches!(self.kind(), T::Newline | T::RBrace | T::Eof | T::DocComment) && !self.starts_item() {
+                        let _ = self.unexpected::<()>("end of line after the method");
+                        self.recover(start, Stop::Item);
+                    }
+                }
+                Err(()) => {
+                    recovered = true;
+                    self.recover(start, Stop::Item);
+                }
+            }
+            self.item_indent = block_indent;
+            if self.pos == start {
+                self.bump();
+            }
+        }
+        Ok(InterfaceDecl { name, methods, recovered })
+    }
+
+    /// `[T: Ord + Copy, U]` after a function's name (REFERENCE §4.8).
+    fn generics(&mut self) -> PResult<Vec<GenericParam>> {
+        let open = self.bump();
+        let mut params = Vec::new();
+        while !self.at(T::RBracket) {
+            if self.at_kw(Kw::Effect) {
+                return self.not_implemented("effect parameters", Planned::Phase(3));
+            }
+            let name = self.ident("a type parameter")?;
+            let mut bounds = Vec::new();
+            if self.eat(T::Colon) {
+                loop {
+                    bounds.push(self.ident("an interface")?);
+                    if !self.eat(T::Plus) {
+                        break;
+                    }
+                }
+            }
+            params.push(GenericParam { name, bounds });
+            if !self.eat(T::Comma) {
+                break;
+            }
+        }
+        self.close(&open, T::RBracket, "`,` or `]`")?;
+        Ok(params)
+    }
+
+    /// `self`, `inout self` or `take self` at the start of a parameter list.
+    fn receiver(&mut self, kind: FnKind) -> PResult<Option<Receiver>> {
+        let start = self.peek().span;
+        let mode = match (self.kind(), self.nth(1)) {
+            (T::Keyword(Kw::SelfValue), _) => ParamMode::Borrow,
+            (T::Keyword(Kw::Inout), T::Keyword(Kw::SelfValue)) => ParamMode::Inout,
+            (T::Keyword(Kw::Take), T::Keyword(Kw::SelfValue)) => ParamMode::Take,
+            _ => return Ok(None),
+        };
+        if mode != ParamMode::Borrow {
+            self.bump();
+        }
+        self.bump();
+        let span = start.to(self.prev_span());
+        if kind == FnKind::Free {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "only a method, in an `impl` block or an interface, takes `self`",
+            );
+            return Err(());
+        }
+        Ok(Some(Receiver { mode, span }))
+    }
+
+    fn fn_rest(&mut self, name: Ident, kind: FnKind) -> PResult<FnDecl> {
+        let generics = match kind {
+            _ if !self.at(T::LBracket) => Vec::new(),
+            FnKind::Signature => return self.not_implemented("generic interface methods", Planned::Unscheduled),
+            _ => self.generics()?,
+        };
         let open = self.expect(T::LParen, "`(`")?;
+        let receiver = self.receiver(kind)?;
+        if receiver.is_some() && !self.at(T::RParen) {
+            self.expect(T::Comma, "`,` or `)`")?;
+        }
         let mut params = Vec::new();
         while !self.at(T::RParen) {
             params.push(self.param()?);
@@ -717,14 +947,42 @@ impl Parser<'_> {
                 _ => break,
             }
         }
-        self.recovered = false;
-        let body = self.block()?;
-        Ok(FnDecl { name, params, ret, fails, body, recovered: self.recovered })
+        if kind != FnKind::Signature {
+            self.recovered = false;
+            let body = self.block()?;
+            return Ok(FnDecl {
+                name,
+                generics,
+                receiver,
+                params,
+                ret,
+                fails,
+                body: Some(body),
+                recovered: self.recovered,
+            });
+        }
+        if receiver.is_none() {
+            self.diags.not_implemented(name.span, "interface functions without `self`", Planned::Unscheduled);
+            return Err(());
+        }
+        // The method is kept, so its implementations aren't reported again.
+        if self.at(T::LBrace) {
+            let span = self.peek().span;
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "an interface declares its methods without bodies; there are no default methods (Q13)",
+            );
+            self.block()?;
+        }
+        Ok(FnDecl { name, generics, receiver, params, ret, fails, body: None, recovered: false })
     }
 
     fn param(&mut self) -> PResult<Param> {
         if self.at_kw(Kw::SelfValue) {
-            return self.not_implemented("methods (`self` parameters)", Planned::Phase(2));
+            let span = self.peek().span;
+            self.error(codes::UNEXPECTED_TOKEN, span, "a method's `self` comes before its other parameters");
+            return Err(());
         }
         let name = self.ident("a parameter name")?;
         self.expect(T::Colon, "`:` and the parameter's type")?;
@@ -781,7 +1039,10 @@ impl Parser<'_> {
             T::Keyword(Kw::Fn) => return self.not_implemented("function types", Planned::Phase(2)),
             T::Keyword(Kw::Scoped) => return self.not_implemented("`scoped` function types", Planned::Phase(3)),
             T::Keyword(Kw::Any) => return self.not_implemented("`any` types", Planned::PastV1),
-            T::Keyword(Kw::SelfType) => return self.not_implemented("methods and `Self`", Planned::Phase(2)),
+            T::Keyword(Kw::SelfType) => {
+                self.bump();
+                TypeExprKind::SelfType
+            }
             T::LParen => return self.not_implemented("tuple types", Planned::Phase(2)),
             _ => return self.unexpected("a type"),
         };
@@ -1167,18 +1428,23 @@ impl Parser<'_> {
                 T::LParen => {
                     let args = self.args()?;
                     let span = self.span_of(e).to(self.prev_span());
-                    e = self.alloc(ExprKind::Call { callee: e, args }, span);
+                    e = self.alloc(ExprKind::Call { callee: e, targs: None, args }, span);
+                }
+                T::ColonColon => {
+                    self.deeper()?;
+                    let targs = Some(self.explicit_type_args()?);
+                    let args = self.args()?;
+                    let span = self.span_of(e).to(self.prev_span());
+                    e = self.alloc(ExprKind::Call { callee: e, targs, args }, span);
                 }
                 T::Dot => {
                     self.bump();
                     let name = self.member_name("a field or method name")?;
-                    if self.at(T::ColonColon) {
-                        return self.not_implemented("explicit type arguments (`::[…]`)", Planned::Phase(2));
-                    }
-                    if self.at(T::LParen) {
+                    let targs = if self.at(T::ColonColon) { Some(self.explicit_type_args()?) } else { None };
+                    if self.at(T::LParen) || targs.is_some() {
                         let args = self.args()?;
                         let span = self.span_of(e).to(self.prev_span());
-                        e = self.alloc(ExprKind::MethodCall { receiver: e, method: name, args }, span);
+                        e = self.alloc(ExprKind::MethodCall { receiver: e, method: name, targs, args }, span);
                     } else {
                         let span = self.span_of(e).to(name.span);
                         e = self.alloc(ExprKind::Field { base: e, name }, span);
@@ -1188,13 +1454,25 @@ impl Parser<'_> {
                     return self.not_implemented("units of measure", Planned::PastV1);
                 }
                 T::LBracket => return self.not_implemented("indexing expressions", Planned::Phase(2)),
-                T::ColonColon => return self.not_implemented("explicit type arguments (`::[…]`)", Planned::Phase(2)),
                 _ => {
                     self.depth = base;
                     return Ok(e);
                 }
             }
         }
+    }
+
+    /// `::[Int, Text]`, which the call's arguments must follow (REFERENCE §4.8).
+    fn explicit_type_args(&mut self) -> PResult<Vec<TypeId>> {
+        self.bump();
+        if !self.at(T::LBracket) {
+            return self.unexpected("`[` and type arguments after `::`");
+        }
+        let targs = self.type_args()?;
+        if !self.at(T::LParen) {
+            return self.unexpected("the call's arguments after its type arguments");
+        }
+        Ok(targs)
     }
 
     fn args(&mut self) -> PResult<Vec<Arg>> {
@@ -1301,9 +1579,11 @@ impl Parser<'_> {
                 ExprKind::Fail(value)
             }
             T::Keyword(Kw::It) => return self.not_implemented("`it` bindings", Planned::Phase(2)),
-            T::Keyword(Kw::SelfValue | Kw::SelfType) => {
-                return self.not_implemented("methods and `self`", Planned::Phase(2));
+            T::Keyword(Kw::SelfValue) => {
+                let token = self.bump();
+                ExprKind::Name(self.intern(token.span))
             }
+            T::Keyword(Kw::SelfType) => return self.not_implemented("`Self` in expressions", Planned::Unscheduled),
             T::Keyword(Kw::All | Kw::Any) => return self.not_implemented("quantifiers", Planned::Phase(5)),
             _ => return self.unexpected("an expression"),
         };
@@ -1610,8 +1890,6 @@ fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
         Kw::Type => ("`type` declarations", Planned::Phase(2)),
         Kw::Distinct => ("distinct types", Planned::Phase(2)),
         Kw::Unique | Kw::Opaque | Kw::Resource => ("`unique`, `opaque` and `resource` records", Planned::Phase(2)),
-        Kw::Impl => ("`impl` blocks", Planned::Phase(2)),
-        Kw::Interface => ("interfaces", Planned::Phase(2)),
         Kw::Example => ("`example` declarations", Planned::Phase(2)),
         Kw::Test => ("`test` blocks", Planned::Phase(2)),
         Kw::Cap => ("capability declarations", Planned::Phase(3)),

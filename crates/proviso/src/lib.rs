@@ -8,14 +8,14 @@ use std::path::Path;
 
 use proviso_check::{Options, Program, check_module};
 use proviso_interp::{Defect, Outcome, run_main};
-use proviso_syntax::ast::Module;
+use proviso_syntax::ast::{ItemKind, Module, TypeExprKind};
 use proviso_syntax::diag::{Diagnostic, Diagnostics, Severity};
 use proviso_syntax::parse_module;
 use proviso_syntax::source::{SourceFile, Span};
 
 /// How far this toolchain implements the v1 plan (OPEN_QUESTIONS P3): phase 1, and the first
-/// three slices of phase 2.
-pub const IMPLEMENTED_PHASE: Phase = Phase::slice(2, 3);
+/// four slices of phase 2.
+pub const IMPLEMENTED_PHASE: Phase = Phase::slice(2, 4);
 
 /// A point in the v1 plan: a whole phase, or a slice of one. A phase delivered over several
 /// pull requests numbers its slices `2.1`, `2.2` and so on, and each pull request turns its
@@ -144,15 +144,23 @@ impl Compiled {
     /// eighth line of `parse_user`, counting its first line as line 1 (REFERENCE §15.1).
     pub fn anchor(&self, span: Span) -> String {
         let m = &self.module;
-        for item in &m.items {
-            if item.span.lo <= span.lo
-                && span.lo < item.span.hi.max(item.span.lo + 1)
-                && let Some(name) = item.name()
-            {
-                let (line, _) = self.file.line_col(span.lo);
-                let (first, _) = self.file.line_col(item.span.lo);
-                return format!("{}.{}+{}", m.name, m.text(name.sym), line - first + 1);
+        let within = |s: Span| s.lo <= span.lo && span.lo < s.hi.max(s.lo + 1);
+        let from = |first: Span| self.file.line_col(span.lo).0 - self.file.line_col(first.lo).0 + 1;
+        for item in m.items.iter().filter(|item| within(item.span)) {
+            if let Some(name) = item.name() {
+                return format!("{}.{}+{}", m.name, m.text(name.sym), from(item.span));
             }
+            // A method is anchored at its type and its name, such as `shapes.Circle.area+2`
+            // (OPEN_QUESTIONS P5), and the rest of an `impl` block at its type.
+            let ItemKind::Impl(decl) = &item.kind else { continue };
+            let ty = match &m.types[decl.target].kind {
+                TypeExprKind::Named(name) | TypeExprKind::Applied { name, .. } => m.text(name.sym),
+                TypeExprKind::SelfType => "Self",
+            };
+            return match decl.methods.iter().find(|method| within(method.span)) {
+                Some(method) => format!("{}.{ty}.{}+{}", m.name, m.text(method.decl.name.sym), from(method.span)),
+                None => format!("{}.{ty}+{}", m.name, from(item.span)),
+            };
         }
         m.name.clone()
     }
@@ -272,5 +280,13 @@ mod tests {
         let compiled = compile("m.proviso", text, Options::default());
         assert_eq!(compiled.diagnostics.len(), 1, "{}", compiled.render());
         assert_eq!(compiled.anchor(compiled.diagnostics[0].span), "m.b+3");
+    }
+
+    #[test]
+    fn methods_are_anchored_at_their_type_and_name() {
+        let text = "record R {\n    n: Int\n}\n\nimpl R {\n    fn a(self) {\n    }\n\n    fn b(self) {\n        let y = q\n    }\n}\n";
+        let compiled = compile("m.proviso", text.to_string(), Options::default());
+        assert_eq!(compiled.diagnostics.len(), 1, "{}", compiled.render());
+        assert_eq!(compiled.anchor(compiled.diagnostics[0].span), "m.R.b+2");
     }
 }

@@ -80,8 +80,9 @@ fn constructors(decls: &Decls, inhabited: &Inhabited, ty: &Ty) -> Option<Vec<(Ct
         }
         Ty::Bool => Some(vec![(Ctor::Bool(false), Vec::new()), (Ctor::Bool(true), Vec::new())]),
         Ty::Unit => Some(vec![(Ctor::Unit, Vec::new())]),
-        Ty::Never | Ty::Error | Ty::Param(_) => Some(Vec::new()),
-        Ty::Int(_) | Ty::Float(_) | Ty::Char | Ty::Text | Ty::IoError | Ty::Cap(_) => None,
+        Ty::Never | Ty::Error => Some(Vec::new()),
+        // A type parameter stands for any type, so its values can't be listed.
+        Ty::Int(_) | Ty::Float(_) | Ty::Char | Ty::Text | Ty::IoError | Ty::Cap(_) | Ty::Param(_) => None,
     }
 }
 

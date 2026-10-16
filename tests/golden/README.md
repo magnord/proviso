@@ -8,7 +8,7 @@ The golden tests of the implementation. `basics/` holds the phase-1 tests. The `
 - `fNN_<what>.out` is the expected stdout of `proviso run`, and `fNN_<what>.err` the expected stderr. A missing `.out` means no output on stdout. A missing `.err` means no output on stderr, except in a file with `expect-report`, whose stderr is then checked only for the expected reports. The §F files have no `.err`. They check runtime reports with `expect-report` instead (T10), so they don't depend on a report's message or call sites.
 - `fNN_<what>.sig` is the expected output of `proviso sig` for the symbol named by `// sig:`.
 
-- `basics/` holds the phase-1 tests of the implementation, `records/` the tests of slice 2.1, `enums/` those of slice 2.2, and `option_result/` those of slice 2.3. They follow the same format, except that their header has no `§F row` line, and their `.err` files fix the provisional defect output (OPEN_QUESTIONS P5).
+- `basics/` holds the phase-1 tests of the implementation, `records/` the tests of slice 2.1, `enums/` those of slice 2.2, `option_result/` those of slice 2.3, and `methods/` those of slice 2.4. They follow the same format, except that their header has no `§F row` line, and their `.err` files fix the provisional defect output (OPEN_QUESTIONS P5).
 
 Error codes are in [../DIAGNOSTICS.md](../DIAGNOSTICS.md). The runner rejects an `expect-error` code that isn't in the catalog.
 
@@ -32,6 +32,7 @@ A phase delivered over several pull requests has slices, written `// phase: 2.1`
 | 2.1 | the data model, proven by records: declarations, construction, fields, `with`, `derives(Eq, Show)`, refinements checked at runtime |
 | 2.2 | enums, `match` and patterns: declarations, construction, exhaustiveness, `is` tests, `derives(Eq, Show)` on enums, record patterns |
 | 2.3 | `Option` and `Result`: the prelude enums and their type arguments, construction with inferred type arguments, patterns and exhaustiveness, `Eq` and `Show`, `fail` and `attempt` |
+| 2.4 | methods, interfaces and generic functions: `impl` blocks with `self` methods and associated functions, `Self`, `interface` declarations and `impl I for T` for module types, scalars and the prelude's `Eq` and `Show`, method resolution and `I.f(x)`, type parameters with constraints, inference and `::[…]`, interface-typed parameters, `Copy`, `derives(Ord, Hash)` |
 
 ## Directives
 

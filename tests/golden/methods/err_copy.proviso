@@ -1,0 +1,50 @@
+// phase: 2.4
+// expect-error: E0503
+// A type parameter isn't assumed copyable (REFERENCE §4.8). A borrowed `T`, such as a
+// parameter or a binding into one, may be passed on, compared and shown, but binding it to
+// a new name, storing it in a value or returning it copies it, which needs `T: Copy`. So
+// does an `Option[T]`. A `T` that a call returns isn't borrowed, so it may be bound and
+// returned without `Copy`.
+fn give[T](x: T) -> T {
+    return x                                        // <- E0503
+}
+
+fn bind[T](x: T) {
+    let y = x                                       // <- E0503
+}
+
+fn wrap[T](x: T) -> Option[T] {
+    return Some(x)                                  // <- E0503
+}
+
+fn whole[T](o: Option[T]) -> Option[T] {
+    return o                                        // <- E0503
+}
+
+fn inner[T](o: Option[T], fallback: Option[T]) -> Option[T] {
+    return match o {
+        Some(v) => Some(v)                          // <- E0503
+        None => fallback                            // <- E0503
+    }
+}
+
+fn copies[T: Copy](x: T, o: Option[T]) -> Option[T] {
+    let y = x
+    return match o {
+        Some(v) => Some(v)
+        None => Some(y)
+    }
+}
+
+fn borrows[T: Eq + Show](x: T, y: T, o: Option[T]) -> Text {
+    let same = x == y and o is Some(_)
+    let text = f"{x} {y.show()}"
+    debug(x, y)
+    let again = borrows(x: x, y: y, o: o)
+    return text
+}
+
+fn relay[T](x: T) -> T {
+    let r = give(x)
+    return r
+}

@@ -1,0 +1,91 @@
+// phase: 2.4
+// expect-error: E0203
+// expect-error: E0204
+// expect-error: E0210
+// expect-error: E0301
+// expect-error: E0302
+// expect-error: E0303
+// expect-error: E0306
+// expect-error: E0307
+// expect-error: E0309
+// expect-error: E0312
+// A call infers each type parameter from the expected type and the arguments, or takes it
+// from `::[…]`, which gives each parameter once (REFERENCE §4.8). Every argument for one
+// parameter has its type, and that type implements the parameter's constraints. `Float` has
+// no `Eq` and `Bool` no `Ord` (§12.2), and `System` holds a capability, so it isn't `Copy`
+// (§5.1). Inside the function, a `T` has only what its constraints give it, also when it
+// is passed on. A constraint names an interface, and an interface is a type only as a
+// parameter's (§4.9). A type parameter is PascalCase, declared once, and doesn't reuse a
+// type's name (§2, H4). A parameter whose constraint is rejected isn't reported again.
+record Plain {
+    n: Int
+}
+
+record Holder {
+    item: Show                                      // <- E0307
+}
+
+fn same[T: Eq](a: T, b: T) -> Bool {
+    return a == b
+}
+
+fn largest[T: Ord + Copy](a: T, b: T) -> T {
+    if a < b {
+        return b
+    }
+    return a
+}
+
+fn keep_one[T: Copy](x: T) -> T {
+    return x
+}
+
+fn nothing[T]() -> Option[T] {
+    return None
+}
+
+fn tell[T: Show](x: T) -> Text {
+    return x.show()
+}
+
+fn calls(sys: System, p: Plain) {
+    let a = same(a: 1, b: "one")                    // <- E0301
+    let b = same(a: 1.5, b: 2.5)                    // <- E0309
+    let c = largest(a: true, b: false)              // <- E0309
+    let d = keep_one(sys)                           // <- E0309
+    let e = tell(p)                                 // <- E0309
+    let f: Int8 = keep_one(300)                     // <- E0302
+    let g = nothing()                               // <- E0312
+    let h: Option[Text] = nothing()
+    let i = nothing::[Int, Text]()                  // <- E0307
+    let j = tell::[Text](5)                         // <- E0301
+    let k = p.n.show::[Int]()                       // <- E0307
+    let l = same::[Int](a: 1, b: 2)
+}
+
+fn body[T, U: Show](x: T, y: U) -> Text {
+    let a = x == x                                  // <- E0306
+    let b = x.show()                                // <- E0303
+    let c = f"{x}"                                  // <- E0306
+    let d = y < y                                   // <- E0306
+    let e = y.size()                                // <- E0303
+    let f = tell(x)                                 // <- E0309
+    return tell(y)
+}
+
+fn bounded[T: Sortable, U: Int](x: T, y: U) -> Bool {   // <- E0307, E0307
+    return x == x and y.size() > 0
+}
+
+fn shown() -> Show {                                // <- E0307
+    return 1
+}
+
+fn cased[t](x: t) {                                 // <- E0204
+}
+
+fn twice[T, T](x: T) {                              // <- E0210
+}
+
+fn shadows[Int](x: Int) {                           // <- E0203
+}
