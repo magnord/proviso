@@ -1,0 +1,60 @@
+// phase: 2.5
+// expect-error: E0312
+// expect-error: E0701
+// expect-error: E0702
+// A `try` where there is no `fails` to take its error is E0702 with the error type the
+// statement settles, also when only a literal gives it (REFERENCE §7.2). One whose error
+// type nothing gives is E0312, reported once, as such (issue #20). An unmarked call that
+// shares the error type is a second mistake, which hides neither (§15.1).
+
+fn both[T: Copy](x: T) -> T fails T {
+    return x
+}
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn pass[E: Copy]() -> Int fails E {
+    return 1
+}
+
+fn rethrow[E: Copy](e: E) -> Int fails E {
+    fail e
+}
+
+record Bounded {
+    x: Int where x > try both(x: 0)                 // <- E0702
+}
+
+fn literals(small: Int8) -> Int {
+    let a1 = try both(x: 5)                         // <- E0702
+    let a2 = first(a: try both(x: 5), b: 1)         // <- E0702
+    let a3 = try both(x: 5) + small                 // <- E0702
+    return 0
+}
+
+fn returned() -> Float {
+    return try both(x: 1.5)                         // <- E0702
+}
+
+fn unmarked_too() -> Int {
+    let b1 = first(a: both(x: 5), b: try both(x: 5)) // <- E0701, E0702
+    let b2 = first(a: try both(x: 5), b: both(x: 5)) // <- E0702, E0701
+    let b3 = first(a: try both(x: None), b: both(x: None)) // <- E0312, E0701
+    let b4 = first(a: both(x: None), b: try both(x: None)) // <- E0701, E0312
+    return 0
+}
+
+fn fallbacks() -> Int {
+    let c1 = pass() else {                          // <- E0312
+        let a = try rethrow(e: it)
+        0
+    }
+    let c2 = pass() else {                          // <- E0312
+        let a = try rethrow(e: it)
+        let b = rethrow(e: it)                      // <- E0701
+        0
+    }
+    return c1 + c2
+}

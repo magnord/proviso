@@ -484,6 +484,8 @@ enum Pending {
     /// A call of `callee` that can fail with `ty` but has no marker, which is reported with
     /// the error type the statement settles (E0701).
     Unmarked { ty: Ty, callee: Box<str>, span: Span },
+    /// A `try` that propagates `ty` from a function without `fails` (E0702).
+    Try { ty: Ty, span: Span },
 }
 
 impl Pending {
@@ -495,7 +497,8 @@ impl Pending {
             | Pending::Bound { ty, .. }
             | Pending::Neg { ty, .. }
             | Pending::Arith { ty, .. }
-            | Pending::Unmarked { ty, .. } => ty,
+            | Pending::Unmarked { ty, .. }
+            | Pending::Try { ty, .. } => ty,
         }
     }
 }
@@ -573,7 +576,7 @@ impl Checker<'_> {
                 Kind::Int => Ty::INT,
                 Kind::Float => Ty::Float(FloatTy::F64),
                 Kind::Any if open.never => Ty::Never,
-                Kind::Any if open.quiet => Ty::Error,
+                Kind::Any if open.quiet && !open.owed => Ty::Error,
                 Kind::Any => {
                     unknown.push(open.origin);
                     Ty::Error
@@ -667,6 +670,13 @@ impl Checker<'_> {
             Pending::Unmarked { ty, callee, span } => {
                 let ty = self.vars.zonk(&ty);
                 self.unmarked(&callee, &ty, span);
+            }
+            Pending::Try { ty, span } => {
+                // One that nothing gave is reported once, as such (issue #20).
+                let ty = self.vars.zonk(&ty);
+                if ty != Ty::Error {
+                    self.try_without_fails(&ty, span);
+                }
             }
         }
     }
@@ -3985,16 +3995,15 @@ impl Checker<'_> {
         for err in errors {
             let err = self.vars.resolve(&err);
             let message = match &self.f.fails {
-                // A type parameter used only in `fails` that nothing gives is reported once,
-                // as such (issue #20).
-                None if self.vars.has_open(&err) => continue,
-                None if !self.f.returns => {
-                    let place = if self.f.example { "an example" } else { "a `where` clause" };
-                    format!("`try` in {place}, which has no function to propagate `{}` to", self.show(&err))
+                // One the statement has yet to settle is reported with the type it settles.
+                None if self.vars.has_var(&err) => {
+                    self.vars.owe(&err);
+                    self.pending.push(Pending::Try { ty: err, span });
+                    continue;
                 }
                 None => {
-                    let err = self.show(&err);
-                    format!("`try` propagates `{err}`, but this function does not declare `fails {err}`")
+                    self.try_without_fails(&err, span);
+                    continue;
                 }
                 // The function's error type gives one the call leaves open (issue #20).
                 Some(own) if *own == Ty::Error || err == Ty::Error => continue,
@@ -4009,6 +4018,19 @@ impl Checker<'_> {
             self.error(codes::TRY_ERROR_MISMATCH, span, message);
         }
         ty
+    }
+
+    /// Reports a `try` that propagates `err` where there is no `fails` to take it.
+    fn try_without_fails(&mut self, err: &Ty, span: Span) {
+        let message = if self.f.returns {
+            let err = self.show(err);
+            format!("`try` propagates `{err}`, but this function does not declare `fails {err}`")
+        } else {
+            let place = if self.f.example { "an example" } else { "a `where` clause" };
+            format!("`try` in {place}, which has no function to propagate `{}` to", self.show(err))
+        };
+        self.vars.poison(err);
+        self.error(codes::TRY_ERROR_MISMATCH, span, message);
     }
 
     /// `attempt f(…)`: a `Result` of the chain's value and the error of the calls it marks
