@@ -2274,7 +2274,13 @@ impl Checker<'_> {
                 self.condition(*cond);
                 let bindings = self.f.scopes.pop().unwrap_or_default();
                 let (ty, span) = match fallback {
-                    Fallback::Value(value) => (self.infer(*value), self.span(*value)),
+                    // Nothing after the fallback gives its type, so it is settled before it is
+                    // tested, as a statement's is. A type argument only `Never` gave is then
+                    // `Never` (OPEN_QUESTIONS P5).
+                    Fallback::Value(value) => {
+                        let ty = self.infer(*value);
+                        (self.force(&ty), self.span(*value))
+                    }
                     Fallback::Block(block) => (self.block_stmt(block, None), block.span),
                 };
                 if !diverges_ty(&ty) {
@@ -2552,9 +2558,11 @@ impl Checker<'_> {
         if missing {
             return Ty::Error;
         }
+        // A block without a final value gives `()`, which settles a type argument that
+        // expected it (issue #10).
         match (value, expected) {
             (Some(ty), _) => ty,
-            (None, Some(expected)) if *expected != Ty::Unit && *expected != Ty::Error => {
+            (None, Some(expected)) if !self.vars.subsume(expected, &Ty::Unit) => {
                 self.error(
                     codes::TYPE_MISMATCH,
                     block.span.end(),

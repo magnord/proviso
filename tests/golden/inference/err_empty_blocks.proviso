@@ -1,0 +1,44 @@
+// phase: 2.5
+// expect-error: E0301
+// expect-error: E0415
+// A block without a final value gives `()`, so it meets the other branch, argument or
+// declared type as `Unit`, and the mistake is one error where they meet (REFERENCE §15.1;
+// issue #10). An `if` without `else` is still no value when nothing yet expects `Unit`
+// (OPEN_QUESTIONS P5). A `check` fallback whose value settles as a type that can finish is
+// still rejected.
+
+fn id[T: Copy](x: T) -> T {
+    return x
+}
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn stop() -> Never {
+    return stop()
+}
+
+fn blocks(c: Bool, d: Bool) {
+    let e1 = first(a: if c {} else {}, b: 5) // <- E0301
+    let e2 = first(a: if c {} else { stop() }, b: 5) // <- E0301
+    let e3 = first(a: if c {} else { 5 }, b: ()) // <- E0301
+    let e4 = first(
+        a: if c { 5 } else {}, // <- E0301
+        b: 1,
+    )
+    let e5 = id(if c { if d {} } else {}) // <- E0301
+    let e6: Never = if c {} else {} // <- E0301
+    let e7 = if c { 5 } else {} // <- E0301
+    let e8 = if c { Some(1) } else {} // <- E0301
+}
+
+fn fallbacks(c: Bool) -> Int {
+    check c else id(5) // <- E0415
+    check c else id(()) // <- E0415
+    check c else first(a: stop(), b: 1) // <- E0415
+    return 1
+}
+
+pub fn main(sys: keep System) {
+}

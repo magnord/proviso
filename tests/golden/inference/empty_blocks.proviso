@@ -1,0 +1,82 @@
+// phase: 2.5
+// A block without a final value gives `()`. Where a type argument is all the context the
+// block has, the block settles it as `Unit`, in either argument order, after `else if`,
+// in `match` arms, inside a constructor and a tuple, and beside a branch that leaves
+// (issue #10). A `check` whose fallback is a value settles the value's type before it tests
+// that the fallback can't finish, so a type argument that only `Never` gives makes the
+// fallback one that leaves (OPEN_QUESTIONS P5). Each `dN` runs its fallback when `c` is
+// false.
+use std.io { IoError }
+
+fn id[T: Copy](x: T) -> T {
+    return x
+}
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn is_unit(x: Unit) -> Bool {
+    return x == ()
+}
+
+fn blocks(c: Bool, d: Bool) -> Text {
+    let u1 = id(if c {} else {})
+    let u2 = first(a: if c {} else {}, b: ())
+    let u3 = first(a: (), b: if c {} else {})
+    let u4 = id(x: if c {} else if d {} else {})
+    let u5 = id(match c {
+        true => {}
+        false => {}
+    })
+    let u6 = first(a: match c {
+        true => {}
+        false => {}
+    }, b: ())
+    let u7 = Some(if c {} else {})
+    let u8 = (id(if c {} else {}), 1)
+    return f"{is_unit(u1)} {is_unit(u2)} {is_unit(u3)} {is_unit(u4)} {is_unit(u5)} {is_unit(u6)} {u7 == Some(())} {u8 == ((), 1)}"
+}
+
+fn leaves(c: Bool) -> Bool fails Text {
+    let u9 = id(if c {} else { fail "u9" })
+    let u10 = first(a: if c { fail "u10" } else {}, b: ())
+    return is_unit(u9) and is_unit(u10)
+}
+
+fn d1(c: Bool) -> Int fails Text {
+    check c else id(fail "d1")
+    return 1
+}
+
+fn d2(c: Bool) -> Int fails Text {
+    check c else first(a: fail "d2", b: fail "d2b")
+    return 2
+}
+
+fn d3(c: Bool) -> Int fails Text {
+    check c else id(x: id(fail "d3"))
+    return 3
+}
+
+fn d4(c: Bool, d: Bool) -> Int fails Text {
+    check c else if d { id(fail "d4") } else { fail "d4b" }
+    return 4
+}
+
+fn d5(c: Bool, d: Bool) -> Int fails Text {
+    check c else match d {
+        true => id(fail "d5")
+        false => fail "d5b"
+    }
+    return 5
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(blocks(c: true, d: true))
+    try sys.stdout.write_line(blocks(c: false, d: false))
+    try sys.stdout.write_line(f"{attempt leaves(true)} {attempt leaves(false)}")
+    try sys.stdout.write_line(f"{attempt d1(true)} {attempt d2(true)} {attempt d3(true)} {attempt d4(c: true, d: true)} {attempt d5(c: true, d: true)}")
+    try sys.stdout.write_line(f"{attempt d1(false)} {attempt d2(false)} {attempt d3(false)} {attempt d4(c: false, d: true)} {attempt d5(c: false, d: true)}")
+    try sys.stdout.write_line(f"{attempt d4(c: false, d: false)} {attempt d5(c: false, d: false)}")
+}
