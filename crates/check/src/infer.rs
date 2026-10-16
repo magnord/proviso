@@ -217,8 +217,9 @@ impl Vars {
         }
     }
 
-    /// Makes the classes of `a` and `b` one. The older root stays, so a statement's own
-    /// variables never stand for those of the expression around it.
+    /// Makes the classes of `a` and `b` one. The older root stays, so a statement's solve,
+    /// which settles only the roots made since it began, can't settle a class that also
+    /// holds a variable of the expression around it.
     fn union(&mut self, a: u32, b: u32) -> bool {
         let (a, b) = (self.root(a), self.root(b));
         if a == b {
