@@ -18,8 +18,9 @@ fn attempted() -> Result[Int, Text] {
 
 fn compared() -> Bool {
     let a = (attempt never_fails()) == Err("x")
-    let b = Ok(1) == attempt never_fails::[Text]()
-    return a or b
+    let b = Err("x") == attempt never_fails()
+    let c = Ok(1) == attempt never_fails::[Text]()
+    return a or b or c
 }
 
 fn handled() -> Int {

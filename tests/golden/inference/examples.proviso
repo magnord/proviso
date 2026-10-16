@@ -26,6 +26,6 @@ example id(Some(5)) == Some(small())
 example id(Some(small())) == Some(5)
 example second(a: None, b: Some(small())) == Some(5)
 example second(a: Some(small()), b: None) == None
-example id((5, None)) == (small(), Option.None)
+example id((5, Some(5))) == (small(), Option.Some(small()))
 example second(a: nothing(), b: Some(small())) == Some(5)
 example id(None) == Some(small())

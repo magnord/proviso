@@ -58,10 +58,12 @@ fn joined(bx: Box, small: Int8) -> Text {
     let b4 = small == (id(bx).maybe(1) else 0)
     let b5 = first(a: conv(1) else 0, b: small)
     let b6 = first(a: small, b: maybe(1) else 0)
+    let b10 = first(a: small, b: conv(1) else 0)
+    let b11 = first(a: maybe(1) else 0, b: small)
     let b7 = conv(1) else small
     let b8 = maybe(1) else small
     let b9 = id(bx).conv(1) else small
-    return f"{b1} {b2} {b3} {b4} {int8(b5) + int8(b6) + int8(b7) + int8(b8) + int8(b9)}"
+    return f"{b1} {b2} {b3} {b4} {int8(b5) + int8(b6) + int8(b7) + int8(b8) + int8(b9) + int8(b10) + int8(b11)}"
 }
 
 pub fn main(sys: keep System) fails IoError {
