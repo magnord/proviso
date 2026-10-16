@@ -1403,9 +1403,12 @@ impl Checker<'_> {
             ty if ty.is_numeric() || matches!(ty, Ty::Adt(..)) => Some(ty.clone()),
             _ => hint.cloned(),
         };
-        // A variant with fields can give its own type, as `Some(1)` does, so in
-        // `None == Some(1)` it goes first.
-        let has_fields = |e: ExprId| matches!(&self.m.exprs[e].kind, ExprKind::Call { args, .. } if !args.is_empty());
+        // A variant with fields can give its own type, as `Some(1)` and `Option.Some(1)` do,
+        // so in `None == Some(1)` it goes first.
+        let has_fields = |e: ExprId| match &self.m.exprs[e].kind {
+            ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. } => !args.is_empty(),
+            _ => false,
+        };
         let lhs_needs = self.needs_context(lhs);
         let rhs_needs = self.needs_context(rhs);
         if lhs_needs && (!rhs_needs || (!has_fields(lhs) && has_fields(rhs))) {
@@ -1877,10 +1880,20 @@ impl Checker<'_> {
                 _ => {}
             }
             match ty {
-                // An expected `Never` argument says nothing about the field, which gives it
-                // instead, so the field of `Some(1)` is an `Int` whatever was expected.
-                Ty::Param(i) if matches!(targs[*i as usize], None | Some(Ty::Never)) => {
-                    targs[*i as usize] = Some(self.infer(arg.value))
+                Ty::Param(i) if targs[*i as usize].is_none() => targs[*i as usize] = Some(self.infer(arg.value)),
+                // An expected `Never`, also inside a type argument, says less than the field,
+                // which widens it, so `Some(Some(1))` is an `Option[Option[Int]]` where an
+                // `Option[Option[Never]]` was expected (OPEN_QUESTIONS P5).
+                Ty::Param(i) if targs[*i as usize].as_ref().is_some_and(|t| *t == Ty::Never || t.has_never_arg()) => {
+                    let i = *i as usize;
+                    let expected = targs[i].clone().expect("the guard saw a type");
+                    let actual = self.expr(arg.value, Some(&expected).filter(|t| **t != Ty::Never));
+                    targs[i] = Some(expected.join(&actual).unwrap_or_else(|| {
+                        let span = self.span(arg.value);
+                        let message = format!("expected `{}`, found `{}`", self.show(&expected), self.show(&actual));
+                        self.error(codes::TYPE_MISMATCH, span, message);
+                        Ty::Error
+                    }));
                 }
                 ty => {
                     let known: Vec<Ty> = targs.iter().map(|t| t.clone().unwrap_or(Ty::Error)).collect();

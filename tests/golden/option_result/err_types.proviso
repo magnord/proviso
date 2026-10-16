@@ -18,8 +18,9 @@
 // their ordering waits for the `Ord` derives. A mistake is reported once (§15.1).
 // An unqualified `Some` is always `Option`'s (§3). The first branch of an `if` gives the
 // others their type, as for literals, unless its type has a `Never` argument, since `Never`
-// is a subtype of every type (§9.2). A variant with fields gives its own type, so it goes
-// first in `==` (P5).
+// is a subtype of every type (§9.2). A field widens a `Never` that the expected type gives,
+// also inside a type argument. A variant with fields gives its own type, qualified or not,
+// so it goes first in `==` (P5).
 enum Maybe {
     Some(n: Int)
     Nothing
@@ -50,6 +51,13 @@ fn branches(c: Bool, o: Option[Int]) -> Option[Int] fails Text {
     let l: Option[Int] = k
     let m = Some(fail "m") == Some(1)
     return if a == b { d } else { a }
+}
+
+fn nested(x: Option[Option[Never]]) -> Bool {
+    let a = None == Option.Some(1)
+    let b = x == Some(Some(1))
+    let c = x == Some(5)                            // <- E0301
+    return a == b
 }
 
 record Gauge derives(Eq) {
