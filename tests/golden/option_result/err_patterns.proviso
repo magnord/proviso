@@ -1,0 +1,100 @@
+// phase: 2.3
+// expect-error: E0208
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0311
+// A `match` on an `Option` or `Result` covers each variant, nested ones included, and a
+// guarded arm covers nothing (REFERENCE §6.3). A pattern names the variants of the
+// scrutinee's type (§6.4): `Some` against an `Int`, or `Option.Ok`, is a mismatch, and a
+// user enum's own variants hide nothing of `Option`'s, nor `Option`'s of its. The one field
+// is `value` or `error` (STD.md). A variant holding a `Result` with one type that has values,
+// declared before or after, or an `Option` of any type, has values and needs an arm.
+enum Maybe {
+    Some(n: Int)
+    Nothing
+}
+
+enum Void {}
+
+enum Later {
+    Only(x: Result[Declared, Void])
+}
+
+enum Optional {
+    Only(o: Option[Void])
+}
+
+enum Declared {
+    Here
+}
+
+enum Holder {
+    Late(l: Later)
+    Opt(o: Optional)
+}
+
+fn empty_matches(l: Later, o: Optional, h: Holder) -> Int {
+    let a = match l {}                              // <- E0311
+    let b = match o {}                              // <- E0311
+    let c = match h {                               // <- E0311
+        Opt(_) => 1
+    }
+    let d = match h {                               // <- E0311
+        Late(_) => 1
+    }
+    return a + b + c + d
+}
+
+fn cases(o: Option[Option[Int]], r: Result[Int, Text], n: Int, m: Maybe) -> Int {
+    let a = match r {                               // <- E0311
+        Ok(v) => v
+    }
+    let b = match o {                               // <- E0311
+        Some(Some(_)) => 1
+        None => 2
+    }
+    let c = match o {                               // <- E0311
+        Some(_) => 1
+    }
+    let d = match n {
+        Some(x) => x                                // <- E0301
+        _ => 0
+    }
+    let e = match r {
+        Option.Ok(v) => v                           // <- E0301
+        _ => 0
+    }
+    let f = match r {
+        Result.Some(v) => v                         // <- E0303
+        _ => 0
+    }
+    let g = match o {
+        Some(v: x) => 1                             // <- E0303
+        _ => 2
+    }
+    let h = match o {
+        Some(value: x) => 1
+        None => 2
+    }
+    let i = match r {
+        Ok => 1                                     // <- E0208
+        Err(..) => 2
+    }
+    let j = match m {
+        None => 1                                   // <- E0303
+        _ => 2
+    }
+    let k = match m {
+        Some(x) => x
+        Nothing => 0
+    }
+    let l = match r {                               // <- E0311
+        Ok(v) if v > 0 => v
+        Err(_) => 0
+    }
+    let p = match r {
+        Err(error: t) => t.byte_len()
+        Ok(value: v) => v
+    }
+    return a + b + c + d + e + f + g + h + i + j + k + l + p
+}

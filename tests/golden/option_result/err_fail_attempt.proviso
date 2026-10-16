@@ -1,0 +1,91 @@
+// phase: 2.3
+// expect-error: E0102
+// expect-error: E0201
+// expect-error: E0203
+// expect-error: E0301
+// expect-error: E0302
+// expect-error: E0701
+// expect-error: E0702
+// expect-error: E0703
+// expect-error: E0705
+// expect-error: E0706
+// `fail e` needs a `fails` clause whose type `e` has (REFERENCE §7.1). A `where` clause is an
+// expression with no function to fail. `attempt` marks a call that can fail, as `try` does
+// (E0703), and its value is a `Result`, so an `attempt` alone is not a statement (Q33). It
+// covers its postfix chain, not the arguments, whose fallible calls are marked on their own.
+// A literal after `fail` takes the `fails` type (§2). A function that returns a `Result`
+// doesn't fail, so `try` on it marks nothing (§7.2). A constructor with fields is a call and
+// may stand alone, as `Point(x: 1, y: 2)` may, but a bare `None` is not (Q33). `Err` is a
+// prelude name (§3), so a record may not reuse it (H4), and its uses aren't reported again.
+record Err {                                        // <- E0203
+    v: Int
+}
+
+fn errs() -> Int {
+    let e: Err = Err(v: 1)
+    return e.v
+}
+
+record Limit {
+    n: Int where n > 0 or fail "no"                 // <- E0705
+}
+
+fn no_fails(n: Int) -> Int {
+    if n > 0 {
+        fail "positive"                             // <- E0705
+    }
+    return n
+}
+
+fn wrong(n: Int) -> Int fails Text {
+    fail n                                          // <- E0301
+}
+
+fn small(n: Int) -> Int fails Int8 {
+    if n > 0 {
+        fail 300                                    // <- E0302
+    }
+    fail 100
+}
+
+fn checked(n: Int) -> Result[Int, Text] {
+    return Ok(n)
+}
+
+fn tries() -> Int fails Text {
+    let r = try checked(1)                          // <- E0703
+    return 0
+}
+
+fn unknown_error() fails Text {
+    fail missing                                    // <- E0201
+}
+
+fn safe(n: Int) -> Int {
+    return n
+}
+
+fn risky(n: Int) -> Int fails Text {
+    if n < 0 {
+        fail "negative"
+    }
+    return n
+}
+
+fn never(n: Int) -> Int fails Never {
+    return n
+}
+
+fn attempts() {
+    let a = attempt safe(1)                         // <- E0706
+    let b = attempt never(1)                        // <- E0706
+    attempt risky(1)                                // <- E0102
+    let c = attempt risky(try risky(1))             // <- E0702
+    let d = attempt risky(risky(2))                 // <- E0701
+    let _ = attempt risky(3)
+    let e: Result[Int, Int] = attempt risky(4)      // <- E0301
+    let f: Option[Int] = attempt risky(5)           // <- E0301
+    let g: Result[Int, Text] = attempt risky(6)
+    None                                            // <- E0102
+    Some(1)
+}

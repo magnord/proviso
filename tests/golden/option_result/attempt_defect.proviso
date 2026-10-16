@@ -1,0 +1,20 @@
+// phase: 2.3
+// expect-exit: 70
+// expect-report: defect integer_overflow
+// `attempt` reifies errors, not defects (REFERENCE §7.2, §7.3), so an overflow in the call
+// it marks still aborts the program.
+use std.io { IoError }
+
+fn grow(n: Int8) -> Int8 fails Text {
+    if n < 0 {
+        fail "negative"
+    }
+    return n + 100
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let a = attempt grow(-1)
+    try sys.stdout.write_line(a.show())
+    let b = attempt grow(100)
+    try sys.stdout.write_line("not reached")
+}

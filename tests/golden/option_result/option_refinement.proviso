@@ -1,0 +1,15 @@
+// phase: 2.3
+// expect-exit: 70
+// expect-report: defect refinement_failed
+// A refinement may test an `Option` field with `is` (REFERENCE §8.1), and the v1 profile
+// checks it at run time (OPEN_QUESTIONS P3). The defect writes the value in literal form,
+// `Some(0)`.
+record Config {
+    retries: Option[Int] where not (retries is Some(0))
+}
+
+pub fn main(sys: keep System) {
+    let a = Config(retries: None)
+    let b = Config(retries: Some(2))
+    let c = Config(retries: Some(0))
+}

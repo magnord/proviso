@@ -1,0 +1,55 @@
+// phase: 2.3
+// `Some`, `None`, `Ok` and `Err` may be used unqualified, and `Option.Some(…)` is the
+// qualified form (REFERENCE §3, §4.5). Their type arguments come from the expected type,
+// which for `==` is the other operand's, or else from their fields (OPEN_QUESTIONS P5).
+// `Show` writes them in literal form, as `Some(3)`, `None` or `Ok("a")`, with text and chars
+// quoted (STD.md), and `debug` writes them the same way. A user enum keeps its qualified form.
+// `Eq` compares the variants, then the values, so `Ok(1)` and `Err(1)` differ.
+use std.io { IoError }
+
+enum Shape derives(Eq, Show) {
+    Circle(radius: Int)
+    Empty
+}
+
+record Point derives(Eq, Show) {
+    x: Int
+    y: Int
+}
+
+record Slot derives(Eq, Show) {
+    item: Option[Text]
+    status: Result[Int, Shape]
+}
+
+fn small(n: Int) -> Option[Int8] {
+    if n < 0 {
+        return None
+    }
+    return Some(127)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let a = Some(3)
+    let b: Option[Int] = None
+    let c = Option.Some("a \"q\"")
+    let d: Option[Char] = Option.None
+    let e: Result[Int, Text] = Ok(1)
+    let f: Result[Int, Text] = Err("bad")
+    let g: Result[Int, Int] = Result.Err(1)
+    let h: Result[Int, Int] = Ok(value: 1)
+    try sys.stdout.write_line(f"{a} {b} {c} {d}")
+    try sys.stdout.write_line(f"{e} {f} {g.show()} {h}")
+    try sys.stdout.write_line(f"{g == h} {g != h} {h == Ok(1)} {Ok(1) == h} {h.eq(Err(1))}")
+    try sys.stdout.write_line(f"{b == None} {None == b} {a == None} {a == Some(3)} {Some(4) == a}")
+    let nested = Some(Some(Point(x: 1, y: -2)))
+    let inner: Option[Option[Shape]] = Some(None)
+    try sys.stdout.write_line(f"{nested} {inner} {Some(Shape.Circle(radius: 2))} {Some('\n')}")
+    try sys.stdout.write_line(f"{small(-1)} {small(1)} {small(1) == Some(127)}")
+    let s = Slot(item: Some("x"), status: Err(Shape.Empty))
+    let t = Slot(item: Some("x"), status: Err(Shape.Empty))
+    try sys.stdout.write_line(f"{s} {s == t} {s == s.with(status: Ok(0))} {s.with(item: None)}")
+    let done: Result[Unit, Text] = Ok(())
+    try sys.stdout.write_line(f"{done == Ok(())} {done == Err("()")}")
+    debug(c, f, Some(Some('x')), s)
+}

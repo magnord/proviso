@@ -1,0 +1,6 @@
+big 10, small 9, inner none, none
+7 4 5 3
+4 -1 Maybe.Some(n: 1)
+Some(2) Some(1) None
+4 true false 0 e
+Ok(5) true

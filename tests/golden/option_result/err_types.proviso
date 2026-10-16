@@ -1,0 +1,104 @@
+// phase: 2.3
+// expect-error: E0201
+// expect-error: E0207
+// expect-error: E0208
+// expect-error: E0301
+// expect-error: E0302
+// expect-error: E0303
+// expect-error: E0306
+// expect-error: E0307
+// expect-error: E0309
+// expect-error: E0312
+// expect-error: E0901
+// `Option` takes one type argument and `Result` two (STD.md). A variant's type arguments
+// come from the expected type, which for `==` is the other operand's, or else from its fields,
+// and a variant that neither determines is rejected (OPEN_QUESTIONS P5). A literal inside
+// takes its type from them (REFERENCE §2). `Option` and `Result` implement `Eq` and `Show`
+// only when their type arguments do, so `Option[Float]` has no `==` (§12.2, STD.md), and
+// their ordering waits for the `Ord` derives. A mistake is reported once (§15.1).
+// An unqualified `Some` is always `Option`'s (§3). The first branch of an `if` gives the
+// others their type, as for literals, unless its type has a `Never` argument, since `Never`
+// is a subtype of every type (§9.2). A field widens a `Never` that the expected type gives,
+// also inside a type argument. A variant with fields gives its own type, qualified or not,
+// so it goes first in `==` (P5).
+enum Maybe {
+    Some(n: Int)
+    Nothing
+}
+
+fn take_maybe(m: Maybe) -> Int {
+    return 0
+}
+
+fn prelude_names() -> Int {
+    let b = Maybe.Some(n: 2)
+    return take_maybe(Some(4))                      // <- E0301
+}
+
+fn branches(c: Bool, o: Option[Int]) -> Option[Int] fails Text {
+    let a = if c { Some(fail "a") } else { Some(1) }
+    let b = match o {
+        Some(_) => Some(fail "b")
+        None => Some(2)
+    }
+    let d = if c { Some(1) } else { None }
+    let e = if c { None } else { Some(1) }          // <- E0312
+    let g = if c { Some(fail "g") } else { 3 }      // <- E0301
+    let h: Option[Never] = Some(1)                  // <- E0301
+    let i = None == Some(1)
+    let j = Some(1) != None
+    let k = Some(fail "k")
+    let l: Option[Int] = k
+    let m = Some(fail "m") == Some(1)
+    return if a == b { d } else { a }
+}
+
+fn nested(x: Option[Option[Never]]) -> Bool {
+    let a = None == Option.Some(1)
+    let b = x == Some(Some(1))
+    let c = x == Some(5)                            // <- E0301
+    return a == b
+}
+
+record Gauge derives(Eq) {
+    reading: Option[Float]                          // <- E0309
+}
+
+record Label derives(Eq, Show) {
+    text: Option[Text]
+    code: Result[Int, Label]
+}
+
+fn arity(a: Option, b: Option[Int, Int], c: Result[Int], d: Option[Missing]) -> Int { // <- E0307, E0307, E0307, E0307
+    let x = a == b
+    let y = c == d
+    return 0
+}
+
+fn values(o: Option[Int], f: Option[Float]) {
+    let a = None                                    // <- E0312
+    let b = Ok(1)                                   // <- E0312
+    let c = Result.Err("e")                         // <- E0312
+    let d: Option[Int] = Some("a")                  // <- E0301
+    let e: Option[Int8] = Some(200)                 // <- E0302
+    let g: Option[Int8] = Some(-128)
+    let h: Int = None                               // <- E0301
+    let i: Result[Int, Text] = Ok("a")              // <- E0301
+    let j: Result[Int, Text] = Err(1)               // <- E0301
+    let k = Some()                                  // <- E0208
+    let l = Some(1, 2)                              // <- E0208
+    let m: Option[Int] = None(1)                    // <- E0208
+    let n = Some                                    // <- E0901
+    let p = Option.Maybe(1)                         // <- E0303
+    let q = Result.None                             // <- E0303
+    let r = o == Some(1.5)                          // <- E0301
+    let s = f == f                                  // <- E0306
+    let t = o < Some(2)                             // <- E0901
+    let u = Some(unknown)                           // <- E0201
+    let v: Option[Int] = Some(unknown_too)          // <- E0201
+    let w: Missing = None                           // <- E0307
+    let x = Some(v: 1)                              // <- E0207
+    let y = Some(value: 1) == o
+    let z = None != o
+    let ok = o.value                                // <- E0303
+}

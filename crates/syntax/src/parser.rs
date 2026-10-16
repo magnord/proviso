@@ -765,8 +765,15 @@ impl Parser<'_> {
             T::Ident => {
                 let name = self.ident("a type")?;
                 if self.at(T::LBracket) {
-                    self.skip_group()?;
-                    TypeExprKind::Applied(name)
+                    // A numeric type takes a unit, and `Array[T, N]` a length, which are not
+                    // types (REFERENCE §4.2, §4.7).
+                    let args = if takes_non_type_args(self.m.text(name.sym)) {
+                        self.skip_group()?;
+                        None
+                    } else {
+                        Some(self.type_args()?)
+                    };
+                    TypeExprKind::Applied { name, args }
                 } else {
                     TypeExprKind::Named(name)
                 }
@@ -780,6 +787,20 @@ impl Parser<'_> {
         };
         let span = start.to(self.prev_span());
         Ok(self.m.types.alloc(TypeExpr { kind, span }))
+    }
+
+    /// `[A, B]` after a type's name.
+    fn type_args(&mut self) -> PResult<Vec<TypeId>> {
+        let open = self.expect(T::LBracket, "`[`")?;
+        let mut args = Vec::new();
+        while !self.at(T::RBracket) {
+            args.push(self.nested(Self::type_expr)?);
+            if !self.eat(T::Comma) {
+                break;
+            }
+        }
+        self.close(&open, T::RBracket, "`,` or `]`")?;
+        Ok(args)
     }
 
     // ---- statements ----
@@ -888,7 +909,6 @@ impl Parser<'_> {
                 self.bump();
                 StmtKind::Assert(self.expr()?)
             }
-            T::Keyword(Kw::Fail) => return self.not_implemented("`fail` statements", Planned::Phase(2)),
             T::Keyword(Kw::Check) => return self.not_implemented("`check` statements", Planned::Phase(2)),
             T::Keyword(Kw::Expect) => return self.not_implemented("`expect` statements", Planned::Phase(2)),
             T::Ident
@@ -1125,7 +1145,13 @@ impl Parser<'_> {
                 let span = token.span.to(self.span_of(inner));
                 Ok(self.alloc(ExprKind::Try(inner), span))
             }
-            T::Keyword(Kw::Attempt) => self.not_implemented("`attempt` expressions", Planned::Phase(2)),
+            T::Keyword(Kw::Attempt) => {
+                // `attempt` covers the whole postfix chain to its right, as `try` does.
+                let token = self.bump();
+                let inner = self.nested(Self::postfix)?;
+                let span = token.span.to(self.span_of(inner));
+                Ok(self.alloc(ExprKind::Attempt(inner), span))
+            }
             _ => self.postfix(),
         }
     }
@@ -1266,8 +1292,14 @@ impl Parser<'_> {
             T::Pipe => return self.not_implemented("closures", Planned::Phase(2)),
             T::Keyword(Kw::Match) => return self.match_expr(),
             T::Keyword(Kw::Scope) => return self.not_implemented("`scope` blocks", Planned::Phase(6)),
-            T::Keyword(Kw::Attempt) => return self.not_implemented("`attempt` expressions", Planned::Phase(2)),
-            T::Keyword(Kw::Fail) => return self.not_implemented("`fail` expressions", Planned::Phase(2)),
+            // As the operand of `try` or `attempt`, which covers only its own chain.
+            T::Keyword(Kw::Try | Kw::Attempt) => return self.prefix(),
+            T::Keyword(Kw::Fail) => {
+                // `fail e` takes everything to its right (REFERENCE §6.1).
+                self.bump();
+                let value = self.expr()?;
+                ExprKind::Fail(value)
+            }
             T::Keyword(Kw::It) => return self.not_implemented("`it` bindings", Planned::Phase(2)),
             T::Keyword(Kw::SelfValue | Kw::SelfType) => {
                 return self.not_implemented("methods and `self`", Planned::Phase(2));
@@ -1591,4 +1623,25 @@ fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
         Kw::Let => ("top-level constants", Planned::Unscheduled),
         _ => return None,
     })
+}
+
+/// The types whose brackets hold something other than types: a unit, as in `Float[m]`
+/// (REFERENCE §4.7), or the length of an `Array[T, N]` (§4.2).
+fn takes_non_type_args(name: &str) -> bool {
+    matches!(
+        name,
+        "Array"
+            | "Int"
+            | "Int8"
+            | "Int16"
+            | "Int32"
+            | "Int64"
+            | "UInt8"
+            | "UInt16"
+            | "UInt32"
+            | "UInt64"
+            | "Byte"
+            | "Float"
+            | "Float32"
+    )
 }

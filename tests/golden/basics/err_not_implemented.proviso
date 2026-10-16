@@ -21,6 +21,10 @@ fn f(xs: List[Int]) -> Int {                        // <- E0901
     return n
 }
 
+fn arrays(xs: Array[Int, 3]) -> Int {             // <- E0901
+    return 0
+}
+
 fn g(c: Bool) -> Bool {
     return true
 }

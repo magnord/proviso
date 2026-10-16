@@ -1,0 +1,51 @@
+// phase: 2.3
+// `attempt f(…)` reifies the outcome of the call it marks as a `Result` (REFERENCE §7.2):
+// `Ok` with the value, or `Err` with the error unchanged. Like `try`, it covers the postfix
+// chain to its right (§6.1) and no further. A failure inside an argument, from a `try` or a
+// `fail`, still exits the function. So `relay(-3)` fails with `Code.Inner` through its
+// argument's `try`, and doesn't return an `Err`; the `attempt` in `main` is what catches it.
+use std.io { IoError }
+
+enum Code derives(Eq, Show) {
+    Outer
+    Inner(n: Int)
+}
+
+fn outer(x: Int) -> Int fails Code {
+    if x > 100 {
+        fail Code.Outer
+    }
+    return x + 1
+}
+
+fn inner(n: Int) -> Int fails Code {
+    if n < 0 {
+        fail Code.Inner(n: n)
+    }
+    return n * 10
+}
+
+fn relay(n: Int) -> Result[Int, Code] fails Code {
+    return attempt outer(x: try inner(n))
+}
+
+fn bail(n: Int) -> Result[Int, Code] fails Code {
+    let r = attempt outer(x: if n > 0 { n } else { fail Code.Inner(n: 0) })
+    return r
+}
+
+fn rescue(n: Int) -> Int {
+    return match attempt outer(x: n) {
+        Ok(v) => v
+        Err(Code.Outer) => -1
+        Err(Code.Inner(m)) => m
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{attempt relay(1)} {attempt relay(20)} {attempt relay(-3)}")
+    try sys.stdout.write_line(f"{attempt bail(5)} {attempt bail(0)}")
+    try sys.stdout.write_line(f"{rescue(1)} {rescue(101)} {attempt outer(x: 7) == Ok(8)}")
+    let w = attempt sys.stdout.write_line("written")
+    try sys.stdout.write_line(f"{w is Ok(())} {w is Err(_)}")
+}

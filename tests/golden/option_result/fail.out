@@ -1,0 +1,2 @@
+Ok(6) Err(Problem.Negative) Err(Problem.TooBig(limit: 10))
+Err(Problem.Negative) Ok(8) Err(3)

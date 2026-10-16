@@ -5,15 +5,15 @@
 //! cover as much as `_` here: their exhaustiveness is `[verified]`, so before the verifier
 //! exists the v1 profile checks it at run time instead (OPEN_QUESTIONS P5). Text and chars
 //! have too many values to list, so only `_` or a binding covers them. A constructor with a
-//! field of a type that has no values, such as an enum without variants, builds nothing, so
-//! it needs no arm.
+//! field of a type that has no values, such as an enum without variants or `Never`, builds
+//! nothing, so it needs no arm: `Err` of a `Result[Int, Never]` is one.
 //!
 //! The algorithm keeps its own stack and holds rows as lists that share their tails, so no
 //! pattern is too wide or deep for the native stack, and taking a column off a row costs the
 //! same however wide the row is. Some sets of arms still take exponential work, so the check
 //! gives up after [`MAX_STEPS`] steps.
 
-use crate::decls::{Decls, VariantIdx};
+use crate::decls::{Decls, Inhabited, VariantIdx};
 use crate::types::Ty;
 
 /// The most work one `match` may take to check, counted in rows visited and columns added.
@@ -54,8 +54,8 @@ enum Witness {
 
 /// A pattern for a value of type `ty` that none of `rows` covers, or `None` if they cover
 /// every value.
-/// `inhabited` says which records and enums have values (see [`Decls::inhabited`]).
-pub fn uncovered(decls: &Decls, inhabited: &[bool], ty: &Ty, rows: &[Space]) -> Result<Option<String>, TooComplex> {
+/// `inhabited` says which types have values (see [`Decls::inhabited`]).
+pub fn uncovered(decls: &Decls, inhabited: &Inhabited, ty: &Ty, rows: &[Space]) -> Result<Option<String>, TooComplex> {
     let mut m = Matrices { decls, inhabited, cells: Vec::new(), tys: Vec::new(), steps: 0 };
     let tys = Some(m.push_ty(ty.clone(), None));
     let rows = rows.iter().map(|row| Some(m.push_cell(row, None))).collect();
@@ -66,26 +66,21 @@ pub fn uncovered(decls: &Decls, inhabited: &[bool], ty: &Ty, rows: &[Space]) -> 
 /// The constructors of `ty` that build values, with their field types, or `None` when its
 /// values are too many to list. An unknown type, or an enum with a rejected variant, is taken
 /// to have none, so that nothing about it is reported (REFERENCE §15.1).
-fn constructors(decls: &Decls, inhabited: &[bool], ty: &Ty) -> Option<Vec<(Ctor, Vec<Ty>)>> {
-    let has_values = |ty: &Ty| match ty {
-        Ty::Adt(id, _) => inhabited[id.index()],
-        Ty::Never => false,
-        _ => true,
-    };
+fn constructors(decls: &Decls, inhabited: &Inhabited, ty: &Ty) -> Option<Vec<(Ctor, Vec<Ty>)>> {
     match ty {
-        Ty::Adt(id, _) => {
+        Ty::Adt(id, args) => {
             let def = decls.adt(*id);
             if def.unknown_variants {
                 return Some(Vec::new());
             }
-            let variants = def.variants.iter().enumerate().filter(|(_, v)| v.fields.iter().all(|f| has_values(&f.ty)));
-            let ctors = variants
-                .map(|(i, v)| (Ctor::Variant(VariantIdx::new(i)), v.fields.iter().map(|f| f.ty.clone()).collect()));
+            let ctors = (0..def.variants.len())
+                .map(|v| (Ctor::Variant(VariantIdx::new(v)), def.field_types(VariantIdx::new(v), args)))
+                .filter(|(_, fields)| fields.iter().all(|field| inhabited.has_values(decls, field)));
             Some(ctors.collect())
         }
         Ty::Bool => Some(vec![(Ctor::Bool(false), Vec::new()), (Ctor::Bool(true), Vec::new())]),
         Ty::Unit => Some(vec![(Ctor::Unit, Vec::new())]),
-        Ty::Never | Ty::Error => Some(Vec::new()),
+        Ty::Never | Ty::Error | Ty::Param(_) => Some(Vec::new()),
         Ty::Int(_) | Ty::Float(_) | Ty::Char | Ty::Text | Ty::IoError | Ty::Cap(_) => None,
     }
 }
@@ -111,7 +106,7 @@ type List = Option<usize>;
 /// The pattern matrices of one check: their cells, their column types, and the work so far.
 struct Matrices<'a, 's> {
     decls: &'a Decls,
-    inhabited: &'a [bool],
+    inhabited: &'a Inhabited,
     /// A pattern and the rest of its row.
     cells: Vec<(&'s Space, List)>,
     /// A column's type and the types of the columns after it.
@@ -277,26 +272,32 @@ fn cell(row: List) -> usize {
 }
 
 /// Writes a witness as a pattern: `Shape.Empty`, `IntList.Cons(head: _, tail: IntList.Nil)`,
-/// with `..` for a constructor whose fields may be anything.
+/// with `..` for a constructor whose fields may be anything. A variant of `Option` or
+/// `Result` is written as code writes it: `Some(None)`, `Err(_)`.
 fn render(decls: &Decls, ty: &Ty, witness: &Witness) -> String {
     let Witness::Ctor(ctor, parts) = witness else { return "_".to_string() };
     match (ctor, ty) {
         (Ctor::Bool(b), _) => b.to_string(),
         (Ctor::Unit, _) => "()".to_string(),
-        (Ctor::Variant(v), Ty::Adt(id, _)) => {
+        (Ctor::Variant(v), Ty::Adt(id, args)) => {
             let def = decls.adt(*id);
             let name = def.ctor_name(*v);
             let fields = &def.variants[v.index()].fields;
+            let tys = def.field_types(*v, args);
             if fields.is_empty() {
                 return if def.is_enum() { name } else { format!("{name}()") };
+            }
+            if def.bare_variants {
+                return format!("{name}({})", render(decls, &tys[0], &parts[0]));
             }
             if parts.iter().all(|p| matches!(p, Witness::Any)) {
                 return format!("{name}(..)");
             }
             let parts: Vec<String> = fields
                 .iter()
+                .zip(&tys)
                 .zip(parts)
-                .map(|(field, part)| format!("{}: {}", field.name, render(decls, &field.ty, part)))
+                .map(|((field, ty), part)| format!("{}: {}", field.name, render(decls, ty, part)))
                 .collect();
             format!("{name}({})", parts.join(", "))
         }

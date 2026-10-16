@@ -212,7 +212,8 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
   - whether a closure body may use `return`, and what it returns from. §F row 13 writes `{ w(); return "t" }`;
   - how far an unbraced closure body extends: `|| f() else ()` could parse as `(|| f()) else ()`;
   - whether `it` is bound in `e else { … }` when `e` is a fallible call;
-  - whether a path that ends in `fail` meets the rule that a non-`Unit` body ends every path with `return` (f07).
+  - whether a path that ends in `fail` meets the rule that a non-`Unit` body ends every path with `return` (f07);
+  - whether a constructor counts as a call statement. Its value is discarded as an `attempt`'s would be. The toolchain accepts `Point(x: 1, y: 2)` and `Some(1)` as statements and rejects a bare `None` (records/err_construction, option_result/err_fail_attempt).
 - **Goldens:** use `try` statements, discard an error with `let _ = attempt f()`, and give a closure with statements a braced body that ends in its value.
 - **Decided for phase 2:**
   - A call marked with `try` or with an `else` form counts as a call statement, so `out.write_line(t) else ()` and `save(x) else fail E.Io(cause: it)` are statements. `attempt f()` doesn't count. Its value is a `Result`, and discarding it takes `let _ = attempt f()`.
@@ -406,6 +407,10 @@ All 18 §F rows are already written as `tests/golden/fNN_*.proviso`, each tagged
 - **Exhaustiveness limit** (phase 2). Checking exhaustiveness can take exponential work in the number of arms, so the check stops after 10 million steps and reports E0903, as Rust does with its pattern complexity limit. The limit allows a record of a million fields, but not, say, twenty `Bool` fields each matched both ways in arms of their own.
 - **Literal patterns** (phase 2) are integer, char, text, `Bool` and `()` literals, with a leading `-` allowed on numbers. A float literal pattern is an error, since float equality is not a sound way to choose a branch. Ranges take integers and chars only.
 - **`is` bindings** (phase 2) scope as §6.4 says, and in a `while` condition they also scope over the loop body. They are not in scope after `or`, under `not`, in an `else` or after the `if`. An `is` in a `match` guard binds only within the guard, not in the arm's body.
+- **Type arguments** (phase 2). `Some`, `None`, `Ok` and `Err` take their type arguments from the expected type, which for an operand of `==` or `!=` is the other operand's type. A type argument the expected type doesn't give comes from the field that has it, so `Some(3)` is an `Option[Int]`. One that neither gives is an error (E0312), so `let x = None` needs a type. Rust and Swift infer it from later uses instead. As for literals, the first branch of an `if` or `match` gives the later ones their type, so `if c { Some(1) } else { None }` checks and `if c { None } else { Some(1) }` does not. Where both operands of `==` need context, a variant with fields goes first, qualified or not, so `None == Some(1)` and `None == Option.Some(1)` check. `Never` is a subtype of every type also as a type argument, so `Some(fail e)` is an `Option[T]` for any `T`. A branch whose type has a `Never` argument gives the others no type, and a field widens a `Never` the expected type gives, also inside a type argument, so `x == Some(Some(1))` checks for an `x: Option[Option[Never]]`.
+- **`Option` and `Result` values** (phase 2). `Show` and `debug` write them in literal form, as `Some("a")` and `Err(e)`. They implement `Eq` and `Show` when their type arguments do, and `Never` counts as implementing both, since it has no values. Ordering them with `<` waits for the `Ord` derives.
+- **`attempt`** (phase 2) reifies only the failures of the calls it marks, which are the calls of its postfix chain (§6.1). A `try` or `fail` in an argument still exits the function, and a defect is never caught. An `attempt` that marks no fallible call is an error (E0706), as a `try` is (E0703). Calls in its chain that fail with different error types are an error (E0301) until §G's question about them is decided, as `try` requires equal types (§7.2).
+- **`fail` in a `where` clause** (phase 2) is an error (E0705), as `return` is (E0108), since there is no function to fail.
 
 ## E. Experiment plan
 
@@ -478,6 +483,7 @@ Writing the §F rows as complete programs ([tests/golden](tests/golden/README.md
 | How defects, leaks and replay overlaps are reported; simulated replay suppresses stdout; what counts as overlapping | f09, f10 | T9, T10 |
 | How `sig` shows an `inout` that holds a resource | f14 | T11 |
 | Row 13 as written calls the fallible `w` unmarked, and its `try` adds a second reason for rejection. The golden makes `w` infallible so that reach is the only reason. | f13 | the row's wording |
+| The error type of an `attempt` whose postfix chain has calls that fail with different types (§6.1, §7.2). It can't be tested until methods land. | none yet | P5 |
 | P3's phase 2 lacks features its own rows need: `check` (§17's `parse_user`), closures and function types with modes (row 15), and `keep` parameters and capability-typed fields (f08, f09, f14 print through a stored `Out`; retention can still wait for phase 3). P3 also places `supervise` in no phase (f18, phase 6). | f08, f09, f14, f15, f18 | P3 |
 
 The P3 row, Q33, Q35, Q36 and T10 now have decisions for phase 2. Each one still lists the parts that stay open.

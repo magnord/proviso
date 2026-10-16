@@ -1,0 +1,8 @@
+Some(3) None Some("a \"q\"") None
+Ok(1) Err("bad") Err(1) Ok(1)
+false true true true false
+true true false true false
+Some(Some(Point(x: 1, y: -2))) Some(None) Some(Shape.Circle(radius: 2)) Some('\n')
+None Some(127) true
+Slot(item: Some("x"), status: Err(Shape.Empty)) true false Slot(item: None, status: Err(Shape.Empty))
+true false
