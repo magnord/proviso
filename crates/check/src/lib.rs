@@ -266,7 +266,17 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         checker.body(id);
     }
     checker.examples();
+    debug_assert!(!checker.p.expr_ty.values().any(holds_var), "an inference variable was left in `expr_ty`");
     checker.p
+}
+
+/// Whether `ty` has an inference variable in it, which [`Program`] never does.
+fn holds_var(ty: &Ty) -> bool {
+    match ty {
+        Ty::Var(_) => true,
+        Ty::Adt(_, args) => args.iter().any(holds_var),
+        _ => false,
+    }
 }
 
 #[derive(Clone)]
@@ -473,6 +483,19 @@ enum Pending {
     Arith { op: BinOp, ty: Ty, span: Span },
 }
 
+impl Pending {
+    /// The type whose variables the check waits on.
+    fn ty(&self) -> &Ty {
+        match self {
+            Pending::Int { ty, .. }
+            | Pending::Float { ty, .. }
+            | Pending::Bound { ty, .. }
+            | Pending::Neg { ty, .. }
+            | Pending::Arith { ty, .. } => ty,
+        }
+    }
+}
+
 impl Checker<'_> {
     fn error(&mut self, code: Code, span: Span, message: impl Into<String>) {
         self.diags.error(code, span, message);
@@ -510,12 +533,22 @@ impl Checker<'_> {
     /// `pending`, which wait on them. An integer literal's variable becomes `Int`, a float
     /// literal's `Float` (REFERENCE §2), and one that only `Never` reached `Never` (OPEN_QUESTIONS P5). Any other
     /// is a type argument that nothing gave, which is reported once (E0312).
-    fn solve(&mut self, vars: u32, pending: usize) {
-        let open: Vec<u32> = (vars..self.vars.count()).filter(|&v| self.vars.root(v) == v).collect();
+    ///
+    /// A variable that an older one was bound to a type with, such as a `None` met with `it`
+    /// in a fallback's statement, belongs to the expression around the statement, which
+    /// solves it. A check that waits on an open variable waits for that solve too.
+    fn solve(&mut self, vars: u32, pending: usize, bound: usize) {
+        let outer = self.vars.outer(vars, bound);
+        let open: Vec<u32> =
+            (vars..self.vars.count()).filter(|&v| self.vars.root(v) == v && !outer.contains(&v)).collect();
         self.settle_vars(open);
         let checks = self.pending.split_off(pending.min(self.pending.len()));
         for check in checks {
-            self.run_pending(check);
+            if self.vars.has_open(check.ty()) {
+                self.pending.push(check);
+            } else {
+                self.run_pending(check);
+            }
         }
     }
 
@@ -536,6 +569,7 @@ impl Checker<'_> {
                 Kind::Int => Ty::INT,
                 Kind::Float => Ty::Float(FloatTy::F64),
                 Kind::Any if open.never => Ty::Never,
+                Kind::Any if open.quiet => Ty::Error,
                 Kind::Any => {
                     unknown.push(open.origin);
                     Ty::Error
@@ -629,7 +663,7 @@ impl Checker<'_> {
     /// Solves what a body, refinement or example left open, and writes the side table
     /// without variables, so the interpreter never sees one.
     fn settle(&mut self) {
-        self.solve(0, 0);
+        self.solve(0, 0, 0);
         for e in std::mem::take(&mut self.typed) {
             if let Some(ty) = self.p.expr_ty.get(e) {
                 let ty = self.vars.zonk(ty);
@@ -2172,9 +2206,9 @@ impl Checker<'_> {
     /// Checks a statement and returns whether it always diverges. What it leaves open is
     /// solved at its end, since nothing after it can give it (OPEN_QUESTIONS P5).
     fn stmt(&mut self, s: StmtId) -> bool {
-        let (vars, pending) = (self.vars.count(), self.pending.len());
+        let (vars, pending, bound) = (self.vars.count(), self.pending.len(), self.vars.bound());
         let diverges = self.stmt_kind(s);
-        self.solve(vars, pending);
+        self.solve(vars, pending, bound);
         diverges
     }
 
@@ -2379,7 +2413,7 @@ impl Checker<'_> {
                 return None;
             }
         };
-        self.p.expr_ty.insert(target, ty.clone());
+        self.record(target, ty.clone());
         Some((root, id, ty))
     }
 
@@ -2519,8 +2553,10 @@ impl Checker<'_> {
             let span = self.span(e);
             let message = format!("expected `{}`, found `{}`", self.show(expected), self.show(&actual));
             self.error(codes::TYPE_MISMATCH, span, message);
-            // What the value leaves open has no other way to be given (§15.1).
+            // What the value leaves open has no other way to be given, and what the expected
+            // type leaves open may have been the value's to give (§15.1).
             self.vars.poison(&actual);
+            self.vars.quiet(expected);
         }
         self.vars.resolve(&actual)
     }
@@ -2540,11 +2576,17 @@ impl Checker<'_> {
         if copying {
             self.copied(e, &ty);
         }
+        self.record(e, ty.clone());
+        ty
+    }
+
+    /// Writes `ty` as the type of `e`. One with a variable in it is zonked when the body is
+    /// settled, so the interpreter never sees the variable.
+    fn record(&mut self, e: ExprId, ty: Ty) {
         if self.vars.count() > 0 && self.vars.has_var(&ty) {
             self.typed.push(e);
         }
-        self.p.expr_ty.insert(e, ty.clone());
-        ty
+        self.p.expr_ty.insert(e, ty);
     }
 
     /// Reports a copy of a borrowed value whose type has a type parameter that isn't `Copy`,
@@ -2971,7 +3013,7 @@ impl Checker<'_> {
         // A negative integer literal is one value, so `-128` fits in `Int8`.
         if let ExprKind::Int(value) = self.m.exprs[operand].kind {
             let ty = self.int_literal(value, true, expected, span);
-            self.p.expr_ty.insert(operand, ty.clone());
+            self.record(operand, ty.clone());
             return ty;
         }
         let ty = self.expr(operand, expected.filter(|t| t.is_numeric() || matches!(t, Ty::Var(_))));
@@ -3898,11 +3940,14 @@ impl Checker<'_> {
                 }
             }
             _ => {
+                // An error type that only a marker could give is left unsaid, and nothing
+                // else reports it (§15.1).
+                let with = if self.vars.has_open(err) { String::new() } else { format!(" with `{}`", self.show(err)) };
                 let message = format!(
-                    "`{callee}` can fail with `{}`, so the call must be marked with `try`, `else` or `attempt` (§7.2)",
-                    self.show(err)
+                    "`{callee}` can fail{with}, so the call must be marked with `try`, `else` or `attempt` (§7.2)"
                 );
                 self.error(codes::UNMARKED_FALLIBLE_CALL, span, message);
+                self.vars.poison(err);
             }
         }
     }
@@ -4040,7 +4085,7 @@ impl Checker<'_> {
                 }
             }
         };
-        self.p.expr_ty.insert(e, ty.clone());
+        self.record(e, ty.clone());
         ty
     }
 
@@ -4049,6 +4094,9 @@ impl Checker<'_> {
     /// (OPEN_QUESTIONS P5). A mismatch is reported at `e`.
     fn joined(&mut self, e: ExprId, known: &Ty) -> Ty {
         let ty = self.expr(e, Some(known));
+        if ty == Ty::Error {
+            self.vars.quiet(known);
+        }
         if diverges_ty(&ty) {
             return ty;
         }
@@ -4056,6 +4104,7 @@ impl Checker<'_> {
             let message = format!("expected `{}`, found `{}`", self.show(known), self.show(&ty));
             self.error(codes::TYPE_MISMATCH, self.span(e), message);
             self.vars.poison(&ty);
+            self.vars.quiet(known);
             Ty::Error
         })
     }
@@ -4075,7 +4124,7 @@ impl Checker<'_> {
                 return;
             }
         }
-        self.p.expr_ty.insert(e, Ty::Bool);
+        self.record(e, Ty::Bool);
     }
 
     /// `value is pat`, whose bindings go in the innermost scope.
@@ -4128,7 +4177,10 @@ impl Checker<'_> {
     /// already has an error (§15.1).
     fn variant_type(&mut self, id: AdtId, targs: Vec<Ty>, expected: Option<&Ty>, span: Span, reported: bool) -> Ty {
         let ty = Ty::applied(id, targs);
-        if !self.vars.has_open(&ty) {
+        // A literal's type has a default, so a mismatch can name the whole type.
+        let mut open = Vec::new();
+        self.vars.open_in(&ty, &mut open);
+        if open.iter().all(|&v| self.vars.open(v).is_some_and(|open| open.kind != Kind::Any)) {
             return ty;
         }
         let name = self.p.decls.adt(id).name.clone();
@@ -4303,7 +4355,7 @@ impl Checker<'_> {
             Mode::Value(_) if !complete => Ty::Error,
             Mode::Value(_) => expected.unwrap_or(Ty::Error),
         };
-        self.p.expr_ty.insert(e, ty.clone());
+        self.record(e, ty.clone());
         ty
     }
 
@@ -4658,7 +4710,7 @@ impl Checker<'_> {
                 Ty::Error
             }
         };
-        self.p.expr_ty.insert(iter, element.clone());
+        self.record(iter, element.clone());
         self.f.scopes.push(Vec::new());
         let id = self.declare(binding, element, false, "loop variable", false);
         self.p.for_local.insert(e, id);

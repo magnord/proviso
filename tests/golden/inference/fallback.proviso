@@ -1,0 +1,74 @@
+// phase: 2.5
+// A value in a fallback's statement that meets `it` gives the type of the call's error,
+// which the `let` around the fallback settles, so a later statement or the tail may give
+// the rest of it (OPEN_QUESTIONS P5; issue #10). Each pair puts the open value first and
+// the one that gives its type second, then the other way round. `else match it` settles
+// `it` at the scrutinee, so it has no such statement.
+use std.io { IoError }
+
+fn pass[E: Copy]() -> Int fails E {
+    return 1
+}
+
+fn second[T: Copy](a: T, b: T) -> T {
+    return b
+}
+
+fn zero[T: Copy](x: T) -> Int {
+    return 0
+}
+
+fn nothing[T]() -> Option[T] {
+    return None
+}
+
+fn options(small: Int8) -> Int {
+    let a1 = pass() else {
+        let t = zero(second(a: it, b: None))
+        zero(second(a: it, b: Some(small)))
+    }
+    let a2 = pass() else {
+        let t = zero(second(a: it, b: Some(small)))
+        zero(second(a: it, b: None))
+    }
+    let a3 = pass() else {
+        let t = zero(second(a: it, b: Option.None))
+        zero(second(a: it, b: Option.Some(small)))
+    }
+    let a4 = pass() else {
+        let t = zero(second(a: it, b: nothing()))
+        zero(second(a: it, b: Some(small)))
+    }
+    return a1 + a2 + a3 + a4
+}
+
+fn results(small: Int8) -> Int {
+    let b1 = pass() else {
+        let t = zero(second(a: it, b: Ok(small)))
+        zero(second(a: it, b: Err("x")))
+    }
+    let b2 = pass() else {
+        let t = zero(second(a: it, b: Err("x")))
+        zero(second(a: it, b: Ok(small)))
+    }
+    let b3 = pass() else {
+        let t = zero(second(a: it, b: (None, 1)))
+        zero(second(a: it, b: (Some(small), small)))
+    }
+    return b1 + b2 + b3
+}
+
+fn nested(small: Int8) -> Int {
+    let c1 = pass() else {
+        let t = pass() else {
+            let u = zero(second(a: it, b: None))
+            zero(second(a: it, b: Some(small)))
+        }
+        zero(second(a: it, b: Some(t)))
+    }
+    return c1
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{options(small: 1)} {results(small: 1)} {nested(small: 1)}")
+}

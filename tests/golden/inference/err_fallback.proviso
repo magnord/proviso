@@ -1,0 +1,92 @@
+// phase: 2.5
+// expect-error: E0302
+// expect-error: E0306
+// expect-error: E0309
+// `it` in a fallback's statement has the type of the call's error, which the `let` around
+// the fallback settles. A check that a statement queues on that type waits for it, so it is
+// made once the type is known (OPEN_QUESTIONS P5; issue #10). Each check is tested with
+// the type settled after the statement and before it, and one fallback deeper. `else match
+// it` settles `it` at the scrutinee, so it has no such statement.
+
+fn pass[E: Copy](e: E) -> Int fails E {
+    fail e
+}
+
+fn second[T: Copy](a: T, b: T) -> T {
+    return b
+}
+
+fn need_eq[T: Eq](a: T, b: T) -> Bool {
+    return true
+}
+
+fn zero[T: Copy](x: T) -> Int {
+    return 0
+}
+
+fn int8(x: Int8) -> Int {
+    return 0
+}
+
+fn f32(x: Float32) -> Int {
+    return 0
+}
+
+fn u8(x: UInt8) -> Int {
+    return 0
+}
+
+fn bool(x: Bool) -> Int {
+    return 0
+}
+
+fn ranges(small: Int8, f: Float32) -> Int {
+    let r1 = pass(5) else {
+        let t = zero(second(a: it, b: 300))         // <- E0302
+        int8(second(a: it, b: small))
+    }
+    let r2 = pass(5) else {
+        let t = int8(second(a: it, b: small))
+        zero(second(a: it, b: 300))                 // <- E0302
+    }
+    let r3 = pass(5) else {
+        let t = pass(5) else {
+            let u = zero(second(a: it, b: 300))     // <- E0302
+            int8(second(a: it, b: small))
+        }
+        t
+    }
+    let r4 = pass(1.5) else {
+        let t = zero(second(a: it, b: 1.0e40))      // <- E0302
+        f32(second(a: it, b: f))
+    }
+    return r1 + r2 + r3 + r4
+}
+
+fn bounds() -> Int {
+    let r1 = pass(1.5) else {
+        let same = need_eq(a: it, b: it)            // <- E0309
+        0
+    }
+    let r2 = pass(Some(1.5)) else {
+        let same = need_eq(a: it, b: None)          // <- E0309
+        0
+    }
+    return r1 + r2
+}
+
+fn operators(u: UInt8, b: Bool) -> Int {
+    let r1 = pass(5) else {
+        let n = zero(-second(a: it, b: it))         // <- E0306
+        u8(second(a: it, b: u))
+    }
+    let r2 = pass(5) else {
+        let n = zero(-second(a: it, b: it))
+        n
+    }
+    let r3 = pass(true) else {
+        let n = zero(second(a: it, b: it) + it)     // <- E0306
+        bool(second(a: it, b: b))
+    }
+    return r1 + r2 + r3
+}

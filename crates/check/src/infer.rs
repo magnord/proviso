@@ -43,6 +43,9 @@ pub struct Open {
     pub kind: Kind,
     /// Only `Never` has reached it so far, so it is `Never` if nothing else does.
     pub never: bool,
+    /// A rejected value was the one to give it, so it is an error, not reported, if nothing
+    /// else does (REFERENCE §15.1).
+    pub quiet: bool,
     pub origin: Origin,
 }
 
@@ -71,6 +74,9 @@ pub struct Vars {
     /// variable never changes, so a walk need not go through it again, and a chain of calls
     /// whose types hold the one before costs each call its own part only.
     ground: RefCell<Vec<Option<Ty>>>,
+    /// Each variable in the order it was bound, so a statement can find the variables of the
+    /// expressions around it that it gave a type.
+    trail: Vec<u32>,
 }
 
 /// Hashes an address with one multiply, which is all a key that is already unique needs.
@@ -102,6 +108,26 @@ impl Vars {
         self.states.clear();
         self.shapes.get_mut().clear();
         self.ground.get_mut().clear();
+        self.trail.clear();
+    }
+
+    /// How many variables have been bound so far.
+    pub fn bound(&self) -> usize {
+        self.trail.len()
+    }
+
+    /// The open variables, made at `since` or later, in what the variables made before
+    /// `since` were bound to after `mark`. A statement must not settle these, since the
+    /// expression around it may still give them a type.
+    pub fn outer(&self, since: u32, mark: usize) -> Vec<u32> {
+        let mut found = Vec::new();
+        for &v in &self.trail[mark..] {
+            if v < since {
+                self.open_in(&Ty::Var(v), &mut found);
+            }
+        }
+        found.retain(|&v| v >= since);
+        found
     }
 
     fn ground_of(&self, v: u32) -> Option<Ty> {
@@ -142,13 +168,13 @@ impl Vars {
     }
 
     pub fn fresh(&mut self, kind: Kind, origin: Origin) -> Ty {
-        self.states.push(State::Open(Open { kind, never: false, origin }));
+        self.states.push(State::Open(Open { kind, never: false, quiet: false, origin }));
         Ty::Var(self.count() - 1)
     }
 
     /// A variable that only `Never` has reached, as a `Never` in an expected type is.
     fn never(&mut self) -> Ty {
-        self.states.push(State::Open(Open { kind: Kind::Any, never: true, origin: Origin::Defaulted }));
+        self.states.push(State::Open(Open { kind: Kind::Any, never: true, quiet: false, origin: Origin::Defaulted }));
         Ty::Var(self.count() - 1)
     }
 
@@ -273,6 +299,7 @@ impl Vars {
     pub fn settle(&mut self, v: u32, ty: Ty) {
         let root = self.root(v);
         self.states[root as usize] = State::Bound(ty);
+        self.trail.push(root);
     }
 
     /// Settles every open variable in `ty` as an error, so nothing more is reported about
@@ -282,6 +309,18 @@ impl Vars {
         self.open_in(ty, &mut found);
         for v in found {
             self.settle(v, Ty::Error);
+        }
+    }
+
+    /// Marks every open variable in `ty` as one a rejected value was to give. Unlike
+    /// [`Vars::poison`], a later value may still give it a type.
+    pub fn quiet(&mut self, ty: &Ty) {
+        let mut found = Vec::new();
+        self.open_in(ty, &mut found);
+        for v in found {
+            if let State::Open(open) = &mut self.states[v as usize] {
+                open.quiet = true;
+            }
         }
     }
 
@@ -349,10 +388,12 @@ impl Vars {
             _ => return false,
         };
         let never = kept.never || other.never;
+        let quiet = kept.quiet || other.quiet;
         // An error about the class names the value that first left it open.
         let origin = if matches!(kept.origin, Origin::Defaulted) { other.origin } else { kept.origin };
-        self.states[keep as usize] = State::Open(Open { kind, never, origin });
+        self.states[keep as usize] = State::Open(Open { kind, never, quiet, origin });
         self.states[gone as usize] = State::Bound(Ty::Var(keep));
+        self.trail.push(gone);
         true
     }
 

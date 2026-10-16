@@ -1,0 +1,64 @@
+// phase: 2.5
+// expect-error: E0301
+// expect-error: E0701
+// One mistake is one error (REFERENCE §15.1). Each line mixes a value whose type argument
+// is open with a value of another type, which is one E0301, in each order. The rejected
+// value was the one to give the type argument, so it is not also E0312. A later value may
+// still give it, and a later mistake is still reported. An unmarked call whose error type
+// only a marker could give is one E0701, which leaves the type unsaid.
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn nothing[T]() -> Option[T] {
+    return None
+}
+
+fn three[T: Copy](a: T, b: T, c: T) -> T {
+    return a
+}
+
+fn opt_or[T: Copy](o: Option[T], d: T) -> T {
+    return d
+}
+
+fn never_fails[E]() -> Int fails E {
+    return 1
+}
+
+fn arguments() {
+    let a1 = first(a: None, b: "s")                 // <- E0301
+    let a2 = first(a: "s", b: None)                 // <- E0301
+    let a3 = first(a: nothing(), b: 3)              // <- E0301
+    let a4 = first(a: Some(None), b: Some(3))       // <- E0301
+    let a5 = first(a: Ok(1), b: 2)                  // <- E0301
+    let a6 = first(a: (None, 1), b: (2, 1))         // <- E0301
+    let a7 = first(a: Option.None, b: "s")          // <- E0301
+    let a8 = three(a: None, b: "s", c: Some("t"))   // <- E0301
+    let a9 = three(
+        a: None,
+        b: "s",                                     // <- E0301
+        c: 5                                        // <- E0301
+    )
+}
+
+fn branches(c: Bool) {
+    let b1 = if c { None } else { "s" }             // <- E0301
+    let b2 = if c { "s" } else { None }             // <- E0301
+    let b4 = opt_or(o: if c {
+        1                                           // <- E0301
+    } else {
+        2                                           // <- E0301
+    }, d: 5)
+    let b3 = match c {
+        true => Err("e")
+        false => 4                                  // <- E0301
+    }
+}
+
+fn unmarked() -> Int {
+    let u1 = never_fails()                          // <- E0701
+    let u2 = never_fails::[Text]() + 1              // <- E0701
+    return u1 + u2
+}
