@@ -1859,6 +1859,17 @@ impl Checker<'_> {
         }
     }
 
+    /// Whether `e` is an `if`, or a chain of `else if`s, that ends without an `else`.
+    fn lacks_final_else(&self, mut e: ExprId) -> bool {
+        loop {
+            match &self.m.exprs[e].kind {
+                ExprKind::If { else_branch: None, .. } => return true,
+                ExprKind::If { else_branch: Some(ElseBranch::If(nested)), .. } => e = *nested,
+                _ => return false,
+            }
+        }
+    }
+
     /// Whether an example's call builds a value, as `Some(1)`, `Point(x: 1)` and
     /// `Shape.Circle(r: 1)` do. Only the checker knows whether `Sure(1)` calls a misnamed
     /// function instead, so the parser leaves this to it (REFERENCE §14). It is told from
@@ -1869,7 +1880,8 @@ impl Checker<'_> {
             ExprKind::Call { callee, .. } => match m.exprs[callee].kind {
                 ExprKind::Name(name) => {
                     !self.fn_names.contains_key(&name.sym)
-                        && (bare_variant(m.text(name.sym)).is_some() || self.adt_named(name.sym).is_some())
+                        && (bare_variant(m.text(name.sym)).is_some()
+                            || self.adt_named(name.sym).is_some_and(|id| !self.p.decls.adt(id).is_enum()))
                 }
                 _ => false,
             },
@@ -2264,7 +2276,7 @@ impl Checker<'_> {
                 self.copying = copying;
                 // A block that gives `()` may end in an `if` without `else`, which is then the
                 // statement §6.2 makes it, as in a fallback that only sometimes leaves.
-                if expected == Some(&Ty::Unit) && matches!(m.exprs[e].kind, ExprKind::If { else_branch: None, .. }) {
+                if expected == Some(&Ty::Unit) && self.lacks_final_else(e) {
                     let ty = self.expr_stmt(e);
                     diverges |= diverges_ty(&ty);
                     value = Some(Ty::Unit);

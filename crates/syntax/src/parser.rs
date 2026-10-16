@@ -1334,6 +1334,9 @@ impl Parser<'_> {
         let mut i = start;
         while let Some(token) = self.tokens.get(i) {
             match token.kind {
+                // A `{` on the line of a `check` that lacks its `else` opens the block meant
+                // for it, whose names the condition doesn't bind.
+                T::LBrace if depth == 0 => break,
                 T::LParen | T::LBracket | T::LBrace => {
                     depth += 1;
                     groups.push((names.len(), false));

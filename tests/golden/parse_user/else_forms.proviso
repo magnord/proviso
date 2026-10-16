@@ -101,6 +101,17 @@ fn leave_or_mark(n: Int, c: Bool) -> Int {
     return seen
 }
 
+fn chained(n: Int) -> Int {
+    even(n) else {
+        if n > 0 {
+            return 1
+        } else if n < -5 {
+            return 2
+        }
+    }
+    return 0
+}
+
 fn guarded(n: Int, o: Option[Bool]) -> Int {
     return match n {
         0 if o else false => 1
@@ -243,6 +254,7 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(f"{narrow(true)} {narrow(false)} {narrow_method(1)} {narrow_method(0)}")
     try sys.stdout.write_line(f"{wide(true)} {wide(false)}")
     try sys.stdout.write_line(f"{found(1)} {found(0)} {found(-1)} {found_inner(1)} {found_inner(0)} {found_inner(-1)}")
+    try sys.stdout.write_line(f"{chained(3)} {chained(-7)} {chained(-1)} {chained(4)}")
     try sys.stdout.write_line(f"{leave_or_mark(n: 3, c: true)} {leave_or_mark(n: 3, c: false)} {leave_or_mark(n: 4, c: true)}")
     try sys.stdout.write_line(f"{guarded(n: 0, o: Some(true))} {guarded(n: 0, o: None)} {guarded(n: 0, o: Some(false))}")
 }

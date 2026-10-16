@@ -88,3 +88,4 @@ example Misnamed(1) == 1
 example Ok(1) == Ok(1)                              // <- E0101
 example Some() == Some(1)                           // <- E0101
 example Plain(m: 1) == plain(1)                     // <- E0101
+example Mode(1) == 1                                // <- E0201
