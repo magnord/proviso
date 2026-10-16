@@ -3,8 +3,13 @@
 // expect-report: defect integer_overflow
 // A literal's type is the one inference settles on, also at run time (REFERENCE §2;
 // issue #10). The literals in the branches meet `small` only through `first` and `==`,
-// so they are `Int8`s, and `100 + 100` overflows instead of making `200`.
+// so they are `Int8`s, and `100 + 100` overflows instead of making `200`. A refinement's
+// literals are settled the same way before it runs.
 use std.io { IoError }
+
+record Small {
+    n: Int8 where n < (if n > 0 { 100 } else { 0 }) + 20
+}
 
 fn first[T: Copy](a: T, b: T) -> T {
     return a
@@ -14,7 +19,7 @@ pub fn main(sys: keep System) fails IoError {
     let yes = true
     let small: Int8 = 1
     let a = first(a: if yes { 100 } else { 0 }, b: small)
-    try sys.stdout.write_line(f"{a}")
+    try sys.stdout.write_line(f"{a} {Small(n: 5).n}")
     let b = (if yes { 100 } else { 0 }) + (match yes { true => 100, false => 0 }) == small
     try sys.stdout.write_line(f"not reached {b}")
 }
