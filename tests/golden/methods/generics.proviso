@@ -8,6 +8,10 @@
 // `x: Show`, is a type parameter of its own (§4.9), so two of them may take different
 // types. The `Ord` derive orders variants, then fields, in declaration order (STD.md),
 // and `Option` does the same with the variants STD.md declares, so `Some(x) < None` (P5).
+// Arguments that give a parameter its type without context are read before literals and
+// variants, so the order of arguments or operands doesn't change what a call infers, and
+// `value_or(r: Ok(100), d: small)` is a `Result[Int8, Text]`. A `fail` argument is `Never`,
+// which gives way to the type the other arguments give (P5).
 use std.io { IoError }
 
 record Version derives(Eq, Ord, Hash, Show) {
@@ -47,6 +51,38 @@ fn nothing[T]() -> Option[T] {
     return None
 }
 
+fn value_or[T: Copy](r: Result[T, Text], d: T) -> T {
+    return match r {
+        Ok(v) => v
+        Err(_) => d
+    }
+}
+
+fn first_ok[T: Copy](o: Option[Result[T, Text]], d: T) -> T {
+    return match o {
+        Some(Ok(v)) => v
+        _ => d
+    }
+}
+
+fn is_some[T](o: Option[T]) -> Bool {
+    return match o {
+        Some(_) => true
+        None => false
+    }
+}
+
+fn both_some[T](a: Option[T], b: Option[T]) -> Bool {
+    return is_some(a) and is_some(b)
+}
+
+fn stop_or_both(flag: Bool) -> Bool fails Text {
+    if flag {
+        return both_some(a: Some(fail "stopped"), b: Some(1))
+    }
+    return both_some(a: Some(2), b: nothing())
+}
+
 fn pair_text(a: Show, b: Show) -> Text {
     return f"{a}+{b}"
 }
@@ -69,5 +105,9 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(f"{Level.Low < Level.Mid(n: 0)} {Level.Mid(n: 5) < Level.Mid(n: 3)} {Level.High > Level.Mid(n: 99)} {largest(a: Level.High, b: Level.Low)}")
     let none: Option[Int] = nothing()
     try sys.stdout.write_line(f"{or_else(o: Some(4), fallback: 9)} {or_else(o: none, fallback: 9)} {nothing::[Text]()} {Some(1) < None} {largest(a: Some(2), b: None)}")
+    let wide: Int16 = 5
+    let o = Some(3)
+    try sys.stdout.write_line(f"{value_or(r: Ok(1), d: 0)} {value_or(r: Err("bad"), d: 7)} {value_or(r: Ok(100), d: small)} {first_ok(o: Some(Ok(200)), d: wide)} {first_ok(o: Some(Err("no")), d: 3)} {first_ok(o: None, d: 4)}")
+    try sys.stdout.write_line(f"{largest(a: 1, b: small)} {id(1) + small} {small + id(1)} {nothing() == o} {o == nothing()} {largest(a: None, b: Some(2))} {attempt stop_or_both(false)} {attempt stop_or_both(true)}")
     try sys.stdout.write_line(f"{pair_text(a: 1, b: "one")} {pair_text(a: v1, b: Level.Low)} {count_down(x: "hi", n: 2)} {show_largest(a: 'a', b: 'z')}")
 }

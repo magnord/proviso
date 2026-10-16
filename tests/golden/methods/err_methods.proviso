@@ -10,7 +10,7 @@
 // §3). A type has one method of each name across its `impl` blocks. `self` exists only in
 // a method, and `Self` only in an `impl` block or an interface. An `impl` without an
 // interface belongs to a record or enum of the module, not to a prelude type such as `Int`
-// (§4.9). The methods of a rejected `impl` aren't reported again where they are called, and
+// (§3). The methods of a rejected `impl` aren't reported again where they are called, and
 // a call of a name declared twice may mean either declaration (§15.1). The bodies of a
 // rejected `impl` are still checked. An `attempt` whose chain calls methods that fail with
 // different types is an error until §G decides its error type (OPEN_QUESTIONS P5).

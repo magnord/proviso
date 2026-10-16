@@ -3,8 +3,9 @@
 // Its `show` is what `show()`, interpolation and `Show.show(x)` produce, and also what a
 // derived `Show` of a value holding it writes, such as a record's or an `Option`'s (STD.md;
 // OPEN_QUESTIONS P5). Its `eq` decides `==`, `!=` and `eq()`, also inside a derived `Eq`,
-// an `Option` and generic code. `debug` writes a value's fields and never runs a
-// hand-written `show` (P5).
+// an `Option` and generic code. A derived `Eq` compares fields in declaration order and
+// stops at the first that differs, so a later field's `eq` doesn't run (P5). `debug` writes
+// a value's fields and never runs a hand-written `show` (P5).
 use std.io { IoError }
 
 record Span derives(Eq) {
@@ -49,6 +50,27 @@ record Booking derives(Eq, Show) {
     span: Span
 }
 
+/// Comparing two probes at level 100 overflows.
+record Probe {
+    level: Int8
+}
+
+impl Eq for Probe {
+    fn eq(self, other: Self) -> Bool {
+        return self.level * 2 == other.level * 2
+    }
+}
+
+record Reading derives(Eq) {
+    id: Int
+    probe: Probe
+}
+
+enum Sample derives(Eq) {
+    Taken(id: Int, probe: Probe)
+    Skipped
+}
+
 fn same[T: Eq](a: T, b: T) -> Bool {
     return a == b
 }
@@ -69,5 +91,10 @@ pub fn main(sys: keep System) fails IoError {
     let y = Booking(ticket: b, span: s)
     let z = Booking(ticket: a, span: Span(lo: 1, hi: 5))
     try sys.stdout.write_line(f"{x == y} {x == z} {same(a: Some(a), b: Some(b))} {Some(s)} {x}")
+    let hot = Probe(level: 100)
+    let first = Reading(id: 1, probe: hot)
+    let second = Reading(id: 2, probe: hot)
+    let taken = Sample.Taken(id: 1, probe: hot)
+    try sys.stdout.write_line(f"{first == second} {Some(first) != Some(second)} {taken == Sample.Taken(id: 2, probe: hot)} {taken == Sample.Skipped}")
     debug(s, x)
 }

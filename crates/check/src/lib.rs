@@ -2572,11 +2572,15 @@ impl Checker<'_> {
         let mut tvars: Vec<Option<Ty>> = info.generics.iter().map(|g| g.rejected.then_some(Ty::Error)).collect();
         // `::[…]` gives the declared parameters, which come before those of interface types.
         let declared = info.generics.iter().filter(|g| g.param.is_none()).count();
+        // A parameter declared twice may have been meant as one, so either count may be right.
+        let duplicated = info.generics.iter().any(|g| g.sym.is_none() && g.param.is_none());
         let mut fixed = vec![false; tvars.len()];
         match targs {
             Some(targs) => {
                 let tys: Vec<Ty> = targs.iter().map(|&t| self.resolve_type(t)).collect();
-                if tys.len() != declared {
+                if tys.len() != declared && duplicated {
+                    tvars.fill(Some(Ty::Error));
+                } else if tys.len() != declared {
                     let at = match (targs.first(), targs.last()) {
                         (Some(&first), Some(&last)) => m.types[first].span.to(m.types[last].span),
                         _ => span,
@@ -2593,10 +2597,11 @@ impl Checker<'_> {
                         self.infer(arg.value);
                     }
                     return Ty::Error;
-                }
-                for ((slot, fixed), ty) in tvars.iter_mut().zip(&mut fixed).zip(tys) {
-                    *fixed = true;
-                    slot.get_or_insert(ty);
+                } else {
+                    for ((slot, fixed), ty) in tvars.iter_mut().zip(&mut fixed).zip(tys) {
+                        *fixed = true;
+                        slot.get_or_insert(ty);
+                    }
                 }
             }
             None => {

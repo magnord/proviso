@@ -1,4 +1,5 @@
 // phase: 2.4
+// expect-error: E0201
 // expect-error: E0203
 // expect-error: E0204
 // expect-error: E0210
@@ -12,12 +13,16 @@
 // expect-error: E0317
 // A call infers each type parameter from the expected type and the arguments, or takes it
 // from `::[…]`, which gives each parameter once (REFERENCE §4.8). Every argument for one
-// parameter has its type, and that type implements the parameter's constraints. `Float` has
-// no `Eq` and `Bool` no `Ord` (§12.2), and `System` holds a capability, so it isn't `Copy`
-// (§5.1). Inside the function, a `T` has only what its constraints give it, also when it
-// is passed on. A constraint names an interface, and an interface is a type only as a
-// parameter's (§4.9). A type parameter is PascalCase, declared once, and doesn't reuse a
-// type's name (§2, H4). A parameter whose constraint is rejected isn't reported again.
+// parameter has its type, and that type implements the parameter's constraints. `Float`
+// has no `Eq` (§12.2), `Bool` has no `Ord` (OPEN_QUESTIONS P5), and `System` holds a
+// capability, so it isn't `Copy` (§5.1). Inside the function, a `T` has only what its
+// constraints give it, also when it is passed on. A constraint names an interface, and an
+// interface is a type only as a parameter's (§4.9). A type parameter is PascalCase,
+// declared once, and doesn't reuse a type's name (§2, H4). A parameter declared twice may
+// have been meant as one, so either count of type arguments is accepted. A type given with
+// `::[…]` is fixed, so `Never` there is a type no value has. A call of a function whose
+// type parameters or constraints are rejected, or whose argument or expected type is
+// rejected, isn't reported again (§15.1).
 record Plain {
     n: Int
 }
@@ -49,6 +54,23 @@ fn tell[T: Show](x: T) -> Text {
     return x.show()
 }
 
+fn pass[T](x: T) -> Int {
+    return 0
+}
+
+fn is_some[T](o: Option[T]) -> Bool {
+    return match o {
+        Some(_) => true
+        None => false
+    }
+}
+
+fn takes(o: Bogus) {                                // <- E0307
+}
+
+fn takes_some(o: Option[Bogus]) {                   // <- E0307
+}
+
 fn calls(sys: System, p: Plain) {
     let a = same(a: 1, b: "one")                    // <- E0301
     let b = same(a: 1.5, b: 2.5)                    // <- E0309
@@ -62,6 +84,21 @@ fn calls(sys: System, p: Plain) {
     let j = tell::[Text](5)                         // <- E0301
     let k = p.n.show::[Int]()                       // <- E0317
     let l = same::[Int](a: 1, b: 2)
+    let m = pass::[Never](5)                        // <- E0301
+    let n = pass::[Option[Never]](Some("s"))        // <- E0301
+    let o = is_some(bogus)                          // <- E0201
+    let q = is_some(Some(bogus))                    // <- E0201
+    let r: Bogus = nothing()                        // <- E0307
+    takes(nothing())
+    takes_some(nothing())
+    twice::[Int, Text](1)
+    twice::[Int](1)
+    twice(1)
+    cased::[Int, Int](1)                            // <- E0317
+    shadows("s")
+    shadows::[Text]("s")
+    let s = bounded::[Float, Float](x: 1.5, y: 2.5)
+    let t = bounded(x: 1.5, y: 2.5)
 }
 
 fn body[T, U: Show](x: T, y: U) -> Text {

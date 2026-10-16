@@ -936,7 +936,9 @@ fn equal_with<E>(
             (a @ Value::Adt(x), b @ Value::Adt(y)) => match hand_written(a, b)? {
                 Some(same) => same,
                 None => {
-                    pairs.extend(x.fields.iter().zip(y.fields.iter()));
+                    // Reversed, so the first field is compared first and a later field's
+                    // hand-written `eq` doesn't run once one differs (OPEN_QUESTIONS P5).
+                    pairs.extend(x.fields.iter().zip(y.fields.iter()).rev());
                     x.variant == y.variant
                 }
             },
