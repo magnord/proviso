@@ -32,7 +32,7 @@ A phase delivered over several pull requests has slices, written `// phase: 2.1`
 | 2.1 | the data model, proven by records: declarations, construction, fields, `with`, `derives(Eq, Show)`, refinements checked at runtime |
 | 2.2 | enums, `match` and patterns: declarations, construction, exhaustiveness, `is` tests, `derives(Eq, Show)` on enums, record patterns |
 | 2.3 | `Option` and `Result`: the prelude enums and their type arguments, construction with inferred type arguments, patterns and exhaustiveness, `Eq` and `Show`, `fail` and `attempt` |
-| 2.4 | methods, interfaces and generic functions: `impl` blocks with `self` methods and associated functions, `Self`, `interface` declarations and `impl I for T` for module types, scalars and the prelude's `Eq` and `Show`, method resolution and `I.f(x)`, type parameters with constraints, inference and `::[…]`, interface-typed parameters, `Copy`, `derives(Ord, Hash)` |
+| 2.4 | methods, interfaces and generic functions: `impl` blocks with `self` methods and associated functions, `Self` as a type, `interface` declarations and `impl I for T` for module types and prelude types such as `Int` and `Text`, hand-written `Eq` and `Show`, method resolution and `I.f(x)`, type parameters with constraints, inference and `::[…]`, interface-typed parameters, `Copy`, `derives(Ord, Hash)` |
 
 ## Directives
 

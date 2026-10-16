@@ -300,8 +300,16 @@ mod tests {
     #[test]
     fn interface_methods_are_anchored_at_their_interface_too() {
         let iface = |name: &str| format!("interface {name} {{\n    fn label(self) -> Text\n}}\n\n");
-        let imp = |name: &str| format!("impl {name} for R {{\n    fn label(self) -> Text {{\n        return q\n    }}\n}}\n\n");
-        let text = format!("record R {{\n    n: Int\n}}\n\n{}{}{}{}", iface("Front"), iface("Back"), imp("Front"), imp("Back"));
+        let imp = |name: &str| {
+            format!("impl {name} for R {{\n    fn label(self) -> Text {{\n        return q\n    }}\n}}\n\n")
+        };
+        let text = format!(
+            "record R {{\n    n: Int\n}}\n\n{}{}{}{}",
+            iface("Front"),
+            iface("Back"),
+            imp("Front"),
+            imp("Back")
+        );
         let compiled = compile("m.proviso", text, Options::default());
         let anchors: Vec<String> = compiled.diagnostics.iter().map(|d| compiled.anchor(d.span)).collect();
         assert_eq!(anchors, ["m.R.Front.label+2", "m.R.Back.label+2"], "{}", compiled.render());

@@ -972,7 +972,8 @@ impl Checker<'_> {
             let cased = self.pascal_case(param.name, "type parameter");
             // A rejected parameter keeps its place, so `::[…]` still gives it, and stands for
             // an unknown type (§15.1). Its name means the first declaration of it.
-            let rejected = GenericInfo { name: text.into(), sym: None, param: None, bounds: Vec::new(), rejected: true };
+            let rejected =
+                GenericInfo { name: text.into(), sym: None, param: None, bounds: Vec::new(), rejected: true };
             if self.generic_scope.iter().any(|(sym, _)| *sym == param.name.sym) {
                 if cased {
                     let message = format!("type parameter `{text}` is declared twice");
@@ -1026,7 +1027,13 @@ impl Checker<'_> {
                         let name: Box<str> = format!("type of {}", m.text(param.name.sym)).into();
                         self.param_names.push(name.clone());
                         let sym = Some(param.name.sym);
-                        generics.push(GenericInfo { name, sym: None, param: sym, bounds: vec![iface], rejected: false });
+                        generics.push(GenericInfo {
+                            name,
+                            sym: None,
+                            param: sym,
+                            bounds: vec![iface],
+                            rejected: false,
+                        });
                         Ty::Param(index)
                     }
                     None => Ty::Error,
@@ -3136,9 +3143,9 @@ impl Checker<'_> {
                 _ => {}
             }
         }
-        // Arguments that need no context go first, then variants with fields, so that a
-        // literal or a `None` takes the type the others give, in any position (OPEN_QUESTIONS
-        // P5).
+        // Arguments that need no context go first, then variants and calls with arguments, so
+        // that a literal or a `None` takes the type the others give, in any position
+        // (OPEN_QUESTIONS P5).
         let mut order: Vec<usize> = (0..args.len()).collect();
         if targs.iter().any(Option::is_none) {
             order.sort_by_key(|&i| match args[i].value {
@@ -3163,7 +3170,7 @@ impl Checker<'_> {
             let open: Vec<Ty> = targs.iter().map(|t| t.clone().unwrap_or(Ty::Never)).collect();
             let expected = ty.subst(&open);
             let informative = expected != Ty::Never && says_more(ty, targs);
-            let actual = self.expr(arg.value, Some(&expected).filter(|_| informative));
+            let actual = self.expr(arg.value, informative.then_some(&expected));
             infer_targs(ty, &actual, targs, fixed);
             let known: Vec<Ty> = targs.iter().map(|t| t.clone().unwrap_or(Ty::Error)).collect();
             let expected = ty.subst(&known);
