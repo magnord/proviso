@@ -1,13 +1,20 @@
 // phase: 2.5
 // expect-error: E0101
 // expect-error: E0201
+// expect-error: E0203
 // expect-error: E0301
+// expect-error: E0305
 // expect-error: E0415
+// expect-error: E0503
 // `check P else …` needs a `Bool` and an `else` that doesn't finish, so it has type
 // `Never`, as `fail`, `return`, `break`, `continue`, `unreachable`, a call of a function
 // that returns `Never`, and a block ending in one of those do (REFERENCE §8.4;
-// OPEN_QUESTIONS P5). The bindings of an
-// `is` in `P` scope only over `P`, not its `else`. The error must be the function's.
+// OPEN_QUESTIONS P5). Because the `else`
+// leaves, the code after a `check` runs only when `P` holds, so the bindings of an `is` in
+// `P` scope over the rest of the enclosing block, as an `if`'s scope over its then-block
+// (§6.4, §8.4). They don't scope over the `else`, nor past the block, and an `is` under
+// `or` or `not` binds nothing. The bindings are immutable, may not shadow, and borrow a
+// borrowed value. The error must be the function's.
 fn checks(n: Int, o: Option[Int]) -> Int fails Text {
     check n > 0 else { return 0 }
     check n > 1 else fail "small"
@@ -18,7 +25,29 @@ fn checks(n: Int, o: Option[Int]) -> Int fails Text {
     check n > 5 else fail 5                         // <- E0301
     check o is Some(w) else fail f"{w}"             // <- E0201
     check o is Some(v) else fail "none"
-    return v                                        // <- E0201
+    return v
+}
+
+fn scopes(o: Option[Int], c: Bool) -> Int {
+    if c {
+        check o is Some(inner) else { return 0 }
+    }
+    check o is Some(either) or c else { return 1 }
+    check not (o is Some(negated)) else { return 2 }
+    let b1 = inner                                  // <- E0201
+    let b2 = either                                 // <- E0201
+    let b3 = negated                                // <- E0201
+    check o is Some(kept) else { return 3 }
+    kept = 4                                        // <- E0305
+    let kept = 5                                    // <- E0203
+    check o is Some(c) else { return 4 }            // <- E0203
+    check o is Some(after) else { debug(1) }        // <- E0415
+    return after
+}
+
+fn borrowed[T](o: Option[T]) -> T {
+    check o is Some(x) else { unreachable }
+    return x                                        // <- E0503
 }
 
 fn never() -> Never {

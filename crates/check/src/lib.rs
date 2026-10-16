@@ -1980,10 +1980,12 @@ impl Checker<'_> {
                 diverges_ty(&init_ty)
             }
             StmtKind::Check { cond, fallback } => {
-                // The bindings of an `is` in the condition scope over the condition alone.
+                // The fallback runs when the condition is false, so the bindings of its `is`
+                // tests don't reach it. The code after it runs only when the condition holds,
+                // so they scope over the rest of the block (§6.4, §8.4; OPEN_QUESTIONS P5).
                 self.f.scopes.push(Vec::new());
                 self.condition(*cond);
-                self.f.scopes.pop();
+                let bindings = self.f.scopes.pop().unwrap_or_default();
                 let (ty, span) = match fallback {
                     Fallback::Value(value) => (self.infer(*value), self.span(*value)),
                     Fallback::Block(block) => (self.block_stmt(block, None), block.span),
@@ -1994,6 +1996,9 @@ impl Checker<'_> {
                         span,
                         "the `else` of a `check` must not finish; end it with `fail`, `return`, `break` or `continue`",
                     );
+                }
+                if let Some(scope) = self.f.scopes.last_mut() {
+                    scope.extend(bindings);
                 }
                 false
             }

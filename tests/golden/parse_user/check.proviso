@@ -2,7 +2,9 @@
 // `check P else …` runs the test the program asks for and, when `P` is false, the `else`,
 // which must not finish, as `fail` and a block that returns, breaks or continues don't
 // (REFERENCE §8.4; OPEN_QUESTIONS P5). The statement continues on a line that starts with `else` (§2). An
-// `else` form's block may leave a loop in the same ways.
+// `else` form's block may leave a loop in the same ways. The code after a `check` runs only
+// when `P` holds, so the bindings of an `is` in `P`, through `and` and nested patterns,
+// scope over the rest of the block (§6.4, §8.4; P5).
 use std.io { IoError }
 
 fn grade(score: Int) -> Text fails Text {
@@ -72,10 +74,48 @@ fn nonempty(name: Text) -> Text fails Text {
     return name
 }
 
+fn add_both(a: Option[Int], b: Option[Int]) -> Int {
+    check a is Some(x) and b is Some(y) else { return -1 }
+    return x + y
+}
+
+fn joined(p: (Option[Int], Option[Text])) -> Text fails Text {
+    check p is (Some(n), Some(t)) else fail "missing"
+    return f"{t}{n}"
+}
+
+fn maybe_odd(i: Int) -> Option[Int] {
+    if i % 2 == 1 {
+        return Some(i)
+    }
+    return None
+}
+
+fn sum_odd(limit: Int) -> Int {
+    var total = 0
+    for i in 0..limit {
+        check maybe_odd(i) is Some(v) else { continue }
+        total += v
+    }
+    return total
+}
+
+fn first_word(line: Text) -> Text {
+    check line.split_once(" ") is Some((word, _))
+        else { return line }
+    return word
+}
+
 pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(f"{attempt grade(-1)} {attempt grade(0)} {attempt grade(100)} {attempt grade(101)}")
     try sys.stdout.write_line(f"{first_even(1)} {first_even(5)}")
     try sys.stdout.write_line(f"{count_odd(7)} {steps(4)}")
     try sys.stdout.write_line(f"{attempt nonempty("")} {attempt nonempty("x")}")
     try sys.stdout.write_line(f"{halvings(8)} {halvings(12)} {half_sum(7)}")
+    try sys.stdout.write_line(f"{add_both(a: Some(2), b: Some(3))} {add_both(a: Some(2), b: None)} {add_both(a: None, b: Some(3))}")
+    let both = (Some(4), Some("n"))
+    let half: (Option[Int], Option[Text]) = (Some(4), None)
+    try sys.stdout.write_line(f"{attempt joined(both)} {attempt joined(half)}")
+    try sys.stdout.write_line(f"{sum_odd(6)} {sum_odd(0)}")
+    try sys.stdout.write_line(f"{first_word("ada lovelace")} {first_word("ada")}")
 }
