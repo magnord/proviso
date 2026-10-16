@@ -103,6 +103,14 @@ pub struct FnInfo {
     pub rejected: bool,
 }
 
+/// Why an `impl` block's interface was rejected: `unknown` when the block may have given its
+/// type methods and interfaces, and `bodies` when its methods are still checked (§15.1).
+#[derive(Clone, Copy)]
+struct Rejected {
+    unknown: bool,
+    bodies: bool,
+}
+
 /// A type parameter.
 pub struct GenericInfo {
     /// How diagnostics write it: its name, or for a parameter of interface type such as
@@ -740,14 +748,14 @@ impl Checker<'_> {
             'methods: for method in &decl.methods {
                 let text = m.text(method.name.sym);
                 // A wrongly cased name stands for the one it misspells, which an `impl` or a
-                // call may use, so neither is checked against this interface (§15.1).
-                if !self.snake_case(method.name, "method") {
+                // call may use, so neither is checked against this interface (§15.1). Its
+                // signature is still checked, as a duplicate's is.
+                let cased = self.snake_case(method.name, "method");
+                let duplicate = cased && methods.iter().any(|other| *other.name == *text);
+                if !cased {
                     incomplete = true;
-                    continue;
-                }
-                if methods.iter().any(|other| *other.name == *text) {
+                } else if duplicate {
                     self.error(codes::DUPLICATE_NAME, method.name.span, format!("method `{text}` is declared twice"));
-                    continue;
                 }
                 let receiver = method.receiver.expect("the parser keeps only interface methods with `self`");
                 if receiver.mode != ParamMode::Borrow {
@@ -786,7 +794,9 @@ impl Checker<'_> {
                 if let Some(at) = method.fails {
                     self.exposes(decl.name, vis, &fails.clone().unwrap_or(Ty::Never), at);
                 }
-                methods.push(IfaceMethod { name: text.into(), params, modes, ret, fails });
+                if cased && !duplicate {
+                    methods.push(IfaceMethod { name: text.into(), params, modes, ret, fails });
+                }
             }
             let def = self.p.decls.iface_mut(id);
             def.methods = methods;
@@ -1158,6 +1168,14 @@ impl Checker<'_> {
             if let TypeExprKind::Named(name) | TypeExprKind::Applied { name, .. } = m.types[decl.target].kind {
                 self.unknown_target(name.sym);
             }
+            // The interface is checked on its own, and so are the bodies (§15.1).
+            let rejected = match decl.iface {
+                Some(name) => self.impl_iface(name).and_then(|iface| self.implementable(iface, name)).err(),
+                None => None,
+            };
+            if rejected.is_none_or(|r| r.bodies) {
+                self.declare_rejected(item, decl, &Ty::Error);
+            }
             return;
         }
         let own = matches!(&target, Ty::Adt(id, _) if self.adts.iter().any(|adt| adt.id == *id));
@@ -1201,10 +1219,8 @@ impl Checker<'_> {
         };
         let iface = match self.impl_iface(iface_name) {
             Ok(iface) => iface,
-            Err(unknown) => {
-                if unknown {
-                    self.unknown_ty(&target);
-                }
+            Err(rejected) => {
+                self.reject_impl(item, decl, &target, rejected);
                 return;
             }
         };
@@ -1216,6 +1232,10 @@ impl Checker<'_> {
             self.error(codes::ORPHAN_IMPL, target_span, message);
             self.declare_rejected(item, decl, &target);
             self.unknown_ty(&target);
+            return;
+        }
+        if let Err(rejected) = self.implementable(iface, iface_name) {
+            self.reject_impl(item, decl, &target, rejected);
             return;
         }
         // Dispatch reads the type of the receiver's value, which `Never` has none of, and
@@ -1295,6 +1315,16 @@ impl Checker<'_> {
         self.p.decls.add_impl(iface, key, ImplDef { methods: fns });
     }
 
+    /// Records an `impl` block for `target` that names an interface it can't implement.
+    fn reject_impl(&mut self, item: usize, decl: &ImplDecl, target: &Ty, rejected: Rejected) {
+        if rejected.unknown {
+            self.unknown_ty(target);
+        }
+        if rejected.bodies {
+            self.declare_rejected(item, decl, target);
+        }
+    }
+
     /// Declares the methods of a rejected `impl` block for `target`, so that their bodies are
     /// checked, without giving them to the type.
     fn declare_rejected(&mut self, item: usize, decl: &ImplDecl, target: &Ty) {
@@ -1303,12 +1333,13 @@ impl Checker<'_> {
         }
     }
 
-    /// The interface that `impl I for T` names, or `Err(unknown)` once it is reported, where
-    /// `unknown` says the block may have given `T` methods and interfaces (REFERENCE §15.1).
-    fn impl_iface(&mut self, name: Ident) -> Result<IfaceId, bool> {
+    /// The interface that `impl I for T` names, or why the block is rejected once that is
+    /// reported (REFERENCE §15.1).
+    fn impl_iface(&mut self, name: Ident) -> Result<IfaceId, Rejected> {
         let text = self.m.text(name.sym);
+        // A rejected declaration may have been any interface.
         if self.poisoned.contains(&name.sym) {
-            return Err(true);
+            return Err(Rejected { unknown: true, bodies: true });
         }
         if let Some(&id) = self.iface_names.get(&name.sym) {
             return Ok(id);
@@ -1316,7 +1347,7 @@ impl Checker<'_> {
         if self.names_cap(name.sym) {
             let what = "implementations of capability interfaces such as `Out`";
             self.not_implemented(name.span, what, Planned::Phase(3));
-            return Err(true);
+            return Err(Rejected { unknown: true, bodies: false });
         }
         let Some(iface) = IfaceId::prelude(text) else {
             let message = if self.names_type(name.sym) {
@@ -1325,28 +1356,39 @@ impl Checker<'_> {
                 format!("unknown interface `{text}`")
             };
             self.error(codes::UNKNOWN_TYPE, name.span, message);
-            return Err(true);
+            return Err(Rejected { unknown: true, bodies: true });
         };
+        Ok(iface)
+    }
+
+    /// Whether this slice lets a module implement `iface` by hand, reported when it doesn't.
+    /// The bodies of a later phase's implementation wait for it.
+    fn implementable(&mut self, iface: IfaceId, name: Ident) -> Result<(), Rejected> {
+        if self.ifaces.iter().any(|src| src.id == iface) {
+            return Ok(());
+        }
+        let later = Rejected { unknown: true, bodies: false };
         match iface {
-            IfaceId::EQ | IfaceId::SHOW => Ok(iface),
+            IfaceId::EQ | IfaceId::SHOW => Ok(()),
             IfaceId::COPY => {
                 let message =
                     "`Copy` holds by itself for copyable types with no reach, so it can't be implemented (§5.1)";
                 self.error(codes::NOT_IMPLEMENTABLE, name.span, message);
-                Err(false)
+                Err(Rejected { unknown: false, bodies: true })
             }
             IfaceId::ORD => {
                 let what = "hand-written `Ord` implementations, whose `cmp` returns an `Ordering`,";
                 self.not_implemented(name.span, what, Planned::Phase(2));
-                Err(true)
+                Err(later)
             }
             IfaceId::HASH => {
                 self.not_implemented(name.span, "hand-written `Hash` implementations", Planned::Unscheduled);
-                Err(true)
+                Err(later)
             }
             _ => {
+                let text = self.m.text(name.sym);
                 self.not_implemented(name.span, &format!("`{text}` implementations"), Planned::Phase(2));
-                Err(true)
+                Err(later)
             }
         }
     }
@@ -1434,7 +1476,7 @@ impl Checker<'_> {
 
     /// Reports a method of a type's own that shares its name with a method of an interface
     /// the type implements, by `derives` or by an `impl` (REFERENCE §3). Calls of the name
-    /// then take the interface's.
+    /// may mean either, so they aren't reported (§15.1).
     fn collisions(&mut self) {
         let m = self.m;
         let mut adts: Vec<AdtId> = self.inherent.keys().copied().collect();
@@ -2307,11 +2349,9 @@ impl Checker<'_> {
             ty if ty.is_numeric() || matches!(ty, Ty::Adt(..)) => Some(ty.clone()),
             _ => hint.cloned(),
         };
-        // A variant with fields can give its own type, as `Some(1)` and `Option.Some(1)` do,
-        // so in `None == Some(1)` it goes first.
-        let lhs_needs = self.needs_context(lhs);
-        let rhs_needs = self.needs_context(rhs);
-        if lhs_needs && (!rhs_needs || (!self.has_fields(lhs) && self.has_fields(rhs))) {
+        // The operand that says more about its own type goes first, so `None == Some(1)` and
+        // `Some(1) == Some(small)` check as their swapped forms do.
+        if self.context_rank(lhs) > self.context_rank(rhs) {
             let rt = self.expr(rhs, hint);
             let lt = self.expr(lhs, numeric_or(&rt).as_ref());
             (lt, rt)
@@ -2322,12 +2362,23 @@ impl Checker<'_> {
         }
     }
 
-    /// Whether `e` is a call with arguments, such as a variant with fields, which can give
-    /// its own type as `Some(1)` and `Option.Some(1)` do.
-    fn has_fields(&self, e: ExprId) -> bool {
+    /// How little an argument or operand says about its own type, so that one that says more
+    /// is checked first and gives the others theirs, in any position (OPEN_QUESTIONS P5). 0
+    /// needs no context. 1 is a variant or call with such a part, as `Some(x)` is. 2 has only
+    /// a literal's type, as `1` and `Some(1)` do. 3 says nothing, as `None`, `nothing()` and
+    /// `id(None)` do.
+    fn context_rank(&self, e: ExprId) -> u8 {
+        if !self.needs_context(e) {
+            return 0;
+        }
+        if self.is_untyped_literal(e) {
+            return 2;
+        }
         match &self.m.exprs[e].kind {
-            ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. } => !args.is_empty(),
-            _ => false,
+            ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. } => {
+                args.iter().map(|arg| self.context_rank(arg.value)).min().map_or(3, |rank| rank.max(1))
+            }
+            _ => 3,
         }
     }
 
@@ -2471,7 +2522,13 @@ impl Checker<'_> {
             self.p.res.insert(callee, Res::Fn(id));
             return self.fn_call(e, id, targs, args, span, chain, expected);
         }
-        if let ExprKind::Name(name) = m.exprs[callee].kind {
+        // A variant or record takes no type arguments. A name that resolves to nothing or to
+        // a rejected declaration may have, and a call of a local is a later phase's (§15.1).
+        if let ExprKind::Name(name) = m.exprs[callee].kind
+            && !self.poisoned.contains(&name.sym)
+            && self.lookup_local(name.sym).is_none()
+            && (bare_variant(m.text(name.sym)).is_some() || self.adt_named(name.sym).is_some())
+        {
             self.no_targs(targs, m.text(name.sym), span);
         }
         if let ExprKind::Name(name) = m.exprs[callee].kind
@@ -2579,23 +2636,26 @@ impl Checker<'_> {
         let mut tvars: Vec<Option<Ty>> = info.generics.iter().map(|g| g.rejected.then_some(Ty::Error)).collect();
         // `::[…]` gives the declared parameters, which come before those of interface types.
         let declared = info.generics.iter().filter(|g| g.param.is_none()).count();
-        // A parameter declared twice may have been meant as one, so either count may be right.
-        let duplicated = info.generics.iter().any(|g| g.sym.is_none() && g.param.is_none());
+        // A parameter declared twice may have been meant as one, so a count without it is
+        // also right.
+        let duplicates = info.generics.iter().filter(|g| g.sym.is_none() && g.param.is_none()).count();
         let mut fixed = vec![false; tvars.len()];
         match targs {
             Some(targs) => {
                 let tys: Vec<Ty> = targs.iter().map(|&t| self.resolve_type(t)).collect();
-                if tys.len() != declared && duplicated {
+                let fewest = declared - duplicates;
+                if tys.len() != declared && (fewest..declared).contains(&tys.len()) {
                     tvars.fill(Some(Ty::Error));
                 } else if tys.len() != declared {
                     let at = match (targs.first(), targs.last()) {
                         (Some(&first), Some(&last)) => m.types[first].span.to(m.types[last].span),
                         _ => span,
                     };
-                    let message = match declared {
-                        0 => format!("`{name}` takes no type arguments"),
-                        n => {
+                    let message = match (declared, tys.len() < fewest) {
+                        (0, _) => format!("`{name}` takes no type arguments"),
+                        (n, short) => {
                             let verb = if tys.len() == 1 { "was" } else { "were" };
+                            let n = if short { fewest } else { n };
                             format!("`{name}` takes {}, but {} {verb} given", type_args(n), tys.len())
                         }
                     };
@@ -2686,7 +2746,9 @@ impl Checker<'_> {
         if let Some(id) = self.enum_named(receiver)
             && (self.p.decls.adt(id).variant_named(name).is_some() || is_pascal(name))
         {
-            self.no_targs(targs, name, span);
+            if self.p.decls.adt(id).variant_named(name).is_some() {
+                self.no_targs(targs, name, span);
+            }
             return self.construct_variant(e, id, method, args, span, expected);
         }
         if let ExprKind::Name(receiver_name) = m.exprs[receiver].kind
@@ -3143,16 +3205,11 @@ impl Checker<'_> {
                 _ => {}
             }
         }
-        // Arguments that need no context go first, then variants and calls with arguments, so
-        // that a literal or a `None` takes the type the others give, in any position
-        // (OPEN_QUESTIONS P5).
+        // Arguments that say more about their type go first, so that a literal or a `None`
+        // takes the type the others give, in any position (OPEN_QUESTIONS P5).
         let mut order: Vec<usize> = (0..args.len()).collect();
-        if targs.iter().any(Option::is_none) {
-            order.sort_by_key(|&i| match args[i].value {
-                e if !self.needs_context(e) => 0,
-                e if self.has_fields(e) => 1,
-                _ => 2,
-            });
+        if targs.iter().any(Option::is_none) && args.len() > 1 {
+            order.sort_by_key(|&i| self.context_rank(args[i].value));
         }
         for i in order {
             let (arg, ty) = (&args[i], &params[i].1);

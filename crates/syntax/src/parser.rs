@@ -219,9 +219,7 @@ impl Parser<'_> {
     /// later-phase item such as an `impl` block is deeper.
     fn starts_item(&self) -> bool {
         let T::Keyword(kw) = self.kind() else { return false };
-        // `let` also starts a statement, so it never ends one.
-        let item = matches!(kw, Kw::Fn | Kw::Pub | Kw::Use | Kw::Record | Kw::Enum | Kw::Impl | Kw::Interface)
-            || (kw != Kw::Let && planned_item(kw).is_some());
+        let item = kw == Kw::Pub || item_keyword(kw);
         let span = self.peek().span;
         item && self.starts_line(span) && self.indent(span) <= self.item_indent
     }
@@ -404,13 +402,7 @@ impl Parser<'_> {
             return Ok(None);
         }
         let start = self.peek().span;
-        let vis = match self.visibility() {
-            Ok(vis) => vis,
-            Err(()) => {
-                self.poison_lost_declaration();
-                return Err(());
-            }
-        };
+        let (vis, written) = self.visibility()?;
         let kind = match self.kind() {
             T::Keyword(Kw::Fn) => ItemKind::Fn(self.fn_decl()?),
             T::Keyword(Kw::Use) if vis != Visibility::Private => {
@@ -421,7 +413,7 @@ impl Parser<'_> {
             T::Keyword(Kw::Enum) => ItemKind::Enum(self.enum_decl()?),
             T::Keyword(Kw::Impl) => {
                 // The block is kept, so its methods are still checked.
-                if vis != Visibility::Private {
+                if vis != Visibility::Private && written {
                     let span = start.to(self.prev_span());
                     self.error(
                         codes::UNEXPECTED_TOKEN,
@@ -444,35 +436,49 @@ impl Parser<'_> {
         Ok(Some(Item { kind, vis, doc, span: start.to(self.prev_span()) }))
     }
 
-    /// `pub`, `pub(pkg)` or nothing.
-    fn visibility(&mut self) -> PResult<Visibility> {
+    /// `pub`, `pub(pkg)` or nothing, and whether it was written without a mistake.
+    fn visibility(&mut self) -> PResult<(Visibility, bool)> {
         if !self.eat(T::Keyword(Kw::Pub)) {
-            return Ok(Visibility::Private);
+            return Ok((Visibility::Private, true));
         }
-        if self.eat(T::LParen) {
-            let scope = self.ident("`pkg`")?;
-            if self.m.text(scope.sym) != "pkg" {
-                self.error(codes::UNEXPECTED_TOKEN, scope.span, "the only restricted visibility is `pub(pkg)`");
-            }
-            self.expect(T::RParen, "`)`")?;
-            return Ok(Visibility::PubPkg);
+        if !self.eat(T::LParen) {
+            return Ok((Visibility::Pub, true));
         }
-        Ok(Visibility::Pub)
+        // A broken `pub(…)` is reported once, and the rest of it is skipped through its `)` or
+        // up to the item's keyword, so the item is still declared (§15.1). It most likely
+        // meant `pub(pkg)`, the only restricted visibility.
+        let written = self.pub_scope().is_ok();
+        if !written && !self.skip_broken_visibility() {
+            return Err(());
+        }
+        Ok((Visibility::PubPkg, written))
     }
 
-    /// Marks what the declaration at the current token would have declared, once a syntax error
-    /// before it, such as a broken `pub(`, loses it: a function's name, a type's name, or the
-    /// type an `impl` block is for. Their uses aren't reported then (§15.1).
-    fn poison_lost_declaration(&mut self) {
-        match self.kind() {
-            T::Keyword(Kw::Impl) => self.note_impl_target(self.pos),
-            T::Keyword(Kw::Fn) => {
-                if let Some(token) = self.tokens.get(self.pos + 1).filter(|t| t.kind == T::Ident) {
-                    let name = self.intern(token.span);
-                    self.m.poisoned.insert(name.sym);
+    /// The `pkg)` of `pub(pkg)`.
+    fn pub_scope(&mut self) -> PResult<()> {
+        let scope = self.ident("`pkg`")?;
+        if self.m.text(scope.sym) != "pkg" {
+            self.error(codes::UNEXPECTED_TOKEN, scope.span, "the only restricted visibility is `pub(pkg)`");
+        }
+        self.expect(T::RParen, "`)`")?;
+        Ok(())
+    }
+
+    /// Skips what is left of a broken `pub(…)` on its line, through its `)` or up to an item's
+    /// keyword. `false` when the line has neither, so the item is lost.
+    fn skip_broken_visibility(&mut self) -> bool {
+        loop {
+            match self.kind() {
+                T::RParen => {
+                    self.bump();
+                    return true;
+                }
+                T::Keyword(kw) if item_keyword(kw) => return true,
+                T::Newline | T::Eof => return false,
+                _ => {
+                    self.bump();
                 }
             }
-            _ => self.poison_declared_type(),
         }
     }
 
@@ -829,7 +835,7 @@ impl Parser<'_> {
 
     fn method(&mut self) -> PResult<Method> {
         let start = self.peek().span;
-        let vis = self.visibility()?;
+        let (vis, _) = self.visibility()?;
         if !self.at_kw(Kw::Fn) {
             return self.unexpected("a method, starting with `fn`");
         }
@@ -1919,6 +1925,12 @@ impl Parser<'_> {
         }
         Ok(())
     }
+}
+
+/// A keyword that begins an item. `let` also begins a statement, so it never ends one.
+fn item_keyword(kw: Kw) -> bool {
+    matches!(kw, Kw::Fn | Kw::Use | Kw::Record | Kw::Enum | Kw::Impl | Kw::Interface)
+        || (kw != Kw::Let && planned_item(kw).is_some())
 }
 
 /// Item keywords that belong to later phases, with what to call them.

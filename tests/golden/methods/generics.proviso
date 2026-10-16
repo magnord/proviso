@@ -8,12 +8,12 @@
 // `x: Show`, is a type parameter of its own (§4.9), so two of them may take different
 // types. The `Ord` derive orders variants, then fields, in declaration order (STD.md), and
 // `Option` does the same with the variants STD.md declares, so `Some(x) < None` (P5).
-// Arguments that give a parameter its type without context are read before literals and
-// variants, and variants with fields before other literals, so the order of arguments or
-// operands doesn't change what a call infers. `value_or(r: Ok(100), d: small)` is a
-// `Result[Int8, Text]`, and in `fallback_or(fallback: 9, o: Some(small))` the `9` is an
-// `Int8`. A `fail` argument is `Never`, which gives way to the type the other arguments
-// give (P5).
+// Arguments that need no context are read first, then variants with such a part, as in
+// `Some(small)`, then literals, then `None` and calls like `id(None)`, so the order of
+// arguments or operands doesn't change what a call infers.
+// `value_or(r: Ok(100), d: small)` is a `Result[Int8, Text]`, and in
+// `fallback_or(fallback: 9, o: Some(small))` the `9` is an `Int8`. A `fail` argument is
+// `Never`, which gives way to the type the other arguments give (P5).
 use std.io { IoError }
 
 record Version derives(Eq, Ord, Hash, Show) {
@@ -115,5 +115,6 @@ pub fn main(sys: keep System) fails IoError {
     let o = Some(3)
     try sys.stdout.write_line(f"{value_or(r: Ok(1), d: 0)} {value_or(r: Err("bad"), d: 7)} {value_or(r: Ok(100), d: small)} {first_ok(o: Some(Ok(200)), d: wide)} {first_ok(o: Some(Err("no")), d: 3)} {first_ok(o: None, d: 4)} {fallback_or(fallback: 9, o: Some(small))}")
     try sys.stdout.write_line(f"{largest(a: 1, b: small)} {id(1) + small} {small + id(1)} {nothing() == o} {o == nothing()} {largest(a: None, b: Some(2))} {attempt stop_or_both(false)} {attempt stop_or_both(true)}")
+    try sys.stdout.write_line(f"{or_else(o: None, fallback: 9)} {fallback_or(fallback: 9, o: None)} {id(None) == Some(1)} {Some(100) == Some(small)} {Some(small) == Some(100)} {largest(a: id(None), b: Some(2))}")
     try sys.stdout.write_line(f"{pair_text(a: 1, b: "one")} {pair_text(a: v1, b: Level.Low)} {count_down(x: "hi", n: 2)} {show_largest(a: 'a', b: 'z')}")
 }

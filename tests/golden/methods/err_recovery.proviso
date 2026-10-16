@@ -1,12 +1,14 @@
 // phase: 2.4
 // expect-error: E0101
+// expect-error: E0301
 // expect-error: E0901
 // A mistake inside an `impl` block or an interface is reported once (REFERENCE §15.1).
 // Recovery skips the rest of the member's line and stops at the block's `}`, so the block
 // isn't also reported as never closed. A block that loses a method this way isn't reported
 // for lacking it, an `impl` may declare a method its interface lost, and calls of a lost
-// method aren't reported. A broken visibility loses the item it comes before, and uses of
-// that item aren't reported either.
+// method aren't reported. A broken visibility is reported once and skipped through its `)`
+// or up to the item's keyword, so the item is still declared and checked, and its uses
+// aren't reported.
 interface Shape {
     fn area(self) -> Int
     fn sides(self) -> Int
@@ -81,4 +83,22 @@ fn calls(b: Box, c: Crate, t: Thing) -> Int {
     let own = b.a() + b.b() + b.c() + b.d(x: 1) + b.e() + b.f()
     let ifaces = b.one() + b.two() + b.width(x: 2)
     return shape + own + ifaces + c.get() + helper() + t.n
+}
+
+pub(1) record Plank {                                       // <- E0101
+    n: Int
+}
+
+pub(pkg] fn shaped() -> Int {                               // <- E0101
+    return "shaped"                                         // <- E0301
+}
+
+impl Plank {
+    pub(1) fn len(self) -> Int {                            // <- E0101
+        return self.n
+    }
+}
+
+fn more(p: Plank) -> Int {
+    return p.len() + Plank(n: 1).n + shaped()
 }

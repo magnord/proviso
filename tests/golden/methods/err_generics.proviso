@@ -89,11 +89,14 @@ fn calls(sys: System, p: Plain) {
     let o = is_some(bogus)                          // <- E0201
     let q = is_some(Some(bogus))                    // <- E0201
     let u = is_some(None)                           // <- E0312
+    let v = bogus::[Int](2)                         // <- E0201
+    let w = Option.Bogus::[Int](1)                  // <- E0303
     let r: Bogus = nothing()                        // <- E0307
     takes(nothing())
     takes_some(nothing())
     twice::[Int, Text](1)
     twice::[Int](1)
+    twice::[Int, Text, Bool](1)                     // <- E0317
     twice(1)
     cased::[Int, Int](1)                            // <- E0317
     shadows("s")

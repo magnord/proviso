@@ -9,9 +9,11 @@
 // parameters and their modes, return type and `fails`, reading `Self` as `T` (REFERENCE
 // §4.9). A type implements an interface once, by `derives` or by one `impl`. An `impl` lives
 // in the module of the interface or of the type, so this module can't implement the
-// prelude's `Show` for `Int`. `Copy` holds by itself and can't be implemented by hand (§5.1).
-// A type with a rejected `impl` still implements its interface, so calls of its methods
-// aren't reported again (§15.1). The bodies of a rejected `impl` are still checked.
+// prelude's `Show` for `Int`, nor `Ord` or `Add` for a prelude type, although a later
+// phase lets a module implement those for its own types. `Copy` holds by itself and can't be
+// implemented by hand (§5.1). A type with a rejected `impl` still implements its interface,
+// so calls of its methods aren't reported again (§15.1). The interface and the target of an
+// `impl` are checked apart, and the bodies of a rejected `impl` are still checked.
 interface Shape {
     fn area(self) -> Int
     fn same(self, other: Self) -> Bool
@@ -118,17 +120,38 @@ impl Show for Int {                                 // <- E0315
 }
 
 impl Copy for Square {                              // <- E0316
+    fn copied(self) -> Int {
+        return "copied"                             // <- E0301
+    }
+}
+
+impl Ord for Int {                                  // <- E0315
+}
+
+impl Add for Bool {                                 // <- E0315
 }
 
 impl Shape for Ghost {                              // <- E0307
     fn area(self) -> Int {
-        return 0
+        return "ghost"                              // <- E0301
     }
 }
 
 impl Drawable for Square {                          // <- E0307
     fn draw(self) -> Int {
-        return 0
+        return "drawn"                              // <- E0301
+    }
+}
+
+impl Drawable for Ghost {                           // <- E0307, E0307
+    fn sketch(self) -> Int {
+        return "sketched"                           // <- E0301
+    }
+}
+
+impl Phantom {                                      // <- E0307
+    fn haunt(self) -> Int {
+        return self.n + "boo"
     }
 }
 
