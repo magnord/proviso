@@ -3342,12 +3342,13 @@ impl Checker<'_> {
             }
         }
         for (ty, (param, bounds)) in tvars.iter().zip(&generics) {
-            let ty = self.vars.zonk(ty);
+            let ty = self.vars.resolve(ty);
             if ty.is_unknown() {
                 continue;
             }
-            // One not known yet is checked once the statement settles it.
-            if self.vars.has_open(&ty) {
+            // One with a variable in it is checked once the statement settles it, which
+            // also walks a deep argument once rather than at each call around it.
+            if self.vars.has_var(&ty) {
                 for &iface in bounds {
                     let (callee, param) = (name.into(), param.clone());
                     self.pending.push(Pending::Bound { ty: ty.clone(), iface, callee, param, span });
