@@ -3,8 +3,10 @@
 // expect-error: E0201
 // expect-error: E0301
 // expect-error: E0415
-// `check P else …` needs a `Bool` and an `else` that leaves, by `fail`, or by a block that
-// returns, breaks or continues (REFERENCE §8.4; OPEN_QUESTIONS P5). The bindings of an
+// `check P else …` needs a `Bool` and an `else` that doesn't finish, so it has type
+// `Never`, as `fail`, `return`, `break`, `continue`, `unreachable`, a call of a function
+// that returns `Never`, and a block ending in one of those do (REFERENCE §8.4;
+// OPEN_QUESTIONS P5). The bindings of an
 // `is` in `P` scope only over `P`, not its `else`. The error must be the function's.
 fn checks(n: Int, o: Option[Int]) -> Int fails Text {
     check n > 0 else { return 0 }
@@ -17,4 +19,17 @@ fn checks(n: Int, o: Option[Int]) -> Int fails Text {
     check o is Some(w) else fail f"{w}"             // <- E0201
     check o is Some(v) else fail "none"
     return v                                        // <- E0201
+}
+
+fn never() -> Never {
+    unreachable
+}
+
+fn diverging(n: Int) -> Int {
+    check n > 1 else unreachable
+    check n > 2 else { unreachable }
+    check n > 3 else never()
+    check n > 4 else { never() }
+    check n > 5 else { return 0 }
+    return n
 }

@@ -2,8 +2,9 @@
 // run: test
 // The worked example of REFERENCE §17, without what needs phase 3: `load_users`, which
 // reads a `Dir`, the `Io` variant, which holds an `FsError`, and the `MemDir` test.
-// `proviso test` runs both examples of `parse_user`, and both pass. This is the milestone
-// of phase 2 in OPEN_QUESTIONS P3.
+// `proviso test` runs both examples of `parse_user`, and both pass. This is the
+// `parse_user` part of the phase 2 milestone in OPEN_QUESTIONS P3, whose §F rows come with
+// later slices.
 pub record User derives(Eq, Show) {
     name: Text where not name.is_empty()
     age:  Int  where 0 <= age and age < 150

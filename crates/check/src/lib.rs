@@ -1992,7 +1992,7 @@ impl Checker<'_> {
                     self.error(
                         codes::CHECK_FALLS_THROUGH,
                         span,
-                        "the `else` of a `check` must leave: `fail`, or a block that returns, breaks or continues",
+                        "the `else` of a `check` must not finish; end it with `fail`, `return`, `break` or `continue`",
                     );
                 }
                 false

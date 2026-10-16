@@ -1,7 +1,7 @@
 // phase: 2.5
 // `check P else …` runs the test the program asks for and, when `P` is false, the `else`,
-// which must leave: `fail`, or a block that returns, breaks or continues (REFERENCE §8.4;
-// OPEN_QUESTIONS P5). The statement continues on a line that starts with `else` (§2). An
+// which must not finish, as `fail` and a block that returns, breaks or continues don't
+// (REFERENCE §8.4; OPEN_QUESTIONS P5). The statement continues on a line that starts with `else` (§2). An
 // `else` form's block may leave a loop in the same ways.
 use std.io { IoError }
 
