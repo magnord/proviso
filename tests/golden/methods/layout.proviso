@@ -1,0 +1,33 @@
+// phase: 2.4
+// Members written at column 0 aren't canonical, but layout is never an error (REFERENCE
+// §16). Each block still ends at its own `}`, so the items after it keep their meaning.
+use std.io { IoError }
+
+record Box {
+    n: Int
+}
+
+interface Size {
+fn size(self) -> Int
+}
+
+impl Box {
+fn get(self) -> Int {
+    return self.n
+}
+}
+
+impl Size for Box {
+fn size(self) -> Int {
+    return self.n * 2
+}
+}
+
+fn total(b: Box) -> Int {
+    return b.get() + b.size()
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let b = Box(n: 3)
+    try sys.stdout.write_line(f"{b.get()} {b.size()} {total(b)}")
+}

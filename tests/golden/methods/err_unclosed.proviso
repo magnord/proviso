@@ -1,0 +1,31 @@
+// phase: 2.4
+// expect-error: E0101
+// An interface or `impl` block whose `{` is never closed is reported where it opens, even
+// when the methods inside close their own braces. The block ends before the next item,
+// which is parsed as usual, and uses of what the block declares aren't reported (REFERENCE
+// §15.1).
+interface Open {                                    // <- E0101
+    fn area(self) -> Int
+
+record Box {
+    n: Int
+}
+
+impl Box {                                          // <- E0101
+    fn get(self) -> Int {
+        return self.n
+    }
+
+impl Open for Box {
+    fn area(self) -> Int {
+        return 1
+    }
+}
+
+record Crate {
+    n: Int
+}
+
+fn reads(b: Box, c: Crate) -> Int {
+    return b.get() + b.area() + c.n
+}

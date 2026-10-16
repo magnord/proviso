@@ -2,9 +2,11 @@
 // expect-error: E0901
 // Receivers that mutate or take `self`, generic records and `impl` blocks, implementations
 // for generic types such as `Option[Int]`, a hand-written `Ord`, `Hash` or `Abandon`, `cmp`,
-// interface functions without `self`, generic interface methods and `Self` in expressions
-// come later. Uses of what they declare aren't reported again (REFERENCE §15.1), and an
-// `impl` may declare the methods its interface couldn't.
+// interface functions without `self`, generic interface methods, generic interfaces such
+// as `Index[Int]`, tag parameters, `Self` in expressions and patterns, and functions used
+// as values, such as `id::[Int]` without a call, come later. Uses of what they declare
+// aren't reported again (REFERENCE §15.1), and an `impl` may declare the methods its
+// interface couldn't.
 record Counter {
     n: Int
 }
@@ -20,6 +22,17 @@ impl Counter {
 
     fn fresh() -> Self {
         return Self(n: 0)                           // <- E0901
+    }
+
+    fn empty(self) -> Bool {
+        match self {
+            Self(n: 0) => return true               // <- E0901
+            _ => return false
+        }
+    }
+
+    fn zeroed(self) -> Bool {
+        return self is Self(n: 0)                   // <- E0901
     }
 }
 
@@ -38,6 +51,24 @@ interface Size {
     fn size(self) -> Int
     fn zero() -> Int                                // <- E0901
     fn convert[U](self, u: U) -> Int                // <- E0901
+}
+
+impl Index[Int] for Counter {                       // <- E0901
+    fn get(self, i: Int) -> Int {
+        return self.n
+    }
+}
+
+fn first[T: Index[Int]](x: T) -> Int {              // <- E0901
+    return 0
+}
+
+fn scaled[S: tag](x: Int) -> Int {                  // <- E0901
+    return x
+}
+
+fn id[T: Copy](x: T) -> T {
+    return x
 }
 
 impl Size for Option[Int] {                         // <- E0901
@@ -76,5 +107,9 @@ fn calls(c: Counter, o: Option[Int], p: Pair) -> Int {
     let e = c.close() + o.size() + p.swap() + Counter.fresh().n + c.size()
     let f = c < c
     let g = c.n.cmp(2)                              // <- E0901
+    let h = id::[Int]                               // <- E0901
+    let k = c.size::[Int]                           // <- E0901
+    let i = c.get(i: 0) + first(x: c) + scaled(x: 1) + id(x: 2)
+    let j = c.empty() or c.zeroed()
     return e
 }
