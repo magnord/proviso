@@ -39,7 +39,7 @@ fn wrap(n: Int) -> Int fails Text {
     return n
 }
 
-fn forms(o: Option[Int]) -> Int fails Text {
+fn forms(o: Option[Int], ob: Option[Bool]) -> Int fails Text {
     let a = 5 else 0                                // <- E0707
     let b = attempt risky(1) else 0                 // <- E0707
     let c = (try risky(1)) else 0                   // <- E0707
@@ -53,7 +53,7 @@ fn forms(o: Option[Int]) -> Int fails Text {
     let k = o else { 1 }
     let l = o else { }                              // <- E0301
     o else 0                                        // <- E0102
-    if o else 0 > 1 {                               // <- E0101
+    if ob else false {                              // <- E0101
         return 1
     }
     return a

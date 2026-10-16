@@ -17,6 +17,13 @@ impl AdtId {
     pub const SYSTEM: AdtId = AdtId(0);
     pub const OPTION: AdtId = AdtId(1);
     pub const RESULT: AdtId = AdtId(2);
+    /// `std.text`'s `ParseError` (STD.md).
+    pub const PARSE_ERROR: AdtId = AdtId(3);
+    /// The 2-tuple `(A, B)`. Tuples of other lengths are declared when first used.
+    pub const PAIR: AdtId = AdtId(4);
+
+    /// How many records and enums are declared before the module's own.
+    const BUILT_IN: usize = 5;
 
     pub fn index(self) -> usize {
         self.0 as usize
@@ -148,7 +155,7 @@ impl VariantIdx {
     pub const OK: VariantIdx = VariantIdx(0);
     pub const ERR: VariantIdx = VariantIdx(1);
 
-    pub fn new(index: usize) -> VariantIdx {
+    pub const fn new(index: usize) -> VariantIdx {
         VariantIdx(index as u32)
     }
 
@@ -186,6 +193,9 @@ pub struct AdtDef {
     /// A rejected variant may be the one a pattern meant, so a `match` on the enum isn't
     /// checked for exhaustiveness.
     pub unknown_variants: bool,
+    /// A tuple, whose one variant has a field per element, named by its position. It is
+    /// written `(A, B)`, and so are its values and patterns (OPEN_QUESTIONS P5).
+    pub tuple: bool,
 }
 
 impl AdtDef {
@@ -211,7 +221,19 @@ impl AdtDef {
             unknown_interfaces: false,
             unknown_methods: false,
             unknown_variants: false,
+            tuple: false,
         }
+    }
+
+    /// The tuple of `n` elements, a record whose type parameters are its elements' types.
+    fn tuple(n: usize) -> AdtDef {
+        let name = format!("({})", vec!["_"; n].join(", "));
+        let fields = (0..n).map(|i| FieldDef { name: i.to_string().into(), ty: Ty::Param(i as u32) }).collect();
+        let mut def = AdtDef::record(&name, fields);
+        def.params = n;
+        def.tuple = true;
+        def.derives = vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW, IfaceId::HASH];
+        def
     }
 
     pub fn is_enum(&self) -> bool {
@@ -243,7 +265,7 @@ impl AdtDef {
     }
 
     /// How code names a variant: `Point` for a record, `Shape.Circle` for an enum's variant,
-    /// and `Some` for one of the prelude's.
+    /// and `Some` for one of the prelude's. A tuple has no name.
     pub fn ctor_name(&self, variant: VariantIdx) -> String {
         match self.kind {
             AdtKind::Record => self.name.to_string(),
@@ -293,6 +315,8 @@ pub struct Decls {
     adts: Vec<AdtDef>,
     ifaces: Vec<IfaceDef>,
     impls: HashMap<(IfaceId, ImplKey), ImplDef>,
+    /// The tuple of each length, by its length.
+    tuples: HashMap<usize, AdtId>,
     /// Types other than records and enums that a rejected `impl` block names, such as
     /// `Int`. It may have given them methods and interfaces, so uses of those aren't
     /// reported. A record or enum keeps this in its [`AdtDef`].
@@ -317,6 +341,11 @@ impl Default for Decls {
         };
         let option = generic("Option", 1, [("Some", Some(("value", 0))), ("None", None)]);
         let result = generic("Result", 2, [("Ok", Some(("value", 0))), ("Err", Some(("error", 1)))]);
+        let mut parse_error = AdtDef::enumeration("ParseError");
+        parse_error.derives = vec![IfaceId::EQ, IfaceId::SHOW];
+        for variant in ["Empty", "Invalid", "OutOfRange"] {
+            parse_error.variants.push(VariantDef::new(variant, Vec::new()));
+        }
         // `Ord`'s `cmp` returns an `Ordering`, which comes later, so its calls are rejected.
         let method = |name: &str, params: Vec<(&str, Ty)>, ret: Ty| IfaceMethod {
             name: name.into(),
@@ -337,7 +366,10 @@ impl Default for Decls {
                 IfaceDef { name: name.into(), methods, incomplete: false }
             })
             .collect();
-        Decls { adts: vec![system, option, result], ifaces, impls: HashMap::new(), unknown: HashSet::new() }
+        let adts = vec![system, option, result, parse_error, AdtDef::tuple(2)];
+        debug_assert_eq!(adts.len(), AdtId::BUILT_IN);
+        let tuples = HashMap::from([(2, AdtId::PAIR)]);
+        Decls { adts, ifaces, impls: HashMap::new(), tuples, unknown: HashSet::new() }
     }
 }
 
@@ -353,6 +385,26 @@ impl Decls {
 
     pub fn adt_mut(&mut self, id: AdtId) -> &mut AdtDef {
         &mut self.adts[id.0 as usize]
+    }
+
+    /// The tuple of `n` elements, declared on first use.
+    pub fn tuple(&mut self, n: usize) -> AdtId {
+        if let Some(&id) = self.tuples.get(&n) {
+            return id;
+        }
+        let id = self.push(AdtDef::tuple(n));
+        self.tuples.insert(n, id);
+        id
+    }
+
+    /// The `n`-tuple applied to `elements`.
+    pub fn tuple_ty(&mut self, elements: Vec<Ty>) -> Ty {
+        let id = self.tuple(elements.len());
+        Ty::applied(id, elements)
+    }
+
+    pub fn is_tuple(&self, ty: &Ty) -> bool {
+        matches!(ty, Ty::Adt(id, _) if self.adt(*id).tuple)
     }
 
     pub fn push_iface(&mut self, def: IfaceDef) -> IfaceId {
@@ -521,9 +573,19 @@ impl Decls {
     /// Like [`Decls::display`], where type parameter `i` is called `names[i]`.
     pub fn display_in<'a>(&'a self, ty: &'a Ty, names: &'a [Box<str>]) -> impl fmt::Display + 'a {
         let std = move |name: &'static str, qualified: &'static str| {
-            if self.adts.iter().any(|adt| &*adt.name == name) { qualified } else { name }
+            if self.adts[AdtId::BUILT_IN..].iter().any(|adt| &*adt.name == name) { qualified } else { name }
         };
         fmt::from_fn(move |f| {
+            if let Ty::Adt(id, args) = ty
+                && self.adt(*id).tuple
+            {
+                f.write_str("(")?;
+                for (i, arg) in args.iter().enumerate() {
+                    let sep = if i == 0 { "" } else { ", " };
+                    write!(f, "{sep}{}", self.display_in(arg, names))?;
+                }
+                return f.write_str(")");
+            }
             if let Ty::Adt(id, args) = ty
                 && !args.is_empty()
             {
@@ -547,6 +609,7 @@ impl Decls {
                 Ty::Text => "Text",
                 Ty::Unit => "Unit",
                 Ty::Never => "Never",
+                Ty::Adt(AdtId::PARSE_ERROR, _) => std("ParseError", "std.text.ParseError"),
                 Ty::Adt(id, _) => &self.adt(*id).name,
                 Ty::IoError => std("IoError", "std.io.IoError"),
                 Ty::Cap(cap) if cap.iface == IfaceId::OUT => std("Out", "std.io.Out"),

@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use proviso::{IMPLEMENTED_PHASE, compile, exit, run};
+use proviso::{IMPLEMENTED_PHASE, compile, exit, run, test};
 use proviso_check::Options;
 use proviso_syntax::diag::codes;
 
@@ -11,14 +11,15 @@ usage: proviso <command> [options]
 commands:
   check [--incomplete] [--json] <file>   type-check a file
   run [--incomplete] <file>              check a file, then run its `main`
+  test [--incomplete] <file>             check a file, then run its examples
   explain <code>                         describe a diagnostic code, such as E0301
   version                                print the version and implemented phase
 
 --incomplete accepts `todo` holes. --json prints one diagnostic per line as JSON on stdout.
 A program writes to stdout; its `debug` output, failures and defects go to stderr.
 
-exit codes: 0 success, 1 `main` failed, 64 usage, 65 check errors, 66 unreadable file,
-70 defect, 101 internal error
+exit codes: 0 success, 1 `main` or an example failed, 64 usage, 65 check errors,
+66 unreadable file, 70 defect, 101 internal error
 ";
 
 /// Writes to stdout. A reader that has gone away, as in `proviso check --json f | head`,
@@ -43,7 +44,9 @@ fn real_main() -> i32 {
         return exit::USAGE;
     };
     match command.as_str() {
-        "check" | "run" => check_or_run(command == "run", &args[1..]),
+        "check" => check_or_run(Command::Check, &args[1..]),
+        "run" => check_or_run(Command::Run, &args[1..]),
+        "test" => check_or_run(Command::Test, &args[1..]),
         "explain" => explain(&args[1..]),
         "version" | "--version" => {
             out(&format!("proviso {} (v1 phase {IMPLEMENTED_PHASE})\n", env!("CARGO_PKG_VERSION")));
@@ -60,15 +63,23 @@ fn real_main() -> i32 {
     }
 }
 
-fn check_or_run(is_run: bool, args: &[String]) -> i32 {
-    let mut opts = Options { needs_main: is_run, ..Options::default() };
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Command {
+    Check,
+    Run,
+    Test,
+}
+
+fn check_or_run(command: Command, args: &[String]) -> i32 {
+    let is_check = command == Command::Check;
+    let mut opts = Options { needs_main: command == Command::Run, ..Options::default() };
     let mut json = false;
     let mut path = None;
     for arg in args {
         match arg.as_str() {
             "--incomplete" => opts.incomplete = true,
-            "--json" if !is_run => json = true,
-            // `run` prints the program's output on stdout, which JSON would mix with.
+            "--json" if is_check => json = true,
+            // `run` and `test` print their output on stdout, which JSON would mix with.
             "--json" => {
                 err("proviso: `--json` applies only to `check`\n");
                 return exit::USAGE;
@@ -104,10 +115,11 @@ fn check_or_run(is_run: bool, args: &[String]) -> i32 {
     if compiled.has_errors() {
         return exit::CHECK_ERRORS;
     }
-    if !is_run {
-        return exit::OK;
+    match command {
+        Command::Check => exit::OK,
+        Command::Run => run(&compiled, &mut std::io::stdout(), &mut std::io::stderr()),
+        Command::Test => test(&compiled, &mut std::io::stdout(), &mut std::io::stderr()),
     }
-    run(&compiled, &mut std::io::stdout(), &mut std::io::stderr())
 }
 
 fn explain(args: &[String]) -> i32 {

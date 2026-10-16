@@ -2,7 +2,7 @@
 //!
 //! Every `*.proviso` file under the root is one test. Files for a phase or slice after the
 //! given one are pending, but their headers and markers are still validated. Directives this runner
-//! can't check yet (`expect-log`, `run`, `schedules`, and `sig` from phase 4)
+//! can't check yet (`expect-log`, `run: record-replay`, `schedules`, and `sig` from phase 4)
 //! make an active file fail rather than pass unchecked. Setting `bless` writes the actual
 //! output to the `.out` and `.err` files instead of comparing.
 
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use proviso_check::Options;
 use proviso_syntax::diag::{Severity, codes};
 
-use crate::{Phase, compile, run};
+use crate::{Phase, compile, run, test};
 
 #[derive(Default, Debug)]
 pub struct Report {
@@ -66,7 +66,7 @@ const ALTERNATIVE: &str = "--- or ---";
 const MARKER: &str = "// <-";
 
 /// Directives in the format that this runner cannot check yet.
-const UNCHECKED: &[&str] = &["expect-log", "run", "schedules"];
+const UNCHECKED: &[&str] = &["expect-log", "schedules"];
 
 /// The kinds of runtime report, the rows of "Runtime reports" in tests/DIAGNOSTICS.md.
 const REPORT_KINDS: &[&str] = &["defect", "leak", "overlap"];
@@ -81,6 +81,8 @@ struct Header {
     expect_reports: Reports,
     incomplete: bool,
     sig: bool,
+    /// `// run: test`: run the examples, as `proviso test` does, instead of `main`.
+    test: bool,
     unchecked: Vec<String>,
 }
 
@@ -103,6 +105,7 @@ fn parse_header(text: &str) -> Result<Header, String> {
         expect_reports: Reports::new(),
         incomplete: false,
         sig: false,
+        test: false,
         unchecked: Vec::new(),
     };
     let mut in_header = true;
@@ -110,8 +113,9 @@ fn parse_header(text: &str) -> Result<Header, String> {
     for (index, line) in text.lines().enumerate() {
         in_header &= line.trim_start().starts_with("//");
         let Some((name, value)) = directive(line) else { continue };
-        let known = matches!(name, "phase" | "expect-error" | "expect-exit" | "expect-report" | "flags" | "sig")
-            || UNCHECKED.contains(&name);
+        let known =
+            matches!(name, "phase" | "expect-error" | "expect-exit" | "expect-report" | "flags" | "sig" | "run")
+                || UNCHECKED.contains(&name);
         if !in_header {
             if known {
                 return Err(format!("line {}: the directive `{name}` must be in the header", index + 1));
@@ -149,6 +153,14 @@ fn parse_header(text: &str) -> Result<Header, String> {
                 }
             }
             "sig" => header.sig = true,
+            "run" if value == "test" => header.test = true,
+            // `record-replay` comes with phase 6.
+            "run" if value == "record-replay" => {
+                if !header.unchecked.iter().any(|d| d == "run") {
+                    header.unchecked.push("run".to_string());
+                }
+            }
+            "run" => return Err(format!("line {}: unknown run mode `{value}`", index + 1)),
             name if UNCHECKED.contains(&name) => {
                 if !header.unchecked.iter().any(|d| d == name) {
                     header.unchecked.push(name.to_string());
@@ -229,8 +241,12 @@ fn run_file(path: &Path, name: &str, phase: Phase, bless: bool) -> Result<Verdic
 
     let out_path = path.with_extension("out");
     let err_path = path.with_extension("err");
-    let runs = out_path.exists() || err_path.exists() || header.expect_exit != 0 || !header.expect_reports.is_empty();
-    let opts = Options { incomplete: header.incomplete, needs_main: runs && want.is_empty() };
+    let runs = out_path.exists()
+        || err_path.exists()
+        || header.expect_exit != 0
+        || !header.expect_reports.is_empty()
+        || header.test;
+    let opts = Options { incomplete: header.incomplete, needs_main: runs && want.is_empty() && !header.test };
     let compiled = compile(name, text, opts);
 
     if !want.is_empty() {
@@ -259,12 +275,13 @@ fn run_file(path: &Path, name: &str, phase: Phase, bless: bool) -> Result<Verdic
     if compiled.has_errors() {
         return Err(format!("unexpected diagnostics:\n{}", compiled.render()));
     }
-    if compiled.program.main.is_none() {
+    if compiled.program.main.is_none() && !header.test {
         return Ok(Verdict::Pass);
     }
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let code = run(&compiled, &mut stdout, &mut stderr);
+    let code =
+        if header.test { test(&compiled, &mut stdout, &mut stderr) } else { run(&compiled, &mut stdout, &mut stderr) };
     let stdout = String::from_utf8_lossy(&stdout).into_owned();
     let stderr = String::from_utf8_lossy(&stderr).into_owned();
 

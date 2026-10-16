@@ -1,7 +1,8 @@
 //! Name resolution and type checking for the phase-1 subset (scalar types, functions,
 //! control flow, `fails` and `try`, and the prelude's `System` with only `stdout`), for
 //! records, for enums, `match` and patterns, for `Option`, `Result`, `fail` and `attempt`,
-//! and for methods, interfaces and generic functions.
+//! for methods, interfaces and generic functions, and for tuples, `let` patterns, the `else`
+//! forms, `check`, the text operations and `example` declarations.
 //!
 //! The checker never rewrites the tree. It records what it learns in side tables of
 //! [`Program`], which the interpreter reads.
@@ -55,6 +56,17 @@ pub enum Builtin {
     ByteLen,
     /// `Text.is_empty() -> Bool`
     IsEmpty,
+    /// `Text.trim() -> Text`
+    Trim,
+    /// `Text.split_once(sep: Text) -> Option[(Text, Text)]`
+    SplitOnce,
+    /// `Text.starts_with(prefix: Text) -> Bool`
+    StartsWith,
+    /// `Text.strip_prefix(prefix: Text) -> Option[Text]`
+    StripPrefix,
+    /// `Int.parse(text: Text) -> Int fails ParseError`, and the same for each integer type.
+    /// It is called on the type, so it has no receiver.
+    Parse(IntTy),
 }
 
 /// What a name, call or member access resolved to.
@@ -152,7 +164,6 @@ pub struct Program {
     pub res: SideTable<Expr, Res>,
     /// The fields each `with` replaces, in the order of its arguments.
     pub with_fields: SideTable<Expr, Box<[FieldIdx]>>,
-    pub let_local: SideTable<Stmt, LocalId>,
     /// The local each binding pattern binds.
     pub pat_local: SideTable<Pat, LocalId>,
     /// What each constructor pattern matches.
@@ -160,9 +171,23 @@ pub struct Program {
     pub for_local: SideTable<Expr, LocalId>,
     /// The loop each `break` or `continue` leaves.
     pub jump_target: SideTable<Stmt, ExprId>,
-    /// The `attempt` that marks each fallible call it covers, which reifies the call's
-    /// failure as an `Err` (REFERENCE §7.2).
-    pub attempt_of: SideTable<Expr, ExprId>,
+    /// What handles the failure of each fallible call that is marked other than by `try`:
+    /// the `attempt`, which reifies it as an `Err` (REFERENCE §7.2), the `else` form, which
+    /// runs its fallback (§6.6), or the call of an `example`, which reports it (§14).
+    pub handler_of: SideTable<Expr, ExprId>,
+    /// The local that holds `it` in the fallback of each `else` form on a call that can
+    /// fail. An `else` form without one unwraps an `Option`.
+    pub it_local: SideTable<Expr, LocalId>,
+    /// The module's examples, in declaration order.
+    pub examples: Vec<ExampleInfo>,
+}
+
+/// An `example` declaration (REFERENCE §14).
+pub struct ExampleInfo {
+    /// Index of the declaring item in `Module::items`.
+    pub item: usize,
+    /// Number of local slots its expressions need.
+    pub locals: usize,
 }
 
 static ERROR: Ty = Ty::Error;
@@ -212,6 +237,10 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         copying: false,
         tail_copying: false,
         pattern_borrowed: false,
+        pattern_mutable: false,
+        let_pattern: false,
+        its: Vec::new(),
+        option_fallbacks: 0,
         borrowed_values: HashSet::new(),
     };
     checker.imports();
@@ -231,6 +260,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     for id in 0..checker.p.fns.len() {
         checker.body(id);
     }
+    checker.examples();
     checker.p
 }
 
@@ -308,8 +338,11 @@ struct FnState {
     scopes: Vec<Vec<(Symbol, LocalId)>>,
     locals: Vec<Local>,
     loops: Vec<LoopState>,
-    /// False in a refinement, which is an expression with no function to return from.
+    /// False in a refinement or an example, which are expressions with no function to return
+    /// from or fail.
     returns: bool,
+    /// Set in an example, so diagnostics name it.
+    example: bool,
     /// The interfaces each of the function's type parameters implements.
     bounds: Vec<Vec<IfaceId>>,
     /// For each type parameter that a parameter of interface type stands for, that
@@ -326,16 +359,18 @@ impl FnState {
             locals: Vec::new(),
             loops: Vec::new(),
             returns: true,
+            example: false,
             bounds: Vec::new(),
             anonymous: Vec::new(),
         }
     }
 }
 
-/// An enclosing `try` or `attempt`, and the error types of the fallible calls it marks.
+/// An enclosing `try`, `attempt`, `else` form or example, and the error types of the
+/// fallible calls it marks.
 struct Marker {
-    /// The `attempt`, or `None` for a `try`.
-    attempt: Option<ExprId>,
+    /// What handles their failure (see [`Program::handler_of`]), or `None` for a `try`.
+    handler: Option<ExprId>,
     errors: Vec<Ty>,
 }
 
@@ -395,6 +430,17 @@ struct Checker<'a> {
     tail_copying: bool,
     /// Set while checking a pattern that matches a borrowed value, so its bindings are too.
     pattern_borrowed: bool,
+    /// Set while checking the pattern of a `var`, whose bindings are mutable.
+    pattern_mutable: bool,
+    /// Set while checking the pattern of a `let`, which must match every value, so a literal
+    /// it holds covers only some even where a `match` counts it as `_`.
+    let_pattern: bool,
+    /// The `it` of each enclosing fallback of an `else` form on a call that can fail,
+    /// innermost last (Q33).
+    its: Vec<LocalId>,
+    /// How many fallbacks of `else` forms on an `Option` enclose the expression, where `it`
+    /// would be an `Option`'s, which has no error.
+    option_fallbacks: u32,
     /// The `if` and `match` expressions whose value may be a borrowed value, because a
     /// branch's value may be.
     borrowed_values: HashSet<ExprId>,
@@ -453,7 +499,7 @@ impl Checker<'_> {
             ItemKind::Record(decl) => vec![decl.name],
             ItemKind::Enum(decl) => vec![decl.name],
             ItemKind::Interface(decl) => vec![decl.name],
-            ItemKind::Impl(_) => vec![],
+            ItemKind::Impl(_) | ItemKind::Example(_) => vec![],
             ItemKind::Use(decl) if decl.names.is_empty() => vec![decl.path[decl.path.len() - 1]],
             ItemKind::Use(decl) => decl
                 .names
@@ -472,10 +518,12 @@ impl Checker<'_> {
         let span = decl.path[0].span.to(decl.path[decl.path.len() - 1].span);
         let available: Option<Vec<(&str, Ty)>> = match path.as_slice() {
             ["std", "io"] => Some(vec![("IoError", Ty::IoError), ("Out", Ty::out())]),
+            // `ParseError` is the only item `std.text` declares (STD.md).
+            ["std", "text"] => Some(vec![("ParseError", Ty::adt(AdtId::PARSE_ERROR))]),
             ["std", module] => {
                 let planned = match *module {
                     "fs" | "test" => Planned::Phase(3),
-                    "pool" | "text" => Planned::Phase(2),
+                    "pool" => Planned::Phase(2),
                     "task" => Planned::Phase(6),
                     _ => Planned::Unscheduled,
                 };
@@ -486,7 +534,7 @@ impl Checker<'_> {
                 self.error(
                     codes::UNKNOWN_IMPORT,
                     span,
-                    format!("unknown module `{joined}`; phase 1 checks one file at a time, and the standard library provides only `std.io`"),
+                    format!("unknown module `{joined}`; phase 1 checks one file at a time, and the standard library provides only `std.io` and `std.text`"),
                 );
                 None
             }
@@ -1561,6 +1609,10 @@ impl Checker<'_> {
         let te = &m.types[t];
         match te.kind {
             TypeExprKind::Named(name) => self.type_name(name),
+            TypeExprKind::Tuple(ref elements) => {
+                let tys = elements.iter().map(|&t| self.resolve_type(t)).collect();
+                self.p.decls.tuple_ty(tys)
+            }
             TypeExprKind::SelfType => match &self.self_ty {
                 Some(ty) => ty.clone(),
                 None => {
@@ -1731,6 +1783,73 @@ impl Checker<'_> {
         self.self_ty = None;
     }
 
+    /// Checks each `example f(…) == v` and `example f(…) fails P` (REFERENCE §14). The
+    /// example marks the fallible calls of its postfix chain, as `attempt` does (§7.2).
+    /// `== v` needs `v` to have the call's type, and that type `Eq`, or to be a float,
+    /// compared by IEEE `==` (§12.2). `fails P` needs a call that can fail, and a pattern
+    /// for its error (OPEN_QUESTIONS P5).
+    fn examples(&mut self) {
+        let m = self.m;
+        for (index, item) in m.items.iter().enumerate() {
+            let ItemKind::Example(decl) = &item.kind else { continue };
+            let mut state = FnState::new(Ty::Unit, None);
+            (state.returns, state.example) = (false, true);
+            state.scopes.push(Vec::new());
+            self.f = state;
+            self.markers.push(Marker { handler: Some(decl.call), errors: Vec::new() });
+            self.in_chain = true;
+            let ty = self.infer(decl.call);
+            let mut errors: Vec<Ty> = Vec::new();
+            for err in self.markers.pop().map(|m| m.errors).unwrap_or_default() {
+                if !errors.contains(&err) {
+                    errors.push(err);
+                }
+            }
+            let span = self.span(decl.call);
+            let err = match errors.as_slice() {
+                [] => None,
+                [err] => Some(err.clone()),
+                _ if errors.contains(&Ty::Error) => Some(Ty::Error),
+                [first, second, ..] => {
+                    let message = format!(
+                        "the calls this example marks fail with `{}` and `{}`, but an example expects one error type",
+                        self.show(first),
+                        self.show(second)
+                    );
+                    self.error(codes::TYPE_MISMATCH, span, message);
+                    Some(Ty::Error)
+                }
+            };
+            match &decl.expect {
+                Expectation::Equals(value) => {
+                    let value_ty = self.check(*value, &ty);
+                    let ty = if ty.is_unknown() { value_ty } else { ty };
+                    let defined = matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::EQ);
+                    if !defined && !ty.is_unknown() {
+                        let message =
+                            format!("`==` is not defined for `{}`, so an example can't compare it", self.show(&ty));
+                        let at = span.to(self.span(*value));
+                        self.error(codes::UNSUPPORTED_OPERATOR, at, message);
+                    }
+                }
+                Expectation::Fails(pat) => {
+                    let err = match err {
+                        Some(err) => err,
+                        None => {
+                            if !ty.is_unknown() {
+                                let message = "`fails` needs a call that can fail, and this one can't";
+                                self.error(codes::EXAMPLE_CANNOT_FAIL, span, message);
+                            }
+                            Ty::Error
+                        }
+                    };
+                    self.pattern(*pat, &err);
+                }
+            }
+            self.p.examples.push(ExampleInfo { item: index, locals: self.f.locals.len() });
+        }
+    }
+
     fn fn_body(&mut self, decl: &FnDecl, body: &Block) {
         let m = self.m;
         let ret = self.f.ret.clone();
@@ -1836,7 +1955,7 @@ impl Checker<'_> {
         let m = self.m;
         let stmt = &m.stmts[s];
         match &stmt.kind {
-            StmtKind::Let { mutable, name, ty, init } => {
+            StmtKind::Let { mutable, pat, ty, init } => {
                 let declared = ty.map(|t| self.resolve_type(t));
                 // Binding a value to a new name copies it (REFERENCE §4.8).
                 self.copying = true;
@@ -1850,10 +1969,26 @@ impl Checker<'_> {
                         (ty.clone(), ty)
                     }
                 };
-                let what = if *mutable { "variable" } else { "binding" };
-                let id = self.declare(*name, ty, *mutable, what, false);
-                self.p.let_local.insert(s, id);
+                self.let_pattern(*pat, &ty, *mutable);
                 diverges_ty(&init_ty)
+            }
+            StmtKind::Check { cond, fallback } => {
+                // The bindings of an `is` in the condition scope over the condition alone.
+                self.f.scopes.push(Vec::new());
+                self.condition(*cond);
+                self.f.scopes.pop();
+                let (ty, span) = match fallback {
+                    Fallback::Value(value) => (self.infer(*value), self.span(*value)),
+                    Fallback::Block(block) => (self.block_stmt(block, None), block.span),
+                };
+                if !diverges_ty(&ty) {
+                    self.error(
+                        codes::CHECK_FALLS_THROUGH,
+                        span,
+                        "the `else` of a `check` must leave: `fail`, or a block that returns, breaks or continues",
+                    );
+                }
+                false
             }
             StmtKind::Assign { target, op, value } => diverges_ty(&self.assign(*target, *op, *value)),
             StmtKind::Expr(e) => diverges_ty(&self.expr_stmt(*e)),
@@ -1864,7 +1999,11 @@ impl Checker<'_> {
                 self.error(
                     codes::MISPLACED_RETURN,
                     stmt.span,
-                    "`return` outside a function body; a `where` clause is an expression",
+                    if self.f.example {
+                        "`return` outside a function body; an example is an expression"
+                    } else {
+                        "`return` outside a function body; a `where` clause is an expression"
+                    },
                 );
                 true
             }
@@ -1893,6 +2032,34 @@ impl Checker<'_> {
             }
             StmtKind::Assert(cond) => diverges_ty(&self.check(*cond, &Ty::Bool)),
         }
+    }
+
+    /// Binds the names of a `let` or `var` pattern for a value of type `ty`. The pattern must
+    /// match every value (REFERENCE §6.4; OPEN_QUESTIONS P5).
+    fn let_pattern(&mut self, pat: PatId, ty: &Ty, mutable: bool) {
+        let m = self.m;
+        if let PatKind::Bind(name) = m.pats[pat].kind {
+            let what = if mutable { "variable" } else { "binding" };
+            let id = self.declare(name, ty.clone(), mutable, what, false);
+            self.p.pat_local.insert(pat, id);
+            return;
+        }
+        (self.pattern_mutable, self.let_pattern) = (mutable, true);
+        let space = self.pattern(pat, ty);
+        (self.pattern_mutable, self.let_pattern) = (false, false);
+        if ty.is_unknown() {
+            return;
+        }
+        let inhabited = self.inhabited.as_ref().expect("bodies are checked after the declarations");
+        let missing = match exhaust::uncovered(&self.p.decls, inhabited, ty, &[space]) {
+            Ok(None) => return,
+            Ok(Some(missing)) => format!("this pattern does not match `{missing}`"),
+            Err(exhaust::TooComplex) => "this pattern is too complex to check".to_string(),
+        };
+        let span = m.pats[pat].span;
+        let message =
+            format!("{missing}, and a `let` pattern must match every value; use `match`, `is` or an `else` form");
+        self.error(codes::REFUTABLE_PATTERN, span, message);
     }
 
     fn expr_stmt(&mut self, e: ExprId) -> Ty {
@@ -1993,7 +2160,9 @@ impl Checker<'_> {
                 | ExprKind::Range { .. }
                 | ExprKind::Is { .. }
                 | ExprKind::Attempt(_)
-        )
+                | ExprKind::Tuple(_)
+                | ExprKind::It
+        ) || matches!(self.m.exprs[e].kind, ExprKind::Else { value, .. } if self.is_bare_value(value))
     }
 
     fn jump(&mut self, s: StmtId, label: Option<Ident>, is_break: bool) {
@@ -2164,7 +2333,7 @@ impl Checker<'_> {
     /// matches the value asks this (OPEN_QUESTIONS P5).
     fn borrowed_value(&self, e: ExprId) -> bool {
         match self.m.exprs[e].kind {
-            ExprKind::If { .. } | ExprKind::Match { .. } => self.borrowed_values.contains(&e),
+            ExprKind::If { .. } | ExprKind::Match { .. } | ExprKind::Else { .. } => self.borrowed_values.contains(&e),
             _ => self.borrowed_place(e),
         }
     }
@@ -2261,6 +2430,8 @@ impl Checker<'_> {
                         self.infer(*value);
                         let message = if self.f.returns {
                             "`fail` needs a `fails` clause, and this function declares none"
+                        } else if self.f.example {
+                            "`fail` in an example, which has no function to fail"
                         } else {
                             "`fail` in a `where` clause, which has no function to fail"
                         };
@@ -2315,7 +2486,142 @@ impl Checker<'_> {
                 }
                 Ty::Unit
             }
+            ExprKind::Tuple(elements) => self.tuple(elements, expected),
+            ExprKind::Else { value, fallback } => self.else_expr(e, *value, fallback, copying),
+            ExprKind::It => match self.its.last() {
+                Some(&id) => {
+                    self.p.res.insert(e, Res::Local(id));
+                    self.f.locals[id.index()].ty.clone()
+                }
+                None => {
+                    let message = if self.option_fallbacks > 0 {
+                        "`it` is the error of a call that can fail, and an `Option` has none (Q33)"
+                    } else {
+                        "`it` exists only in the fallback of an `else` form on a call that can fail (Q33)"
+                    };
+                    self.error(codes::UNKNOWN_NAME, span, message);
+                    Ty::Error
+                }
+            },
             ExprKind::Error => Ty::Error,
+        }
+    }
+
+    /// `(a, b)`. A tuple stores its elements, so it copies them (REFERENCE §4.8). An element
+    /// takes its type from the expected one, which reports a mismatch at the element.
+    fn tuple(&mut self, elements: &[ExprId], expected: Option<&Ty>) -> Ty {
+        let expected_args = match expected {
+            Some(Ty::Adt(id, args)) if self.p.decls.adt(*id).tuple && args.len() == elements.len() => {
+                Some(args.clone())
+            }
+            _ => None,
+        };
+        let mut tys = Vec::new();
+        for (i, &element) in elements.iter().enumerate() {
+            self.copying = true;
+            let ty = match expected_args.as_ref().map(|args| &args[i]) {
+                // A `Never` may stand for a type not known yet, which the element widens.
+                Some(expected) if *expected == Ty::Never || expected.has_never_arg() => {
+                    let ty = self.expr(element, Some(expected));
+                    if diverges_ty(&ty) { ty } else { self.join_branch(expected, &ty, self.span(element)) }
+                }
+                Some(expected) => {
+                    let ty = self.check(element, expected);
+                    // A mismatch is reported here, not again for the whole tuple.
+                    if expected.accepts(&ty) { ty } else { Ty::Error }
+                }
+                None => self.infer(element),
+            };
+            tys.push(ty);
+        }
+        self.p.decls.tuple_ty(tys)
+    }
+
+    /// `value else fallback` (REFERENCE §6.6). It marks the fallible calls of `value`'s chain,
+    /// as `try` does, and their failure runs the fallback with the error as `it`. Without
+    /// one, `value` is an `Option`, which it unwraps (OPEN_QUESTIONS P5).
+    fn else_expr(&mut self, e: ExprId, value: ExprId, fallback: &Fallback, copying: bool) -> Ty {
+        self.markers.push(Marker { handler: Some(e), errors: Vec::new() });
+        self.in_chain = true;
+        self.copying = copying;
+        let value_ty = self.infer(value);
+        let mut errors: Vec<Ty> = Vec::new();
+        for err in self.markers.pop().map(|m| m.errors).unwrap_or_default() {
+            if !errors.contains(&err) {
+                errors.push(err);
+            }
+        }
+        let span = self.span(e);
+        let it = match errors.as_slice() {
+            [] => None,
+            [err] => Some(err.clone()),
+            _ if errors.contains(&Ty::Error) => Some(Ty::Error),
+            [first, second, ..] => {
+                let message = format!(
+                    "the calls this `else` marks fail with `{}` and `{}`, but `it` has one type",
+                    self.show(first),
+                    self.show(second)
+                );
+                self.error(codes::TYPE_MISMATCH, span, message);
+                Some(Ty::Error)
+            }
+        };
+        let unwrapped = match (&it, &value_ty) {
+            (Some(_), ty) => ty.clone(),
+            (None, Ty::Adt(AdtId::OPTION, args)) => args[0].clone(),
+            (None, ty) if ty.is_unknown() => ty.clone(),
+            (None, ty) => {
+                let hint = match ty {
+                    Ty::Adt(AdtId::RESULT, _) => "; match a `Result` instead",
+                    _ => "",
+                };
+                let message = format!(
+                    "`else` needs an `Option` or a call that can fail on its left, but this is a `{}`{hint}",
+                    self.show(ty)
+                );
+                self.error(codes::NOTHING_TO_UNWRAP, span, message);
+                Ty::Error
+            }
+        };
+        match &it {
+            Some(err) => {
+                let id = LocalId(self.f.locals.len() as u32);
+                self.f.locals.push(Local { ty: err.clone(), mutable: false, borrowed: false });
+                self.p.it_local.insert(e, id);
+                self.its.push(id);
+            }
+            None => self.option_fallbacks += 1,
+        }
+        let expected = (unwrapped != Ty::Never).then_some(&unwrapped);
+        let (fallback_ty, tail) = match fallback {
+            Fallback::Value(x) => {
+                self.copying = copying;
+                let ty = match expected {
+                    Some(expected) if expected.has_never_arg() => {
+                        let ty = self.expr(*x, Some(expected));
+                        if diverges_ty(&ty) { ty } else { self.join_branch(expected, &ty, self.span(*x)) }
+                    }
+                    Some(expected) => self.check(*x, expected),
+                    None => self.infer(*x),
+                };
+                (ty, Some(*x))
+            }
+            Fallback::Block(block) => (self.block_value(block, expected, copying), self.tail(block)),
+        };
+        match &it {
+            Some(_) => {
+                self.its.pop();
+            }
+            None => self.option_fallbacks -= 1,
+        }
+        if (it.is_none() && self.borrowed_value(value)) || self.borrowed_tail(tail) {
+            self.borrowed_values.insert(e);
+        }
+        match (&unwrapped, &fallback_ty) {
+            (Ty::Never, ty) => ty.clone(),
+            (ty, Ty::Never) => ty.clone(),
+            (ty, other) if ty.has_never_arg() => ty.join(other).unwrap_or(Ty::Error),
+            (ty, _) => ty.clone(),
         }
     }
 
@@ -2413,6 +2719,9 @@ impl Checker<'_> {
             ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. } => {
                 args.iter().map(|arg| self.context_rank(arg.value)).min().map_or(3, |rank| rank.max(1))
             }
+            ExprKind::Tuple(elements) => {
+                elements.iter().map(|&element| self.context_rank(element)).min().map_or(3, |rank| rank.max(1))
+            }
             ExprKind::Try(inner) | ExprKind::Attempt(inner) => self.context_rank(*inner),
             _ => 3,
         }
@@ -2449,6 +2758,7 @@ impl Checker<'_> {
             }
             ExprKind::Field { base, .. } | ExprKind::MethodCall { receiver: base, .. } => prelude_enum(*base),
             ExprKind::Try(inner) | ExprKind::Attempt(inner) => self.needs_context(*inner),
+            ExprKind::Tuple(elements) => elements.iter().any(|&element| self.needs_context(element)),
             _ => self.is_untyped_literal(e),
         }
     }
@@ -2868,6 +3178,9 @@ impl Checker<'_> {
             if let Some(iface) = self.iface_named(receiver_name.sym) {
                 return self.iface_call(e, iface, method, targs, args, span, chain);
             }
+            if let Some(ty) = builtin_type(m.text(receiver_name.sym)).filter(|ty| ty.is_numeric() || is_scalar(ty)) {
+                return self.scalar_call(e, &ty, receiver_name, method, targs, args, span, chain);
+            }
             let cap = self.names_cap(receiver_name.sym);
             if cap {
                 let what = "calls of capability interface methods such as `Out.write_line(…)`";
@@ -2885,11 +3198,19 @@ impl Checker<'_> {
         let receiver_ty = self.infer(receiver);
         if let (Ty::Adt(id, _), "with") = (&receiver_ty, name)
             && !self.p.decls.adt(*id).is_enum()
+            && !self.p.decls.adt(*id).tuple
         {
             self.no_targs(targs, name, span);
             self.p.res.insert(e, Res::With);
             self.with_args(e, *id, args, span);
             return receiver_ty;
+        }
+        if receiver_ty == Ty::Text && name == "lines" {
+            self.not_implemented(method.span, "`lines`, which returns a `List`,", Planned::Phase(2));
+            for arg in args {
+                self.infer(arg.value);
+            }
+            return Ty::Error;
         }
         if let Some((builtin, params, ret, fails)) = builtin_method(&receiver_ty, name) {
             self.no_targs(targs, name, span);
@@ -2915,6 +3236,46 @@ impl Checker<'_> {
                 Ty::Error
             }
         }
+    }
+
+    /// `Int.parse(text)`: an associated function of a scalar type (STD.md). Only the integer
+    /// types have one, `parse`. The conversions of REFERENCE §12.1 come later.
+    #[allow(clippy::too_many_arguments)]
+    fn scalar_call(
+        &mut self,
+        e: ExprId,
+        ty: &Ty,
+        type_name: Ident,
+        method: Ident,
+        targs: Option<&[TypeId]>,
+        args: &[Arg],
+        span: Span,
+        chain: bool,
+    ) -> Ty {
+        let m = self.m;
+        let (type_text, name) = (m.text(type_name.sym), m.text(method.sym));
+        match (ty, name) {
+            (Ty::Int(it), "parse") => {
+                let callee = format!("{type_text}.parse");
+                self.no_targs(targs, &callee, span);
+                self.p.res.insert(e, Res::Method(Builtin::Parse(*it)));
+                self.args(&callee, &[("text", Ty::Text)], args, span);
+                self.fallible_call(e, &callee, &Ty::adt(AdtId::PARSE_ERROR), span, chain);
+                return ty.clone();
+            }
+            (Ty::Int(_) | Ty::Float(_), "from" | "try_from" | "wrapping_from" | "saturating_from") => {
+                let what = format!("numeric conversions such as `{type_text}.{name}`");
+                self.not_implemented(span, &what, Planned::Unscheduled);
+            }
+            _ => {
+                let message = format!("`{type_text}` has no associated function `{name}`");
+                self.error(codes::UNKNOWN_MEMBER, method.span, message);
+            }
+        }
+        for arg in args {
+            self.infer(arg.value);
+        }
+        Ty::Error
     }
 
     /// The method `x.name(…)` calls on a value of type `ty`: one of the type's own, or one of
@@ -3354,13 +3715,13 @@ impl Checker<'_> {
         match self.markers.last_mut() {
             Some(marker) if chain => {
                 marker.errors.push(err.clone());
-                if let Some(attempt) = marker.attempt {
-                    self.p.attempt_of.insert(call, attempt);
+                if let Some(handler) = marker.handler {
+                    self.p.handler_of.insert(call, handler);
                 }
             }
             _ => {
                 let message = format!(
-                    "`{callee}` can fail with `{}`, so the call must be marked, for example with `try` (§7.2)",
+                    "`{callee}` can fail with `{}`, so the call must be marked with `try`, `else` or `attempt` (§7.2)",
                     self.show(err)
                 );
                 self.error(codes::UNMARKED_FALLIBLE_CALL, span, message);
@@ -3369,7 +3730,7 @@ impl Checker<'_> {
     }
 
     fn try_expr(&mut self, inner: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
-        self.markers.push(Marker { attempt: None, errors: Vec::new() });
+        self.markers.push(Marker { handler: None, errors: Vec::new() });
         self.in_chain = true;
         let ty = self.expr(inner, expected);
         let mut errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
@@ -3403,7 +3764,7 @@ impl Checker<'_> {
             Some(Ty::Adt(AdtId::RESULT, args)) => Some(args[0].clone()),
             _ => None,
         };
-        self.markers.push(Marker { attempt: Some(e), errors: Vec::new() });
+        self.markers.push(Marker { handler: Some(e), errors: Vec::new() });
         self.in_chain = true;
         let ty = self.expr(inner, value_expected.as_ref());
         let mut errors: Vec<Ty> = Vec::new();
@@ -3559,7 +3920,11 @@ impl Checker<'_> {
         if self.poisoned.contains(&sym) {
             return None;
         }
-        self.adt_names.get(&sym).copied().or_else(|| prelude_adt(self.m.text(sym)))
+        let imported = || match self.imports.get(&sym) {
+            Some(Import::Type(Ty::Adt(id, args))) if args.is_empty() => Some(*id),
+            _ => None,
+        };
+        self.adt_names.get(&sym).copied().or_else(|| prelude_adt(self.m.text(sym))).or_else(imported)
     }
 
     /// The enum that `e` names, when it is a name that is not a local.
@@ -3794,10 +4159,12 @@ impl Checker<'_> {
         match &m.pats[pat].kind {
             PatKind::Wild => Space::Wild,
             PatKind::Bind(name) => {
-                let id = self.declare(*name, ty.clone(), false, "binding", self.pattern_borrowed);
+                let (mutable, what) = if self.pattern_mutable { (true, "variable") } else { (false, "binding") };
+                let id = self.declare(*name, ty.clone(), mutable, what, self.pattern_borrowed);
                 self.p.pat_local.insert(pat, id);
                 Space::Wild
             }
+            PatKind::Tuple(parts) => self.tuple_pattern(pat, parts, ty),
             PatKind::Lit(lit) => self.literal_pattern(*lit, ty),
             PatKind::Range { lo, hi, .. } => match ty {
                 Ty::Int(_) | Ty::Char => {
@@ -3806,6 +4173,7 @@ impl Checker<'_> {
                     match ty {
                         _ if lo_ty != *ty || hi_ty != *ty => Space::Error,
                         Ty::Char => Space::Some,
+                        _ if self.let_pattern => Space::Some,
                         // Integers are covered by facts, which the v1 profile checks at run time.
                         _ => Space::Wild,
                     }
@@ -3845,9 +4213,42 @@ impl Checker<'_> {
             (Ty::Bool, ExprKind::Bool(b)) => Space::Ctor(Ctor::Bool(*b), Vec::new()),
             (Ty::Unit, _) => Space::Ctor(Ctor::Unit, Vec::new()),
             (Ty::Char | Ty::Text, _) => Space::Some,
+            // A `let` can't wait for a fact to cover it.
+            _ if self.let_pattern => Space::Some,
             // Integers are covered by facts, which the v1 profile checks at run time.
             _ => Space::Wild,
         }
+    }
+
+    /// `(a, b)`, which matches a tuple of as many elements, each against its part.
+    fn tuple_pattern(&mut self, pat: PatId, parts: &[PatId], ty: &Ty) -> Space {
+        let span = self.m.pats[pat].span;
+        let args = match ty {
+            Ty::Adt(id, args) if self.p.decls.adt(*id).tuple && args.len() == parts.len() => Some((*id, args.clone())),
+            _ => None,
+        };
+        let Some((id, args)) = args else {
+            if !ty.is_unknown() {
+                let message = match ty {
+                    Ty::Adt(id, args) if self.p.decls.adt(*id).tuple => {
+                        format!("`{}` has {} elements, but the pattern has {}", self.show(ty), args.len(), parts.len())
+                    }
+                    _ => format!("expected a pattern for `{}`, found a tuple pattern", self.show(ty)),
+                };
+                self.error(codes::TYPE_MISMATCH, span, message);
+            }
+            for &part in parts {
+                self.pattern(part, &Ty::Error);
+            }
+            return Space::Error;
+        };
+        let spaces: Vec<Space> = parts.iter().zip(args.iter()).map(|(&part, arg)| self.pattern(part, arg)).collect();
+        let fields = (0..parts.len()).map(|i| FieldIdx(i as u32)).collect();
+        self.p.pat_ctor.insert(pat, CtorPat { adt: id, variant: VariantIdx::RECORD, fields });
+        if spaces.iter().any(|space| matches!(space, Space::Error)) {
+            return Space::Error;
+        }
+        Space::Ctor(Ctor::Variant(VariantIdx::RECORD), spaces)
     }
 
     /// Checks the parts of a pattern that has an error, so that its names are still bound.
@@ -3879,6 +4280,11 @@ impl Checker<'_> {
             return self.unknown_parts(fields);
         };
         let id = *id;
+        if self.p.decls.adt(id).tuple {
+            let message = format!("expected a tuple pattern for `{}`, found the pattern `{text}`", self.show(ty));
+            self.error(codes::TYPE_MISMATCH, span, message);
+            return self.unknown_parts(fields);
+        }
         if let Some(q) = qualifier {
             let q_text = m.text(q.sym);
             let def = self.p.decls.adt(id);
@@ -3912,7 +4318,9 @@ impl Checker<'_> {
         };
         let Some(v) = found else {
             if self.poisoned.contains(&name.sym) {
-            } else if let Some(&other) = self.adt_names.get(&name.sym).filter(|_| !def.is_enum()) {
+            } else if let Some(&other) =
+                self.adt_names.get(&name.sym).filter(|&&other| !def.is_enum() || !self.p.decls.adt(other).is_enum())
+            {
                 let message =
                     format!("expected a pattern for `{}`, found one for `{}`", def.name, self.p.decls.adt(other).name);
                 self.error(codes::TYPE_MISMATCH, span, message);
@@ -4210,8 +4618,20 @@ fn builtin_method(ty: &Ty, name: &str) -> Option<BuiltinSig> {
         }
         (Ty::Text, "byte_len") => (Builtin::ByteLen, vec![], Ty::INT, None),
         (Ty::Text, "is_empty") => (Builtin::IsEmpty, vec![], Ty::Bool, None),
+        (Ty::Text, "trim") => (Builtin::Trim, vec![], Ty::Text, None),
+        (Ty::Text, "split_once") => {
+            let pair = Ty::applied(AdtId::PAIR, vec![Ty::Text, Ty::Text]);
+            (Builtin::SplitOnce, vec![("sep", Ty::Text)], Ty::option(pair), None)
+        }
+        (Ty::Text, "starts_with") => (Builtin::StartsWith, vec![("prefix", Ty::Text)], Ty::Bool, None),
+        (Ty::Text, "strip_prefix") => (Builtin::StripPrefix, vec![("prefix", Ty::Text)], Ty::option(Ty::Text), None),
         _ => return None,
     })
+}
+
+/// A scalar type other than a number, whose name a call such as `Text.parse(t)` may use.
+fn is_scalar(ty: &Ty) -> bool {
+    matches!(ty, Ty::Bool | Ty::Char | Ty::Text | Ty::Unit)
 }
 
 fn builtin_type(name: &str) -> Option<Ty> {

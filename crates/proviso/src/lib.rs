@@ -7,15 +7,15 @@ use std::io::Write;
 use std::path::Path;
 
 use proviso_check::{Options, Program, check_module};
-use proviso_interp::{Defect, Outcome, run_main};
+use proviso_interp::{Defect, ExampleOutcome, Outcome, run_examples, run_main};
 use proviso_syntax::ast::{ItemKind, Module, TypeExprKind};
 use proviso_syntax::diag::{Diagnostic, Diagnostics, Severity};
 use proviso_syntax::parse_module;
 use proviso_syntax::source::{SourceFile, Span};
 
 /// How far this toolchain implements the v1 plan (OPEN_QUESTIONS P3): phase 1, and the first
-/// four slices of phase 2.
-pub const IMPLEMENTED_PHASE: Phase = Phase::slice(2, 4);
+/// five slices of phase 2.
+pub const IMPLEMENTED_PHASE: Phase = Phase::slice(2, 5);
 
 /// A point in the v1 plan: a whole phase, or a slice of one. A phase delivered over several
 /// pull requests numbers its slices `2.1`, `2.2` and so on, and each pull request turns its
@@ -80,7 +80,7 @@ impl std::fmt::Display for Phase {
 /// (OPEN_QUESTIONS P5).
 pub mod exit {
     pub const OK: i32 = 0;
-    /// `main` failed with an error.
+    /// `main` failed with an error, or an example failed.
     pub const FAILED: i32 = 1;
     pub const USAGE: i32 = 64;
     /// `check` found errors, so nothing ran.
@@ -158,6 +158,8 @@ impl Compiled {
             let ty = match &m.types[decl.target].kind {
                 TypeExprKind::Named(name) | TypeExprKind::Applied { name, .. } => m.text(name.sym),
                 TypeExprKind::SelfType => "Self",
+                // The parser rejects implementations for tuples.
+                TypeExprKind::Tuple(_) => "(…)",
             };
             let owner = match &decl.iface {
                 Some(iface) => format!("{}.{ty}.{}", m.name, m.text(iface.sym)),
@@ -249,6 +251,45 @@ pub fn run(compiled: &Compiled, stdout: &mut (dyn Write + Send), stderr: &mut (d
             let _ = writeln!(stderr, "internal error: the interpreter panicked; this is a bug in proviso");
             exit::INTERNAL
         }
+    }
+}
+
+/// Runs the examples of a compiled program without errors, as `proviso test` does, and
+/// returns its exit code: 0 when every example passed, 1 when one failed, and 70 when one hit
+/// a defect (OPEN_QUESTIONS P5). Each example's outcome goes to `stdout`, followed by a count;
+/// defects are reported on `stderr`.
+pub fn test(compiled: &Compiled, stdout: &mut (dyn Write + Send), stderr: &mut (dyn Write + Send)) -> i32 {
+    let outcomes = match run_examples(&compiled.file, &compiled.module, &compiled.program, stdout, stderr) {
+        Ok(outcomes) => outcomes,
+        Err(_) => {
+            let _ = writeln!(stderr, "internal error: the interpreter panicked; this is a bug in proviso");
+            return exit::INTERNAL;
+        }
+    };
+    let (mut passed, mut defects) = (0, 0);
+    for (info, outcome) in compiled.program.examples.iter().zip(&outcomes) {
+        let at = compiled.location(compiled.module.items[info.item].span);
+        let _ = match outcome {
+            ExampleOutcome::Passed => {
+                passed += 1;
+                writeln!(stdout, "{at}: example passed")
+            }
+            ExampleOutcome::Failed(why) => writeln!(stdout, "{at}: example failed: {why}"),
+            ExampleOutcome::Defect(defect) => {
+                defects += 1;
+                let _ = write!(stderr, "{}", compiled.render_defect(defect));
+                writeln!(stdout, "{at}: example failed: it hit a defect")
+            }
+        };
+    }
+    let total = outcomes.len();
+    let noun = if total == 1 { "example" } else { "examples" };
+    let _ = writeln!(stdout, "{total} {noun}: {passed} passed, {} failed", total - passed);
+    let _ = stdout.flush();
+    match () {
+        _ if defects > 0 => exit::DEFECT,
+        _ if passed < total => exit::FAILED,
+        _ => exit::OK,
     }
 }
 

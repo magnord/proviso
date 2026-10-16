@@ -30,7 +30,7 @@ fn refutable(o: Option[Int], p: (Int, Int), q: (Bool, Int), r: (Text, Char)) {
 fn shapes(p: (Int, Int), o: Option[Int]) {
     let (a1, b1, c1) = p                            // <- E0301
     let (d1, e1) = 5                                // <- E0301
-    let Point(f1, g1) = o                           // <- E0301
+    let Point(x: f1, y: g1) = o                     // <- E0301
     let (h1, i1): (Int, Text) = (1, 2)              // <- E0301
 }
 
@@ -48,7 +48,7 @@ fn mutability(p: (Int, Int)) {
 }
 
 fn broken() -> Int {
-    let (r1, r2 = 5                                 // <- E0101
+    let (r1 r2) = (5, 6)                            // <- E0101
     let gone = missing                              // <- E0201
     return r1 + r2
 }

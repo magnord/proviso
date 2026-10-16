@@ -424,6 +424,7 @@ impl Parser<'_> {
                 ItemKind::Impl(self.impl_decl()?)
             }
             T::Keyword(Kw::Interface) => ItemKind::Interface(self.interface_decl()?),
+            T::Keyword(Kw::Example) => ItemKind::Example(self.example_decl()?),
             T::Keyword(kw) => match planned_item(kw) {
                 Some((what, planned)) => {
                     self.poison_declared_type();
@@ -760,6 +761,11 @@ impl Parser<'_> {
         } else {
             (None, first)
         };
+        if let TypeExprKind::Tuple(_) = self.m.types[target].kind {
+            let span = self.m.types[target].span;
+            self.diags.not_implemented(span, "implementations for tuple types", Planned::Phase(2));
+            return Err(());
+        }
         if let TypeExprKind::Applied { args: Some(_), .. } = self.m.types[target].kind {
             let span = self.m.types[target].span;
             self.diags.not_implemented(
@@ -845,6 +851,24 @@ impl Parser<'_> {
         let name = self.ident("a method name")?;
         let decl = self.fn_rest(name, FnKind::Method)?;
         Ok(Method { vis, decl, span: start.to(self.prev_span()) })
+    }
+
+    /// `example f(…) == v` or `example f(…) fails P` (REFERENCE §14).
+    fn example_decl(&mut self) -> PResult<ExampleDecl> {
+        self.bump();
+        let call = self.nested(Self::range)?;
+        let expect = match self.kind() {
+            T::EqEq => {
+                self.bump();
+                Expectation::Equals(self.nested(Self::range)?)
+            }
+            T::Keyword(Kw::Fails) => {
+                self.bump();
+                Expectation::Fails(self.pattern()?)
+            }
+            _ => return self.unexpected("`==` or `fails` after the example's call"),
+        };
+        Ok(ExampleDecl { call, expect })
     }
 
     /// `interface Shape { fn area(self) -> Int }` (REFERENCE §4.9).
@@ -1079,7 +1103,7 @@ impl Parser<'_> {
                 self.bump();
                 TypeExprKind::SelfType
             }
-            T::LParen => return self.not_implemented("tuple types", Planned::Phase(2)),
+            T::LParen => TypeExprKind::Tuple(self.tuple(Self::type_expr, "tuple type")?),
             _ => return self.unexpected("a type"),
         };
         let span = start.to(self.prev_span());
@@ -1166,19 +1190,66 @@ impl Parser<'_> {
         Block { stmts, span: open.span.to(self.prev_span()), unclosed: false }
     }
 
-    /// Stands in for a statement that failed to parse. A `let` still binds its name, with
-    /// an unknown type, so later uses of it aren't reported again.
+    /// Stands in for a statement that failed to parse. A `let` still binds the names its
+    /// pattern has, with an unknown type, so later uses of them aren't reported again.
     fn placeholder(&mut self, start: usize) -> StmtId {
         let span = self.tokens[start].span.to(self.prev_span());
         let init = self.alloc(ExprKind::Error, span);
-        let kind = match (self.tokens[start].kind, self.tokens.get(start + 1)) {
-            (T::Keyword(kw @ (Kw::Let | Kw::Var)), Some(next)) if next.kind == T::Ident => {
-                let name = self.intern(next.span);
-                StmtKind::Let { mutable: kw == Kw::Var, name, ty: None, init }
+        let kind = match self.tokens[start].kind {
+            T::Keyword(kw @ (Kw::Let | Kw::Var)) => {
+                let pat = self.placeholder_pattern(start + 1);
+                StmtKind::Let { mutable: kw == Kw::Var, pat, ty: None, init }
             }
             _ => StmtKind::Expr(init),
         };
         self.m.stmts.alloc(Stmt { kind, span })
+    }
+
+    /// The names a broken `let` pattern starting at token `start` binds: its snake_case
+    /// names up to the `=`, other than field labels, constructors and its type's names.
+    fn placeholder_pattern(&mut self, start: usize) -> PatId {
+        let mut names: Vec<Ident> = Vec::new();
+        let mut depth = 0usize;
+        let mut i = start;
+        while let Some(token) = self.tokens.get(i) {
+            match token.kind {
+                T::LParen | T::LBracket | T::LBrace => depth += 1,
+                T::RParen | T::RBracket | T::RBrace => depth = depth.saturating_sub(1),
+                T::Eq | T::Newline | T::Eof => break,
+                T::Colon if depth == 0 => break,
+                T::Ident => {
+                    let next = self.nth_from(i + 1);
+                    let label = depth > 0 && next == T::Colon;
+                    let after_dot = i > 0 && self.tokens[i - 1].kind == T::Dot;
+                    let text = self.file.slice(token.span);
+                    let snake = text.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') && text != "_";
+                    if snake && !label && !after_dot && !matches!(next, T::Dot | T::LParen) {
+                        let name = self.intern(token.span);
+                        if !names.iter().any(|n| n.sym == name.sym) {
+                            names.push(name);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let span = self.tokens.get(start).map_or(self.prev_span(), |t| t.span);
+        let lone = names.len() == 1 && self.tokens.get(start).is_some_and(|t| t.span == names[0].span);
+        let kind = if lone {
+            PatKind::Bind(names[0])
+        } else {
+            let parts = names
+                .into_iter()
+                .map(|name| self.m.pats.alloc(Pat { kind: PatKind::Bind(name), span: name.span }))
+                .collect();
+            PatKind::Tuple(parts)
+        };
+        self.m.pats.alloc(Pat { kind, span })
+    }
+
+    fn nth_from(&self, i: usize) -> T {
+        self.tokens.get(i).map_or(T::Eof, |t| t.kind)
     }
 
     fn stmt(&mut self) -> PResult<StmtId> {
@@ -1206,7 +1277,14 @@ impl Parser<'_> {
                 self.bump();
                 StmtKind::Assert(self.expr()?)
             }
-            T::Keyword(Kw::Check) => return self.not_implemented("`check` statements", Planned::Phase(2)),
+            T::Keyword(Kw::Check) => {
+                self.bump();
+                let cond = self.nested(Self::logical)?;
+                if !self.eat(T::Keyword(Kw::Else)) {
+                    return self.unexpected("`else` and what to do when the check fails");
+                }
+                StmtKind::Check { cond, fallback: self.fallback()? }
+            }
             T::Keyword(Kw::Expect) => return self.not_implemented("`expect` statements", Planned::Phase(2)),
             T::Ident
                 if self.nth(1) == T::Colon && matches!(self.nth(2), T::Keyword(Kw::For | Kw::While | Kw::Loop)) =>
@@ -1245,26 +1323,81 @@ impl Parser<'_> {
 
     fn let_stmt(&mut self) -> PResult<StmtKind> {
         let mutable = self.bump().kind == T::Keyword(Kw::Var);
-        if self.at(T::LParen) {
-            return self.not_implemented("destructuring `let` statements", Planned::Phase(2));
-        }
-        let name = self.ident("a variable name")?;
+        // A name alone binds it whatever its case, so a misnamed variable is reported as
+        // misnamed rather than as an unknown constructor.
+        let pat = if self.at(T::Ident) && matches!(self.nth(1), T::Eq | T::Colon) {
+            let name = self.ident("a variable name")?;
+            let kind = if self.m.text(name.sym) == "_" { PatKind::Wild } else { PatKind::Bind(name) };
+            self.m.pats.alloc(Pat { kind, span: name.span })
+        } else {
+            self.pattern()?
+        };
         let ty = if self.eat(T::Colon) { Some(self.type_expr()?) } else { None };
         self.expect(T::Eq, "`=`")?;
         let init = self.expr()?;
-        Ok(StmtKind::Let { mutable, name, ty, init })
+        Ok(StmtKind::Let { mutable, pat, ty, init })
     }
 
     // ---- expressions, from lowest precedence to highest (REFERENCE §6.1) ----
 
     fn expr(&mut self) -> PResult<ExprId> {
         self.nested(|p| {
-            let e = p.logical()?;
-            if p.at_kw(Kw::Else) {
-                return p.not_implemented("`else` unwrapping forms", Planned::Phase(2));
+            let value = p.logical()?;
+            if !p.eat(T::Keyword(Kw::Else)) {
+                return Ok(value);
             }
-            Ok(e)
+            let fallback = p.fallback()?;
+            let span = p.span_of(value).to(p.prev_span());
+            Ok(p.alloc(ExprKind::Else { value, fallback }, span))
         })
+    }
+
+    /// What follows the `else` of an `else` form or a `check`: a block, or an expression,
+    /// which may itself be an `else` form.
+    fn fallback(&mut self) -> PResult<Fallback> {
+        if self.at(T::LBrace) { Ok(Fallback::Block(self.block()?)) } else { Ok(Fallback::Value(self.expr()?)) }
+    }
+
+    /// `(a, b)`, a tuple of at least two of what `element` parses, after its `(`. A trailing
+    /// comma is allowed after the second element (OPEN_QUESTIONS P5).
+    fn tuple<X>(&mut self, element: fn(&mut Self) -> PResult<X>, what: &str) -> PResult<Vec<X>> {
+        let open = self.bump();
+        if self.at(T::RParen) && what == "tuple type" {
+            let span = open.span.to(self.peek().span);
+            self.error(codes::UNEXPECTED_TOKEN, span, "the unit type is written `Unit`");
+            return Err(());
+        }
+        let first = self.nested(element)?;
+        self.tuple_rest(&open, first, element, what)
+    }
+
+    /// The rest of a tuple after its `(` and first element.
+    fn tuple_rest<X>(
+        &mut self,
+        open: &Token,
+        first: X,
+        element: fn(&mut Self) -> PResult<X>,
+        what: &str,
+    ) -> PResult<Vec<X>> {
+        let mut elements = vec![first];
+        while self.eat(T::Comma) {
+            if self.at(T::RParen) {
+                break;
+            }
+            elements.push(self.nested(element)?);
+        }
+        let close = self.close(open, T::RParen, "`,` or `)`")?;
+        if elements.len() < 2 {
+            let span = open.span.to(close.span);
+            let message = if what == "tuple" {
+                "a tuple has at least two elements; without the comma, parentheses only group".to_string()
+            } else {
+                format!("a {what} has at least two elements, and parentheses do not group here")
+            };
+            self.error(codes::UNEXPECTED_TOKEN, span, message);
+            return Err(());
+        }
+        Ok(elements)
     }
 
     /// A condition of `if` or `while`, which stops before `{`. An `else` form there must
@@ -1567,7 +1700,9 @@ impl Parser<'_> {
                 } else {
                     let inner = self.expr()?;
                     if self.at(T::Comma) {
-                        return self.not_implemented("tuples", Planned::Phase(2));
+                        let elements = self.tuple_rest(&open, inner, Self::expr, "tuple")?;
+                        let span = start.to(self.prev_span());
+                        return Ok(self.alloc(ExprKind::Tuple(elements), span));
                     }
                     let close = self.close(&open, T::RParen, "`)`")?;
                     // The parentheses belong to the expression, so its text quoted in a
@@ -1618,7 +1753,10 @@ impl Parser<'_> {
                 let value = self.expr()?;
                 ExprKind::Fail(value)
             }
-            T::Keyword(Kw::It) => return self.not_implemented("`it` bindings", Planned::Phase(2)),
+            T::Keyword(Kw::It) => {
+                self.bump();
+                ExprKind::It
+            }
             T::Keyword(Kw::SelfValue) => {
                 let token = self.bump();
                 ExprKind::Name(self.intern(token.span))
@@ -1797,7 +1935,7 @@ impl Parser<'_> {
                 let span = start.to(self.prev_span());
                 PatKind::Lit(self.alloc(ExprKind::Unit, span))
             }
-            T::LParen => return self.not_implemented("tuple patterns", Planned::Phase(2)),
+            T::LParen => PatKind::Tuple(self.tuple(Self::pattern_kind, "tuple pattern")?),
             T::Keyword(Kw::SelfType) => {
                 return self.not_implemented("uses of `Self` in patterns", Planned::Unscheduled);
             }
@@ -1903,7 +2041,7 @@ impl Parser<'_> {
             T::Keyword(Kw::For) => {
                 self.bump();
                 if self.at(T::LParen) {
-                    return self.not_implemented("tuple patterns", Planned::Phase(2));
+                    return self.not_implemented("destructuring `for` loops", Planned::Phase(2));
                 }
                 let binding = self.ident("a loop variable")?;
                 self.expect(T::Keyword(Kw::In), "`in`")?;
@@ -1931,7 +2069,7 @@ impl Parser<'_> {
 
 /// A keyword that begins an item. `let` also begins a statement, so it never ends one.
 fn item_keyword(kw: Kw) -> bool {
-    matches!(kw, Kw::Fn | Kw::Use | Kw::Record | Kw::Enum | Kw::Impl | Kw::Interface)
+    matches!(kw, Kw::Fn | Kw::Use | Kw::Record | Kw::Enum | Kw::Impl | Kw::Interface | Kw::Example)
         || (kw != Kw::Let && planned_item(kw).is_some())
 }
 
@@ -1941,7 +2079,6 @@ fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
         Kw::Type => ("`type` declarations", Planned::Phase(2)),
         Kw::Distinct => ("distinct types", Planned::Phase(2)),
         Kw::Unique | Kw::Opaque | Kw::Resource => ("`unique`, `opaque` and `resource` records", Planned::Phase(2)),
-        Kw::Example => ("`example` declarations", Planned::Phase(2)),
         Kw::Test => ("`test` blocks", Planned::Phase(2)),
         Kw::Cap => ("capability declarations", Planned::Phase(3)),
         Kw::Effect => ("effect parameters", Planned::Phase(3)),

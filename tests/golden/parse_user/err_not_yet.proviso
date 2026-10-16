@@ -18,11 +18,11 @@ impl Shape for (Int, Int) {                         // <- E0901
 fn later(t: Text) -> Int {
     let rows = t.lines()                             // <- E0901
     let n = rows.len()
-    let narrow = Int32.try_from(5)                  // <- E0901
+    let narrow = Int32.try_from(5) else 0           // <- E0901
     let wrapped = Int8.wrapping_from(300)           // <- E0901
-    for (i, x) in 0..3 {                            // <- E0901
+    for (i, x) in rows.enumerate() {                // <- E0901
     }
-    return narrow
+    return 1
 }
 
 test "not yet" {                                    // <- E0901
