@@ -97,6 +97,7 @@ fn calls(sys: System, p: Plain) {
     cased::[Int, Int](1)                            // <- E0317
     shadows("s")
     shadows::[Text]("s")
+    shadows::[Text, Text]("s")                      // <- E0317
     let s = bounded::[Float, Float](x: 1.5, y: 2.5)
     let t = bounded(x: 1.5, y: 2.5)
 }
