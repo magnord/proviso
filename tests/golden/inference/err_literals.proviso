@@ -2,8 +2,9 @@
 // expect-error: E0301
 // expect-error: E0302
 // A literal takes the type of whatever it meets, in any order and at any depth (REFERENCE
-// §2; OPEN_QUESTIONS P5; issue #10). So `300` that meets `small` doesn't fit `Int8`
-// (E0302) in each rewrite, where reading it as an `Int` first would report E0301 instead.
+// §2; OPEN_QUESTIONS P5; issue #10). So a literal such as `300` that meets `small` doesn't
+// fit `Int8` (E0302) in each rewrite. Where it meets `small` only through a branch, a call
+// or a nesting, reading it as an `Int` first would report E0301 instead.
 // A literal that meets a type of another kind is E0301 in each order, and a value that
 // doesn't fit isn't also reported for the type arguments it leaves open (§15.1).
 

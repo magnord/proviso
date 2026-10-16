@@ -3,7 +3,7 @@
 // expect-exit: 1
 // An example's call and expected value give each other their types as the operands of
 // `==` do, whatever spells the value (OPEN_QUESTIONS P5; issue #10). Each example is a
-// rewrite of the others, and each passes but the last, which shows the types it compared.
+// rewrite of the others, and each passes but the last, which shows the values it compared.
 fn id[T: Copy](x: T) -> T {
     return x
 }

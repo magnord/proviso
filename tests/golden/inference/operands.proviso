@@ -4,7 +4,8 @@
 // group is one program and its rewrites: swapped operands, a qualified or bare
 // constructor, a value bound by `let` first, one more level of nesting, and the same value
 // inside a tuple. Every rewrite checks, so a literal that meets `small` is an `Int8`, and
-// each prints the same result.
+// each prints the same result. A `Never` gives way to the other operand, in either order
+// and at any depth, so `failing` checks, and fails at its first comparison.
 use std.io { IoError }
 
 record Box {

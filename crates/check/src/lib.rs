@@ -508,7 +508,7 @@ impl Checker<'_> {
 
     /// Settles the open variables made since `vars`, and runs the checks queued since
     /// `pending`, which wait on them. An integer literal's variable becomes `Int`, a float
-    /// literal's `Float`, and one that only `Never` reached `Never` (REFERENCE §2). Any other
+    /// literal's `Float` (REFERENCE §2), and one that only `Never` reached `Never` (OPEN_QUESTIONS P5). Any other
     /// is a type argument that nothing gave, which is reported once (E0312).
     fn solve(&mut self, vars: u32, pending: usize) {
         let open: Vec<u32> = (vars..self.vars.count()).filter(|&v| self.vars.root(v) == v).collect();
@@ -1999,7 +1999,7 @@ impl Checker<'_> {
                     return;
                 }
                 // As in `operands`, the call gives the value what it knows of its type, and the
-                // type compared is their join, which a `Never` part of either may widen (§12.2).
+                // type compared is their join, which a `Never` part of either may widen (§9.2; OPEN_QUESTIONS P5).
                 let hint = (ty.is_numeric() || matches!(ty, Ty::Adt(..) | Ty::Var(_))).then_some(&ty);
                 let value_ty = self.expr(*value, hint);
                 let ty = match self.vars.join(&value_ty, &ty) {
@@ -3000,9 +3000,9 @@ impl Checker<'_> {
         }
     }
 
-    /// Checks the operands of a binary operator and joins their types. An untyped literal,
-    /// `None` or generic call takes its type from the other operand (REFERENCE §2), in
-    /// either position, since what neither gives stays a variable until they meet
+    /// Checks the operands of a binary operator and joins their types. An untyped literal
+    /// takes its type from the other operand (REFERENCE §2), and so do `None` and a generic
+    /// call, in either position, since what neither gives stays a variable until they meet
     /// (OPEN_QUESTIONS P5; issue #10). Returns the joined type, or an error once reported.
     fn operands(&mut self, lhs: ExprId, rhs: ExprId, hint: Option<&Ty>, span: Span) -> Ty {
         let lt = self.expr(lhs, hint);

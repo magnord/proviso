@@ -3,7 +3,9 @@
 // and literal types, in any order (OPEN_QUESTIONS P5; issue #10). Each group is one value
 // and its rewrites: swapped branches, a qualified or bare constructor, a branch that binds
 // its value first, an `else if`, and the same value inside a tuple. Every rewrite checks,
-// and passing it on shows its type.
+// and passing it on shows its type, apart from `b9`, whose `Some(1)` nothing makes an
+// `Int8`. Branches that only `Never` reaches give `Never`, so `n3` and `n4` are
+// `Option[Never]`s.
 use std.io { IoError }
 
 fn opt(x: Option[Int]) -> Option[Int] {
