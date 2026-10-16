@@ -36,6 +36,8 @@ All golden files run inside a single test (`crates/proviso/tests/golden.rs`), an
 
 CI (`.github/workflows/ci.yml`) runs fmt, clippy with `-D warnings`, and the tests on every pull request. Run all three before you call a branch clean. Checks take a moment to register, so a PR with no checks right after opening still has CI.
 
+Shell commands run in zsh on macOS. There is no `timeout`, so use `perl -e 'alarm 60; exec @ARGV' -- cmd`, which exits 142 when time runs out. Quote a word that starts with `=`, such as `'====='`, and a glob in a flag, such as `--include='*.md'`.
+
 ## Architecture
 
 The pipeline is split into one crate per stage, and each crate depends only on the ones before it:
@@ -74,9 +76,13 @@ Codes are stable, so a code's meaning never changes once assigned. They are defi
 - Other work that outlives a session goes in a GitHub issue on magnord/proviso. Examples are a review finding left unfixed, a follow-up a PR defers, a commit no one reviewed, or a tooling or skill problem. Link the PR it came from, and close the issue from the PR that fixes it.
 - Ask the user before opening an issue.
 - A PR that adds a provisional decision to OPEN_QUESTIONS P5 lists each one in its body, so the user can confirm or overturn it.
+- A change to a skill, CLAUDE.md or another workflow file goes on its own branch and PR, never on a feature branch, even when the user asks for it in the middle of a task. Sessions started from main need it before the feature PR merges.
+- When a brief sets a size target for a PR, compare the diff with it once the goldens exist. If the PR is over, say so and offer the user a split.
 
 ## Working with the user
 
 - Commit freely on your own branch. Ask before you push or open a PR.
 - Write replies, PR bodies, commit messages and docs in short declarative sentences. Use no em dashes, and no colon as a connector in the middle of a sentence.
 - Give each claim its evidence, or label it as measured, inferred or a guess.
+- When a tool refuses and names a step for the user, or a configured model or path is unavailable, tell the user and ask before any fallback. This holds even when the user approved the end result. Doing a refused action by hand defeats the check.
+- Answer a question the user asks mid-task in visible text, even in one line, before you go back to the work. An answer only in your thinking never reaches them.

@@ -71,6 +71,8 @@ Follow each approved row's Routing exactly:
 
 If your environment ships a SKILL.md validator, run it on every touched skill before declaring done.
 
+After applying edits, tell each running session that loaded a changed skill to invoke it again by name. A session keeps the skill text it loaded first, also across compaction, so it skips exactly the steps an edit adds.
+
 ## 6. Summarize for the user
 
 Short list, no preamble:
