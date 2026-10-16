@@ -4,7 +4,10 @@
 // its type from the expected tuple type (§2). Tuples implement `Eq`, `Ord`, `Hash` and
 // `Show` when their elements do. `Show` and `debug` write the literal form with text and
 // chars quoted, and `Ord` compares element by element from the left (OPEN_QUESTIONS P5).
-// A `var` pattern makes each of its bindings mutable.
+// A `var` pattern makes each of its bindings mutable. A `let` that takes a borrowed value
+// apart borrows its parts, as a `match` does (§6.4), so only the parts it copies need
+// `Copy`. A tuple's type is known when each element's is, so in `==` the side whose
+// elements need no context is read first, in either order (P5).
 use std.io { IoError }
 
 record Point derives(Eq, Show) {
@@ -15,6 +18,16 @@ record Point derives(Eq, Show) {
 fn swap[A: Copy, B: Copy](pair: (A, B)) -> (B, A) {
     let (a, b) = pair
     return (b, a)
+}
+
+fn second_by_let[T](p: (T, Int)) -> Int {
+    let (a, b) = p
+    return b
+}
+
+fn first_by_let[A: Copy, B](p: (A, B)) -> A {
+    let (a, _) = p
+    return a
 }
 
 fn classify(p: (Int, Bool)) -> Text {
@@ -80,4 +93,11 @@ pub fn main(sys: keep System) fails IoError {
         Some((n, text)) => try sys.stdout.write_line(f"{n} is {text}")
         None => try sys.stdout.write_line("none")
     }
+    let none_first = (1, None) == (1, Some(2))
+    let none_second = (None, 1) == (Some(2), 1)
+    let some_first = (1, Some(2)) == (1, None)
+    try sys.stdout.write_line(f"{none_first} {none_second} {some_first}")
+    let second = second_by_let(("t", 6))
+    let first = first_by_let((7, "u"))
+    try sys.stdout.write_line(f"{second} {first}")
 }

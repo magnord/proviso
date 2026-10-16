@@ -3,6 +3,7 @@
 // expect-error: E0102
 // expect-error: E0201
 // expect-error: E0301
+// expect-error: E0303
 // expect-error: E0701
 // expect-error: E0705
 // expect-error: E0707
@@ -12,7 +13,8 @@
 // in the fallback of a fallible call, not in that of an `Option` (Q33). An `else` marks
 // only the calls of its postfix chain, as `try` does (§6.1), and they must fail with one
 // error type, as for `attempt` (P5). An `Option` with an `else` is still a bare value
-// (§2), and an `else` form in a condition is parenthesized (§6.1).
+// (§2), and an `else` form in a condition is parenthesized (§6.1). A left side that is
+// already an error may have been a call that can fail, so its `it` isn't reported (§15.1).
 enum Other {
     Thing
 }
@@ -62,4 +64,14 @@ fn forms(o: Option[Int], ob: Option[Bool]) -> Int fails Text {
 fn no_fails(o: Option[Int]) -> Int {
     let m = risky(1) else fail it                   // <- E0705
     return m
+}
+
+fn unknown_left(n: Int, t: Text) -> Int {
+    let a = missing(n) else it                      // <- E0201
+    let b = nope.run() else it                      // <- E0201
+    let c = undefined_thing else { it }             // <- E0201
+    let d = Text.parse(t) else match it {           // <- E0303
+        _ => 0
+    }
+    return 0
 }

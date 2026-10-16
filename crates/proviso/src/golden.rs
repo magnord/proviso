@@ -156,8 +156,8 @@ fn parse_header(text: &str) -> Result<Header, String> {
             "run" if value == "test" => header.test = true,
             // `record-replay` comes with phase 6.
             "run" if value == "record-replay" => {
-                if !header.unchecked.iter().any(|d| d == "run") {
-                    header.unchecked.push("run".to_string());
+                if !header.unchecked.iter().any(|d| d == "run: record-replay") {
+                    header.unchecked.push("run: record-replay".to_string());
                 }
             }
             "run" => return Err(format!("line {}: unknown run mode `{value}`", index + 1)),

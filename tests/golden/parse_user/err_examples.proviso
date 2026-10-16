@@ -1,15 +1,21 @@
 // phase: 2.5
 // expect-error: E0101
+// expect-error: E0108
 // expect-error: E0201
 // expect-error: E0301
 // expect-error: E0306
 // expect-error: E0701
+// expect-error: E0702
+// expect-error: E0705
 // expect-error: E0708
 // An example is `example f(…) == v` or `example f(…) fails P` (REFERENCE §14). It marks the
 // calls of its postfix chain, as `attempt` does (§7.2), so another fallible call in it is
 // unmarked. `== v` needs a `v` of the call's type, and a type with `Eq`, or a float, whose
 // `==` is IEEE's (§12.2). `fails P` needs a call that can fail, and a pattern for its
-// error (OPEN_QUESTIONS P5).
+// error (OPEN_QUESTIONS P5). The left side is a call or a method call, and an example has
+// no name, so it is never `pub`. An example is an expression with no function around it, so
+// `return`, `fail` and `try` have nothing to leave (E0108, E0705, E0702). The expected
+// value may be any expression, an `else` form among them.
 record Plain {
     n: Int
 }
@@ -42,3 +48,17 @@ example risky(1) == 1
 example risky(1) fails "boom"
 example halve(1.0) == 0.5
 example sure(3) == 1 + 2
+example 5 == 5                                      // <- E0101
+example sure(1) + 1 == 2                            // <- E0101
+example -sure(1) == -1                              // <- E0101
+example (sure(1), sure(2)) == (1, 2)                // <- E0101
+example plain(1).n == 1                             // <- E0101
+example try risky(1) == 1                           // <- E0101
+example sure(try risky(1)) == 1                     // <- E0702
+example sure(match 1 { _ => return 2 }) == 2        // <- E0108
+example sure(fail "x") == 1                         // <- E0705
+pub example sure(4) == 4                            // <- E0101
+pub(pkg) example sure(5) == "five"                  // <- E0101, E0301
+example (sure(6)) == 6
+example Int.parse("8") == 8
+example sure(9) == risky(9) else 0

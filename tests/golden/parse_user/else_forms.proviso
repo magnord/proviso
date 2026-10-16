@@ -3,11 +3,14 @@
 // chain to their left (REFERENCE §6.6, §7.2). The fallback runs only when there is nothing
 // to unwrap. `it` is the error, in every form on a fallible call, and in nested forms it is
 // the error of the innermost one on a fallible call (OPEN_QUESTIONS Q33). `else` binds
-// loosest (§6.1) and groups to the right, so `o else 0 + 1` is `o else (0 + 1)` (P5). A call
+// loosest (§6.1), so `o else 0 + 1` is `o else (0 + 1)`, and groups to the right, so
+// `o else p else 0` is `o else (p else 0)` (P5). A call
 // whose result is an `Option` and that can fail has its failure handled, not the `Option`
 // unwrapped (P5). A `try` in an argument still fails the function. A call marked with an
 // `else` form is a statement (Q33), and a statement continues on a line that starts with
-// `else` (§2).
+// `else` (§2). An arm's guard ends at `=>`, so it takes an `else` form unparenthesized
+// (§6.1). The type an `else` form is expected to have reaches the call on its left, as it
+// reaches one under `try`, or as an `Option` of it for a call that returns one (P5).
 use std.io { IoError }
 
 enum Problem derives(Eq, Show) {
@@ -25,6 +28,49 @@ impl Holder {
             fail Problem.Small(n: 0)
         }
         return self.n
+    }
+
+    fn same[T: Copy](self, x: T) -> T fails Problem {
+        if self.n == 0 {
+            fail Problem.Small(n: 0)
+        }
+        return x
+    }
+}
+
+fn conv[T: Copy](x: T, ok: Bool) -> T fails Problem {
+    if not ok {
+        fail Problem.Small(n: 0)
+    }
+    return x
+}
+
+fn maybe[T: Copy](x: T, some: Bool) -> Option[T] {
+    if some {
+        return Some(x)
+    }
+    return None
+}
+
+fn narrow(ok: Bool) -> Int8 {
+    let y: Int8 = conv(x: 5, ok: ok) else -1
+    return y
+}
+
+fn narrow_method(n: Int) -> Int8 {
+    let h = Holder(n: n)
+    let z: Int8 = h.same(x: 7) else -2
+    return z
+}
+
+fn wide(some: Bool) -> UInt8 {
+    return maybe(x: 200, some: some) else 0
+}
+
+fn guarded(n: Int, o: Option[Bool]) -> Int {
+    return match n {
+        0 if o else false => 1
+        _ => 2
     }
 }
 
@@ -160,6 +206,9 @@ pub fn main(sys: keep System) fails IoError {
     if (positive(9) else 0) > 3 {
         try sys.stdout.write_line("big")
     }
+    try sys.stdout.write_line(f"{narrow(true)} {narrow(false)} {narrow_method(1)} {narrow_method(0)}")
+    try sys.stdout.write_line(f"{wide(true)} {wide(false)}")
+    try sys.stdout.write_line(f"{guarded(n: 0, o: Some(true))} {guarded(n: 0, o: None)} {guarded(n: 0, o: Some(false))}")
 }
 
 fn fail_soft() {

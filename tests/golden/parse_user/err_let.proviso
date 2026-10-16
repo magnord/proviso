@@ -2,6 +2,7 @@
 // expect-error: E0101
 // expect-error: E0201
 // expect-error: E0203
+// expect-error: E0204
 // expect-error: E0301
 // expect-error: E0305
 // expect-error: E0318
@@ -12,7 +13,9 @@
 // another (H4). `let` bindings are immutable and `var` ones mutable (§5.1). A `let` whose
 // pattern is broken still binds the names it has, so their uses aren't reported (§15.1).
 // A refutable part makes the whole pattern refutable, and an enum's only variant matches
-// every value.
+// every value. A pattern that is one name binds it whatever its case, so a misnamed one is
+// reported as misnamed, also when the `let` is broken. Inside a larger pattern a name is
+// read as in a `match`, so `None` there is the variant (§6.4).
 record Point {
     x: Int
     y: Int
@@ -59,4 +62,16 @@ fn broken() -> Int {
     let (r1 r2) = (5, 6)                            // <- E0101
     let gone = missing                              // <- E0201
     return r1 + r2
+}
+
+fn broken_names() -> Int {
+    let Total = (1 2)                               // <- E0204, E0101
+    var Count: Int = (1 2)                          // <- E0204, E0101
+    Count += 1
+    let Width: Int = 3                              // <- E0204
+    let p.q = 5                                     // <- E0101
+    var r.s = 6                                     // <- E0101
+    r = 7
+    let (None, k2) = (Some(1), 2)                   // <- E0318
+    return Total + Count + Width + p + r + k2
 }

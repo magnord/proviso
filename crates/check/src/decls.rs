@@ -317,6 +317,8 @@ pub struct Decls {
     impls: HashMap<(IfaceId, ImplKey), ImplDef>,
     /// The tuple of each length, by its length.
     tuples: HashMap<usize, AdtId>,
+    /// Whether a rejected `impl` block was for a tuple type.
+    unknown_tuples: bool,
     /// Types other than records and enums that a rejected `impl` block names, such as
     /// `Int`. It may have given them methods and interfaces, so uses of those aren't
     /// reported. A record or enum keeps this in its [`AdtDef`].
@@ -369,7 +371,7 @@ impl Default for Decls {
         let adts = vec![system, option, result, parse_error, AdtDef::tuple(2)];
         debug_assert_eq!(adts.len(), AdtId::BUILT_IN);
         let tuples = HashMap::from([(2, AdtId::PAIR)]);
-        Decls { adts, ifaces, impls: HashMap::new(), tuples, unknown: HashSet::new() }
+        Decls { adts, ifaces, impls: HashMap::new(), tuples, unknown_tuples: false, unknown: HashSet::new() }
     }
 }
 
@@ -392,7 +394,9 @@ impl Decls {
         if let Some(&id) = self.tuples.get(&n) {
             return id;
         }
-        let id = self.push(AdtDef::tuple(n));
+        let mut def = AdtDef::tuple(n);
+        (def.unknown_interfaces, def.unknown_methods) = (self.unknown_tuples, self.unknown_tuples);
+        let id = self.push(def);
         self.tuples.insert(n, id);
         id
     }
@@ -401,6 +405,16 @@ impl Decls {
     pub fn tuple_ty(&mut self, elements: Vec<Ty>) -> Ty {
         let id = self.tuple(elements.len());
         Ty::applied(id, elements)
+    }
+
+    /// Notes that a rejected `impl` block was for a tuple type, so every tuple type, now and
+    /// later, may have methods and interfaces we don't know (§15.1).
+    pub fn poison_tuples(&mut self) {
+        self.unknown_tuples = true;
+        for &id in self.tuples.values() {
+            let def = &mut self.adts[id.index()];
+            (def.unknown_interfaces, def.unknown_methods) = (true, true);
+        }
     }
 
     pub fn is_tuple(&self, ty: &Ty) -> bool {
@@ -522,6 +536,8 @@ impl Decls {
             || ImplKey::of(ty).is_some_and(|key| self.impls.contains_key(&(iface, key)) || self.unknown.contains(&key));
         match ty {
             Ty::Param(i) => params.get(*i as usize).is_some_and(|bounds| bounds.contains(&iface)),
+            // A rejected `impl` block may have given it this interface for any type arguments.
+            Ty::Adt(id, _) if self.adt(*id).unknown_interfaces => true,
             // `Option` and `Result` implement what their type arguments do (STD.md). `Never` has
             // no values, so it implements everything as an argument.
             Ty::Adt(id, args) if self.adt(*id).derives.contains(&iface) => {
@@ -568,6 +584,21 @@ impl Decls {
     /// told apart.
     pub fn display<'a>(&'a self, ty: &'a Ty) -> impl fmt::Display + 'a {
         self.display_in(ty, &[])
+    }
+
+    /// How diagnostics name the record or enum `id`, qualified as [`Decls::display`] does.
+    pub fn name(&self, id: AdtId) -> String {
+        self.display(&Ty::adt(id)).to_string()
+    }
+
+    /// How diagnostics write variant `v` of `id`, as [`AdtDef::ctor_name`] does, with the
+    /// enum's name qualified as [`Decls::display`] does it.
+    pub fn ctor_name(&self, id: AdtId, v: VariantIdx) -> String {
+        let def = self.adt(id);
+        match def.kind {
+            AdtKind::Enum if !def.bare_variants => format!("{}.{}", self.name(id), def.variants[v.index()].name),
+            _ => def.ctor_name(v),
+        }
     }
 
     /// Like [`Decls::display`], where type parameter `i` is called `names[i]`.

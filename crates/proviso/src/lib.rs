@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::io::Write;
 use std::path::Path;
 
-use proviso_check::{Options, Program, check_module};
+use proviso_check::{ExampleInfo, Options, Program, check_module};
 use proviso_interp::{Defect, ExampleOutcome, Outcome, run_examples, run_main};
 use proviso_syntax::ast::{ItemKind, Module, TypeExprKind};
 use proviso_syntax::diag::{Diagnostic, Diagnostics, Severity};
@@ -259,15 +259,8 @@ pub fn run(compiled: &Compiled, stdout: &mut (dyn Write + Send), stderr: &mut (d
 /// a defect (OPEN_QUESTIONS P5). Each example's outcome goes to `stdout`, followed by a count;
 /// defects are reported on `stderr`.
 pub fn test(compiled: &Compiled, stdout: &mut (dyn Write + Send), stderr: &mut (dyn Write + Send)) -> i32 {
-    let outcomes = match run_examples(&compiled.file, &compiled.module, &compiled.program, stdout, stderr) {
-        Ok(outcomes) => outcomes,
-        Err(_) => {
-            let _ = writeln!(stderr, "internal error: the interpreter panicked; this is a bug in proviso");
-            return exit::INTERNAL;
-        }
-    };
     let (mut passed, mut defects) = (0, 0);
-    for (info, outcome) in compiled.program.examples.iter().zip(&outcomes) {
+    let report = |info: &ExampleInfo, outcome, stdout: &mut dyn Write, stderr: &mut dyn Write| {
         let at = compiled.location(compiled.module.items[info.item].span);
         let _ = match outcome {
             ExampleOutcome::Passed => {
@@ -277,12 +270,16 @@ pub fn test(compiled: &Compiled, stdout: &mut (dyn Write + Send), stderr: &mut (
             ExampleOutcome::Failed(why) => writeln!(stdout, "{at}: example failed: {why}"),
             ExampleOutcome::Defect(defect) => {
                 defects += 1;
-                let _ = write!(stderr, "{}", compiled.render_defect(defect));
+                let _ = write!(stderr, "{}", compiled.render_defect(&defect));
                 writeln!(stdout, "{at}: example failed: it hit a defect")
             }
         };
+    };
+    if run_examples(&compiled.file, &compiled.module, &compiled.program, stdout, stderr, report).is_err() {
+        let _ = writeln!(stderr, "internal error: the interpreter panicked; this is a bug in proviso");
+        return exit::INTERNAL;
     }
-    let total = outcomes.len();
+    let total = compiled.program.examples.len();
     let noun = if total == 1 { "example" } else { "examples" };
     let _ = writeln!(stdout, "{total} {noun}: {passed} passed, {} failed", total - passed);
     let _ = stdout.flush();

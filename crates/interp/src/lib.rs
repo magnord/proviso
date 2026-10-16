@@ -162,16 +162,23 @@ pub fn run_main(
     on_interp_thread(file, m, p, stdout, stderr, |interp| interp.main())
 }
 
-/// Runs each example in declaration order, each with [`EXAMPLE_FUEL`], and returns how each
-/// came out. `debug` output goes to `stderr`.
+/// Runs each example in declaration order, each with [`EXAMPLE_FUEL`]. `report` gets how each
+/// came out as soon as it has run, with the output streams, so a result is written next to the
+/// example's `debug` output. `debug` output goes to `stderr`.
 pub fn run_examples(
     file: &SourceFile,
     m: &Module,
     p: &Program,
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
-) -> std::thread::Result<Vec<ExampleOutcome>> {
-    on_interp_thread(file, m, p, stdout, stderr, |interp| p.examples.iter().map(|info| interp.example(info)).collect())
+    mut report: impl FnMut(&ExampleInfo, ExampleOutcome, &mut dyn Write, &mut dyn Write) + Send,
+) -> std::thread::Result<()> {
+    on_interp_thread(file, m, p, stdout, stderr, |interp| {
+        for info in &p.examples {
+            let outcome = interp.example(info);
+            report(info, outcome, &mut *interp.stdout, &mut *interp.stderr);
+        }
+    })
 }
 
 fn on_interp_thread<'a, R: Send>(

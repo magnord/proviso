@@ -73,6 +73,32 @@ fn test_runs_examples_without_a_main() {
     assert_eq!(run(&["test", "--json"], &file).status.code(), Some(64));
 }
 
+/// Each example's result is written as soon as it has run, so it sits next to that example's
+/// `debug` output and defect report when both streams go to one place.
+#[test]
+fn test_reports_each_example_next_to_its_output() {
+    let file = source(
+        "streamed.proviso",
+        "fn f(n: Int) -> Int {\n    debug(n)\n    assert n != 2\n    return n\n}\n\nexample f(1) == 1\nexample f(2) == 2\nexample f(3) == 3\n",
+    );
+    let merged = file.with_extension("log");
+    let log = std::fs::File::create(&merged).unwrap();
+    let status = proviso().arg("test").arg(&file).stdout(log.try_clone().unwrap()).stderr(log).status().unwrap();
+    assert_eq!(status.code(), Some(70));
+    let text = std::fs::read_to_string(&merged).unwrap();
+    let kinds: Vec<&str> = text
+        .lines()
+        .filter_map(|line| match () {
+            _ if line.starts_with("[debug") => Some("debug"),
+            _ if line.starts_with("defect") => Some("defect"),
+            _ if line.ends_with("example passed") => Some("passed"),
+            _ if line.contains("example failed") => Some("failed"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds, ["debug", "passed", "debug", "defect", "failed", "debug", "passed"], "{text}");
+}
+
 #[test]
 fn unknown_options_are_usage_errors() {
     let file = source("hello.proviso", HELLO);
@@ -101,6 +127,27 @@ fn deep_recursion_through_nested_expressions_is_a_defect() {
     let output = run(&["run"], &file);
     assert_eq!(output.status.code(), Some(70), "{}", stderr(&output));
     assert!(stderr(&output).starts_with("defect[stack_exhausted]"), "{}", stderr(&output));
+}
+
+/// A chain of blocks nested past the limit is reported once, whatever the statement that
+/// opens each block, though the code after each inner block is just as deep (§15.1).
+#[test]
+fn a_deep_chain_of_blocks_is_too_deep_once() {
+    for head in ["check n > 5 else ", "if n > 5 ", "let v = o else ", "let w = risky(n) else "] {
+        let mut chain = String::from("{ return 0 }");
+        for _ in 0..1000 {
+            chain = format!("{{ {head}{chain}\n return 1 }}");
+        }
+        let text = format!(
+            "fn risky(n: Int) -> Int fails Text {{\n    return n\n}}\n\nfn f(n: Int, o: Option[Int]) -> Int {{\n    {head}{chain}\n    return 2\n}}\n"
+        );
+        let file = source("deep_blocks.proviso", &text);
+        let output = run(&["check"], &file);
+        let errors = stderr(&output);
+        assert_eq!(output.status.code(), Some(65), "{head}: {errors}");
+        assert_eq!(errors.matches("error[").count(), 1, "{head}: {errors}");
+        assert!(errors.contains("error[E0902]"), "{head}: {errors}");
+    }
 }
 
 /// A program whose recursion runs the interpreter's stack low while each call compares or

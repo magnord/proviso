@@ -50,6 +50,7 @@ pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> M
         interner: Interner::default(),
         poisoned: HashSet::new(),
         impls: HashSet::new(),
+        tuple_impls: false,
     };
     let mut parser = Parser {
         file,
@@ -62,6 +63,8 @@ pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> M
         item_indent: 0,
         recovered: false,
         unclosed_reported: false,
+        unclosed_blocks: 0,
+        too_deep_reported: false,
         field_indent: None,
         arm_depth: 0,
     };
@@ -87,6 +90,12 @@ struct Parser<'a> {
     /// Set once an unclosed `{` has been reported in the current item, so the blocks around
     /// it close without reporting it again.
     unclosed_reported: bool,
+    /// How many blocks have ended without being closed, so a `match` arm whose body is one
+    /// statement knows that a block inside it ended before the next arm.
+    unclosed_blocks: usize,
+    /// Set once a statement of a body, or an item outside one, has nested too deeply, so the
+    /// code left at that depth after recovery isn't reported again (§15.1).
+    too_deep_reported: bool,
     /// The indentation of the record field being parsed. A line of a block in its `where`
     /// that is no deeper starts the next field, so the block was never closed.
     field_indent: Option<usize>,
@@ -301,6 +310,9 @@ impl Parser<'_> {
     fn deeper(&mut self) -> PResult<()> {
         self.depth += 1;
         if self.depth > MAX_NESTING {
+            if std::mem::replace(&mut self.too_deep_reported, true) {
+                return Err(());
+            }
             let span = self.peek().span;
             self.error(
                 codes::NESTING_TOO_DEEP,
@@ -356,7 +368,7 @@ impl Parser<'_> {
             }
             let start = self.pos;
             self.depth = 0;
-            self.unclosed_reported = false;
+            (self.unclosed_reported, self.too_deep_reported) = (false, false);
             self.stmt_indent = self.indent(self.peek().span);
             self.item_indent = self.stmt_indent;
             match self.item() {
@@ -424,7 +436,14 @@ impl Parser<'_> {
                 ItemKind::Impl(self.impl_decl()?)
             }
             T::Keyword(Kw::Interface) => ItemKind::Interface(self.interface_decl()?),
-            T::Keyword(Kw::Example) => ItemKind::Example(self.example_decl()?),
+            T::Keyword(Kw::Example) => {
+                // The example is kept, so it is still checked.
+                if vis != Visibility::Private && written {
+                    let span = start.to(self.prev_span());
+                    self.error(codes::UNEXPECTED_TOKEN, span, "an example has no name, so it is never exported");
+                }
+                ItemKind::Example(self.example_decl()?)
+            }
             T::Keyword(kw) => match planned_item(kw) {
                 Some((what, planned)) => {
                     self.poison_declared_type();
@@ -517,7 +536,7 @@ impl Parser<'_> {
     }
 
     /// Notes the type a rejected `impl` block, whose keyword is token `at`, is for: `Point`
-    /// in `impl Point` and in `impl Show for Point`.
+    /// in `impl Point` and in `impl Show for Point`, or any tuple type in `impl Show for (A, B)`.
     fn note_impl_target(&mut self, at: usize) {
         let mut i = at + 1;
         let mut target = None;
@@ -525,6 +544,10 @@ impl Parser<'_> {
             match token.kind {
                 T::Ident => target = Some(token.span),
                 T::Keyword(Kw::For) => {}
+                T::LParen => {
+                    self.m.tuple_impls = true;
+                    return;
+                }
                 T::LBracket => {
                     // Skips type parameters and arguments, such as `impl[T] Show for Box[T]`.
                     let mut depth = 0;
@@ -857,10 +880,15 @@ impl Parser<'_> {
     fn example_decl(&mut self) -> PResult<ExampleDecl> {
         self.bump();
         let call = self.nested(Self::range)?;
+        if !matches!(self.m.exprs[call].kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. }) {
+            let span = self.span_of(call);
+            self.error(codes::UNEXPECTED_TOKEN, span, "an example tests a call, as in `example f(…) == v`");
+            return Err(());
+        }
         let expect = match self.kind() {
             T::EqEq => {
                 self.bump();
-                Expectation::Equals(self.nested(Self::range)?)
+                Expectation::Equals(self.expr()?)
             }
             T::Keyword(Kw::Fails) => {
                 self.bump();
@@ -1139,7 +1167,12 @@ impl Parser<'_> {
     /// the file.
     fn block_rest(&mut self, open: &Token, indent: usize) -> Block {
         let mut stmts = Vec::new();
+        let mut lost = false;
         loop {
+            // Each statement of a body may nest too deeply on its own.
+            if self.depth <= 1 {
+                self.too_deep_reported = false;
+            }
             // A doc comment documents an item, so there is nothing for it to do in a block.
             while matches!(self.kind(), T::Newline | T::DocComment) {
                 self.bump();
@@ -1162,7 +1195,8 @@ impl Parser<'_> {
                     self.unclosed_reported = true;
                     let _ = self.unclosed::<()>(open);
                 }
-                return Block { stmts, span: open.span.to(self.prev_span()), unclosed: true };
+                self.unclosed_blocks += 1;
+                return Block { stmts, span: open.span.to(self.prev_span()), unclosed: true, lost };
             }
             let start = self.pos;
             let saved = (self.depth, self.stmt_indent);
@@ -1173,10 +1207,12 @@ impl Parser<'_> {
                     if !matches!(self.kind(), T::Newline | T::RBrace | T::Eof) && !self.starts_item() {
                         let _ = self.unexpected::<()>("end of statement");
                         self.recover(start, Stop::Stmt);
+                        lost = true;
                     }
                     stmt
                 }
                 Err(()) => {
+                    lost = true;
                     self.recover(start, Stop::Stmt);
                     if self.pos == start {
                         self.bump();
@@ -1187,7 +1223,7 @@ impl Parser<'_> {
             (self.depth, self.stmt_indent) = saved;
             stmts.push(stmt);
         }
-        Block { stmts, span: open.span.to(self.prev_span()), unclosed: false }
+        Block { stmts, span: open.span.to(self.prev_span()), unclosed: false, lost }
     }
 
     /// Stands in for a statement that failed to parse. A `let` still binds the names its
@@ -1206,8 +1242,13 @@ impl Parser<'_> {
     }
 
     /// The names a broken `let` pattern starting at token `start` binds: its snake_case
-    /// names up to the `=`, other than field labels, constructors and its type's names.
+    /// names up to the `=`, other than field labels, constructors and its type's names. A
+    /// name alone binds whatever its case, as [`Parser::let_stmt`] reads it.
     fn placeholder_pattern(&mut self, start: usize) -> PatId {
+        if let Some(name) = self.lone_let_name(start) {
+            let kind = if self.m.text(name.sym) == "_" { PatKind::Wild } else { PatKind::Bind(name) };
+            return self.m.pats.alloc(Pat { kind, span: name.span });
+        }
         let mut names: Vec<Ident> = Vec::new();
         let mut depth = 0usize;
         let mut i = start;
@@ -1321,16 +1362,30 @@ impl Parser<'_> {
         if self.at(T::Ident) { Ok(Some(self.ident("a label")?)) } else { Ok(None) }
     }
 
+    /// The name a `let` whose pattern starts at token `at` binds when the pattern is that name
+    /// alone. It binds it whatever its case, so a misnamed variable is reported as misnamed
+    /// rather than as an unknown constructor. A snake_case name before a `.`, as in the
+    /// mistaken `let p.q = 5`, is one too, since no constructor is written that way.
+    fn lone_let_name(&mut self, at: usize) -> Option<Ident> {
+        let token = self.tokens.get(at).filter(|t| t.kind == T::Ident)?;
+        let snake = self.file.slice(token.span).starts_with(|c: char| c.is_ascii_lowercase() || c == '_');
+        match self.nth_from(at + 1) {
+            T::Eq | T::Colon => {}
+            T::Dot if snake => {}
+            _ => return None,
+        }
+        Some(self.intern(token.span))
+    }
+
     fn let_stmt(&mut self) -> PResult<StmtKind> {
         let mutable = self.bump().kind == T::Keyword(Kw::Var);
-        // A name alone binds it whatever its case, so a misnamed variable is reported as
-        // misnamed rather than as an unknown constructor.
-        let pat = if self.at(T::Ident) && matches!(self.nth(1), T::Eq | T::Colon) {
-            let name = self.ident("a variable name")?;
-            let kind = if self.m.text(name.sym) == "_" { PatKind::Wild } else { PatKind::Bind(name) };
-            self.m.pats.alloc(Pat { kind, span: name.span })
-        } else {
-            self.pattern()?
+        let pat = match self.lone_let_name(self.pos) {
+            Some(name) => {
+                self.bump();
+                let kind = if self.m.text(name.sym) == "_" { PatKind::Wild } else { PatKind::Bind(name) };
+                self.m.pats.alloc(Pat { kind, span: name.span })
+            }
+            None => self.pattern()?,
         };
         let ty = if self.eat(T::Colon) { Some(self.type_expr()?) } else { None };
         self.expect(T::Eq, "`=`")?;
@@ -1879,7 +1934,8 @@ impl Parser<'_> {
     /// `pattern if guard => body`, where the body is a block or one statement.
     fn arm(&mut self) -> PResult<Arm> {
         let pat = self.pattern()?;
-        let guard = if self.eat(T::Keyword(Kw::If)) { Some(self.nested(Self::logical)?) } else { None };
+        // A guard ends at `=>`, so it may be an `else` form unparenthesized (§6.1).
+        let guard = if self.eat(T::Keyword(Kw::If)) { Some(self.expr()?) } else { None };
         self.expect(T::FatArrow, "`=>` and the arm's body")?;
         let body = if self.at(T::LBrace) {
             self.block()?
@@ -1888,8 +1944,10 @@ impl Parser<'_> {
                 return self.unexpected("an expression or `{` after `=>`");
             }
             let start = self.peek().span;
+            let before = self.unclosed_blocks;
             let stmt = self.stmt()?;
-            Block { stmts: vec![stmt], span: start.to(self.prev_span()), unclosed: false }
+            let unclosed = self.unclosed_blocks != before;
+            Block { stmts: vec![stmt], span: start.to(self.prev_span()), unclosed, lost: false }
         };
         Ok(Arm { pat, guard, body })
     }

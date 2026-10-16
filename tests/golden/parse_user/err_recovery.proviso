@@ -1,0 +1,72 @@
+// phase: 2.5
+// expect-error: E0101
+// expect-error: E0201
+// A fallback block that is never closed, or that loses a statement it can't parse, may be
+// missing how it ends, so it isn't reported as falling through or as lacking a value
+// (§15.1). A block that is never closed in a `match` arm without braces ends before the
+// next arm, which is still checked. So is an unrelated error in the same function.
+fn log() {
+}
+
+fn risky(n: Int) -> Int fails Text {
+    return n
+}
+
+fn check_unclosed(n: Int) -> Int {
+    check n > 0 else {                              // <- E0101
+        log()
+    log()
+}
+
+fn else_unclosed(o: Option[Int]) -> Int {
+    let v = o else {                                // <- E0101
+        log()
+    log()
+}
+
+fn it_unclosed() -> Int {
+    let v = risky(1) else {                         // <- E0101
+        log()
+    log()
+}
+
+fn check_lost(n: Int) -> Int {
+    check n > 5 else {
+        log() return 0                              // <- E0101
+    }
+    return missing1                                 // <- E0201
+}
+
+fn else_lost(o: Option[Int]) -> Int {
+    let v = o else {
+        log() return 0                              // <- E0101
+    }
+    return v
+}
+
+fn it_lost() -> Int {
+    let v = risky(1) else {
+        log() return 0                              // <- E0101
+    }
+    return v
+}
+
+fn arm_else(n: Int, o: Option[Int]) -> Int {
+    let x = match n {
+        0 => o else {                               // <- E0101
+            6
+        1 => 2
+        _ => missing2                               // <- E0201
+    }
+    return x
+}
+
+fn arm_if(n: Int) -> Int {
+    let x = match n {
+        0 => if true {                              // <- E0101
+            6
+        1 => 2
+        _ => missing3                               // <- E0201
+    }
+    return x
+}

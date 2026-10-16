@@ -26,6 +26,9 @@ pub struct Module {
     /// Types named by a rejected `impl` block, such as `Point` in `impl Show for Point`. The
     /// block may have given them methods and interfaces, so uses of those aren't reported.
     pub impls: HashSet<Symbol>,
+    /// Whether a rejected `impl` block was for a tuple type, which has no name to note in
+    /// `impls`. Every tuple type may then have methods and interfaces we don't know.
+    pub tuple_impls: bool,
 }
 
 impl Module {
@@ -246,6 +249,8 @@ pub struct Block {
     pub span: Span,
     /// The block was never closed, so the code that ended it is missing.
     pub unclosed: bool,
+    /// A statement in it failed to parse, so part of it is missing, perhaps the end.
+    pub lost: bool,
 }
 
 pub struct Stmt {

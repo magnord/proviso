@@ -759,6 +759,9 @@ impl Checker<'_> {
     /// names, as `adt_names` marks the module's.
     fn unknown_impl_targets(&mut self) {
         let m = self.m;
+        if m.tuple_impls {
+            self.p.decls.poison_tuples();
+        }
         for &sym in &m.impls {
             if !self.adt_names.contains_key(&sym) {
                 self.unknown_target(sym);
@@ -1957,8 +1960,10 @@ impl Checker<'_> {
         match &stmt.kind {
             StmtKind::Let { mutable, pat, ty, init } => {
                 let declared = ty.map(|t| self.resolve_type(t));
-                // Binding a value to a new name copies it (REFERENCE §4.8).
-                self.copying = true;
+                // Binding a value to a new name copies it (REFERENCE §4.8). Taking it apart
+                // matches it, which borrows its parts when it is borrowed, as in a `match` (§6.4).
+                let destructures = !matches!(self.m.pats[*pat].kind, PatKind::Bind(_) | PatKind::Wild);
+                self.copying = !destructures;
                 let (ty, init_ty) = match declared {
                     Some(declared) => {
                         let init_ty = self.check(*init, &declared);
@@ -1969,7 +1974,9 @@ impl Checker<'_> {
                         (ty.clone(), ty)
                     }
                 };
+                self.pattern_borrowed = destructures && self.borrowed_value(*init);
                 self.let_pattern(*pat, &ty, *mutable);
+                self.pattern_borrowed = false;
                 diverges_ty(&init_ty)
             }
             StmtKind::Check { cond, fallback } => {
@@ -2199,7 +2206,12 @@ impl Checker<'_> {
             None => block.stmts.iter().fold(false, |diverges, &s| self.stmt(s) | diverges),
         };
         self.f.scopes.pop();
-        if diverges { Ty::Never } else { Ty::Unit }
+        match () {
+            _ if diverges => Ty::Never,
+            // How it ends may be in the code that is missing.
+            _ if block.unclosed || block.lost => Ty::Error,
+            _ => Ty::Unit,
+        }
     }
 
     /// Checks a block used for its value: the final expression, if there is one, which is
@@ -2210,6 +2222,9 @@ impl Checker<'_> {
         let mut diverges = false;
         let mut value = None;
         let count = block.stmts.len();
+        // The last statement of a block that is never closed, or lost one, may not be its end.
+        let missing = block.unclosed || block.lost;
+        let expected = if missing { None } else { expected };
         for (i, &s) in block.stmts.iter().enumerate() {
             if i + 1 == count
                 && let StmtKind::Expr(e) = m.stmts[s].kind
@@ -2236,7 +2251,7 @@ impl Checker<'_> {
             return Ty::Never;
         }
         // Its value may have come from the code that is missing.
-        if block.unclosed {
+        if missing {
             return Ty::Error;
         }
         match (value, expected) {
@@ -2487,7 +2502,7 @@ impl Checker<'_> {
                 Ty::Unit
             }
             ExprKind::Tuple(elements) => self.tuple(elements, expected),
-            ExprKind::Else { value, fallback } => self.else_expr(e, *value, fallback, copying),
+            ExprKind::Else { value, fallback } => self.else_expr(e, *value, fallback, expected, copying),
             ExprKind::It => match self.its.last() {
                 Some(&id) => {
                     self.p.res.insert(e, Res::Local(id));
@@ -2540,11 +2555,30 @@ impl Checker<'_> {
     /// `value else fallback` (REFERENCE §6.6). It marks the fallible calls of `value`'s chain,
     /// as `try` does, and their failure runs the fallback with the error as `it`. Without
     /// one, `value` is an `Option`, which it unwraps (OPEN_QUESTIONS P5).
-    fn else_expr(&mut self, e: ExprId, value: ExprId, fallback: &Fallback, copying: bool) -> Ty {
+    /// The type an `else` form's left side is expected to have, when the call it ends in shows
+    /// without checking it: the form's own for a call that can fail, as for `try`, and an
+    /// `Option` of it for a call that returns one.
+    fn else_context(&self, value: ExprId, expected: Option<&Ty>) -> Option<Ty> {
+        let expected = expected.filter(|ty| !ty.is_unknown())?;
+        let f = match self.m.exprs[value].kind {
+            ExprKind::Call { callee, .. } => self.fn_named(callee)?,
+            ExprKind::MethodCall { receiver, method, .. } => self.method_named(receiver, method)?,
+            _ => return None,
+        };
+        let info = &self.p.fns[f];
+        match (&info.fails, &info.ret) {
+            (Some(_), _) => Some(expected.clone()),
+            (None, Ty::Adt(AdtId::OPTION, _)) => Some(Ty::option(expected.clone())),
+            _ => None,
+        }
+    }
+
+    fn else_expr(&mut self, e: ExprId, value: ExprId, fallback: &Fallback, expected: Option<&Ty>, copying: bool) -> Ty {
+        let context = self.else_context(value, expected);
         self.markers.push(Marker { handler: Some(e), errors: Vec::new() });
         self.in_chain = true;
         self.copying = copying;
-        let value_ty = self.infer(value);
+        let value_ty = self.expr(value, context.as_ref());
         let mut errors: Vec<Ty> = Vec::new();
         for err in self.markers.pop().map(|m| m.errors).unwrap_or_default() {
             if !errors.contains(&err) {
@@ -2553,6 +2587,8 @@ impl Checker<'_> {
         }
         let span = self.span(e);
         let it = match errors.as_slice() {
+            // It may have been a call that can fail, so `it` is not reported again (§15.1).
+            [] if value_ty == Ty::Error => Some(Ty::Error),
             [] => None,
             [err] => Some(err.clone()),
             _ if errors.contains(&Ty::Error) => Some(Ty::Error),
@@ -2719,8 +2755,9 @@ impl Checker<'_> {
             ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. } => {
                 args.iter().map(|arg| self.context_rank(arg.value)).min().map_or(3, |rank| rank.max(1))
             }
+            // A tuple's type is known only when each element's is, so it ranks as its least known.
             ExprKind::Tuple(elements) => {
-                elements.iter().map(|&element| self.context_rank(element)).min().map_or(3, |rank| rank.max(1))
+                elements.iter().map(|&element| self.context_rank(element)).max().map_or(3, |rank| rank.max(1))
             }
             ExprKind::Try(inner) | ExprKind::Attempt(inner) => self.context_rank(*inner),
             _ => 3,
@@ -3205,8 +3242,16 @@ impl Checker<'_> {
             self.with_args(e, *id, args, span);
             return receiver_ty;
         }
-        if receiver_ty == Ty::Text && name == "lines" {
-            self.not_implemented(method.span, "`lines`, which returns a `List`,", Planned::Phase(2));
+        // The `Text` methods of §12.3 that STD.md doesn't declare yet.
+        let planned = match name {
+            "lines" | "split" => Some(("that return a `List`", Planned::Phase(2))),
+            "chars" | "find" | "find_last" | "slice" | "normalize_nfc" => Some(("of §12.3", Planned::Unscheduled)),
+            _ => None,
+        };
+        if receiver_ty == Ty::Text
+            && let Some((which, planned)) = planned
+        {
+            self.not_implemented(method.span, &format!("`Text` methods {which}, such as `{name}`,"), planned);
             for arg in args {
                 self.infer(arg.value);
             }
@@ -3266,6 +3311,9 @@ impl Checker<'_> {
             (Ty::Int(_) | Ty::Float(_), "from" | "try_from" | "wrapping_from" | "saturating_from") => {
                 let what = format!("numeric conversions such as `{type_text}.{name}`");
                 self.not_implemented(span, &what, Planned::Unscheduled);
+            }
+            (Ty::Text, "from_utf8") => {
+                self.not_implemented(span, "conversions from `Bytes`, such as `Text.from_utf8`,", Planned::Unscheduled);
             }
             _ => {
                 let message = format!("`{type_text}` has no associated function `{name}`");
@@ -3741,6 +3789,10 @@ impl Checker<'_> {
         }
         for err in errors {
             let message = match &self.f.fails {
+                None if !self.f.returns => {
+                    let place = if self.f.example { "an example" } else { "a `where` clause" };
+                    format!("`try` in {place}, which has no function to propagate `{}` to", self.show(&err))
+                }
                 None => {
                     let err = self.show(&err);
                     format!("`try` propagates `{err}`, but this function does not declare `fails {err}`")
@@ -4294,12 +4346,16 @@ impl Checker<'_> {
                 Some(other) => Some((
                     codes::TYPE_MISMATCH,
                     q.span,
-                    format!("expected a pattern for `{}`, found one for `{}`", def.name, self.p.decls.adt(other).name),
+                    format!(
+                        "expected a pattern for `{}`, found one for `{}`",
+                        self.p.decls.name(id),
+                        self.p.decls.name(other)
+                    ),
                 )),
                 None if self.imports.contains_key(&q.sym) || builtin_type(q_text).is_some() => Some((
                     codes::TYPE_MISMATCH,
                     q.span,
-                    format!("expected a pattern for `{}`, found one for `{q_text}`", def.name),
+                    format!("expected a pattern for `{}`, found one for `{q_text}`", self.p.decls.name(id)),
                 )),
                 None => Some((codes::UNKNOWN_TYPE, q.span, format!("unknown type `{q_text}`"))),
             };
@@ -4321,11 +4377,12 @@ impl Checker<'_> {
             } else if let Some(&other) =
                 self.adt_names.get(&name.sym).filter(|&&other| !def.is_enum() || !self.p.decls.adt(other).is_enum())
             {
-                let message =
-                    format!("expected a pattern for `{}`, found one for `{}`", def.name, self.p.decls.adt(other).name);
+                let (expected, found) = (self.p.decls.name(id), self.p.decls.name(other));
+                let message = format!("expected a pattern for `{expected}`, found one for `{found}`");
                 self.error(codes::TYPE_MISMATCH, span, message);
             } else if def.is_enum() {
-                self.error(codes::UNKNOWN_MEMBER, name.span, format!("`{}` has no variant `{text}`", def.name));
+                let message = format!("`{}` has no variant `{text}`", self.p.decls.name(id));
+                self.error(codes::UNKNOWN_MEMBER, name.span, message);
             } else {
                 let message = format!("`{text}` is not `{}`; its pattern is written `{}(…)`", def.name, def.name);
                 self.error(codes::TYPE_MISMATCH, span, message);

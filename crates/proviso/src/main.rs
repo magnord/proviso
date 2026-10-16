@@ -17,6 +17,7 @@ commands:
 
 --incomplete accepts `todo` holes. --json prints one diagnostic per line as JSON on stdout.
 A program writes to stdout; its `debug` output, failures and defects go to stderr.
+`test` writes each example's result and a count to stdout; defects still go to stderr.
 
 exit codes: 0 success, 1 `main` or an example failed, 64 usage, 65 check errors,
 66 unreadable file, 70 defect, 101 internal error

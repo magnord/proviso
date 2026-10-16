@@ -86,3 +86,8 @@ fn dup_copy[T: Copy](x: T) -> (T, T) {
 pub fn leak() -> (Secret, Int) {                    // <- E0211
     return (Secret(n: 1), 2)
 }
+
+fn copies_part[T](p: (T, Int)) -> T {
+    let (a, b) = p
+    return a                                        // <- E0503
+}

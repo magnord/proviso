@@ -1,10 +1,13 @@
 // phase: 2.5
+// expect-error: E0309
 // expect-error: E0901
-// `lines` returns a `List`, which comes with collections later in phase 2. So do `for`
-// loops that destructure, and implementations for tuple types, which are generic. The
-// integer conversions of REFERENCE §12.1 other than `parse`, `test` blocks and `expect`
-// statements aren't implemented yet either. Uses of what they produce aren't reported
-// again (§15.1).
+// `lines` and `split` return a `List`, which comes with collections later in phase 2. So
+// do `for` loops that destructure, and implementations for tuple types. The other `Text`
+// functions of REFERENCE §12.3 that STD.md doesn't declare yet, the integer conversions of
+// §12.1 other than `parse`, `test` blocks and `expect` statements aren't implemented yet
+// either. Uses of what they produce aren't reported again (§15.1). A tuple has no name, so
+// after a rejected `impl` for one no tuple type's methods or interfaces are reported. The
+// interface such an `impl` names is still checked for other types.
 interface Shape {
     fn sides(self) -> Int
 }
@@ -31,4 +34,45 @@ test "not yet" {                                    // <- E0901
 
 fn expects() {
     expect 1 == 1                                   // <- E0901
+}
+
+record Bare {
+    n: Int
+}
+
+impl (Int, Text) {                                  // <- E0901
+    fn first(self) -> Int {
+        return 1
+    }
+}
+
+impl Eq for (Bare, Bare) {                          // <- E0901
+    fn eq(self, other: Self) -> Bool {
+        return true
+    }
+}
+
+fn need[T: Shape](x: T) -> Int {
+    return 1
+}
+
+fn tuple_calls(t: (Int, Int), u: (Int, Text), q: (Bare, Bare)) -> Int {
+    let n = t.sides()
+    let m = need(x: t)
+    let k = Shape.sides(t)
+    let f = u.first()
+    let s = (1, 2, 3).sides()
+    let same = q == q
+    let bad = need(x: 5)                            // <- E0309
+    return n + m + k + f + s
+}
+
+fn text_later(t: Text) {
+    let parts = t.split(",")                        // <- E0901
+    let cs = t.chars()                              // <- E0901
+    let at = t.find("a")                            // <- E0901
+    let back = t.find_last("a")                     // <- E0901
+    let mid = t.slice(from: at, to: back)           // <- E0901
+    let norm = t.normalize_nfc()                    // <- E0901
+    let raw = Text.from_utf8(t)                     // <- E0901
 }
