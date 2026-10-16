@@ -1,0 +1,36 @@
+// phase: 2.5
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0311
+// When a module type is named `ParseError`, diagnostics write the one from `std.text` as
+// `std.text.ParseError`: in types, in patterns, and in the cases a `match` misses
+// (OPEN_QUESTIONS P5).
+use std.text { ParseError as PE }
+
+enum ParseError {
+    Mine
+}
+
+fn missing_arm(t: Text) -> Int {
+    return Int.parse(t) else match it {             // <- E0311
+        PE.Empty => 0
+        PE.Invalid => 1
+    }
+}
+
+fn wrong_type(e: PE) -> ParseError {
+    return e                                        // <- E0301
+}
+
+fn wrong_pattern(e: PE) -> Int {
+    return match e {
+        ParseError.Mine => 1                        // <- E0301
+    }
+}
+
+fn no_variant(e: PE) -> Int {
+    return match e {
+        PE.Gone => 1                                // <- E0303
+        _ => 0
+    }
+}

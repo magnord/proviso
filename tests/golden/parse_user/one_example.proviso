@@ -1,0 +1,8 @@
+// phase: 2.5
+// run: test
+// The count says `example` for one example (OPEN_QUESTIONS P5).
+fn double(n: Int) -> Int {
+    return n * 2
+}
+
+example double(4) == 8

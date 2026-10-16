@@ -1,0 +1,78 @@
+// phase: 2.5
+// expect-error: E0309
+// expect-error: E0901
+// `lines` and `split` return a `List`, which comes with collections later in phase 2. So
+// do `for` loops that destructure, and implementations for tuple types. The other `Text`
+// functions of REFERENCE §12.3 that STD.md doesn't declare yet, the integer conversions of
+// §12.1 other than `parse`, `test` blocks and `expect` statements aren't implemented yet
+// either. Uses of what they produce aren't reported again (§15.1). A tuple has no name, so
+// after a rejected `impl` for one no tuple type's methods or interfaces are reported. The
+// interface such an `impl` names is still checked for other types.
+interface Shape {
+    fn sides(self) -> Int
+}
+
+impl Shape for (Int, Int) {                         // <- E0901
+    fn sides(self) -> Int {
+        return 2
+    }
+}
+
+fn later(t: Text) -> Int {
+    let rows = t.lines()                             // <- E0901
+    let n = rows.len()
+    let narrow = Int32.try_from(5) else 0           // <- E0901
+    let wrapped = Int8.wrapping_from(300)           // <- E0901
+    for (i, x) in rows.enumerate() {                // <- E0901
+    }
+    return 1
+}
+
+test "not yet" {                                    // <- E0901
+    expect later("a") == 1
+}
+
+fn expects() {
+    expect 1 == 1                                   // <- E0901
+}
+
+record Bare {
+    n: Int
+}
+
+impl (Int, Text) {                                  // <- E0901
+    fn first(self) -> Int {
+        return 1
+    }
+}
+
+impl Eq for (Bare, Bare) {                          // <- E0901
+    fn eq(self, other: Self) -> Bool {
+        return true
+    }
+}
+
+fn need[T: Shape](x: T) -> Int {
+    return 1
+}
+
+fn tuple_calls(t: (Int, Int), u: (Int, Text), q: (Bare, Bare)) -> Int {
+    let n = t.sides()
+    let m = need(x: t)
+    let k = Shape.sides(t)
+    let f = u.first()
+    let s = (1, 2, 3).sides()
+    let same = q == q
+    let bad = need(x: 5)                            // <- E0309
+    return n + m + k + f + s
+}
+
+fn text_later(t: Text) {
+    let parts = t.split(",")                        // <- E0901
+    let cs = t.chars()                              // <- E0901
+    let at = t.find("a")                            // <- E0901
+    let back = t.find_last("a")                     // <- E0901
+    let mid = t.slice(from: at, to: back)           // <- E0901
+    let norm = t.normalize_nfc()                    // <- E0901
+    let raw = Text.from_utf8(t)                     // <- E0901
+}

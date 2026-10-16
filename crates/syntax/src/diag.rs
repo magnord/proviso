@@ -185,15 +185,19 @@ pub mod codes {
             "An `impl` of an interface that cannot be implemented by hand, such as `Copy` (REFERENCE §5.1).";
         TYPE_ARGUMENT_COUNT = "E0317", "type_argument_count",
             "A call whose `::[…]` gives a function or method more or fewer type arguments than it has type parameters (REFERENCE §4.8).";
+        REFUTABLE_PATTERN = "E0318", "refutable_pattern",
+            "A `let` pattern that may not match its value, such as `let Some(x) = o` or one with a literal; use `match`, `is` or an `else` form (REFERENCE §6.4, §6.6).";
 
-        // E0412 to E0502, E0601 and E0602 are reserved for later phases: the §F goldens
-        // already expect them.
+        // E0412 to E0414, E0501, E0502, E0601 and E0602 are reserved for later phases: the §F
+        // goldens already expect them.
         REFINEMENT_REFUTED = "E0412", "refinement_refuted",
             "A refinement obligation is refuted: values consistent with every admissible fact violate it (REFERENCE §8.3, §8.5).";
         PARTIAL_INOUT_OF_REFINED_PART = "E0413", "partial_inout_of_refined_part",
             "A part of a refined value cannot be passed as `inout(partial)` (REFERENCE §5.4).";
         IMPL_REQUIRES_MISMATCH = "E0414", "impl_requires_mismatch",
             "An implementation takes the interface method's `requires` clauses exactly as written (REFERENCE §4.9).";
+        CHECK_FALLS_THROUGH = "E0415", "check_falls_through",
+            "The `else` of a `check` must not finish, so it has type `Never`, as `fail` and a block that returns, breaks or continues do (REFERENCE §8.4).";
         USE_AFTER_MOVE = "E0501", "use_after_move",
             "A unique or resource value is used after it moved (REFERENCE §5.1).";
         LENT_RESOURCE_CONSUMED = "E0502", "lent_resource_consumed",
@@ -217,6 +221,10 @@ pub mod codes {
             "`fail` in a function that declares no `fails`, or in a `where` clause (REFERENCE §7.1).";
         ATTEMPT_WITHOUT_FAILURE = "E0706", "attempt_without_failure",
             "`attempt` marks no call that can fail.";
+        NOTHING_TO_UNWRAP = "E0707", "nothing_to_unwrap",
+            "An `else` form whose left side is neither an `Option` nor a call that can fail (REFERENCE §6.6).";
+        EXAMPLE_CANNOT_FAIL = "E0708", "example_cannot_fail",
+            "An `example … fails P` whose call can't fail (REFERENCE §14).";
 
         NOT_IMPLEMENTED = "E0901", "not_implemented",
             "A construct the language has that this implementation does not support yet.";

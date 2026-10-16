@@ -50,12 +50,72 @@ fn run_needs_a_main() {
     assert_eq!(run(&["check"], &file).status.code(), Some(0));
 }
 
+/// Golden files check only codes, so the wording that tells std's `ParseError` from a
+/// module's, and an example from a function, is checked here (OPEN_QUESTIONS P5).
+#[test]
+fn messages_name_what_they_mean() {
+    let file = source(
+        "names.proviso",
+        "use std.text { ParseError as PE }\n\nenum ParseError {\n    Mine\n}\n\nfn arms(t: Text) -> Int {\n    return Int.parse(t) else match it {\n        PE.Empty => 0\n        PE.Invalid => 1\n    }\n}\n\nfn wrong(e: PE) -> Int {\n    return match e {\n        ParseError.Mine => 1\n    }\n}\n\nfn gone(e: PE) -> Int {\n    return match e {\n        PE.Gone => 1\n        _ => 0\n    }\n}\n\nfn risky(n: Int) -> Int fails Text {\n    return n\n}\n\nfn id(n: Int) -> Int {\n    return n\n}\n\nexample id(try risky(1)) == 1\n",
+    );
+    let errors = stderr(&run(&["check"], &file));
+    for expected in [
+        "does not cover `std.text.ParseError.OutOfRange`",
+        "expected a pattern for `std.text.ParseError`, found one for `ParseError`",
+        "`std.text.ParseError` has no variant `Gone`",
+        "`try` in an example, which has no function to propagate `Text` to",
+    ] {
+        assert!(errors.contains(expected), "missing {expected:?} in:\n{errors}");
+    }
+}
+
 #[test]
 fn json_applies_only_to_check() {
     let file = source("hello.proviso", HELLO);
     let output = run(&["run", "--json"], &file);
     assert_eq!(output.status.code(), Some(64));
     assert!(stderr(&output).contains("`--json` applies only to `check`"), "{}", stderr(&output));
+}
+
+#[test]
+fn test_runs_examples_without_a_main() {
+    let file = source(
+        "examples.proviso",
+        "fn double(n: Int) -> Int {\n    return n * 2\n}\n\nexample double(2) == 4\nexample double(2) == 5\n",
+    );
+    let output = run(&["test"], &file);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stdout.ends_with("2 examples: 1 passed, 1 failed\n"), "{stdout}");
+    assert!(stdout.contains("example failed: expected `5`, found `4`"), "{stdout}");
+    assert_eq!(run(&["run"], &file).status.code(), Some(65));
+    assert_eq!(run(&["test", "--json"], &file).status.code(), Some(64));
+}
+
+/// Each example's result is written as soon as it has run, so it sits next to that example's
+/// `debug` output and defect report when both streams go to one place.
+#[test]
+fn test_reports_each_example_next_to_its_output() {
+    let file = source(
+        "streamed.proviso",
+        "fn f(n: Int) -> Int {\n    debug(n)\n    assert n != 2\n    return n\n}\n\nexample f(1) == 1\nexample f(2) == 2\nexample f(3) == 3\n",
+    );
+    let merged = file.with_extension("log");
+    let log = std::fs::File::create(&merged).unwrap();
+    let status = proviso().arg("test").arg(&file).stdout(log.try_clone().unwrap()).stderr(log).status().unwrap();
+    assert_eq!(status.code(), Some(70));
+    let text = std::fs::read_to_string(&merged).unwrap();
+    let kinds: Vec<&str> = text
+        .lines()
+        .filter_map(|line| match () {
+            _ if line.starts_with("[debug") => Some("debug"),
+            _ if line.starts_with("defect") => Some("defect"),
+            _ if line.ends_with("example passed") => Some("passed"),
+            _ if line.contains("example failed") => Some("failed"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds, ["debug", "passed", "debug", "defect", "failed", "debug", "passed"], "{text}");
 }
 
 #[test]
@@ -86,6 +146,27 @@ fn deep_recursion_through_nested_expressions_is_a_defect() {
     let output = run(&["run"], &file);
     assert_eq!(output.status.code(), Some(70), "{}", stderr(&output));
     assert!(stderr(&output).starts_with("defect[stack_exhausted]"), "{}", stderr(&output));
+}
+
+/// A chain of blocks nested past the limit is reported once, whatever the statement that
+/// opens each block, though the code after each inner block is just as deep (§15.1).
+#[test]
+fn a_deep_chain_of_blocks_is_too_deep_once() {
+    for head in ["check n > 5 else ", "if n > 5 ", "let v = o else ", "let w = risky(n) else "] {
+        let mut chain = String::from("{ return 0 }");
+        for _ in 0..1000 {
+            chain = format!("{{ {head}{chain}\n return 1 }}");
+        }
+        let text = format!(
+            "fn risky(n: Int) -> Int fails Text {{\n    return n\n}}\n\nfn f(n: Int, o: Option[Int]) -> Int {{\n    {head}{chain}\n    return 2\n}}\n"
+        );
+        let file = source("deep_blocks.proviso", &text);
+        let output = run(&["check"], &file);
+        let errors = stderr(&output);
+        assert_eq!(output.status.code(), Some(65), "{head}: {errors}");
+        assert_eq!(errors.matches("error[").count(), 1, "{head}: {errors}");
+        assert!(errors.contains("error[E0902]"), "{head}: {errors}");
+    }
 }
 
 /// A program whose recursion runs the interpreter's stack low while each call compares or

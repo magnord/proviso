@@ -1,0 +1,63 @@
+// phase: 2.5
+// run: test
+// expect-exit: 1
+// `proviso test` runs every example in file order and reports each one, then a count
+// (REFERENCE §14). `== v` asserts that the call succeeds with a value equal to `v`, and
+// `fails P` that it fails with an error that matches pattern `P` (§7.2). Each way an
+// example can fail is reported with the values involved, written as `debug` writes them,
+// so text is quoted. A failed example makes the exit code 1 (OPEN_QUESTIONS P5). The call
+// and the expected value are read as the operands of `==` are, so either one may give the
+// other its type.
+enum Oops derives(Eq, Show) {
+    Bad(n: Int)
+    Worse
+}
+
+fn half(n: Int) -> Int fails Oops {
+    if n % 2 != 0 {
+        fail Oops.Bad(n: n)
+    }
+    return n / 2
+}
+
+fn double(n: Int) -> Int {
+    return n * 2
+}
+
+fn greet(name: Text) -> Text {
+    return f"hi {name}"
+}
+
+fn ratio(n: Float) -> Float {
+    return n / 4.0
+}
+
+example double(21) == 42
+example double(2) == 5
+example half(8) == 4
+example half(3) == 1
+example half(3) fails Oops.Bad(n: 3)
+example half(3) fails Oops.Bad(n: 5)
+example half(4) fails Oops.Bad(..)
+example half(3) fails Worse
+example half(10) == double(2) + 1
+example greet("a") == "b"
+example ratio(2.0) == 0.5
+example half(5) fails Bad(n: 5)
+
+fn id[T: Copy](x: T) -> T {
+    return x
+}
+
+fn small() -> Int8 {
+    return 1
+}
+
+fn nothing[T]() -> Option[T] {
+    return None
+}
+
+example id(1) == small()
+example small() == id(1)
+example id(None) == Some(2)
+example nothing() == Some(1)

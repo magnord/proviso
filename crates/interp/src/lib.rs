@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use proviso_check::decls::{AdtId, Decls, FieldIdx, IfaceId, ImplKey, VariantIdx};
 use proviso_check::types::{FloatTy, IntTy, Ty};
-use proviso_check::{Builtin, FnId, LocalId, Program, Res};
+use proviso_check::{Builtin, ExampleInfo, FnId, LocalId, Program, Res};
 use proviso_syntax::ast::*;
 use proviso_syntax::source::{SourceFile, Span};
 
@@ -26,6 +26,10 @@ const STACK_SIZE: usize = 1 << 30;
 
 /// The stack kept free for the deepest work between two checks.
 const STACK_RESERVE: usize = 1 << 20;
+
+/// The steps an example may take, each a call or a turn of a loop (REFERENCE §14;
+/// OPEN_QUESTIONS P5).
+pub const EXAMPLE_FUEL: u64 = 1_000_000;
 
 /// A runtime value. It describes itself: an integer knows its type and a record knows its
 /// declaration, so arithmetic, `show` and `==` need no static types.
@@ -102,6 +106,7 @@ pub enum DefectKind {
     StackExhausted,
     RefinementFailed,
     NoArmMatched,
+    FuelExhausted,
 }
 
 impl DefectKind {
@@ -115,6 +120,7 @@ impl DefectKind {
             DefectKind::StackExhausted => "stack_exhausted",
             DefectKind::RefinementFailed => "refinement_failed",
             DefectKind::NoArmMatched => "no_arm_matched",
+            DefectKind::FuelExhausted => "fuel_exhausted",
         }
     }
 }
@@ -136,6 +142,14 @@ pub enum Outcome {
     Defect(Defect),
 }
 
+/// How an example came out (REFERENCE §14).
+pub enum ExampleOutcome {
+    Passed,
+    /// It ran, but not as it says; this tells how.
+    Failed(String),
+    Defect(Defect),
+}
+
 /// Runs `main` on a thread of its own. Program output goes to `stdout`; `debug` output goes
 /// to `stderr`. An `Err` is a panic in the interpreter, which is a bug.
 pub fn run_main(
@@ -145,6 +159,36 @@ pub fn run_main(
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
 ) -> std::thread::Result<Outcome> {
+    on_interp_thread(file, m, p, stdout, stderr, |interp| interp.main())
+}
+
+/// Runs each example in declaration order, each with [`EXAMPLE_FUEL`]. `report` gets how each
+/// came out as soon as it has run, with the output streams, so a result is written next to the
+/// example's `debug` output. `debug` output goes to `stderr`.
+pub fn run_examples(
+    file: &SourceFile,
+    m: &Module,
+    p: &Program,
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    mut report: impl FnMut(&ExampleInfo, ExampleOutcome, &mut dyn Write, &mut dyn Write) + Send,
+) -> std::thread::Result<()> {
+    on_interp_thread(file, m, p, stdout, stderr, |interp| {
+        for info in &p.examples {
+            let outcome = interp.example(info);
+            report(info, outcome, &mut *interp.stdout, &mut *interp.stderr);
+        }
+    })
+}
+
+fn on_interp_thread<'a, R: Send>(
+    file: &'a SourceFile,
+    m: &'a Module,
+    p: &'a Program,
+    stdout: &'a mut (dyn Write + Send),
+    stderr: &'a mut (dyn Write + Send),
+    run: impl FnOnce(&mut Interp<'a>) -> R + Send,
+) -> std::thread::Result<R> {
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("proviso-main".to_string())
@@ -152,8 +196,8 @@ pub fn run_main(
             .spawn_scoped(scope, || {
                 // The stack grows down, so this is close to its top.
                 let stack_limit = stack_address().saturating_sub(STACK_SIZE - STACK_RESERVE);
-                let mut interp = Interp { file, m, p, stdout, stderr, depth: 0, stack_limit };
-                interp.main()
+                let mut interp = Interp { file, m, p, stdout, stderr, depth: 0, stack_limit, fuel: None };
+                run(&mut interp)
             })
             .expect("failed to start the interpreter thread")
             .join()
@@ -172,14 +216,25 @@ enum Unwind {
     Break(ExprId),
     Continue(ExprId),
     Fail(Value),
-    /// A call that this `attempt` marks failed with this error. Only that `attempt` catches
-    /// it, so a failure from anywhere else, such as a `try` in an argument, passes it by
-    /// (REFERENCE §7.2).
+    /// A call that this `attempt`, `else` form or example marks failed with this error. Only
+    /// that one catches it, so a failure from anywhere else, such as a `try` in an argument,
+    /// passes it by (REFERENCE §7.2).
     Attempted(ExprId, Value),
     Defect(Defect),
 }
 
 type Flow<T> = Result<T, Unwind>;
+
+/// Whether `e` is an `if`, or a chain of `else if`s, that ends without an `else`.
+fn lacks_final_else(m: &Module, mut e: ExprId) -> bool {
+    loop {
+        match &m.exprs[e].kind {
+            ExprKind::If { else_branch: None, .. } => return true,
+            ExprKind::If { else_branch: Some(ElseBranch::If(nested)), .. } => e = *nested,
+            _ => return false,
+        }
+    }
+}
 
 fn defect(kind: DefectKind, message: impl Into<String>, span: Span) -> Unwind {
     Unwind::Defect(Defect { kind, message: message.into(), span, callers: Vec::new() })
@@ -195,6 +250,8 @@ struct Interp<'a> {
     depth: usize,
     /// The lowest stack address the interpreter may reach.
     stack_limit: usize,
+    /// The steps an example has left, or `None` outside one.
+    fuel: Option<u64>,
 }
 
 /// A function's local slots, indexed by `LocalId`.
@@ -238,8 +295,81 @@ impl Interp<'_> {
         Ok(())
     }
 
+    /// Runs one example and tells how it came out.
+    fn example(&mut self, info: &ExampleInfo) -> ExampleOutcome {
+        let ItemKind::Example(decl) = &self.m.items[info.item].kind else { unreachable!("examples are items") };
+        let mut frame: Frame = vec![Value::Unit; info.locals];
+        (self.fuel, self.depth) = (Some(EXAMPLE_FUEL), 0);
+        let outcome = self.expect(decl, &mut frame);
+        self.fuel = None;
+        match outcome {
+            Ok(None) => ExampleOutcome::Passed,
+            Ok(Some(message)) => ExampleOutcome::Failed(message),
+            Err(Unwind::Defect(defect)) => ExampleOutcome::Defect(defect),
+            Err(_) => unreachable!("an example neither returns nor fails"),
+        }
+    }
+
+    /// Runs an example's call and compares the outcome with what it expects: `None` when they
+    /// agree, or else what differs. Values are written as `debug` writes them.
+    fn expect(&mut self, decl: &ExampleDecl, frame: &mut Frame) -> Flow<Option<String>> {
+        let decls = &self.p.decls;
+        let outcome = match self.expr(decl.call, frame) {
+            Ok(value) => Ok(value),
+            Err(Unwind::Attempted(handler, error)) if handler == decl.call => Err(error),
+            Err(other) => return Err(other),
+        };
+        Ok(match (&decl.expect, outcome) {
+            (Expectation::Equals(x), outcome) => {
+                let expected = self.expr(*x, frame)?;
+                match outcome {
+                    Ok(value) if self.equal(&value, &expected, self.m.exprs[*x].span)? => None,
+                    Ok(value) => Some(format!(
+                        "expected `{}`, found `{}`",
+                        debug_repr(&expected, decls),
+                        debug_repr(&value, decls)
+                    )),
+                    Err(error) => Some(format!(
+                        "expected `{}`, but it failed with `{}`",
+                        debug_repr(&expected, decls),
+                        debug_repr(&error, decls)
+                    )),
+                }
+            }
+            (Expectation::Fails(pat), outcome) => {
+                let text = self.file.slice(self.m.pats[*pat].span);
+                match outcome {
+                    Err(error) if self.matches(*pat, &error, frame)? => None,
+                    Err(error) => Some(format!(
+                        "expected a failure matching `{text}`, but it failed with `{}`",
+                        debug_repr(&error, decls)
+                    )),
+                    Ok(value) => Some(format!(
+                        "expected a failure matching `{text}`, but it returned `{}`",
+                        debug_repr(&value, decls)
+                    )),
+                }
+            }
+        })
+    }
+
+    /// Takes one step of an example's fuel, if it runs in one.
+    fn step(&mut self, span: Span) -> Flow<()> {
+        match &mut self.fuel {
+            Some(0) => {
+                Err(defect(DefectKind::FuelExhausted, format!("the example took more than {EXAMPLE_FUEL} steps"), span))
+            }
+            Some(fuel) => {
+                *fuel -= 1;
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
     fn call(&mut self, f: FnId, args: Vec<Value>, site: Span) -> Flow<Value> {
         self.check_stack(site)?;
+        self.step(site)?;
         let body = self.p.decl(self.m, f).body.as_ref().expect("functions that run have bodies");
         let mut frame = args;
         frame.resize(self.p.fns[f].locals, Value::Unit);
@@ -276,10 +406,16 @@ impl Interp<'_> {
         let m = self.m;
         let stmt = &m.stmts[s];
         match &stmt.kind {
-            StmtKind::Let { init, .. } => {
+            StmtKind::Let { pat, init, .. } => {
                 let value = self.expr(*init, frame)?;
-                let id = self.p.let_local.get(s).expect("`let` bindings are resolved");
-                frame[id.index()] = value;
+                // The checker proved that the pattern matches every value.
+                self.matches(*pat, &value, frame)?;
+            }
+            StmtKind::Check { cond, fallback } => {
+                if !self.bool(*cond, frame)? {
+                    // The checker proved that the fallback leaves.
+                    self.fallback(fallback, frame)?;
+                }
             }
             StmtKind::Assign { target, op, value } => {
                 let value = self.expr(*value, frame)?;
@@ -458,7 +594,7 @@ impl Interp<'_> {
                 // name, and that of `I.f(x)` an interface's, not a value. Otherwise the receiver
                 // comes first.
                 let named = match res {
-                    Res::Ctor(..) | Res::Dispatch { qualified: true, .. } => true,
+                    Res::Ctor(..) | Res::Dispatch { qualified: true, .. } | Res::Method(Builtin::Parse(_)) => true,
                     Res::Fn(f) => self.p.fns[f].receiver.is_none(),
                     _ => false,
                 };
@@ -562,7 +698,7 @@ impl Interp<'_> {
             }
             ExprKind::Fail(value) => return Err(Unwind::Fail(self.expr(*value, frame)?)),
             ExprKind::If { cond, then_block, else_branch } => {
-                if self.bool(*cond, frame)? {
+                let value = if self.bool(*cond, frame)? {
                     self.block(then_block, frame)?
                 } else {
                     match else_branch {
@@ -570,7 +706,10 @@ impl Interp<'_> {
                         Some(ElseBranch::If(nested)) => self.expr(*nested, frame)?,
                         None => Value::Unit,
                     }
-                }
+                };
+                // A chain without a final `else` is a statement, so its value is `()` even
+                // where a block that gives `()` ends in it (REFERENCE §6.2).
+                if lacks_final_else(m, e) { Value::Unit } else { value }
             }
             ExprKind::While { cond, body, .. } => {
                 while self.bool(*cond, frame)? {
@@ -631,6 +770,33 @@ impl Interp<'_> {
                 let value = self.expr(*value, frame)?;
                 Value::Bool(self.matches(*pat, &value, frame)?)
             }
+            ExprKind::Tuple(elements) => {
+                let Ty::Adt(def, _) = self.p.ty(e) else { unreachable!("tuples have tuple types") };
+                let def = *def;
+                let mut values = Vec::with_capacity(elements.len());
+                for &element in elements {
+                    values.push(self.expr(element, frame)?);
+                }
+                Value::Adt(Adt { def, variant: VariantIdx::RECORD, fields: values.into() })
+            }
+            ExprKind::Else { value, fallback } => match self.p.it_local.get(e) {
+                Some(&it) => match self.expr(*value, frame) {
+                    Ok(value) => value,
+                    Err(Unwind::Attempted(handler, error)) if handler == e => {
+                        frame[it.index()] = error;
+                        return self.fallback(fallback, frame);
+                    }
+                    Err(other) => return Err(other),
+                },
+                None => match self.expr(*value, frame)? {
+                    Value::Adt(adt) if adt.variant == VariantIdx::SOME => adt.fields[0].clone(),
+                    _ => return self.fallback(fallback, frame),
+                },
+            },
+            ExprKind::It => match self.p.res(e) {
+                Some(Res::Local(id)) => frame[id.index()].clone(),
+                other => unreachable!("`it` is a local, not {other:?}"),
+            },
             ExprKind::Error => unreachable!("programs with errors don't run"),
             ExprKind::Debug(values) => {
                 let mut parts = Vec::with_capacity(values.len());
@@ -645,10 +811,19 @@ impl Interp<'_> {
         })
     }
 
-    /// Hands the failure of call `e` to the `attempt` that marks it, if one does.
+    /// The fallback of an `else` form or a `check`.
+    fn fallback(&mut self, fallback: &Fallback, frame: &mut Frame) -> Flow<Value> {
+        match fallback {
+            Fallback::Value(value) => self.expr(*value, frame),
+            Fallback::Block(block) => self.block(block, frame),
+        }
+    }
+
+    /// Hands the failure of call `e` to the `attempt`, `else` form or example that marks it,
+    /// if one does.
     fn attempted(&self, e: ExprId, result: Flow<Value>) -> Flow<Value> {
-        match (result, self.p.attempt_of.get(e)) {
-            (Err(Unwind::Fail(error)), Some(&attempt)) => Err(Unwind::Attempted(attempt, error)),
+        match (result, self.p.handler_of.get(e)) {
+            (Err(Unwind::Fail(error)), Some(&handler)) => Err(Unwind::Attempted(handler, error)),
             (result, _) => result,
         }
     }
@@ -683,11 +858,21 @@ impl Interp<'_> {
                 }
                 true
             }
+            PatKind::Tuple(parts) => {
+                let Value::Adt(adt) = value else { unreachable!("tuple patterns match tuples") };
+                for (&part, value) in parts.iter().zip(adt.fields.iter()) {
+                    if !self.matches(part, value, frame)? {
+                        return Ok(false);
+                    }
+                }
+                true
+            }
         })
     }
 
     /// Runs one iteration of a loop body, turning jumps that target loop `e` into control flow.
     fn loop_body(&mut self, e: ExprId, body: &Block, frame: &mut Frame) -> Flow<LoopStep> {
+        self.step(self.m.exprs[e].span)?;
         match self.block(body, frame) {
             Ok(_) => Ok(LoopStep::Next),
             Err(Unwind::Break(target)) if target == e => Ok(LoopStep::Break),
@@ -735,6 +920,25 @@ impl Interp<'_> {
             }
             (Builtin::ByteLen, [Value::Text(text)]) => Value::Int(text.len() as i128, IntTy::I64),
             (Builtin::IsEmpty, [Value::Text(text)]) => Value::Bool(text.is_empty()),
+            // Rust's `char::is_whitespace` is Unicode's `White_Space` (STD.md).
+            (Builtin::Trim, [Value::Text(text)]) => Value::Text(text.trim_matches(char::is_whitespace).into()),
+            (Builtin::SplitOnce, [Value::Text(text), Value::Text(sep)]) => {
+                option(text.split_once(&**sep).map(|(before, after)| {
+                    let fields = Arc::from([Value::Text(before.into()), Value::Text(after.into())]);
+                    Value::Adt(Adt { def: AdtId::PAIR, variant: VariantIdx::RECORD, fields })
+                }))
+            }
+            (Builtin::StartsWith, [Value::Text(text), Value::Text(prefix)]) => Value::Bool(text.starts_with(&**prefix)),
+            (Builtin::StripPrefix, [Value::Text(text), Value::Text(prefix)]) => {
+                option(text.strip_prefix(&**prefix).map(|rest| Value::Text(rest.into())))
+            }
+            (Builtin::Parse(it), [Value::Text(text)]) => match parse_int(text, it) {
+                Ok(value) => Value::Int(value, it),
+                Err(variant) => {
+                    let error = Adt { def: AdtId::PARSE_ERROR, variant, fields: Arc::from([]) };
+                    return Err(Unwind::Fail(Value::Adt(error)));
+                }
+            },
             (builtin, values) => unreachable!("{builtin:?} does not apply to {values:?}"),
         })
     }
@@ -781,6 +985,45 @@ impl Interp<'_> {
             }
         })
     }
+}
+
+/// `Some(value)`, or `None`.
+fn option(value: Option<Value>) -> Value {
+    let (variant, fields): (VariantIdx, Arc<[Value]>) = match value {
+        Some(value) => (VariantIdx::SOME, Arc::from([value])),
+        None => (VariantIdx::NONE, Arc::from([])),
+    };
+    Value::Adt(Adt { def: AdtId::OPTION, variant, fields })
+}
+
+/// The variants of `ParseError`, in declaration order (STD.md).
+const PARSE_EMPTY: VariantIdx = VariantIdx::new(0);
+const PARSE_INVALID: VariantIdx = VariantIdx::new(1);
+const PARSE_OUT_OF_RANGE: VariantIdx = VariantIdx::new(2);
+
+/// `parse` on integer type `it`: an optional `+` or `-`, then one or more ASCII digits
+/// (STD.md). Text of that form whose value doesn't fit is out of range; any other text is
+/// invalid, so the form is checked first (OPEN_QUESTIONS P5).
+fn parse_int(text: &str, it: IntTy) -> Result<i128, VariantIdx> {
+    if text.is_empty() {
+        return Err(PARSE_EMPTY);
+    }
+    let (negative, digits) = match text.as_bytes()[0] {
+        b'-' => (true, &text[1..]),
+        b'+' => (false, &text[1..]),
+        _ => (false, text),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(PARSE_INVALID);
+    }
+    let mut value: i128 = 0;
+    for b in digits.bytes() {
+        let digit = i128::from(b - b'0');
+        let next =
+            value.checked_mul(10).and_then(|v| if negative { v.checked_sub(digit) } else { v.checked_add(digit) });
+        value = next.ok_or(PARSE_OUT_OF_RANGE)?;
+    }
+    if it.contains(value) { Ok(value) } else { Err(PARSE_OUT_OF_RANGE) }
 }
 
 /// The type a value's `impl` is for.
@@ -1015,6 +1258,18 @@ fn write_value<E>(
                 }
                 let def = decls.adt(adt.def);
                 let variant = &def.variants[adt.variant.index()];
+                // A tuple is written `(1, "a")`, as its literal is (OPEN_QUESTIONS P5).
+                if def.tuple {
+                    out.push('(');
+                    parts.push(Part::Text(")"));
+                    for (i, value) in adt.fields.iter().enumerate().rev() {
+                        parts.push(Part::Value(value, true));
+                        if i > 0 {
+                            parts.push(Part::Text(", "));
+                        }
+                    }
+                    continue;
+                }
                 out.push_str(&def.ctor_name(adt.variant));
                 // An enum's variant without fields is written without parentheses (STD.md).
                 if def.is_enum() && variant.fields.is_empty() {

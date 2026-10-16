@@ -58,7 +58,7 @@ pub interface Abandon {
 | `Hash` | Consistent with the derived `Eq`. |
 | `Show` | Writes the expression that builds the value: `User(name: "ada", age: 36)`, `LoadError.MissingComma(line_no: 7)`, `Stop.Halt`. Text and chars inside are quoted and escaped the way `debug` writes them (OPEN_QUESTIONS P5). |
 
-`List`, `Map`, `Set`, `Option` and `Result` implement each of these interfaces when their element types do. `Show` writes them in literal form: `[1, 2]`, `["k": 1]`, `Some(3)`, `None`, `Ok("a")`.
+`List`, `Map`, `Set`, `Option`, `Result` and tuples implement each of these interfaces when their element types do. `Show` writes them in literal form: `[1, 2]`, `["k": 1]`, `Some(3)`, `None`, `Ok("a")`, `(1, "a")`. A tuple is ordered element by element from the left.
 
 ### List
 
@@ -174,7 +174,7 @@ impl Int {
 }
 ```
 
-Every integer type has the same `parse`. It fails with `ParseError.OutOfRange` when the value doesn't fit the type.
+Every integer type has the same `parse`. It fails with `ParseError.Empty` on empty text, with `ParseError.Invalid` on other text that isn't of that form, and with `ParseError.OutOfRange` when the value doesn't fit the type.
 
 ## std.io
 

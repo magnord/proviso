@@ -1,0 +1,29 @@
+// phase: 2.5
+// run: test
+// expect-exit: 70
+// An example may take exactly a million steps (OPEN_QUESTIONS P5). `count(n)` takes one
+// call and `n` turns of its loop, so `count(999999)` takes 1,000,000 steps and passes, and
+// `count(1000000)` runs out at its last turn. `calls(n)` takes one call, then a turn and a
+// call of `tick` per element, so step 1,000,001 is the 500,000th call of `tick`, and the
+// defect is reported at that call.
+fn count(n: Int) -> Int {
+    var total = 0
+    for i in 0..n {
+        total += 1
+    }
+    return total
+}
+
+fn tick() {
+}
+
+fn calls(n: Int) {
+    for i in 0..n {
+        tick()
+    }
+}
+
+example count(999999) == 999999
+example count(1000000) == 1000000
+example calls(499999) == ()
+example calls(500000) == ()

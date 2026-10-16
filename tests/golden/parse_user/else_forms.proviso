@@ -1,0 +1,282 @@
+// phase: 2.5
+// The `else` forms unwrap an `Option`, or handle the failure of the calls in the postfix
+// chain to their left (REFERENCE §6.6, §7.2). The fallback runs only when there is nothing
+// to unwrap. `it` is the error, in every form on a fallible call, and in nested forms it is
+// the error of the innermost one on a fallible call (OPEN_QUESTIONS Q33). `else` binds
+// loosest (§6.1), so `o else 0 + 1` is `o else (0 + 1)`, and groups to the right, so
+// `o else p else 0` is `o else (p else 0)` (P5). A call
+// whose result is an `Option` and that can fail has its failure handled, not the `Option`
+// unwrapped (P5). A `try` in an argument still fails the function. A call marked with an
+// `else` form is a statement (Q33), and a statement continues on a line that starts with
+// `else` (§2). An arm's guard ends at `=>`, so it takes an `else` form unparenthesized
+// (§6.1). The type an `else` form is expected to have reaches the call on its left, as it
+// reaches one under `try`, or as an `Option` of it for a call that returns one, unless a
+// call before it in the chain can fail, which makes the form's value the call's own (P5).
+// An `if` without `else` in a fallback that gives `()` is a statement (§6.2), so the
+// fallback's value is `()` whatever its branches' calls return.
+use std.io { IoError }
+
+enum Problem derives(Eq, Show) {
+    Small(n: Int)
+    Wrapped(inner: Text)
+}
+
+record Holder {
+    n: Int
+}
+
+impl Holder {
+    fn get(self) -> Int fails Problem {
+        if self.n == 0 {
+            fail Problem.Small(n: 0)
+        }
+        return self.n
+    }
+
+    fn find[T: Copy](self, x: T) -> Option[T] {
+        if self.n == 0 {
+            return None
+        }
+        return Some(x)
+    }
+
+    fn same[T: Copy](self, x: T) -> T fails Problem {
+        if self.n == 0 {
+            fail Problem.Small(n: 0)
+        }
+        return x
+    }
+}
+
+fn conv[T: Copy](x: T, ok: Bool) -> T fails Problem {
+    if not ok {
+        fail Problem.Small(n: 0)
+    }
+    return x
+}
+
+fn maybe[T: Copy](x: T, some: Bool) -> Option[T] {
+    if some {
+        return Some(x)
+    }
+    return None
+}
+
+fn narrow(ok: Bool) -> Int8 {
+    let y: Int8 = conv(x: 5, ok: ok) else -1
+    return y
+}
+
+fn narrow_method(n: Int) -> Int8 {
+    let h = Holder(n: n)
+    let z: Int8 = h.same(x: 7) else -2
+    return z
+}
+
+fn found(n: Int) -> Option[Int8] {
+    let y: Option[Int8] = make(n).find(x: 5) else None
+    return y
+}
+
+fn found_inner(n: Int) -> Int8 {
+    let z: Int8 = make(n).same(x: 9) else -3
+    return z
+}
+
+fn wide(some: Bool) -> UInt8 {
+    return maybe(x: 200, some: some) else 0
+}
+
+fn leave_or_mark(n: Int, c: Bool) -> Int {
+    var seen = 0
+    even(n) else {
+        if c {
+            return 1
+        }
+    }
+    even(n) else {
+        if c {
+            seen = 2
+        }
+    }
+    return seen
+}
+
+fn five_value() -> Int {
+    return 5
+}
+
+fn unit_tail(n: Int, c: Bool) {
+    return even(n) else {
+        if c {
+            five_value()
+        } else if not c {
+            five_value()
+        }
+    }
+}
+
+fn chained(n: Int) -> Int {
+    even(n) else {
+        if n > 0 {
+            return 1
+        } else if n < -5 {
+            return 2
+        }
+    }
+    return 0
+}
+
+fn guarded(n: Int, o: Option[Bool]) -> Int {
+    return match n {
+        0 if o else false => 1
+        _ => 2
+    }
+}
+
+fn positive(n: Int) -> Int fails Problem {
+    if n <= 0 {
+        fail Problem.Small(n: n)
+    }
+    return n
+}
+
+fn make(n: Int) -> Holder fails Problem {
+    if n < 0 {
+        fail Problem.Small(n: n)
+    }
+    return Holder(n: n)
+}
+
+fn even(n: Int) fails Problem {
+    if n % 2 != 0 {
+        fail Problem.Small(n: n)
+    }
+}
+
+fn label_a(n: Int) -> Text fails Text {
+    if n == 0 {
+        fail "a failed"
+    }
+    return "a ok"
+}
+
+fn label_b(n: Int) -> Text fails Text {
+    if n == 0 {
+        fail "b failed"
+    }
+    return "b ok"
+}
+
+fn join(x: Text, y: Text) -> Text {
+    return f"{x}+{y}"
+}
+
+fn lookup(n: Int) -> Option[Int] fails Problem {
+    if n < 0 {
+        fail Problem.Small(n: n)
+    }
+    if n == 0 {
+        return None
+    }
+    return Some(n * 10)
+}
+
+fn first(o: Option[Int], p: Option[Int]) -> Int {
+    return o else p else 0
+}
+
+fn bumped(o: Option[Int]) -> Int {
+    return o else 0 + 1
+}
+
+fn pick(o: Option[Int], flag: Bool) -> Int {
+    return o else if flag { 1 } else { 2 }
+}
+
+fn rescue(n: Int) -> Int {
+    let v = positive(n) else {
+        if it == Problem.Small(n: 0) {
+            return 100
+        }
+        -1
+    }
+    return v * 2
+}
+
+fn inner_it(a: Int, b: Int) -> Text {
+    return label_a(a) else join(x: label_b(b) else it, y: it)
+}
+
+fn outer_it(a: Int, o: Option[Text]) -> Text {
+    return label_a(a) else (o else it)
+}
+
+fn chain(n: Int) -> Int {
+    return make(n).get() else -1
+}
+
+fn combine(a: Int, b: Int) -> Int fails Problem {
+    if a > 50 {
+        fail Problem.Small(n: a)
+    }
+    return a + b
+}
+
+fn passes(n: Int) -> Int fails Problem {
+    let v = combine(a: try positive(n), b: 1) else 0
+    return v
+}
+
+fn wrapped(a: Int) -> Text fails Problem {
+    let t = label_a(a) else fail Problem.Wrapped(inner: it)
+    return t
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{first(o: None, p: Some(7))} {first(o: Some(1), p: Some(7))} {first(o: None, p: None)}")
+    try sys.stdout.write_line(f"{bumped(Some(5))} {bumped(None)}")
+    try sys.stdout.write_line(f"{pick(o: None, flag: true)} {pick(o: None, flag: false)} {pick(o: Some(9), flag: true)}")
+    try sys.stdout.write_line(f"{rescue(5)} {rescue(0)} {rescue(-3)}")
+    try sys.stdout.write_line(f"{inner_it(a: 0, b: 0)} {inner_it(a: 0, b: 1)} {inner_it(a: 1, b: 0)}")
+    let given = Some("o")
+    try sys.stdout.write_line(f"{outer_it(a: 0, o: None)} {outer_it(a: 0, o: given)}")
+    try sys.stdout.write_line(f"{chain(-5)} {chain(0)} {chain(3)}")
+    try sys.stdout.write_line(f"{attempt passes(-1)} {attempt passes(60)} {attempt passes(2)}")
+    try sys.stdout.write_line(f"{attempt wrapped(0)} {attempt wrapped(1)}")
+    let quiet = positive(4) else {
+        try sys.stdout.write_line("the fallback ran")
+        0
+    }
+    let loud = positive(-4) else {
+        try sys.stdout.write_line(f"the fallback ran for {it}")
+        0
+    }
+    try sys.stdout.write_line(f"{quiet} {loud}")
+    let r = lookup(-1) else None
+    let s = lookup(0) else Some(-1)
+    let t = lookup(2) else None
+    try sys.stdout.write_line(f"{r} {s} {t} {r else 5}")
+    even(3) else ()
+    even(4) else fail_soft()
+    sys.stdout.write_line("written") else ()
+    let spaced = positive(0)
+        else 42
+    try sys.stdout.write_line(f"{spaced}")
+    if (positive(9) else 0) > 3 {
+        try sys.stdout.write_line("big")
+    }
+    try sys.stdout.write_line(f"{narrow(true)} {narrow(false)} {narrow_method(1)} {narrow_method(0)}")
+    try sys.stdout.write_line(f"{wide(true)} {wide(false)}")
+    try sys.stdout.write_line(f"{found(1)} {found(0)} {found(-1)} {found_inner(1)} {found_inner(0)} {found_inner(-1)}")
+    let u1 = unit_tail(n: 3, c: true) == ()
+    let u2 = unit_tail(n: 3, c: false) == ()
+    let u3 = unit_tail(n: 4, c: true) == ()
+    try sys.stdout.write_line(f"{u1} {u2} {u3}")
+    try sys.stdout.write_line(f"{chained(3)} {chained(-7)} {chained(-1)} {chained(4)}")
+    try sys.stdout.write_line(f"{leave_or_mark(n: 3, c: true)} {leave_or_mark(n: 3, c: false)} {leave_or_mark(n: 4, c: true)}")
+    try sys.stdout.write_line(f"{guarded(n: 0, o: Some(true))} {guarded(n: 0, o: None)} {guarded(n: 0, o: Some(false))}")
+}
+
+fn fail_soft() {
+}

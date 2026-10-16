@@ -1,0 +1,92 @@
+// phase: 2.5
+// expect-error: E0101
+// expect-error: E0102
+// expect-error: E0201
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0701
+// expect-error: E0705
+// expect-error: E0707
+// An `else` form needs an `Option` or a call that can fail on its left (REFERENCE §6.6).
+// A `Result` from `attempt` is matched instead, and a `try` has already handled its call
+// (OPEN_QUESTIONS P5). The fallback has the type of the unwrapped value. `it` exists only
+// in the fallback of a fallible call, not in that of an `Option` (Q33). An `else` marks
+// only the calls of its postfix chain, as `try` does (§6.1), and they must fail with one
+// error type, as for `attempt` (P5). An `Option` with an `else` is still a bare value
+// (§2), and an `else` form in a condition is parenthesized (§6.1). A left side that is
+// already an error may have been a call that can fail, so its `it` isn't reported (§15.1).
+enum Other {
+    Thing
+}
+
+record Box {
+    n: Int
+}
+
+impl Box {
+    fn get(self) -> Int fails Other {
+        return self.n
+    }
+}
+
+fn risky(n: Int) -> Int fails Text {
+    return n
+}
+
+fn boxed(n: Int) -> Box fails Text {
+    return Box(n: n)
+}
+
+fn wrap(n: Int) -> Int fails Text {
+    return n
+}
+
+fn forms(o: Option[Int], ob: Option[Bool]) -> Int fails Text {
+    let a = 5 else 0                                // <- E0707
+    let b = attempt risky(1) else 0                 // <- E0707
+    let c = (try risky(1)) else 0                   // <- E0707
+    let d = o else "text"                           // <- E0301
+    let e = risky(1) else "x"                       // <- E0301
+    let f = it                                      // <- E0201
+    let g = o else it                               // <- E0201
+    let h = wrap(risky(1)) else 0                   // <- E0701
+    let i = boxed(1).get() else 0                   // <- E0301
+    let j = risky(1) else it                        // <- E0301
+    let k = o else { 1 }
+    let l = o else { }                              // <- E0301
+    o else 0                                        // <- E0102
+    if ob else false {                              // <- E0101
+        return 1
+    }
+    return a
+}
+
+fn no_fails(o: Option[Int]) -> Int {
+    let m = risky(1) else fail it                   // <- E0705
+    return m
+}
+
+fn unknown_left(n: Int, t: Text) -> Int {
+    let a = missing(n) else it                      // <- E0201
+    let b = nope.run() else it                      // <- E0201
+    let c = undefined_thing else { it }             // <- E0201
+    let d = Text.parse(t) else match it {           // <- E0303
+        _ => 0
+    }
+    return 0
+}
+
+fn unused_in_fallback(n: Int) -> Int {
+    even_or_fail(n) else {
+        if n > 0 {
+            5                                       // <- E0102
+        }
+    }
+    return 0
+}
+
+fn even_or_fail(n: Int) fails Text {
+    if n % 2 == 0 {
+        fail "even"
+    }
+}

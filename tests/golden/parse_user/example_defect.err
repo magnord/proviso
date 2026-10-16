@@ -1,0 +1,3 @@
+defect[assertion_failed]: assertion failed: n > 0
+  at parse_user/example_defect.proviso:8:5 (example_defect.boom+2)
+  called from parse_user/example_defect.proviso:13:9 (example_defect)

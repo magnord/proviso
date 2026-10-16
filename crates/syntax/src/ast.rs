@@ -26,6 +26,9 @@ pub struct Module {
     /// Types named by a rejected `impl` block, such as `Point` in `impl Show for Point`. The
     /// block may have given them methods and interfaces, so uses of those aren't reported.
     pub impls: HashSet<Symbol>,
+    /// Whether a rejected `impl` block was for a tuple type, which has no name to note in
+    /// `impls`. Every tuple type may then have methods and interfaces we don't know.
+    pub tuple_impls: bool,
 }
 
 impl Module {
@@ -83,7 +86,7 @@ impl Item {
             ItemKind::Record(decl) => Some(decl.name),
             ItemKind::Enum(decl) => Some(decl.name),
             ItemKind::Interface(decl) => Some(decl.name),
-            ItemKind::Use(_) | ItemKind::Impl(_) => None,
+            ItemKind::Use(_) | ItemKind::Impl(_) | ItemKind::Example(_) => None,
         }
     }
 }
@@ -95,6 +98,21 @@ pub enum ItemKind {
     Enum(EnumDecl),
     Impl(ImplDecl),
     Interface(InterfaceDecl),
+    /// `example f(…) == v` or `example f(…) fails P`, run by `proviso test` (REFERENCE §14).
+    Example(ExampleDecl),
+}
+
+pub struct ExampleDecl {
+    pub call: ExprId,
+    pub expect: Expectation,
+}
+
+/// What an example asserts about its call.
+pub enum Expectation {
+    /// `== v`: the call succeeds with a value equal to `v`.
+    Equals(ExprId),
+    /// `fails P`: the call fails with an error that matches `P`.
+    Fails(PatId),
 }
 
 pub struct FnDecl {
@@ -222,6 +240,8 @@ pub enum TypeExprKind {
     Applied { name: Ident, args: Option<Vec<TypeId>> },
     /// `Self`, the type of an `impl` block, or the implementing type in an interface.
     SelfType,
+    /// `(A, B)`, with at least two elements.
+    Tuple(Vec<TypeId>),
 }
 
 pub struct Block {
@@ -229,6 +249,8 @@ pub struct Block {
     pub span: Span,
     /// The block was never closed, so the code that ended it is missing.
     pub unclosed: bool,
+    /// A statement in it failed to parse, so part of it is missing, perhaps the end.
+    pub lost: bool,
 }
 
 pub struct Stmt {
@@ -237,13 +259,28 @@ pub struct Stmt {
 }
 
 pub enum StmtKind {
-    Let { mutable: bool, name: Ident, ty: Option<TypeId>, init: ExprId },
-    Assign { target: ExprId, op: AssignOp, value: ExprId },
+    /// `let pattern: T = init`. A `var` makes each name the pattern binds mutable.
+    Let {
+        mutable: bool,
+        pat: PatId,
+        ty: Option<TypeId>,
+        init: ExprId,
+    },
+    Assign {
+        target: ExprId,
+        op: AssignOp,
+        value: ExprId,
+    },
     Expr(ExprId),
     Return(Option<ExprId>),
     Break(Option<Ident>),
     Continue(Option<Ident>),
     Assert(ExprId),
+    /// `check cond else fallback`, whose fallback must leave (REFERENCE §8.4).
+    Check {
+        cond: ExprId,
+        fallback: Fallback,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -355,8 +392,24 @@ pub enum ExprKind {
         value: ExprId,
         pat: PatId,
     },
+    /// `(a, b)`, with at least two elements.
+    Tuple(Vec<ExprId>),
+    /// `value else fallback`, which unwraps an `Option` or handles the failure of the calls
+    /// in `value`'s chain (REFERENCE §6.6).
+    Else {
+        value: ExprId,
+        fallback: Fallback,
+    },
+    /// `it`, the error in the fallback of an `else` form (Q33).
+    It,
     /// Stands in for code that failed to parse, which is already reported.
     Error,
+}
+
+/// What an `else` form or a `check` falls back to: a value, or a block.
+pub enum Fallback {
+    Value(ExprId),
+    Block(Block),
 }
 
 /// `pattern if guard => body`. A body written without braces is one statement.
@@ -391,6 +444,8 @@ pub enum PatKind {
         /// Ends with `..`, which skips the remaining fields.
         rest: bool,
     },
+    /// `(a, b)`, with at least two elements.
+    Tuple(Vec<PatId>),
 }
 
 /// One field of a constructor pattern: `w`, `w: width` or a pattern with no label.

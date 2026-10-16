@@ -1,0 +1,125 @@
+// phase: 2.5
+// expect-error: E0101
+// expect-error: E0103
+// expect-error: E0108
+// expect-error: E0201
+// expect-error: E0204
+// expect-error: E0301
+// expect-error: E0306
+// expect-error: E0701
+// expect-error: E0702
+// expect-error: E0705
+// expect-error: E0708
+// An example is `example f(…) == v` or `example f(…) fails P` (REFERENCE §14). It marks the
+// calls of its postfix chain, as `attempt` does (§7.2), so another fallible call in it is
+// unmarked. `== v` needs a `v` of the call's type, and a type with `Eq`, or a float, whose
+// `==` is IEEE's (§12.2). `fails P` needs a call that can fail, and a pattern for its
+// error (OPEN_QUESTIONS P5). The left side is a function or method call, not a
+// construction, and an example has no name, so it is never `pub`. An example is an expression with no function around it, so
+// `return`, `fail` and `try` have nothing to leave (E0108, E0705, E0702). The expected
+// value is an operand of `==`, as the call is, or an `else` form on one, so a comparison
+// after it is chained (E0103). The two sides are read as the operands of `==` are, and
+// compared at their join, so a `Never` part of either widens to the other's (§12.2).
+record Plain {
+    n: Int
+}
+
+fn plain(n: Int) -> Plain {
+    return Plain(n: n)
+}
+
+fn sure(n: Int) -> Int {
+    return n
+}
+
+fn risky(n: Int) -> Int fails Text {
+    return n
+}
+
+fn Misnamed(n: Int) -> Int {                        // <- E0204
+    return n
+}
+
+fn ident[T: Copy](x: T) -> T {
+    return x
+}
+
+fn label(n: Int) -> Text {
+    return "n"
+}
+
+fn ok_any[T: Copy](x: T) -> Result[T, Never] {
+    return Ok(x)
+}
+
+fn ok_fixed() -> Result[Int, Never] {
+    return Ok(1)
+}
+
+fn float_err() -> Result[Int, Float] {
+    return Ok(1)
+}
+
+fn text_err() -> Result[Int, Text] {
+    return Ok(1)
+}
+
+fn yes(n: Int) -> Bool {
+    return true
+}
+
+enum Mode {
+    Fast(n: Int)
+}
+
+fn halve(x: Float) -> Float {
+    return x / 2.0
+}
+
+example plain(1) == plain(1)                        // <- E0306
+example sure(1) == "one"                            // <- E0301
+example sure(1) fails _                             // <- E0708
+example sure(risky(1)) == 1                         // <- E0701
+example missing(1) == 1                             // <- E0201
+example risky(1) fails 5                            // <- E0301
+example risky(1)                                    // <- E0101
+example risky(1) != 2                               // <- E0101
+example risky(1) == 1
+example risky(1) fails "boom"
+example halve(1.0) == 0.5
+example sure(3) == 1 + 2
+example 5 == 5                                      // <- E0101
+example sure(1) + 1 == 2                            // <- E0101
+example -sure(1) == -1                              // <- E0101
+example (sure(1), sure(2)) == (1, 2)                // <- E0101
+example plain(1).n == 1                             // <- E0101
+example try risky(1) == 1                           // <- E0101
+example sure(try risky(1)) == 1                     // <- E0702
+example sure(match 1 { _ => return 2 }) == 2        // <- E0108
+example sure(fail "x") == 1                         // <- E0705
+pub example sure(4) == 4                            // <- E0101
+pub(pkg) example sure(5) == "five"                  // <- E0101, E0301
+example (sure(6)) == 6
+example Int.parse("8") == 8
+example sure(9) == risky(9) else 0
+example yes(1) == 1 < 2                             // <- E0103
+example sure(1) == 1 == 2                           // <- E0103
+example yes(1) == false and false                   // <- E0101
+example Some(1) == Some(1)                          // <- E0101
+example Plain(n: 1) == plain(1)                     // <- E0101
+example Mode.Fast(n: 1) == Mode.Fast(n: 1)          // <- E0101
+example sure(10) == (1 + 9)
+example Misnamed(1) == 1
+example Ok(1) == Ok(1)                              // <- E0101
+example Some() == Some(1)                           // <- E0101
+example Plain(m: 1) == plain(1)                     // <- E0101
+example Mode(1) == 1                                // <- E0201
+example Mode(2) == Mode.Fast(n: 1)                  // <- E0201
+example missing(2) == Mode.Fast(n: 1)               // <- E0201
+example ident(1) == label(1)                        // <- E0301
+example label(1) == ident(1)                        // <- E0301
+example ok_any(1) == float_err()                    // <- E0306
+example float_err() == ok_any(1)                    // <- E0306
+example ok_fixed() == float_err()                   // <- E0306
+example ok_fixed() == text_err()
+example ok_any(1) == text_err()

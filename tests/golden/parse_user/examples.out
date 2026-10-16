@@ -1,0 +1,17 @@
+parse_user/examples.proviso:35:1: example passed
+parse_user/examples.proviso:36:1: example failed: expected `5`, found `4`
+parse_user/examples.proviso:37:1: example passed
+parse_user/examples.proviso:38:1: example failed: expected `1`, but it failed with `Oops.Bad(n: 3)`
+parse_user/examples.proviso:39:1: example passed
+parse_user/examples.proviso:40:1: example failed: expected a failure matching `Oops.Bad(n: 5)`, but it failed with `Oops.Bad(n: 3)`
+parse_user/examples.proviso:41:1: example failed: expected a failure matching `Oops.Bad(..)`, but it returned `2`
+parse_user/examples.proviso:42:1: example failed: expected a failure matching `Worse`, but it failed with `Oops.Bad(n: 3)`
+parse_user/examples.proviso:43:1: example passed
+parse_user/examples.proviso:44:1: example failed: expected `"b"`, found `"hi a"`
+parse_user/examples.proviso:45:1: example passed
+parse_user/examples.proviso:46:1: example passed
+parse_user/examples.proviso:60:1: example passed
+parse_user/examples.proviso:61:1: example passed
+parse_user/examples.proviso:62:1: example failed: expected `Some(2)`, found `None`
+parse_user/examples.proviso:63:1: example failed: expected `Some(1)`, found `None`
+16 examples: 8 passed, 8 failed

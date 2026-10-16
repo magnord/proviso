@@ -16,7 +16,7 @@ impl Ord for Span {                                 // <- E0901
 
 fn f(xs: List[Int]) -> Int {                        // <- E0901
     let ys = [1, 2, 3]                              // <- E0901
-    let n = (1, 2)                                  // <- E0901
+    let n = ys[0]                                   // <- E0901
     let copy = ys
     return n
 }
@@ -30,7 +30,7 @@ fn g(c: Bool) -> Bool {
 }
 
 fn later_forms(c: Bool) -> Int {
-    if (g(c) else false) {                          // <- E0901
+    if (c in [true]) {                              // <- E0901
         return 1
     }
     let d = 3.0[m]                                  // <- E0901
@@ -42,7 +42,7 @@ fn h(callback: scoped fn(Int)) {                    // <- E0901
     let a = 1
 }
 
-fn pair(p: (Int, Int)) -> Int {                     // <- E0901
+fn pair(p: fn(Int) -> Int) -> Int {                 // <- E0901
     return 1
 }
 

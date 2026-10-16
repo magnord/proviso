@@ -1,0 +1,42 @@
+// phase: 2.5
+// run: test
+// Every path through §17's `parse_user`, as examples that all pass. `split_once` splits at
+// the first comma (STD.md), so `"a,b,c"` has the age text `"b,c"`. `BadAgeText` keeps the
+// untrimmed text. 149 is the last age in range and 150 the first out of it. `Int.parse`
+// takes a leading `+` (STD.md).
+pub record User derives(Eq, Show) {
+    name: Text where not name.is_empty()
+    age:  Int  where 0 <= age and age < 150
+}
+
+pub enum LoadError derives(Eq, Show) {
+    MissingComma(line_no: Int)
+    EmptyName(line_no: Int)
+    BadAgeText(line_no: Int, text: Text)
+    AgeOutOfRange(line_no: Int, value: Int)
+}
+
+pub fn parse_user(line: Text, line_no: Int) -> User fails LoadError {
+    let (name_text, age_text) = line.split_once(",")
+        else fail LoadError.MissingComma(line_no: line_no)
+    let name = name_text.trim()
+    check not name.is_empty() else fail LoadError.EmptyName(line_no: line_no)
+    let age = Int.parse(age_text.trim())
+        else fail LoadError.BadAgeText(line_no: line_no, text: age_text)
+    check 0 <= age and age < 150
+        else fail LoadError.AgeOutOfRange(line_no: line_no, value: age)
+    return User(name: name, age: age)
+}
+
+example parse_user(line: "ada,36", line_no: 1) == User(name: "ada", age: 36)
+example parse_user(line: "  bob , +49 ", line_no: 2) == User(name: "bob", age: 49)
+example parse_user(line: "cy, 149", line_no: 3) == User(name: "cy", age: 149)
+example parse_user(line: "dee, 0", line_no: 4) == User(name: "dee", age: 0)
+example parse_user(line: "", line_no: 5) fails LoadError.MissingComma(line_no: 5)
+example parse_user(line: " , 3", line_no: 6) fails LoadError.EmptyName(line_no: 6)
+example parse_user(line: "eve, x", line_no: 7) fails LoadError.BadAgeText(line_no: 7, text: " x")
+example parse_user(line: "a,b,c", line_no: 8) fails LoadError.BadAgeText(line_no: 8, text: "b,c")
+example parse_user(line: "fay,", line_no: 9) fails LoadError.BadAgeText(line_no: 9, text: "")
+example parse_user(line: "gus, 150", line_no: 10) fails LoadError.AgeOutOfRange(line_no: 10, value: 150)
+example parse_user(line: "hal, -1", line_no: 11) fails LoadError.AgeOutOfRange(line_no: 11, value: -1)
+example parse_user(line: "ida, 3 6", line_no: 12) fails LoadError.BadAgeText(..)

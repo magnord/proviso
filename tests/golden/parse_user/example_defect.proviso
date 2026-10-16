@@ -1,0 +1,15 @@
+// phase: 2.5
+// run: test
+// expect-exit: 70
+// A defect in one example fails that example and is reported on stderr like a defect of
+// `proviso run`, traced to the example's call. The examples after it still run. A defect
+// makes the exit code 70, even when other examples only failed (OPEN_QUESTIONS P5).
+fn boom(n: Int) -> Int {
+    assert n > 0
+    return n
+}
+
+example boom(1) == 1
+example boom(0) == 0
+example boom(2) == 3
+example boom(4) == 4

@@ -1,0 +1,139 @@
+// phase: 2.5
+// expect-error: E0101
+// expect-error: E0201
+// expect-error: E0203
+// expect-error: E0301
+// expect-error: E0305
+// expect-error: E0415
+// expect-error: E0503
+// `check P else …` needs a `Bool` and an `else` that doesn't finish, so it has type
+// `Never`, as `fail`, `unreachable`, a call of a function that returns `Never`, and a
+// block with a statement that doesn't finish do (REFERENCE §8.4; OPEN_QUESTIONS P5).
+// `return`, `break` and `continue` are statements, so they go in a block. An `if` without
+// `else` has no value, even when its block leaves. Because the `else`
+// leaves, the code after a `check` runs only when `P` holds, so the bindings of an `is` in
+// `P` scope over the rest of the enclosing block, as an `if`'s scope over its then-block
+// (§6.4, §8.4). They don't scope over the `else`, nor past the block, and an `is` under
+// `or` or `not` binds nothing. The bindings are immutable, may not shadow, and borrow a
+// borrowed value. The error must be the function's.
+fn checks(n: Int, o: Option[Int]) -> Int fails Text {
+    check n > 0 else { return 0 }
+    check n > 1 else fail "small"
+    check n > 2                                     // <- E0101
+    check n > 3 else 0                              // <- E0415
+    check n > 4 else { debug(n) }                   // <- E0415
+    check n else fail "int"                         // <- E0301
+    check n > 5 else fail 5                         // <- E0301
+    check o is Some(w) else fail f"{w}"             // <- E0201
+    check o is Some(v) else fail "none"
+    return v
+}
+
+fn scopes(o: Option[Int], c: Bool) -> Int {
+    if c {
+        check o is Some(inner) else { return 0 }
+    }
+    check o is Some(either) or c else { return 1 }
+    check not (o is Some(negated)) else { return 2 }
+    let b1 = inner                                  // <- E0201
+    let b2 = either                                 // <- E0201
+    let b3 = negated                                // <- E0201
+    check o is Some(kept) else { return 3 }
+    kept = 4                                        // <- E0305
+    let kept = 5                                    // <- E0203
+    check o is Some(c) else { return 4 }            // <- E0203
+    check o is Some(after) else { debug(1) }        // <- E0415
+    return after
+}
+
+fn borrowed[T](o: Option[T]) -> T {
+    check o is Some(x) else { unreachable }
+    return x                                        // <- E0503
+}
+
+fn never() -> Never {
+    unreachable
+}
+
+fn diverging(n: Int) -> Int {
+    check n > 1 else unreachable
+    check n > 2 else { unreachable }
+    check n > 3 else never()
+    check n > 4 else { never() }
+    check n > 5 else { return 0 }
+    return n
+}
+
+fn statements(n: Int) -> Int {
+    while true {
+        check n > 0 else break                      // <- E0101
+    }
+    check n > 1 else return 0                       // <- E0101
+    return n
+}
+
+fn valueless(o: Option[Int], c: Bool) -> Int {
+    check o is Some(x) else if c { return 0 }       // <- E0301
+    let v = if c { return 1 }                       // <- E0301
+    let u: Unit = if c { 5 }                        // <- E0301
+    let s: Option[Unit] = Some(if c { 6 })          // <- E0301
+    check o is Some(y) else {
+        let z = if c { return 2 }                   // <- E0301
+    }
+    return x + v + y
+}
+
+fn broken(o: Option[Int], p: (Option[Int], Option[Int])) -> Int {
+    check o is Some(x1)                             // <- E0101
+    check p is (Some(a1), Some(b1))                 // <- E0101
+    check o is Some(y1) and p.0 > 1 else { return 0 } // <- E0101
+    check o is Some(_) and p is (Some(c1), _)       // <- E0101
+    return x1 + a1 + b1 + y1 + c1
+}
+
+fn finishing(n: Int) -> Int {
+    check n > 1 else {
+        return 0
+        debug(n)
+    }
+    check n > 2 else {
+        loop {
+        }
+    }
+    return n
+}
+
+fn broken_or(o: Option[Int], q: Option[Int], c: Bool) -> Int {
+    check o is Some(x2) or q is Some(x2)            // <- E0101
+    let x2 = 1
+    check not (o is Some(y2))                       // <- E0101
+    let y2 = 2
+    check o is Some(z2) and not (q is Some(w2))     // <- E0101
+    let w2 = 3
+    check not (q is Some(u2)) and o is Some(v2)     // <- E0101
+    let u2 = 4
+    check (o is Some(t2) or c) and q is Some(r2)    // <- E0101
+    let t2 = 5
+    check q is Some(p2) and (match o {
+        Some(_) => true
+        None => false
+    }) and o is Some(s2)                            // <- E0101
+    return x2 + y2 + z2 + w2 + u2 + v2 + t2 + r2 + p2 + s2
+}
+
+fn broken_block(o: Option[Int], n: Int) -> Int {
+    check o is Some(x4) {                           // <- E0101
+        let total = n
+        return total
+    }
+    check match n { 0 => o, _ => None } is Some(x5) // <- E0101
+    let total = x4 + x5 + n
+    return total
+}
+
+fn broken_paren(o: Option[Int]) -> Int {
+    check o is Some(x3                              // <- E0101
+    let n3 = 2
+    let m3 = (n3, 3)
+    return n3 + m3.1
+}

@@ -1,7 +1,7 @@
 // phase: 2.2
 // expect-error: E0901
-// Generic enums, `cmp` and tuple patterns come in later slices of phase 2, and units of
-// measure after v1. Uses of what they declare aren't reported again (REFERENCE §15.1).
+// Generic enums and `cmp` come in later slices of phase 2, and units of measure after
+// v1. Uses of what they declare aren't reported again (REFERENCE §15.1).
 enum Maybe[T] {                                     // <- E0901
     Just(value: T)
     Nothing
@@ -20,12 +20,9 @@ fn later(m: Maybe, r: Ranked) -> Int {
         Just(v) => v
         Nothing => 0
     }
-    let f = match r {
-        (x, y) => 1                                 // <- E0901
-    }
     let h = match 2.5 {
         0.0[m]..1.0[m] => 1                         // <- E0901
         _ => 2
     }
-    return e + f + h
+    return e + h
 }

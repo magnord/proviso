@@ -1,0 +1,87 @@
+// phase: 2.5
+// The `Text` methods of STD.md other than `lines`, and `parse` on each integer type.
+// `trim` removes Unicode `White_Space` at both ends, such as U+3000 and U+00A0, but not
+// U+200B, which isn't `White_Space`. `split_once` splits at the first `sep`, and an empty
+// `sep` matches at the start. `parse` takes an optional sign and one or more ASCII digits,
+// and anything else is `Invalid`, including a lone sign, whitespace, `_`, a base prefix and
+// non-ASCII digits. A value that doesn't fit is `OutOfRange`, also beyond 128 bits, and an
+// empty text is `Empty`. Text of the right form is `OutOfRange` before it is `Invalid` only
+// when every character is valid (OPEN_QUESTIONS P5). `ParseError` comes from `std.text`.
+use std.io { IoError }
+use std.text { ParseError }
+
+fn kind(e: ParseError) -> Text {
+    return match e {
+        Empty => "empty"
+        ParseError.Invalid => "invalid"
+        OutOfRange => "range"
+    }
+}
+
+fn int(text: Text) -> Text {
+    let n = Int.parse(text) else {
+        return kind(it)
+    }
+    return f"{n}"
+}
+
+fn int8(text: Text) -> Text {
+    let n = Int8.parse(text: text) else {
+        return kind(it)
+    }
+    return f"{n}"
+}
+
+fn uint8(text: Text) -> Text {
+    let n = UInt8.parse(text) else {
+        return kind(it)
+    }
+    return f"{n}"
+}
+
+fn uint64(text: Text) -> Text {
+    let n = UInt64.parse(text) else {
+        return kind(it)
+    }
+    return f"{n}"
+}
+
+fn byte(text: Text) -> Text {
+    let n = Byte.parse(text) else 0
+    return f"{n}"
+}
+
+fn shown(text: Text) -> Text {
+    let e = attempt Int.parse(text)
+    return f"{e}"
+}
+
+fn bracket(text: Text) -> Text {
+    return f"[{text}]"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let o = sys.stdout
+    try o.write_line(f"{int("36")} {int("-5")} {int("+7")} {int("007")} {int("-0")}")
+    try o.write_line(f"{int("")} {int("+")} {int("-")} {int(" 1")} {int("1 ")} {int("1_000")}")
+    try o.write_line(f"{int("12x")} {int("0x1f")} {int("--1")} {int("+-1")} {int("\u{661}")}")
+    try o.write_line(f"{int("9223372036854775807")} {int("9223372036854775808")}")
+    try o.write_line(f"{int("-9223372036854775808")} {int("-9223372036854775809")}")
+    try o.write_line(f"{int("99999999999999999999999999999999999999999")}")
+    try o.write_line(f"{int("99999999999999999999999999999999999999999x")}")
+    try o.write_line(f"{int8("127")} {int8("128")} {int8("-128")} {int8("-129")}")
+    try o.write_line(f"{uint8("255")} {uint8("256")} {uint8("-1")} {uint8("-0")}")
+    try o.write_line(f"{uint64("18446744073709551615")} {uint64("18446744073709551616")}")
+    try o.write_line(f"{byte("200")} {byte("300")}")
+    try o.write_line(f"{shown("5")} {shown("")} {shown("x")} {shown("1e3")}")
+    let padded = "  ada \t\n"
+    let wide = "\u{3000}ada\u{a0}"
+    let zero_width = "\u{200b}ada"
+    try o.write_line(f"{bracket(padded.trim())} {bracket(wide.trim())} {zero_width.trim().byte_len()}")
+    try o.write_line(f"{bracket("a b".trim())} {bracket("".trim())} {bracket(" \t ".trim())}")
+    try o.write_line(f"{"a,b,c".split_once(",")} {"abc".split_once(",")} {"abc".split_once("")}")
+    try o.write_line(f"{"key=>value".split_once(sep: "=>")} {",x".split_once(",")} {"x,".split_once(",")}")
+    try o.write_line(f"{"proviso".starts_with("pro")} {"pro".starts_with("proviso")} {"abc".starts_with("")}")
+    try o.write_line(f"{"v1.2".strip_prefix("v")} {"1.2".strip_prefix(prefix: "v")} {"x".strip_prefix("")} {"x".strip_prefix("x")}")
+    try o.write_line(f"{"é".byte_len()} {"".is_empty()} {" ".is_empty()}")
+}

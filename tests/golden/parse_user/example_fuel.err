@@ -1,0 +1,3 @@
+defect[fuel_exhausted]: the example took more than 1000000 steps
+  at parse_user/example_fuel.proviso:10:5 (example_fuel.spin+3)
+  called from parse_user/example_fuel.proviso:23:9 (example_fuel)

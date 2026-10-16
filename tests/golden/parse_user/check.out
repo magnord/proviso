@@ -1,0 +1,9 @@
+Err("negative") Ok("ok") Ok("ok") Err("too high: 101")
+-1 2
+3 4
+Err("empty") Ok("x")
+3 2 6
+5 -1 -1
+Ok("n4") Err("missing")
+9 0
+ada ada

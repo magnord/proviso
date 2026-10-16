@@ -282,9 +282,13 @@ fn render(decls: &Decls, ty: &Ty, witness: &Witness) -> String {
         (Ctor::Unit, _) => "()".to_string(),
         (Ctor::Variant(v), Ty::Adt(id, args)) => {
             let def = decls.adt(*id);
-            let name = def.ctor_name(*v);
+            let name = decls.ctor_name(*id, *v);
             let fields = &def.variants[v.index()].fields;
             let tys = def.field_types(*v, args);
+            if def.tuple {
+                let parts: Vec<String> = tys.iter().zip(parts).map(|(ty, part)| render(decls, ty, part)).collect();
+                return format!("({})", parts.join(", "));
+            }
             if fields.is_empty() {
                 return if def.is_enum() { name } else { format!("{name}()") };
             }

@@ -1,0 +1,77 @@
+// phase: 2.5
+// expect-error: E0101
+// expect-error: E0201
+// expect-error: E0203
+// expect-error: E0204
+// expect-error: E0301
+// expect-error: E0305
+// expect-error: E0318
+// A `let` pattern must match every value of its type, so a variant that may be missing, a
+// `Bool` that may be the other one, or any integer, char or text literal or range is an
+// error there; `match`, `is` and the `else` forms test values (REFERENCE §6.4, §6.6;
+// OPEN_QUESTIONS P5). A pattern binds each name once, and no name it binds may shadow
+// another (H4). `let` bindings are immutable and `var` ones mutable (§5.1). A `let` whose
+// pattern is broken still binds the names it has, so their uses aren't reported (§15.1).
+// A refutable part makes the whole pattern refutable, and an enum's only variant matches
+// every value. A pattern that is one name binds it whatever its case, so a misnamed one is
+// reported as misnamed, also when the `let` is broken. Inside a larger pattern a name is
+// read as in a `match`, so `None` there is the variant (§6.4).
+record Point {
+    x: Int
+    y: Int
+}
+
+enum Only {
+    One(n: Int)
+}
+
+fn refutable(o: Option[Int], p: (Int, Int), q: (Bool, Int), r: (Text, Char), only: Only) {
+    let Some(v) = o                                 // <- E0318
+    let (1, w) = p                                  // <- E0318
+    let (true, z) = q                               // <- E0318
+    let (lo, 'a') = r                               // <- E0318
+    let (0..10, hi) = p                             // <- E0318
+    let (k, _) = p
+    let (Some(x2), y2) = (o, 1)                     // <- E0318
+    let Only.One(kk) = only
+    let Point(x, y) = Point(x: 1, y: 2)
+    let () = ()
+}
+
+fn shapes(p: (Int, Int), o: Option[Int]) {
+    let (a1, b1, c1) = p                            // <- E0301
+    let (d1, e1) = 5                                // <- E0301
+    let Point(x: f1, y: g1) = o                     // <- E0301
+    let (h1, i1): (Int, Text) = (1, 2)              // <- E0301
+}
+
+fn names(p: (Int, Int)) {
+    let (n1, n1) = p                                // <- E0203
+    let (p, q1) = (1, 2)                            // <- E0203
+}
+
+fn mutability(p: (Int, Int)) {
+    let (m1, m2) = p
+    m1 = 3                                          // <- E0305
+    var (m3, m4) = p
+    m3 = 4
+    m4 += m2
+}
+
+fn broken() -> Int {
+    let (r1 r2) = (5, 6)                            // <- E0101
+    let gone = missing                              // <- E0201
+    return r1 + r2
+}
+
+fn broken_names() -> Int {
+    let Total = (1 2)                               // <- E0204, E0101
+    var Count: Int = (1 2)                          // <- E0204, E0101
+    Count += 1
+    let Width: Int = 3                              // <- E0204
+    let p.q = 5                                     // <- E0101
+    var r.s = 6                                     // <- E0101
+    r = 7
+    let (None, k2) = (Some(1), 2)                   // <- E0318
+    return Total + Count + Width + p + r + k2
+}
