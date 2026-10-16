@@ -11,18 +11,26 @@
 // OPEN_QUESTIONS P5). A pattern binds each name once, and no name it binds may shadow
 // another (H4). `let` bindings are immutable and `var` ones mutable (§5.1). A `let` whose
 // pattern is broken still binds the names it has, so their uses aren't reported (§15.1).
+// A refutable part makes the whole pattern refutable, and an enum's only variant matches
+// every value.
 record Point {
     x: Int
     y: Int
 }
 
-fn refutable(o: Option[Int], p: (Int, Int), q: (Bool, Int), r: (Text, Char)) {
+enum Only {
+    One(n: Int)
+}
+
+fn refutable(o: Option[Int], p: (Int, Int), q: (Bool, Int), r: (Text, Char), only: Only) {
     let Some(v) = o                                 // <- E0318
     let (1, w) = p                                  // <- E0318
     let (true, z) = q                               // <- E0318
     let (lo, 'a') = r                               // <- E0318
     let (0..10, hi) = p                             // <- E0318
     let (k, _) = p
+    let (Some(x2), y2) = (o, 1)                     // <- E0318
+    let Only.One(kk) = only
     let Point(x, y) = Point(x: 1, y: 2)
     let () = ()
 }

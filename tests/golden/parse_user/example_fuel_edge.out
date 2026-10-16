@@ -1,0 +1,5 @@
+parse_user/example_fuel_edge.proviso:26:1: example passed
+parse_user/example_fuel_edge.proviso:27:1: example failed: it hit a defect
+parse_user/example_fuel_edge.proviso:28:1: example passed
+parse_user/example_fuel_edge.proviso:29:1: example failed: it hit a defect
+4 examples: 2 passed, 2 failed

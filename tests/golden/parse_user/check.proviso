@@ -1,7 +1,8 @@
 // phase: 2.5
 // `check P else …` runs the test the program asks for and, when `P` is false, the `else`,
 // which must leave: `fail`, or a block that returns, breaks or continues (REFERENCE §8.4;
-// OPEN_QUESTIONS P5). The statement continues on a line that starts with `else` (§2).
+// OPEN_QUESTIONS P5). The statement continues on a line that starts with `else` (§2). An
+// `else` form's block may leave a loop in the same ways.
 use std.io { IoError }
 
 fn grade(score: Int) -> Text fails Text {
@@ -40,6 +41,32 @@ fn steps(limit: Int) -> Int {
     return k
 }
 
+fn half_of(n: Int) -> Option[Int] {
+    if n % 2 == 0 {
+        return Some(n / 2)
+    }
+    return None
+}
+
+fn halvings(start: Int) -> Int {
+    var n = start
+    var count = 0
+    loop {
+        n = half_of(n) else { break }
+        count += 1
+    }
+    return count
+}
+
+fn half_sum(limit: Int) -> Int {
+    var total = 0
+    for i in 0..limit {
+        let v = half_of(i) else { continue }
+        total += v
+    }
+    return total
+}
+
 fn nonempty(name: Text) -> Text fails Text {
     check not name.is_empty() else fail "empty"
     return name
@@ -50,4 +77,5 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(f"{first_even(1)} {first_even(5)}")
     try sys.stdout.write_line(f"{count_odd(7)} {steps(4)}")
     try sys.stdout.write_line(f"{attempt nonempty("")} {attempt nonempty("x")}")
+    try sys.stdout.write_line(f"{halvings(8)} {halvings(12)} {half_sum(7)}")
 }
