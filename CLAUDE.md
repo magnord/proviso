@@ -59,3 +59,10 @@ Codes are stable, so a code's meaning never changes once assigned. They are defi
 - Programs that run are compared with `.out` (stdout) and `.err` (stderr). A missing file means no output.
 - `basics/` holds the phase-1 tests. The `fNN_*.proviso` files are the §F acceptance counterexamples. They were written strictly to REFERENCE.md before the compiler existed, so they test the spec, not the implementation. Record spec gaps in OPEN_QUESTIONS §G rather than bending a test to fit the code.
 - If an active golden file uses a directive the runner doesn't support yet (`expect-report`, `expect-log`, `run`, `schedules`, `sig` from phase 4), the test fails instead of passing unchecked. Implement the directive before raising `IMPLEMENTED_PHASE` to that phase.
+
+## Tracking work
+
+- The roadmap is OPEN_QUESTIONS P3, and a phase's PRs are the slice table in `tests/golden/README.md`. Pending golden tests are what is left.
+- Design questions and spec gaps go in OPEN_QUESTIONS (§A–§D, §G, P5), never in issues, so they stay next to the spec they change.
+- Other work that outlives a session goes in a GitHub issue on magnord/proviso. Examples are a review finding left unfixed, a follow-up a PR defers, a commit no one reviewed, or a tooling or skill problem. Link the PR it came from, and close the issue from the PR that fixes it.
+- Ask the user before opening an issue.
