@@ -2047,6 +2047,12 @@ impl Checker<'_> {
             {
                 self.copying = copying;
                 let ty = match expected {
+                    // A `Never` argument may stand for a type argument not known yet, which
+                    // the value widens, as a variant's field does (OPEN_QUESTIONS P5).
+                    Some(expected) if expected.has_never_arg() => {
+                        let ty = self.expr(e, Some(expected));
+                        if diverges_ty(&ty) { ty } else { self.join_branch(expected, &ty, self.span(e)) }
+                    }
                     Some(expected) => self.check(e, expected),
                     None => self.infer(e),
                 };
@@ -2468,8 +2474,9 @@ impl Checker<'_> {
     }
 
     /// The type `e` has in any context, where that shows without checking it: a local, a
-    /// field of a record known so, a construction, `try` of one, or what a call returns
-    /// whose function or method isn't generic.
+    /// field of a record known so, a construction or variant of a type without type
+    /// parameters, `try` of one, or what a call returns whose function or method isn't
+    /// generic.
     fn static_ty(&self, e: ExprId) -> Option<Ty> {
         let m = self.m;
         let returned = |f: FnId| {
@@ -2478,6 +2485,12 @@ impl Checker<'_> {
         };
         match &m.exprs[e].kind {
             ExprKind::Name(name) => self.lookup_local(name.sym).map(|id| self.f.locals[id.index()].ty.clone()),
+            ExprKind::Field { base, name } | ExprKind::MethodCall { receiver: base, method: name, .. }
+                if let Some(id) = self.enum_named(*base) =>
+            {
+                let def = self.p.decls.adt(id);
+                (def.params == 0 && def.variant_named(m.text(name.sym)).is_some()).then(|| Ty::adt(id))
+            }
             ExprKind::Field { base, name } => {
                 let Ty::Adt(id, _) = self.static_ty(*base)? else { return None };
                 let def = self.p.decls.adt(id);
@@ -3466,9 +3479,14 @@ impl Checker<'_> {
             }
             (Mode::Value(expected), Some(branch)) => {
                 // The then-branch gives the else-branch its type, unless its type has a
-                // `Never` argument, as `Some(fail e)` does.
+                // `Never` argument, as `Some(fail e)` does. An expected type with one is known
+                // only in part, so the branches widen it, each from what the ones before gave.
+                let open = expected.is_some_and(Ty::has_never_arg);
                 let partial = then_ty.has_never_arg();
-                let expected = expected.or(Some(&then_ty).filter(|t| !t.is_unknown() && !partial));
+                let expected = match expected {
+                    Some(_) if open && !then_ty.is_unknown() => Some(&then_ty),
+                    _ => expected.or(Some(&then_ty).filter(|t| !t.is_unknown() && !partial)),
+                };
                 let else_ty = match branch {
                     ElseBranch::Block(block) => self.block_value(block, expected, copying),
                     ElseBranch::If(nested) => {
@@ -3483,16 +3501,15 @@ impl Checker<'_> {
                 if self.borrowed_tail(self.tail(then_block)) || self.borrowed_tail(else_tail) {
                     self.borrowed_values.insert(e);
                 }
+                let else_span = match branch {
+                    ElseBranch::Block(block) => block.span,
+                    ElseBranch::If(nested) => self.span(*nested),
+                };
                 match expected {
                     _ if then_ty == Ty::Never && else_ty == Ty::Never => Ty::Never,
+                    Some(_) if open => self.join_branch(&then_ty, &else_ty, else_span),
                     Some(expected) => expected.clone(),
-                    None if partial => {
-                        let span = match branch {
-                            ElseBranch::Block(block) => block.span,
-                            ElseBranch::If(nested) => self.span(*nested),
-                        };
-                        self.join_branch(&then_ty, &else_ty, span)
-                    }
+                    None if partial => self.join_branch(&then_ty, &else_ty, else_span),
                     None => else_ty,
                 }
             }
@@ -3715,7 +3732,10 @@ impl Checker<'_> {
                 Mode::Tail(ret) => self.block_stmt(&arm.body, Some(ret)),
                 Mode::Value(_) => {
                     let ty = self.block_value(&arm.body, expected.as_ref(), copying);
-                    if expected.is_none() && ty.has_never_arg() {
+                    // An arm widens an expected type known only in part for the arms after it.
+                    if expected.as_ref().is_some_and(Ty::has_never_arg) && !ty.is_unknown() {
+                        expected = Some(ty.clone());
+                    } else if expected.is_none() && ty.has_never_arg() {
                         partial.push((ty.clone(), arm.body.span));
                     } else if expected.is_none() && !ty.is_unknown() {
                         expected = Some(ty.clone());

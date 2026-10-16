@@ -22,7 +22,8 @@
 // have been meant as one, so either count of type arguments is accepted. A type given with
 // `::[…]` is fixed, so `Never` there is a type no value has. A call of a function whose
 // type parameters or constraints are rejected, or whose argument or expected type is
-// rejected, isn't reported again (§15.1).
+// rejected, isn't reported again (§15.1). The branches of an `if` widen a type argument
+// that `value_or` doesn't know yet, and a branch that can't is reported (P5).
 record Plain {
     n: Int
 }
@@ -62,6 +63,17 @@ fn is_some[T](o: Option[T]) -> Bool {
     return match o {
         Some(_) => true
         None => false
+    }
+}
+
+fn checked[T: Copy](x: T) -> Result[T, Text] {
+    return Ok(x)
+}
+
+fn value_or[T: Copy](r: Result[Option[T], Text], d: T) -> T {
+    return match r {
+        Ok(Some(v)) => v
+        _ => d
     }
 }
 
@@ -106,6 +118,7 @@ fn calls(sys: System, p: Plain) {
     shadows::[Text, Text]("s")                      // <- E0317
     let s = bounded::[Float, Float](x: 1.5, y: 2.5)
     let t = bounded(x: 1.5, y: 2.5)
+    let x = value_or(r: checked(if p.n > 0 { 1 } else { 2 }), d: 5)   // <- E0301, E0301
 }
 
 fn body[T, U: Show](x: T, y: U) -> Text {
