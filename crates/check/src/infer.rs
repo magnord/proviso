@@ -69,7 +69,7 @@ pub struct Vars {
     /// A type never changes, so a list keeps its shape, and the entry holds the list so its
     /// address isn't reused. A statement then walks only the parts of its types that are new,
     /// not the whole of a deep type it got from a local.
-    shapes: RefCell<HashMap<usize, (Arc<[Ty]>, Shape), BuildHasherDefault<AddressHasher>>>,
+    shapes: RefCell<Shapes>,
     /// What each bound variable stands for once nothing in it is open, by variable. A bound
     /// variable never changes, so a walk need not go through it again, and a chain of calls
     /// whose types hold the one before costs each call its own part only.
@@ -78,6 +78,8 @@ pub struct Vars {
     /// expressions around it that it gave a type.
     trail: Vec<u32>,
 }
+
+type Shapes = HashMap<usize, (Arc<[Ty]>, Shape), BuildHasherDefault<AddressHasher>>;
 
 /// Hashes an address with one multiply, which is all a key that is already unique needs.
 #[derive(Default)]
@@ -284,7 +286,14 @@ impl Vars {
                     open
                 }
             },
-            Ty::Adt(_, args) => args.iter().fold(false, |open, arg| self.open_part(arg, found) || open),
+            Ty::Adt(_, args) => {
+                // Every part is walked, also after one has an open variable, to find them all.
+                let mut open = false;
+                for arg in args.iter() {
+                    open |= self.open_part(arg, found);
+                }
+                open
+            }
             _ => false,
         }
     }
