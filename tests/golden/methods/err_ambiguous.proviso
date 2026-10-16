@@ -3,9 +3,9 @@
 // A method call resolves to exactly one method among the type's own and those of the
 // interfaces it implements (REFERENCE §3). When two interfaces give it one name, the call
 // is ambiguous, also on a type parameter, and `I.f(x)` picks one. A type can't have a
-// method of its own with the name of a method of an interface it implements, whether the
-// interface is implemented by hand or derived. Calls of that name then take the
-// interface's method, and aren't reported again (§15.1).
+// method of its own, declared or built in, with the name of a method of an interface it
+// implements, whether the interface is implemented by hand or derived. Calls of that name
+// aren't reported again (§15.1), whichever method they match.
 interface Front {
     fn label(self) -> Text
 }
@@ -21,6 +21,14 @@ record Card {
 
 record Tag derives(Show) {
     n: Int
+}
+
+record Badge derives(Show) {
+    n: Int
+}
+
+interface Measured {
+    fn byte_len(self) -> Int
 }
 
 impl Front for Card {
@@ -55,15 +63,28 @@ impl Tag {
     }
 }
 
+impl Badge {
+    fn show(self, prefix: Text) -> Text {           // <- E0212
+        return prefix
+    }
+}
+
+impl Measured for Text {
+    fn byte_len(self) -> Int {                      // <- E0212
+        return 0
+    }
+}
+
 fn generic[T: Front + Back](x: T) -> Text {
     let a = x.label()                               // <- E0212
     return Front.label(x)
 }
 
-fn calls(c: Card, t: Tag) -> Text {
+fn calls(c: Card, t: Tag, g: Badge) -> Text {
     let a = c.label()                               // <- E0212
     let b = Front.label(c)
     let w = c.weight() + c.name().byte_len()
-    let s = t.show()
+    let s = t.show() + g.show(prefix: "badge")
+    let n = "abc".byte_len() + Measured.byte_len("abc")
     return Back.label(c)
 }

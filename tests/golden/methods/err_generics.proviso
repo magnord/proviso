@@ -9,6 +9,7 @@
 // expect-error: E0307
 // expect-error: E0309
 // expect-error: E0312
+// expect-error: E0317
 // A call infers each type parameter from the expected type and the arguments, or takes it
 // from `::[…]`, which gives each parameter once (REFERENCE §4.8). Every argument for one
 // parameter has its type, and that type implements the parameter's constraints. `Float` has
@@ -57,9 +58,9 @@ fn calls(sys: System, p: Plain) {
     let f: Int8 = keep_one(300)                     // <- E0302
     let g = nothing()                               // <- E0312
     let h: Option[Text] = nothing()
-    let i = nothing::[Int, Text]()                  // <- E0307
+    let i = nothing::[Int, Text]()                  // <- E0317
     let j = tell::[Text](5)                         // <- E0301
-    let k = p.n.show::[Int]()                       // <- E0307
+    let k = p.n.show::[Int]()                       // <- E0317
     let l = same::[Int](a: 1, b: 2)
 }
 

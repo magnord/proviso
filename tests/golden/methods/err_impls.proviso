@@ -1,17 +1,17 @@
 // phase: 2.4
-// expect-error: E0303
+// expect-error: E0301
 // expect-error: E0307
 // expect-error: E0313
 // expect-error: E0314
 // expect-error: E0315
 // expect-error: E0316
 // An `impl I for T` gives `T` exactly the methods `I` declares, each with the same receiver,
-// parameters, return type and `fails`, reading `Self` as `T` (REFERENCE §4.9). A type
-// implements an interface once, by `derives` or by one `impl`. An `impl` lives in the module
-// of the interface or of the type, so this module can't implement the prelude's `Show` for
-// `Int`. `Copy` holds by itself and can't be implemented by hand (§5.1). A type with a
-// rejected `impl` still implements its interface, so calls of its methods aren't reported
-// again (§15.1).
+// parameters and their modes, return type and `fails`, reading `Self` as `T` (REFERENCE
+// §4.9). A type implements an interface once, by `derives` or by one `impl`. An `impl` lives
+// in the module of the interface or of the type, so this module can't implement the
+// prelude's `Show` for `Int`. `Copy` holds by itself and can't be implemented by hand (§5.1).
+// A type with a rejected `impl` still implements its interface, so calls of its methods
+// aren't reported again (§15.1). The bodies of a rejected `impl` are still checked.
 interface Shape {
     fn area(self) -> Int
     fn same(self, other: Self) -> Bool
@@ -19,6 +19,10 @@ interface Shape {
 
 interface Load {
     fn load(self, n: Int) -> Int fails Text
+}
+
+interface Run {
+    fn run(self, sys: keep System) -> Int
 }
 
 record Square {
@@ -49,7 +53,7 @@ impl Shape for Square {
 
 impl Shape for Square {                             // <- E0313
     fn area(self) -> Int {
-        return 0
+        return "zero"                               // <- E0301
     }
 
     fn same(self, other: Self) -> Bool {
@@ -84,20 +88,32 @@ impl Load for Circle {
         return 0
     }
 
-    fn extra(self) -> Int {                         // <- E0303
+    fn extra(self) -> Int {                         // <- E0314
         return 1
+    }
+}
+
+impl Run for Square {
+    fn run(self, sys: keep System) -> Int {
+        return 1
+    }
+}
+
+impl Run for Circle {
+    fn run(self, sys: System) -> Int {              // <- E0314
+        return 2
     }
 }
 
 impl Show for Blob {                                // <- E0313
     fn show(self) -> Text {
-        return "blob"
+        return 0                                    // <- E0301
     }
 }
 
 impl Show for Int {                                 // <- E0315
     fn show(self) -> Text {
-        return "int"
+        return self                                 // <- E0301
     }
 }
 

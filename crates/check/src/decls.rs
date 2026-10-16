@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use proviso_syntax::ast::ExprId;
+use proviso_syntax::ast::{ExprId, ParamMode};
 
 use crate::types::{FloatTy, IntTy, Ty};
 
@@ -56,6 +56,13 @@ impl IfaceId {
     pub fn derivable(self) -> bool {
         matches!(self, IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW | IfaceId::HASH)
     }
+
+    /// Whether it is a prelude interface whose methods come later: `Abandon`, whose `abandon`
+    /// takes `take self` (STD.md), and `Index` and the operator interfaces, whose methods
+    /// STD.md doesn't declare yet.
+    pub fn methods_later(self) -> bool {
+        (6..13).contains(&self.0)
+    }
 }
 
 /// An interface's declaration.
@@ -79,6 +86,8 @@ pub struct IfaceMethod {
     pub name: Box<str>,
     /// The parameters after `self`.
     pub params: Vec<(Box<str>, Ty)>,
+    /// The mode of each parameter in `params`, which an implementation must repeat.
+    pub modes: Vec<ParamMode>,
     pub ret: Ty,
     pub fails: Option<Ty>,
 }
@@ -311,6 +320,7 @@ impl Default for Decls {
         // `Ord`'s `cmp` returns an `Ordering`, which comes later, so its calls are rejected.
         let method = |name: &str, params: Vec<(&str, Ty)>, ret: Ty| IfaceMethod {
             name: name.into(),
+            modes: vec![ParamMode::Borrow; params.len()],
             params: params.into_iter().map(|(n, t)| (n.into(), t)).collect(),
             ret,
             fails: None,
@@ -408,6 +418,15 @@ impl Decls {
     pub fn unknown_methods(&self, ty: &Ty) -> bool {
         match ty {
             Ty::Adt(id, _) => self.adt(*id).unknown_methods,
+            ty => ImplKey::of(ty).is_some_and(|key| self.unknown.contains(&key)),
+        }
+    }
+
+    /// Whether a rejected `impl` block or `derives` entry may have given `ty` interfaces that
+    /// nothing records, so that [`Decls::implements`] answers yes for every interface.
+    pub fn unknown_interfaces(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Adt(id, _) => self.adt(*id).unknown_interfaces,
             ty => ImplKey::of(ty).is_some_and(|key| self.unknown.contains(&key)),
         }
     }

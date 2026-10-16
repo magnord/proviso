@@ -10,9 +10,10 @@
 // §3). A type has one method of each name across its `impl` blocks. `self` exists only in
 // a method, and `Self` only in an `impl` block or an interface. An `impl` without an
 // interface belongs to a record or enum of the module, not to a prelude type such as `Int`
-// (§4.9). The methods of a rejected `impl` aren't reported again where they are called
-// (§15.1). An `attempt` whose chain calls methods that fail with different types is an
-// error until §G decides its error type (OPEN_QUESTIONS P5).
+// (§4.9). The methods of a rejected `impl` aren't reported again where they are called, and
+// a call of a name declared twice may mean either declaration (§15.1). The bodies of a
+// rejected `impl` are still checked. An `attempt` whose chain calls methods that fail with
+// different types is an error until §G decides its error type (OPEN_QUESTIONS P5).
 record Span {
     lo: Int
     hi: Int
@@ -26,11 +27,19 @@ impl Span {
     fn point(at: Int) -> Span {
         return Span(lo: at, hi: at + 1)
     }
+
+    fn single() -> Span {
+        return Span(lo: 0, hi: 1)
+    }
 }
 
 impl Span {
-    fn width(self) -> Int {                         // <- E0210
-        return 0
+    fn width(self, scale: Int) -> Int {             // <- E0210
+        return scale
+    }
+
+    fn single(at: Int) -> Span {                    // <- E0210
+        return Span(lo: at, hi: at + 1)
     }
 
     fn len(self) -> Int {
@@ -40,17 +49,17 @@ impl Span {
 
 impl Int {                                          // <- E0315
     fn double(self) -> Int {
-        return self * 2
+        return self * "2"                           // <- E0301
     }
 }
 
 fn calls(s: Span, n: Int) -> Int {
     let a = s.height()                              // <- E0303
-    let b = Span.width(s)                           // <- E0303
+    let b = Span.len(s)                             // <- E0303
     let c = s.point(at: 1)                          // <- E0303
     let d = Span.missing()                          // <- E0303
-    let e = s.width(1)                              // <- E0208
-    let f = n.double() + s.len()
+    let e = s.len(1)                                // <- E0208
+    let f = n.double() + s.width(scale: 2) + Span.single(at: 3).lo
     return self.lo                                  // <- E0201
 }
 

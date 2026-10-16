@@ -2,7 +2,8 @@
 // expect-error: E0211
 // A `pub` method, interface or function may not mention a less visible type in its
 // signature, and a `pub` function's constraints may not name a less visible interface
-// (REFERENCE §3).
+// (REFERENCE §3). A method is visible no further than its type, so a `pub` method of a
+// private record may mention what the record may.
 record Secret {
     n: Int
 }
@@ -21,6 +22,38 @@ impl Open {
     }
 
     fn private_reveal(self) -> Secret {
+        return Secret(n: self.n)
+    }
+}
+
+record Inner {
+    n: Int
+}
+
+impl Inner {
+    pub fn again(self) -> Inner {
+        return self
+    }
+
+    pub fn me(self) -> Self {
+        return self
+    }
+
+    pub fn secret(self) -> Secret {
+        return Secret(n: self.n)
+    }
+}
+
+pub(pkg) record Middle {
+    n: Int
+}
+
+impl Middle {
+    pub fn again(self) -> Middle {
+        return self
+    }
+
+    pub fn secret(self) -> Secret {                 // <- E0211
         return Secret(n: self.n)
     }
 }

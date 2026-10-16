@@ -4,9 +4,13 @@
 // for generic types such as `Option[Int]`, a hand-written `Ord`, `Hash` or `Abandon`, `cmp`,
 // interface functions without `self`, generic interface methods, generic interfaces such
 // as `Index[Int]`, tag parameters, `Self` in expressions and patterns, and functions used
-// as values, such as `id::[Int]` without a call, come later. Uses of what they declare
-// aren't reported again (REFERENCE §15.1), and an `impl` may declare the methods its
-// interface couldn't.
+// as values, such as `id::[Int]` without a call, come later. So do `take` and `inout`
+// parameters, implementations for `Never` and for capability types such as `Out`,
+// capability interfaces in an `impl`, a constraint or a call, and calls of the methods of
+// `Abandon`, `Index` and the operator interfaces. Uses of what they declare aren't reported
+// again (REFERENCE §15.1), and an `impl` may declare the methods its interface couldn't.
+use std.io { IoError, Out }
+
 record Counter {
     n: Int
 }
@@ -71,6 +75,41 @@ fn id[T: Copy](x: T) -> T {
     return x
 }
 
+interface Greet {
+    fn greet(self) -> Text
+}
+
+impl Greet for Never {                              // <- E0901
+    fn greet(self) -> Text {
+        return "never"
+    }
+}
+
+impl Greet for Out {                                // <- E0901
+    fn greet(self) -> Text {
+        return "out"
+    }
+}
+
+impl Out for Counter {                              // <- E0901
+    fn write_line(self, text: Text) fails IoError {
+    }
+}
+
+fn logged[T: Out](x: T) -> Int {                    // <- E0901
+    return 0
+}
+
+fn consume[T](x: take T) -> T {                     // <- E0901
+    let y = x
+    return y
+}
+
+fn update[T](x: inout T) -> T {                     // <- E0901
+    let y = x
+    return y
+}
+
 impl Size for Option[Int] {                         // <- E0901
     fn size(self) -> Int {
         return 1
@@ -112,4 +151,16 @@ fn calls(c: Counter, o: Option[Int], p: Pair) -> Int {
     let i = c.get(i: 0) + first(x: c) + scaled(x: 1) + id(x: 2)
     let j = c.empty() or c.zeroed()
     return e
+}
+
+fn greeting[T: Greet](x: T) -> Text {
+    return x.greet()
+}
+
+fn spellings(c: Counter, n: Never, sys: keep System) -> Text {
+    Out.write_line(c, "hi")                         // <- E0901
+    Abandon.abandon(c)                              // <- E0901
+    let negated = Neg.neg(c)                        // <- E0901
+    let greeted = greeting(x: sys.stdout)
+    return f"{n.greet()} {sys.stdout.greet()}"
 }

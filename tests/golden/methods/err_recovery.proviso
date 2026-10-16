@@ -36,6 +36,8 @@ impl Box {
 
 impl Box { fn c(self) -> Int }                              // <- E0101
 
+impl Box { fn e(self) -> Int { return 5 } fn f(self) -> Int { return 6 } }  // <- E0101
+
 impl Box {
     fn d(self, x: Int                                       // <- E0101
 }
@@ -76,7 +78,7 @@ pub(pkg record Thing {                                      // <- E0101
 
 fn calls(b: Box, c: Crate, t: Thing) -> Int {
     let shape = b.area() + b.sides()
-    let own = b.a() + b.b() + b.c() + b.d(x: 1)
+    let own = b.a() + b.b() + b.c() + b.d(x: 1) + b.e() + b.f()
     let ifaces = b.one() + b.two() + b.width(x: 2)
     return shape + own + ifaces + c.get() + helper() + t.n
 }
