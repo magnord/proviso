@@ -55,7 +55,7 @@ fn literals(c: Bool, small: Int8) -> Text {
     let b7 = if c { (1, None) } else { (small, Some(small)) }
     let b8 = if c { (small, Some(small)) } else { (1, None) }
     let b9 = if c { (small, None) } else { (1, Some(1)) }
-    return f"{int8(b1) + int8(b2) + int8(b3) + int8(b4)} {opt8(b5)} {opt8(b6)} {pair8(b7)} {pair8(b8)} {pair8(b9)}"
+    return f"{int8(b1) + int8(b2) + int8(b3) + int8(b4)} {opt8(b5)} {opt8(b6)} {pair8(b7)} {pair8(b8)} {b9}"
 }
 
 fn nevers(c: Bool) -> Text fails Text {

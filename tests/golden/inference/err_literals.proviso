@@ -1,5 +1,6 @@
 // phase: 2.5
-// expect-error: E0301, E0302
+// expect-error: E0301
+// expect-error: E0302
 // A literal takes the type of whatever it meets, in any order and at any depth (REFERENCE
 // §2; OPEN_QUESTIONS P5; issue #10). So `300` that meets `small` doesn't fit `Int8`
 // (E0302) in each rewrite, where reading it as an `Int` first would report E0301 instead.

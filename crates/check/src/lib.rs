@@ -9,6 +9,7 @@
 
 pub mod decls;
 pub mod exhaust;
+pub mod infer;
 pub mod types;
 
 use std::collections::hash_map::Entry;
@@ -25,6 +26,7 @@ use crate::decls::{
     Pred, VariantDef, VariantIdx,
 };
 use crate::exhaust::{Ctor, Space};
+use crate::infer::{Kind, Origin, Vars};
 use crate::types::{FloatTy, IntTy, Ty};
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -242,6 +244,9 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         its: Vec::new(),
         option_fallbacks: 0,
         borrowed_values: HashSet::new(),
+        vars: Vars::default(),
+        pending: Vec::new(),
+        typed: Vec::new(),
     };
     checker.imports();
     checker.adt_names();
@@ -444,6 +449,28 @@ struct Checker<'a> {
     /// The `if` and `match` expressions whose value may be a borrowed value, because a
     /// branch's value may be.
     borrowed_values: HashSet<ExprId>,
+    /// The inference variables of the body being checked (OPEN_QUESTIONS P5; issue #10).
+    vars: Vars,
+    /// Checks that wait until the variables they read are solved.
+    pending: Vec<Pending>,
+    /// The expressions whose recorded type has a variable, which the side table gets
+    /// without once the body is checked.
+    typed: Vec<ExprId>,
+}
+
+/// A check on a type with a variable in it, made once the statement has solved it.
+enum Pending {
+    /// An integer literal of `magnitude`, negated or not, that must fit its type.
+    Int { ty: Ty, magnitude: u128, negative: bool, span: Span },
+    /// A float literal that must be finite in its type.
+    Float { ty: Ty, lit: ExprId },
+    /// A type argument of a call of `callee` that must implement `iface`, which the
+    /// callee's parameter `param` is constrained by.
+    Bound { ty: Ty, iface: IfaceId, callee: Box<str>, param: Box<str>, span: Span },
+    /// The operand of unary `-`, which must be a signed integer or a float.
+    Neg { ty: Ty, span: Span },
+    /// The operands of arithmetic operator `op`.
+    Arith { op: BinOp, ty: Ty, span: Span },
 }
 
 impl Checker<'_> {
@@ -459,19 +486,160 @@ impl Checker<'_> {
         self.m.exprs[e].span
     }
 
-    /// How diagnostics write `ty`.
-    fn show<'s>(&'s self, ty: &'s Ty) -> impl std::fmt::Display + 's {
-        self.p.decls.display_in(ty, &self.param_names)
+    /// How diagnostics write `ty`. A literal's type that nothing has settled yet is written
+    /// as its default, and a type argument that nothing has given yet as `_` (issue #22).
+    fn show(&self, ty: &Ty) -> String {
+        self.p.decls.display_in(&self.vars.defaulted(ty), &self.param_names).to_string()
     }
 
     /// Whether `ty` implements `iface`, where a type parameter implements its constraints.
     fn implements(&self, ty: &Ty, iface: IfaceId) -> bool {
-        self.p.decls.implements(ty, iface, &self.f.bounds) || self.unknown_tys.contains(ty)
+        let ty = self.vars.defaulted(ty);
+        self.p.decls.implements(&ty, iface, &self.f.bounds) || self.unknown_tys.contains(&ty)
     }
 
     /// Whether a rejected declaration may have given `ty` interfaces that nothing records.
     fn unknown_interfaces(&self, ty: &Ty) -> bool {
-        self.p.decls.unknown_interfaces(ty) || self.unknown_tys.contains(ty)
+        let ty = self.vars.resolve(ty);
+        self.p.decls.unknown_interfaces(&ty) || self.unknown_tys.contains(&ty)
+    }
+
+    // ---- inference variables (OPEN_QUESTIONS P5; issue #10) ----
+
+    /// Settles the open variables made since `vars`, and runs the checks queued since
+    /// `pending`, which wait on them. An integer literal's variable becomes `Int`, a float
+    /// literal's `Float`, and one that only `Never` reached `Never` (REFERENCE §2). Any other
+    /// is a type argument that nothing gave, which is reported once (E0312).
+    fn solve(&mut self, vars: u32, pending: usize) {
+        let open: Vec<u32> = (vars..self.vars.count()).filter(|&v| self.vars.root(v) == v).collect();
+        self.settle_vars(open);
+        let checks = self.pending.split_off(pending.min(self.pending.len()));
+        for check in checks {
+            self.run_pending(check);
+        }
+    }
+
+    /// Settles the open variables in `ty` as [`Checker::solve`] does, where its type must be
+    /// known now: a binding's, a receiver's, or what a pattern or `Show` reads.
+    fn force(&mut self, ty: &Ty) -> Ty {
+        let mut open = Vec::new();
+        self.vars.open_in(ty, &mut open);
+        self.settle_vars(open);
+        self.vars.zonk(ty)
+    }
+
+    fn settle_vars(&mut self, vars: Vec<u32>) {
+        let mut unknown: Vec<Origin> = Vec::new();
+        for v in vars {
+            let Some(open) = self.vars.open(v).cloned() else { continue };
+            let ty = match open.kind {
+                Kind::Int => Ty::INT,
+                Kind::Float => Ty::Float(FloatTy::F64),
+                Kind::Any if open.never => Ty::Never,
+                Kind::Any => {
+                    unknown.push(open.origin);
+                    Ty::Error
+                }
+            };
+            self.vars.settle(v, ty);
+        }
+        // The type arguments of one variant or call that nothing gave make one error.
+        let mut reported: Vec<Span> = Vec::new();
+        for origin in &unknown {
+            let message = match *origin {
+                Origin::Variant { span, .. } | Origin::Call { span, .. } if reported.contains(&span) => continue,
+                Origin::Variant { adt, span } => {
+                    let name = self.p.decls.adt(adt).name.clone();
+                    let count =
+                        unknown.iter().filter(|o| matches!(o, Origin::Variant { span: s, .. } if *s == span)).count();
+                    let noun = if count == 1 { "type argument" } else { "type arguments" };
+                    reported.push(span);
+                    (
+                        span,
+                        format!(
+                            "the {noun} of this `{name}` can't be inferred; give the binding a type, such as `{}`",
+                            example_type(&name)
+                        ),
+                    )
+                }
+                Origin::Call { f, span, .. } => {
+                    let info = &self.p.fns[f];
+                    let name = self.m.text(info.name);
+                    let missing: Vec<String> = (unknown.iter())
+                        .filter_map(|o| match o {
+                            Origin::Call { param, span: s, .. } if *s == span => {
+                                Some(format!("`{}`", info.generics[*param].name))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let noun = if missing.len() == 1 { "type argument" } else { "type arguments" };
+                    reported.push(span);
+                    (
+                        span,
+                        format!(
+                            "the {noun} {} of `{name}` can't be inferred; give the binding a type, or write `{name}::[…](…)`",
+                            missing.join(", ")
+                        ),
+                    )
+                }
+                Origin::Defaulted => continue,
+            };
+            self.error(codes::CANNOT_INFER, message.0, message.1);
+        }
+    }
+
+    fn run_pending(&mut self, check: Pending) {
+        match check {
+            Pending::Int { ty, magnitude, negative, span } => {
+                if let Ty::Int(it) = self.vars.zonk(&ty) {
+                    self.int_range(it, magnitude, negative, span);
+                }
+            }
+            Pending::Float { ty, lit } => {
+                if let (Ty::Float(ft), ExprKind::Float(text)) = (self.vars.zonk(&ty), &self.m.exprs[lit].kind)
+                    && !ft.holds(text)
+                {
+                    let span = self.span(lit);
+                    self.error(codes::LITERAL_OUT_OF_RANGE, span, format!("`{text}` is too large for `{}`", ft.name()));
+                }
+            }
+            Pending::Bound { ty, iface, callee, param, span } => {
+                let ty = self.vars.zonk(&ty);
+                if !ty.is_unknown() && !self.vars.has_open(&ty) && !self.implements(&ty, iface) {
+                    let message = format!(
+                        "`{}` does not implement `{}`, which `{callee}` needs of `{param}`",
+                        self.show(&ty),
+                        self.iface_name(iface)
+                    );
+                    self.error(codes::MISSING_IMPLEMENTATION, span, message);
+                }
+            }
+            Pending::Neg { ty, span } => {
+                let ty = self.vars.zonk(&ty);
+                self.negated(&ty, span);
+            }
+            Pending::Arith { op, ty, span } => {
+                let ty = self.vars.zonk(&ty);
+                self.arithmetic(op, &ty, span);
+            }
+        }
+    }
+
+    /// Solves what a body, refinement or example left open, and writes the side table
+    /// without variables, so the interpreter never sees one.
+    fn settle(&mut self) {
+        self.solve(0, 0);
+        for e in std::mem::take(&mut self.typed) {
+            if let Some(ty) = self.p.expr_ty.get(e) {
+                let ty = self.vars.zonk(ty);
+                self.p.expr_ty.insert(e, ty);
+            }
+        }
+        for local in &mut self.f.locals {
+            local.ty = self.vars.zonk(&local.ty);
+        }
+        self.vars.clear();
     }
 
     fn iface_name(&self, iface: IfaceId) -> &str {
@@ -964,6 +1132,7 @@ impl Checker<'_> {
                     if let Some(expr) = field.refinement {
                         self.f.scopes = vec![vec![(field.name.sym, LocalId(i as u32))]];
                         self.check(expr, &Ty::Bool);
+                        self.settle();
                         preds.push(Pred { expr, field: Some(FieldIdx(i as u32)) });
                     }
                 }
@@ -971,6 +1140,7 @@ impl Checker<'_> {
                     let all = kept.iter().enumerate().map(|(i, f)| (f.name.sym, LocalId(i as u32)));
                     self.f.scopes = vec![all.collect()];
                     self.check(expr, &Ty::Bool);
+                    self.settle();
                     preds.push(Pred { expr, field: None });
                 }
                 let variant = &mut self.p.decls.adt_mut(id).variants[v];
@@ -1780,6 +1950,7 @@ impl Checker<'_> {
             self.shadows_item(param.name);
         }
         self.fn_body(decl, body);
+        self.settle();
         self.p.fns[id].locals = self.f.locals.len();
         self.generic_scope.clear();
         self.param_names.clear();
@@ -1805,90 +1976,63 @@ impl Checker<'_> {
                 self.error(codes::UNEXPECTED_TOKEN, span, message);
                 continue;
             }
-            // `call == v` reads its operands as `==` does, so the one that says more about its
-            // type is checked first and gives the other its type (OPEN_QUESTIONS P5).
-            let mut given = match &decl.expect {
-                Expectation::Equals(value) if self.context_rank(decl.call) > self.context_rank(*value) => {
-                    Some(self.infer(*value))
-                }
-                _ => None,
-            };
-            let hint = given.as_ref().filter(|ty| ty.is_numeric() || matches!(ty, Ty::Adt(..)));
-            self.markers.push(Marker { handler: Some(decl.call), errors: Vec::new() });
-            self.in_chain = true;
-            let ty = self.expr(decl.call, hint);
-            let mut errors: Vec<Ty> = Vec::new();
-            for err in self.markers.pop().map(|m| m.errors).unwrap_or_default() {
-                if !errors.contains(&err) {
-                    errors.push(err);
-                }
-            }
-            let span = self.span(decl.call);
-            let err = match errors.as_slice() {
-                [] => None,
-                [err] => Some(err.clone()),
-                _ if errors.contains(&Ty::Error) => Some(Ty::Error),
-                [first, second, ..] => {
-                    let message = format!(
-                        "the calls this example marks fail with `{}` and `{}`, but an example expects one error type",
-                        self.show(first),
-                        self.show(second)
-                    );
-                    self.error(codes::TYPE_MISMATCH, span, message);
-                    Some(Ty::Error)
-                }
-            };
-            match &decl.expect {
-                Expectation::Equals(value) => {
-                    // A call that was rejected has nothing to compare with (§15.1).
-                    if ty == Ty::Error {
-                        if given.is_none() {
-                            self.infer(*value);
-                        }
-                        self.p.examples.push(ExampleInfo { item: index, locals: self.f.locals.len() });
-                        continue;
-                    }
-                    // The type compared is the two operands' join, which a `Never` part of
-                    // either may widen, as for `==` (§12.2).
-                    let value_ty = match given.take() {
-                        Some(given) => given,
-                        None => {
-                            // As in `operands`, the call gives the value its type.
-                            let hint = (ty.is_numeric() || matches!(ty, Ty::Adt(..))).then_some(&ty);
-                            self.expr(*value, hint)
-                        }
-                    };
-                    let ty = match value_ty.join(&ty) {
-                        Some(joined) => joined,
-                        None => {
-                            let message = format!("expected `{}`, found `{}`", self.show(&ty), self.show(&value_ty));
-                            self.error(codes::TYPE_MISMATCH, self.span(*value), message);
-                            Ty::Error
-                        }
-                    };
-                    let defined = matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::EQ);
-                    if !defined && !ty.is_unknown() {
-                        let message =
-                            format!("`==` is not defined for `{}`, so an example can't compare it", self.show(&ty));
-                        let at = span.to(self.span(*value));
-                        self.error(codes::UNSUPPORTED_OPERATOR, at, message);
-                    }
-                }
-                Expectation::Fails(pat) => {
-                    let err = match err {
-                        Some(err) => err,
-                        None => {
-                            if !ty.is_unknown() {
-                                let message = "`fails` needs a call that can fail, and this one can't";
-                                self.error(codes::EXAMPLE_CANNOT_FAIL, span, message);
-                            }
-                            Ty::Error
-                        }
-                    };
-                    self.pattern(*pat, &err);
-                }
-            }
+            self.example(decl);
+            self.settle();
             self.p.examples.push(ExampleInfo { item: index, locals: self.f.locals.len() });
+        }
+    }
+
+    /// Checks one example. `call == v` reads its operands as `==` does, so either may give
+    /// the other its type (OPEN_QUESTIONS P5; issue #10).
+    fn example(&mut self, decl: &ExampleDecl) {
+        self.markers.push(Marker { handler: Some(decl.call), errors: Vec::new() });
+        self.in_chain = true;
+        let ty = self.expr(decl.call, None);
+        let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
+        let span = self.span(decl.call);
+        let err = self.one_error(errors, span, "example", "an example expects one error type");
+        match &decl.expect {
+            Expectation::Equals(value) => {
+                // A call that was rejected has nothing to compare with (§15.1).
+                if ty == Ty::Error {
+                    self.infer(*value);
+                    return;
+                }
+                // As in `operands`, the call gives the value what it knows of its type, and the
+                // type compared is their join, which a `Never` part of either may widen (§12.2).
+                let hint = (ty.is_numeric() || matches!(ty, Ty::Adt(..) | Ty::Var(_))).then_some(&ty);
+                let value_ty = self.expr(*value, hint);
+                let ty = match self.vars.join(&value_ty, &ty) {
+                    Some(joined) => self.force(&joined),
+                    None => {
+                        let message = format!("expected `{}`, found `{}`", self.show(&ty), self.show(&value_ty));
+                        self.error(codes::TYPE_MISMATCH, self.span(*value), message);
+                        self.vars.poison(&ty);
+                        self.vars.poison(&value_ty);
+                        Ty::Error
+                    }
+                };
+                let defined = matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::EQ);
+                if !defined && !ty.is_unknown() {
+                    let message =
+                        format!("`==` is not defined for `{}`, so an example can't compare it", self.show(&ty));
+                    let at = span.to(self.span(*value));
+                    self.error(codes::UNSUPPORTED_OPERATOR, at, message);
+                }
+            }
+            Expectation::Fails(pat) => {
+                let err = match err {
+                    Some(err) => self.force(&err),
+                    None => {
+                        if !ty.is_unknown() {
+                            let message = "`fails` needs a call that can fail, and this one can't";
+                            self.error(codes::EXAMPLE_CANNOT_FAIL, span, message);
+                        }
+                        Ty::Error
+                    }
+                };
+                self.pattern(*pat, &err);
+            }
         }
     }
 
@@ -2025,8 +2169,16 @@ impl Checker<'_> {
 
     // ---- statements ----
 
-    /// Checks a statement and returns whether it always diverges.
+    /// Checks a statement and returns whether it always diverges. What it leaves open is
+    /// solved at its end, since nothing after it can give it (OPEN_QUESTIONS P5).
     fn stmt(&mut self, s: StmtId) -> bool {
+        let (vars, pending) = (self.vars.count(), self.pending.len());
+        let diverges = self.stmt_kind(s);
+        self.solve(vars, pending);
+        diverges
+    }
+
+    fn stmt_kind(&mut self, s: StmtId) -> bool {
         let m = self.m;
         let stmt = &m.stmts[s];
         match &stmt.kind {
@@ -2041,8 +2193,11 @@ impl Checker<'_> {
                         let init_ty = self.check(*init, &declared);
                         (declared, init_ty)
                     }
+                    // The binding has its value's type, so a later use doesn't give it, and
+                    // `let x = None` is an error (OPEN_QUESTIONS P5).
                     None => {
                         let ty = self.infer(*init);
+                        let ty = self.force(&ty);
                         (ty.clone(), ty)
                     }
                 };
@@ -2075,7 +2230,10 @@ impl Checker<'_> {
                 false
             }
             StmtKind::Assign { target, op, value } => diverges_ty(&self.assign(*target, *op, *value)),
-            StmtKind::Expr(e) => diverges_ty(&self.expr_stmt(*e)),
+            StmtKind::Expr(e) => {
+                let ty = self.expr_stmt(*e);
+                diverges_ty(&self.force(&ty))
+            }
             StmtKind::Return(value) if !self.f.returns => {
                 if let Some(value) = value {
                     self.infer(*value);
@@ -2317,13 +2475,7 @@ impl Checker<'_> {
                 }
                 let ty = match expected {
                     Some(_) if missing => self.expr(e, expected),
-                    // A `Never` argument may stand for a type argument not known yet, which
-                    // the value widens, as a variant's field does (OPEN_QUESTIONS P5).
-                    Some(expected) if expected.has_never_arg() => {
-                        let ty = self.expr(e, Some(expected));
-                        if diverges_ty(&ty) { ty } else { self.join_branch(expected, &ty, self.span(e)) }
-                    }
-                    Some(expected) => self.check(e, expected),
+                    Some(expected) => self.joined(e, expected),
                     None => self.infer(e),
                 };
                 diverges |= diverges_ty(&ty);
@@ -2363,22 +2515,33 @@ impl Checker<'_> {
     /// Checks `e` against `expected`, reports a mismatch, and returns the actual type.
     fn check(&mut self, e: ExprId, expected: &Ty) -> Ty {
         let actual = self.expr(e, Some(expected));
-        if !expected.accepts(&actual) {
+        if !self.vars.subsume(expected, &actual) {
             let span = self.span(e);
             let message = format!("expected `{}`, found `{}`", self.show(expected), self.show(&actual));
             self.error(codes::TYPE_MISMATCH, span, message);
+            // What the value leaves open has no other way to be given (§15.1).
+            self.vars.poison(&actual);
         }
-        actual
+        self.vars.resolve(&actual)
     }
 
-    /// Infers the type of `e`. `expected` guides literals and `if` branches, but mismatches
-    /// against it are reported by [`Checker::check`].
+    /// Infers the type of `e`. `expected` guides literals, variants, calls and branches, but
+    /// mismatches against it are reported by [`Checker::check`]. A `Never` in it stands for
+    /// a type the value may widen, as a field widens it (OPEN_QUESTIONS P5).
     fn expr(&mut self, e: ExprId, expected: Option<&Ty>) -> Ty {
         let chain = std::mem::replace(&mut self.in_chain, false);
         let copying = std::mem::replace(&mut self.copying, false);
-        let ty = self.expr_kind(e, expected, chain, copying);
+        let expected = expected.map(|ty| {
+            let ty = self.vars.resolve(ty);
+            if mentions_never(&ty) { self.vars.open_nevers(&ty) } else { ty }
+        });
+        let ty = self.expr_kind(e, expected.as_ref(), chain, copying);
+        let ty = self.vars.resolve(&ty);
         if copying {
             self.copied(e, &ty);
+        }
+        if self.vars.count() > 0 && has_var(&ty) {
+            self.typed.push(e);
         }
         self.p.expr_ty.insert(e, ty.clone());
         ty
@@ -2392,6 +2555,7 @@ impl Checker<'_> {
         if self.f.bounds.is_empty() || !self.borrowed_place(e) {
             return;
         }
+        let ty = &self.vars.zonk(ty);
         let Some(param) = self.uncopyable(ty) else { return };
         let message = match self.f.anonymous.get(param as usize).cloned().flatten() {
             Some((name, iface)) => format!(
@@ -2461,6 +2625,19 @@ impl Checker<'_> {
             ExprKind::Float(text) => {
                 let ft = match expected {
                     Some(Ty::Float(ft)) => *ft,
+                    Some(Ty::Var(v)) if self.vars.open(*v).is_some_and(|open| open.kind != Kind::Int) => {
+                        let ty = match self.vars.open(*v).map(|open| open.kind) {
+                            Some(Kind::Float) => Ty::Var(*v),
+                            _ => self.vars.fresh(Kind::Float, Origin::Defaulted),
+                        };
+                        self.pending.push(Pending::Float { ty: ty.clone(), lit: e });
+                        return ty;
+                    }
+                    None => {
+                        let ty = self.vars.fresh(Kind::Float, Origin::Defaulted);
+                        self.pending.push(Pending::Float { ty: ty.clone(), lit: e });
+                        return ty;
+                    }
                     _ => FloatTy::F64,
                 };
                 if !ft.holds(text) {
@@ -2476,6 +2653,7 @@ impl Checker<'_> {
                 for part in parts {
                     if let FTextPart::Expr(x) = part {
                         let ty = self.infer(*x);
+                        let ty = self.force(&ty);
                         if !self.implements(&ty, IfaceId::SHOW) && !ty.is_unknown() {
                             let span = self.span(*x);
                             self.error(
@@ -2501,6 +2679,7 @@ impl Checker<'_> {
                 }
                 self.in_chain = chain;
                 let base_ty = self.infer(*base);
+                let base_ty = self.force(&base_ty);
                 self.field(e, &base_ty, *name)
             }
             ExprKind::Unary { op: UnaryOp::Not, operand } => {
@@ -2620,17 +2799,9 @@ impl Checker<'_> {
         let mut tys = Vec::new();
         for (i, &element) in elements.iter().enumerate() {
             self.copying = true;
+            // A mismatch is reported at the element, not again for the whole tuple.
             let ty = match expected_args.as_ref().map(|args| &args[i]) {
-                // A `Never` may stand for a type not known yet, which the element widens.
-                Some(expected) if *expected == Ty::Never || expected.has_never_arg() => {
-                    let ty = self.expr(element, Some(expected));
-                    if diverges_ty(&ty) { ty } else { self.join_branch(expected, &ty, self.span(element)) }
-                }
-                Some(expected) => {
-                    let ty = self.check(element, expected);
-                    // A mismatch is reported here, not again for the whole tuple.
-                    if expected.accepts(&ty) { ty } else { Ty::Error }
-                }
+                Some(expected) => self.joined(element, expected),
                 None => self.infer(element),
             };
             tys.push(ty);
@@ -2640,80 +2811,24 @@ impl Checker<'_> {
 
     /// `value else fallback` (REFERENCE §6.6). It marks the fallible calls of `value`'s chain,
     /// as `try` does, and their failure runs the fallback with the error as `it`. Without
-    /// one, `value` is an `Option`, which it unwraps (OPEN_QUESTIONS P5).
-    /// The type an `else` form's left side is expected to have, when the call it ends in shows
-    /// without checking it: the form's own for a call that can fail, as for `try`, and an
-    /// `Option` of it for a call that returns one.
-    fn else_context(&self, value: ExprId, expected: Option<&Ty>) -> Option<Ty> {
-        let expected = expected.filter(|ty| !ty.is_unknown())?;
-        let f = match self.m.exprs[value].kind {
-            ExprKind::Call { callee, .. } => self.fn_named(callee)?,
-            ExprKind::MethodCall { receiver, method, .. } => self.method_named(receiver, method)?,
-            _ => return None,
-        };
-        // A call that can fail anywhere in the chain makes the form handle that failure, so
-        // its value is the outer call's, unwrapped or not (OPEN_QUESTIONS P5).
-        match (self.chain_fails(value)?, &self.p.fns[f].ret) {
-            (true, _) => Some(expected.clone()),
-            (false, Ty::Adt(AdtId::OPTION, _)) => Some(Ty::option(expected.clone())),
-            _ => None,
-        }
-    }
-
-    /// Whether a call of the postfix chain that ends in `e` can fail, where each of its calls
-    /// shows without checking it, as [`Checker::method_named`] tells. `None` when one doesn't.
-    fn chain_fails(&self, mut e: ExprId) -> Option<bool> {
-        let mut fails = false;
-        loop {
-            match self.m.exprs[e].kind {
-                ExprKind::Call { callee, .. } => {
-                    let f = self.fn_named(callee)?;
-                    return Some(fails || self.p.fns[f].fails.is_some());
-                }
-                ExprKind::MethodCall { receiver, method, .. } => {
-                    let f = self.method_named(receiver, method)?;
-                    fails |= self.p.fns[f].fails.is_some();
-                    e = receiver;
-                }
-                ExprKind::Field { base, .. } => e = base,
-                ExprKind::Name(_) => return Some(fails),
-                _ => return None,
-            }
-        }
-    }
-
+    /// one, `value` is an `Option`, which it unwraps (OPEN_QUESTIONS P5). The unwrapped type
+    /// and the fallback's are joined, so either may give the other its type arguments and
+    /// literal types, and so may the type the form is expected to have (issue #10).
     fn else_expr(&mut self, e: ExprId, value: ExprId, fallback: &Fallback, expected: Option<&Ty>, copying: bool) -> Ty {
-        let context = self.else_context(value, expected);
         self.markers.push(Marker { handler: Some(e), errors: Vec::new() });
         self.in_chain = true;
         self.copying = copying;
-        let value_ty = self.expr(value, context.as_ref());
-        let mut errors: Vec<Ty> = Vec::new();
-        for err in self.markers.pop().map(|m| m.errors).unwrap_or_default() {
-            if !errors.contains(&err) {
-                errors.push(err);
-            }
-        }
+        let value_ty = self.expr(value, None);
+        let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
         let span = self.span(e);
-        let it = match errors.as_slice() {
+        let it = match self.one_error(errors, span, "`else`", "`it` has one type") {
             // It may have been a call that can fail, so `it` is not reported again (§15.1).
-            [] if value_ty == Ty::Error => Some(Ty::Error),
-            [] => None,
-            [err] => Some(err.clone()),
-            _ if errors.contains(&Ty::Error) => Some(Ty::Error),
-            [first, second, ..] => {
-                let message = format!(
-                    "the calls this `else` marks fail with `{}` and `{}`, but `it` has one type",
-                    self.show(first),
-                    self.show(second)
-                );
-                self.error(codes::TYPE_MISMATCH, span, message);
-                Some(Ty::Error)
-            }
+            None if value_ty == Ty::Error => Some(Ty::Error),
+            it => it,
         };
         let unwrapped = match (&it, &value_ty) {
             (Some(_), ty) => ty.clone(),
-            (None, Ty::Adt(AdtId::OPTION, args)) => args[0].clone(),
+            (None, Ty::Adt(AdtId::OPTION, args)) => self.vars.resolve(&args[0]),
             (None, ty) if ty.is_unknown() => ty.clone(),
             (None, ty) => {
                 let hint = match ty {
@@ -2737,16 +2852,17 @@ impl Checker<'_> {
             }
             None => self.option_fallbacks += 1,
         }
-        let expected = (unwrapped != Ty::Never).then_some(&unwrapped);
+        // The form's own expected type gives the fallback its type when the value doesn't.
+        let expected = match &unwrapped {
+            Ty::Never => expected.cloned().filter(|ty| !ty.is_unknown()),
+            ty => Some(ty.clone()),
+        };
+        let expected = expected.as_ref();
         let (fallback_ty, tail) = match fallback {
             Fallback::Value(x) => {
                 self.copying = copying;
                 let ty = match expected {
-                    Some(expected) if expected.has_never_arg() => {
-                        let ty = self.expr(*x, Some(expected));
-                        if diverges_ty(&ty) { ty } else { self.join_branch(expected, &ty, self.span(*x)) }
-                    }
-                    Some(expected) => self.check(*x, expected),
+                    Some(expected) => self.joined(*x, expected),
                     None => self.infer(*x),
                 };
                 (ty, Some(*x))
@@ -2764,15 +2880,58 @@ impl Checker<'_> {
         }
         match (&unwrapped, &fallback_ty) {
             (Ty::Never, ty) => ty.clone(),
-            (ty, Ty::Never) => ty.clone(),
-            (ty, other) if ty.has_never_arg() => ty.join(other).unwrap_or(Ty::Error),
-            (ty, _) => ty.clone(),
+            (ty, Ty::Never | Ty::Error) => ty.clone(),
+            // The fallback's value was joined with the unwrapped one, which it may widen.
+            (_, ty) => ty.clone(),
         }
     }
 
+    /// The one error type of the fallible calls a `try`, `attempt`, `else` form or example
+    /// marks, which a variable not known yet joins. Several are an error (E0301), since
+    /// the error they give has one type. `None` when they mark none.
+    fn one_error(&mut self, errors: Vec<Ty>, span: Span, what: &str, why: &str) -> Option<Ty> {
+        let mut errors = errors.into_iter();
+        let mut one = errors.next()?;
+        for err in errors {
+            if one == Ty::Error || err == Ty::Error {
+                self.vars.poison(&one);
+                self.vars.poison(&err);
+                one = Ty::Error;
+            } else if self.vars.subsume(&one, &err) && self.vars.subsume(&err, &one) {
+                one = self.vars.zonk(&one);
+            } else {
+                let message = format!(
+                    "the calls this {what} marks fail with `{}` and `{}`, but {why}",
+                    self.show(&one),
+                    self.show(&err)
+                );
+                self.error(codes::TYPE_MISMATCH, span, message);
+                self.vars.poison(&one);
+                self.vars.poison(&err);
+                return Some(Ty::Error);
+            }
+        }
+        Some(self.vars.resolve(&one))
+    }
+
+    /// An integer literal takes the type it meets (REFERENCE §2). One that meets nothing
+    /// known yet is a variable, whose range is checked once the statement settles it.
     fn int_literal(&mut self, magnitude: u128, negative: bool, expected: Option<&Ty>, span: Span) -> Ty {
         let it = match expected {
             Some(Ty::Int(it)) => *it,
+            Some(Ty::Var(v)) if self.vars.open(*v).is_some_and(|open| open.kind != Kind::Float) => {
+                let ty = match self.vars.open(*v).map(|open| open.kind) {
+                    Some(Kind::Int) => Ty::Var(*v),
+                    _ => self.vars.fresh(Kind::Int, Origin::Defaulted),
+                };
+                self.pending.push(Pending::Int { ty: ty.clone(), magnitude, negative, span });
+                return ty;
+            }
+            None => {
+                let ty = self.vars.fresh(Kind::Int, Origin::Defaulted);
+                self.pending.push(Pending::Int { ty: ty.clone(), magnitude, negative, span });
+                return ty;
+            }
             Some(Ty::Float(ft)) => {
                 self.error(
                     codes::TYPE_MISMATCH,
@@ -2786,6 +2945,12 @@ impl Checker<'_> {
             }
             _ => IntTy::I64,
         };
+        self.int_range(it, magnitude, negative, span);
+        Ty::Int(it)
+    }
+
+    /// Reports an integer literal that doesn't fit `it`.
+    fn int_range(&mut self, it: IntTy, magnitude: u128, negative: bool, span: Span) {
         let value = i128::try_from(magnitude).ok().map(|v| if negative { -v } else { v });
         if !value.is_some_and(|v| it.contains(v)) {
             let sign = if negative { "-" } else { "" };
@@ -2800,7 +2965,6 @@ impl Checker<'_> {
                 ),
             );
         }
-        Ty::Int(it)
     }
 
     fn negate(&mut self, operand: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
@@ -2810,184 +2974,47 @@ impl Checker<'_> {
             self.p.expr_ty.insert(operand, ty.clone());
             return ty;
         }
-        let ty = self.expr(operand, expected.filter(|t| t.is_numeric()));
+        let ty = self.expr(operand, expected.filter(|t| t.is_numeric() || matches!(t, Ty::Var(_))));
+        if let Ty::Var(v) = ty {
+            // An integer that isn't known yet may turn out unsigned.
+            if self.vars.open(v).is_some_and(|open| open.kind != Kind::Float) {
+                self.pending.push(Pending::Neg { ty: ty.clone(), span });
+            }
+            return ty;
+        }
+        if self.negated(&ty, span) { ty } else { Ty::Error }
+    }
+
+    /// Reports unary `-` on a type that doesn't have it, and returns whether it does.
+    fn negated(&mut self, ty: &Ty, span: Span) -> bool {
         match ty {
-            Ty::Int(it) if it.is_signed() => ty,
-            Ty::Float(_) | Ty::Error | Ty::Never => ty,
+            Ty::Int(it) if it.is_signed() => true,
+            Ty::Float(_) | Ty::Error | Ty::Never => true,
             // A rejected `impl` block may have been the type's `impl Neg` (§15.1).
-            _ if self.unknown_interfaces(&ty) => Ty::Error,
+            _ if self.unknown_interfaces(ty) => false,
             _ => {
-                let message = format!("unary `-` is not defined for `{}`", self.show(&ty));
+                let message = format!("unary `-` is not defined for `{}`", self.show(ty));
                 self.error(codes::UNSUPPORTED_OPERATOR, span, message);
-                Ty::Error
+                false
             }
         }
     }
 
-    /// Checks the operands of a binary operator. An untyped literal takes its type from the
-    /// other operand (REFERENCE §2), so the non-literal side is checked first.
-    fn operands(&mut self, lhs: ExprId, rhs: ExprId, hint: Option<&Ty>) -> (Ty, Ty) {
+    /// Checks the operands of a binary operator and joins their types. An untyped literal,
+    /// `None` or generic call takes its type from the other operand (REFERENCE §2), in
+    /// either position, since what neither gives stays a variable until they meet
+    /// (OPEN_QUESTIONS P5; issue #10). Returns the joined type, or an error once reported.
+    fn operands(&mut self, lhs: ExprId, rhs: ExprId, hint: Option<&Ty>, span: Span) -> Ty {
+        let lt = self.expr(lhs, hint);
         // An operand that already has an error gives the other no type, so a literal there
-        // isn't reported again against the hint.
-        // `Some(1)` and `None` also take their type arguments from the other operand.
-        let numeric_or = |ty: &Ty| match ty {
+        // isn't reported again against it, and one of another kind gives none either.
+        let other = match &lt {
             Ty::Error => None,
-            ty if ty.is_numeric() || matches!(ty, Ty::Adt(..)) => Some(ty.clone()),
+            ty if ty.is_numeric() || matches!(ty, Ty::Adt(..) | Ty::Var(_)) => Some(ty.clone()),
             _ => hint.cloned(),
         };
-        // The operand that says more about its own type goes first, so `None == Some(1)` and
-        // `Some(1) == Some(small)` check as their swapped forms do.
-        if self.context_rank(lhs) > self.context_rank(rhs) {
-            let rt = self.expr(rhs, hint);
-            let lt = self.expr(lhs, numeric_or(&rt).as_ref());
-            (lt, rt)
-        } else {
-            let lt = self.expr(lhs, hint);
-            let rt = self.expr(rhs, numeric_or(&lt).as_ref());
-            (lt, rt)
-        }
-    }
-
-    /// How little an argument or operand says about its own type, so that one that says more
-    /// is checked first and gives the others theirs, in any position (OPEN_QUESTIONS P5). 0
-    /// needs no context. 1 is a variant or call with such a part, as `Some(x)` is. 2 has only
-    /// a literal's type, as `1` and `Some(1)` do. 3 says nothing, as `None`, `nothing()` and
-    /// `id(None)` do.
-    fn context_rank(&self, e: ExprId) -> u8 {
-        if !self.needs_context(e) {
-            return 0;
-        }
-        if self.is_untyped_literal(e) {
-            return 2;
-        }
-        match &self.m.exprs[e].kind {
-            ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. } => {
-                args.iter().map(|arg| self.context_rank(arg.value)).min().map_or(3, |rank| rank.max(1))
-            }
-            // A tuple's type is known only when each element's is, so it ranks as its least known.
-            ExprKind::Tuple(elements) => {
-                elements.iter().map(|&element| self.context_rank(element)).max().map_or(3, |rank| rank.max(1))
-            }
-            ExprKind::Try(inner) | ExprKind::Attempt(inner) => self.context_rank(*inner),
-            _ => 3,
-        }
-    }
-
-    /// A literal, a variant of `Option` or `Result`, or a call of a generic function or
-    /// method whose result type only its context can give, as in `id(1)`, `nothing()` or
-    /// `bx.id(1)`, whose type comes from its context when it has one. `try` and `attempt`
-    /// pass their context on to the call they mark (OPEN_QUESTIONS P5).
-    fn needs_context(&self, e: ExprId) -> bool {
-        let m = self.m;
-        let prelude_variant =
-            |name: Ident| bare_variant(m.text(name.sym)).is_some() && self.lookup_local(name.sym).is_none();
-        let prelude_enum = |base: ExprId| match m.exprs[base].kind {
-            ExprKind::Name(name) => prelude_adt(m.text(name.sym)).is_some() && !self.poisoned.contains(&name.sym),
-            _ => false,
-        };
-        let generic = |f: FnId, args: &[Arg]| {
-            let info = &self.p.fns[f];
-            !info.generics.is_empty()
-                && mentions_param(&info.ret)
-                && args.iter().all(|arg| self.needs_context(arg.value))
-        };
-        match &m.exprs[e].kind {
-            ExprKind::Name(name) => prelude_variant(*name),
-            ExprKind::Call { callee, targs: None, args } if let Some(f) = self.fn_named(*callee) => generic(f, args),
-            ExprKind::Call { callee, .. } => {
-                matches!(m.exprs[*callee].kind, ExprKind::Name(name) if prelude_variant(name))
-            }
-            ExprKind::MethodCall { receiver, method, targs: None, args }
-                if let Some(f) = self.method_named(*receiver, *method) =>
-            {
-                generic(f, args)
-            }
-            ExprKind::Field { base, .. } | ExprKind::MethodCall { receiver: base, .. } => prelude_enum(*base),
-            ExprKind::Try(inner) | ExprKind::Attempt(inner) => self.needs_context(*inner),
-            ExprKind::Tuple(elements) => elements.iter().any(|&element| self.needs_context(element)),
-            _ => self.is_untyped_literal(e),
-        }
-    }
-
-    /// The method or associated function that `receiver.method(…)` calls, where that shows
-    /// without checking the receiver: one of a type's own, called on the type or on a value
-    /// whose type [`Checker::static_ty`] knows. Only a type's own methods may be generic.
-    fn method_named(&self, receiver: ExprId, method: Ident) -> Option<FnId> {
-        let (adt, associated) = match self.m.exprs[receiver].kind {
-            ExprKind::Name(name) if self.lookup_local(name.sym).is_none() => (self.adt_named(name.sym)?, true),
-            _ => match self.static_ty(receiver)? {
-                Ty::Adt(id, _) => (id, false),
-                _ => return None,
-            },
-        };
-        let mut named = self.inherent.get(&adt)?.iter().filter(|entry| entry.name == method.sym);
-        let first = named.next()?;
-        // A rejected declaration of the name may be the one the call means.
-        if first.rejected || named.any(|entry| entry.rejected) {
-            return None;
-        }
-        (self.p.fns[first.f].receiver.is_none() == associated).then_some(first.f)
-    }
-
-    /// The type `e` has in any context, where that shows without checking it: a local, a
-    /// field of a record known so, a construction or variant of a type without type
-    /// parameters, `try` of one, or what a call returns whose function or method isn't
-    /// generic.
-    fn static_ty(&self, e: ExprId) -> Option<Ty> {
-        let m = self.m;
-        let returned = |f: FnId| {
-            let info = &self.p.fns[f];
-            (info.generics.is_empty() && !info.rejected).then(|| info.ret.clone())
-        };
-        match &m.exprs[e].kind {
-            ExprKind::Name(name) => self.lookup_local(name.sym).map(|id| self.f.locals[id.index()].ty.clone()),
-            ExprKind::Field { base, name } | ExprKind::MethodCall { receiver: base, method: name, .. }
-                if let Some(id) = self.enum_named(*base) =>
-            {
-                let def = self.p.decls.adt(id);
-                (def.params == 0 && def.variant_named(m.text(name.sym)).is_some()).then(|| Ty::adt(id))
-            }
-            ExprKind::Field { base, name } => {
-                let Ty::Adt(id, _) = self.static_ty(*base)? else { return None };
-                let def = self.p.decls.adt(id);
-                let text = m.text(name.sym);
-                let field = (!def.is_enum()).then(|| def.variant().fields.iter().find(|f| *f.name == *text))??;
-                Some(field.ty.clone())
-            }
-            ExprKind::Call { callee, .. } => {
-                if let Some(f) = self.fn_named(*callee) {
-                    return returned(f);
-                }
-                let ExprKind::Name(name) = m.exprs[*callee].kind else { return None };
-                if self.lookup_local(name.sym).is_some() || bare_variant(m.text(name.sym)).is_some() {
-                    return None;
-                }
-                let id = self.adt_named(name.sym)?;
-                (!self.p.decls.adt(id).is_enum()).then(|| Ty::adt(id))
-            }
-            ExprKind::MethodCall { receiver, method, .. } => returned(self.method_named(*receiver, *method)?),
-            ExprKind::Try(inner) => self.static_ty(*inner),
-            _ => None,
-        }
-    }
-
-    /// A literal, or arithmetic on literals such as `(1 + 2)`, which takes its type from
-    /// context like a single literal (OPEN_QUESTIONS P5).
-    fn is_untyped_literal(&self, e: ExprId) -> bool {
-        match &self.m.exprs[e].kind {
-            ExprKind::Int(_) | ExprKind::Float(_) => true,
-            ExprKind::Unary { op: UnaryOp::Neg, operand } => self.is_untyped_literal(*operand),
-            ExprKind::Binary { op, lhs, rhs } if op.is_arithmetic() => {
-                self.is_untyped_literal(*lhs) && self.is_untyped_literal(*rhs)
-            }
-            _ => false,
-        }
-    }
-
-    /// The type both operands have, where `Never` gives way to the other side, also as a
-    /// type argument, so `Some(fail e) == Some(1)` compares `Option[Int]`s.
-    fn unify_operands(&mut self, lt: Ty, rt: Ty, span: Span) -> Ty {
-        match lt.join(&rt) {
+        let rt = self.expr(rhs, other.as_ref());
+        match self.vars.join(&lt, &rt) {
             Some(ty) => ty,
             None => {
                 let message = format!(
@@ -2996,9 +3023,34 @@ impl Checker<'_> {
                     self.show(&rt)
                 );
                 self.error(codes::TYPE_MISMATCH, span, message);
+                self.vars.poison(&lt);
+                self.vars.poison(&rt);
                 Ty::Error
             }
         }
+    }
+
+    /// Reports arithmetic operator `op` on operands of type `ty` that don't have it, and
+    /// returns whether they do. An integer or float not known yet has every operator its
+    /// kind has, and a type argument not known yet waits for the statement to settle it.
+    fn arithmetic(&mut self, op: BinOp, ty: &Ty, span: Span) -> bool {
+        let defined = match ty {
+            Ty::Var(v) => match self.vars.open(*v).map(|open| open.kind) {
+                Some(Kind::Int) => true,
+                Some(Kind::Float) => op != BinOp::Rem,
+                _ => {
+                    self.pending.push(Pending::Arith { op, ty: ty.clone(), span });
+                    true
+                }
+            },
+            ty => arithmetic_defined(op, ty),
+        };
+        // A rejected `impl` block may have been the type's `impl Add` (§15.1).
+        if !defined && !self.unknown_interfaces(ty) {
+            let message = format!("`{}` is not defined for `{}`", op.symbol(), self.show(ty));
+            self.error(codes::UNSUPPORTED_OPERATOR, span, message);
+        }
+        defined
     }
 
     fn binary(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
@@ -3010,19 +3062,15 @@ impl Checker<'_> {
                 Ty::Bool
             }
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
-                let (lt, rt) = self.operands(lhs, rhs, expected.filter(|t| t.is_numeric()));
-                let ty = self.unify_operands(lt, rt, span);
-                // A rejected `impl` block may have been the type's `impl Add` (§15.1).
-                if !arithmetic_defined(op, &ty) && !self.unknown_interfaces(&ty) {
-                    let message = format!("`{symbol}` is not defined for `{}`", self.show(&ty));
-                    self.error(codes::UNSUPPORTED_OPERATOR, span, message);
-                    return Ty::Error;
-                }
-                ty
+                let hint = expected.filter(|t| t.is_numeric() || matches!(t, Ty::Var(_)));
+                let ty = self.operands(lhs, rhs, hint, span);
+                if self.arithmetic(op, &ty, span) { ty } else { Ty::Error }
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                let (lt, rt) = self.operands(lhs, rhs, None);
-                let ty = self.unify_operands(lt, rt, span);
+                // The operands' type goes nowhere else, so whatever they leave open is
+                // settled here, before asking what it implements.
+                let ty = self.operands(lhs, rhs, None, span);
+                let ty = self.force(&ty);
                 let defined = match op {
                     // Floats have IEEE `==` and `<` without implementing `Eq` or `Ord` (REFERENCE §12.2).
                     BinOp::Eq | BinOp::Ne => matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::EQ),
@@ -3194,83 +3242,80 @@ impl Checker<'_> {
         let (ret, fails) = (info.ret.clone(), info.fails.clone());
         let generics: Vec<(Box<str>, Vec<IfaceId>)> =
             info.generics.iter().map(|g| (g.name.clone(), g.bounds.clone())).collect();
-        // A parameter whose declaration or constraint is rejected stands for an unknown type.
-        let mut tvars: Vec<Option<Ty>> = info.generics.iter().map(|g| g.rejected.then_some(Ty::Error)).collect();
+        // A parameter whose declaration or constraint is rejected stands for an unknown type,
+        // and any other is a variable until `::[…]`, the expected type or an argument gives it.
+        let rejected: Vec<bool> = info.generics.iter().map(|g| g.rejected).collect();
+        let mut tvars: Vec<Option<Ty>> = rejected.iter().map(|&rejected| rejected.then_some(Ty::Error)).collect();
         // `::[…]` gives the declared parameters, which come before those of interface types.
         let declared = info.generics.iter().filter(|g| g.param.is_none()).count();
         // A parameter declared twice may have been meant as one, so a count without it is
         // also right.
         let duplicates = info.generics.iter().filter(|g| g.sym.is_none() && g.param.is_none()).count();
-        let mut fixed = vec![false; tvars.len()];
-        match targs {
-            Some(targs) => {
-                let tys: Vec<Ty> = targs.iter().map(|&t| self.resolve_type(t)).collect();
-                let fewest = declared - duplicates;
-                if tys.len() != declared && (fewest..declared).contains(&tys.len()) {
-                    tvars.fill(Some(Ty::Error));
-                } else if tys.len() != declared {
-                    let at = match (targs.first(), targs.last()) {
-                        (Some(&first), Some(&last)) => m.types[first].span.to(m.types[last].span),
-                        _ => span,
-                    };
-                    let message = match (declared, tys.len() < fewest) {
-                        (0, _) => format!("`{name}` takes no type arguments"),
-                        (n, short) => {
-                            let verb = if tys.len() == 1 { "was" } else { "were" };
-                            let n = if short { fewest } else { n };
-                            format!("`{name}` takes {}, but {} {verb} given", type_args(n), tys.len())
-                        }
-                    };
-                    self.error(codes::TYPE_ARGUMENT_COUNT, at, message);
-                    for arg in args {
-                        self.infer(arg.value);
+        if let Some(targs) = targs {
+            let tys: Vec<Ty> = targs.iter().map(|&t| self.resolve_type(t)).collect();
+            let fewest = declared - duplicates;
+            if tys.len() != declared && (fewest..declared).contains(&tys.len()) {
+                tvars.fill(Some(Ty::Error));
+            } else if tys.len() != declared {
+                let at = match (targs.first(), targs.last()) {
+                    (Some(&first), Some(&last)) => m.types[first].span.to(m.types[last].span),
+                    _ => span,
+                };
+                let message = match (declared, tys.len() < fewest) {
+                    (0, _) => format!("`{name}` takes no type arguments"),
+                    (n, short) => {
+                        let verb = if tys.len() == 1 { "was" } else { "were" };
+                        let n = if short { fewest } else { n };
+                        format!("`{name}` takes {}, but {} {verb} given", type_args(n), tys.len())
                     }
-                    return Ty::Error;
-                } else {
-                    for ((slot, fixed), ty) in tvars.iter_mut().zip(&mut fixed).zip(tys) {
-                        *fixed = true;
-                        slot.get_or_insert(ty);
-                    }
+                };
+                self.error(codes::TYPE_ARGUMENT_COUNT, at, message);
+                for arg in args {
+                    self.infer(arg.value);
                 }
-            }
-            // A `Never` in the expected type gives a type argument known only in part, which
-            // the arguments may widen, as they widen a `Never` that `Ok(1)` meets.
-            None => {
-                if let Some(expected) = expected.filter(|t| !t.is_unknown()) {
-                    unify(&ret, expected, &mut tvars);
+                return Ty::Error;
+            } else {
+                for (slot, ty) in tvars.iter_mut().zip(tys) {
+                    slot.get_or_insert(ty);
                 }
             }
         }
-        let counted = self.generic_args(name, &params, &mut tvars, &fixed, args, span, false);
-        // An expected type with an error may have given them (§15.1).
-        if expected == Some(&Ty::Error) {
-            for slot in tvars.iter_mut().filter(|slot| slot.is_none()) {
-                *slot = Some(Ty::Error);
+        let tvars: Vec<Ty> = (tvars.into_iter().enumerate())
+            .map(|(param, ty)| ty.unwrap_or_else(|| self.vars.fresh(Kind::Any, Origin::Call { f, param, span })))
+            .collect();
+        // The type the call is expected to have gives what it can first, so a mismatch is
+        // reported at the argument (OPEN_QUESTIONS P5). A `Never` in it is known only in part,
+        // and the arguments may widen it.
+        if targs.is_none()
+            && let Some(expected) = expected.filter(|t| !t.is_unknown())
+        {
+            self.vars.subsume(expected, &ret.subst(&tvars));
+        }
+        let counted = self.generic_args(name, &params, &tvars, args, span, false);
+        // An expected type with an error may have given them, and arguments that don't
+        // match their parameters leave them to nothing (§15.1).
+        if expected == Some(&Ty::Error) || !counted {
+            for ty in &tvars {
+                self.vars.poison(ty);
             }
         }
-        let Some(tvars) = tvars.iter().cloned().collect::<Option<Vec<Ty>>>() else {
-            if counted {
-                let missing: Vec<String> = (tvars.iter().zip(&generics))
-                    .filter(|(t, _)| t.is_none())
-                    .map(|(_, (param, _))| format!("`{param}`"))
-                    .collect();
-                let noun = if missing.len() == 1 { "type argument" } else { "type arguments" };
-                let message = format!(
-                    "the {noun} {} of `{name}` can't be inferred; give the binding a type, or write `{name}::[…](…)`",
-                    missing.join(", ")
-                );
-                self.error(codes::CANNOT_INFER, span, message);
-            }
-            return Ty::Error;
-        };
         for (ty, (param, bounds)) in tvars.iter().zip(&generics) {
+            let ty = self.vars.zonk(ty);
             if ty.is_unknown() {
                 continue;
             }
-            if let Some(&iface) = bounds.iter().find(|&&iface| !self.implements(ty, iface)) {
+            // One not known yet is checked once the statement settles it.
+            if self.vars.has_open(&ty) {
+                for &iface in bounds {
+                    let (callee, param) = (name.into(), param.clone());
+                    self.pending.push(Pending::Bound { ty: ty.clone(), iface, callee, param, span });
+                }
+                continue;
+            }
+            if let Some(&iface) = bounds.iter().find(|&&iface| !self.implements(&ty, iface)) {
                 let message = format!(
                     "`{}` does not implement `{}`, which `{name}` needs of `{param}`",
-                    self.show(ty),
+                    self.show(&ty),
                     self.iface_name(iface)
                 );
                 self.error(codes::MISSING_IMPLEMENTATION, span, message);
@@ -3289,7 +3334,7 @@ impl Checker<'_> {
         let def = self.p.decls.adt(id);
         let name = def.name.clone();
         let params: Vec<(Box<str>, Ty)> = def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-        self.generic_args(&name, &params, &mut [], &[], args, span, true);
+        self.generic_args(&name, &params, &[], args, span, true);
         Ty::adt(id)
     }
 
@@ -3341,7 +3386,9 @@ impl Checker<'_> {
             }
         }
         self.in_chain = chain;
+        // Which method this is depends on the receiver's type, so it must be known here.
         let receiver_ty = self.infer(receiver);
+        let receiver_ty = self.force(&receiver_ty);
         if let (Ty::Adt(id, _), "with") = (&receiver_ty, name)
             && !self.p.decls.adt(*id).is_enum()
             && !self.p.decls.adt(*id).tuple
@@ -3617,6 +3664,7 @@ impl Checker<'_> {
             self.error(codes::WRONG_LABEL, label.span, message);
         }
         let receiver_ty = self.infer(first.value);
+        let receiver_ty = self.force(&receiver_ty);
         if !receiver_ty.is_unknown() && !self.implements(&receiver_ty, iface) {
             let message = format!("`{}` does not implement `{iface_text}`", self.show(&receiver_ty));
             let at = self.span(first.value);
@@ -3760,21 +3808,18 @@ impl Checker<'_> {
 
     /// Checks arguments against parameters, including the label rules (REFERENCE §3, H3).
     fn args<S: AsRef<str>>(&mut self, callee: &str, params: &[(S, Ty)], args: &[Arg], span: Span) {
-        self.generic_args(callee, params, &mut [], &[], args, span, false);
+        self.generic_args(callee, params, &[], args, span, false);
     }
 
     /// Checks arguments against parameters whose types may mention the type parameters
-    /// `targs` stands for, of which `::[…]` gave those `fixed` marks. An argument whose
-    /// parameter mentions a type parameter not yet known gives it the part of its own type
-    /// in that place. A construction, which stores its arguments, `copy`s them. Returns
-    /// whether the number of arguments was right.
-    #[allow(clippy::too_many_arguments)]
+    /// `targs` gives, which may be variables, so an argument in any position may give them
+    /// (OPEN_QUESTIONS P5; issue #10). A construction, which stores its arguments, `copy`s
+    /// them. Returns whether the number of arguments was right.
     fn generic_args<S: AsRef<str>>(
         &mut self,
         callee: &str,
         params: &[(S, Ty)],
-        targs: &mut [Option<Ty>],
-        fixed: &[bool],
+        targs: &[Ty],
         args: &[Arg],
         span: Span,
         copy: bool,
@@ -3831,38 +3876,14 @@ impl Checker<'_> {
                 _ => {}
             }
         }
-        // Arguments that say more about their type go first, so that a literal or a `None`
-        // takes the type the others give, in any position, also where the expected type gave
-        // only a `Never` (OPEN_QUESTIONS P5).
-        let mut order: Vec<usize> = (0..args.len()).collect();
-        let open = |t: &Option<Ty>| t.as_ref().is_none_or(|t| *t == Ty::Never || t.has_never_arg());
-        if targs.iter().any(open) && args.len() > 1 {
-            order.sort_by_key(|&i| self.context_rank(args[i].value));
-        }
-        for i in order {
-            let (arg, ty) = (&args[i], &params[i].1);
+        for (arg, (_, ty)) in args.iter().zip(params) {
             self.copying = copy;
             // A type parameter that `targs` doesn't cover is the caller's own, such as the `T`
             // that `Self` stands for in `x.bigger(y)` where `x: T`, so it is a type like any.
-            if !mentions_targ(ty, targs) {
+            if mentions_targ(ty, targs) {
+                self.check(arg.value, &ty.subst(targs));
+            } else {
                 self.check(arg.value, ty);
-                continue;
-            }
-            // A type argument not known yet is `Never` in the expected type, which the argument
-            // widens, as a field widens a `Never` the expected type gives, so `Ok(1)` meets a
-            // `Result[T, Text]` and `Some(1)` widens an `Option[Never]` (OPEN_QUESTIONS P5). An
-            // expected type that says nothing more is left out, so `None` alone gives no `T`.
-            let open: Vec<Ty> = targs.iter().map(|t| t.clone().unwrap_or(Ty::Never)).collect();
-            let expected = ty.subst(&open);
-            let informative = expected != Ty::Never && says_more(ty, targs);
-            let actual = self.expr(arg.value, informative.then_some(&expected));
-            infer_targs(ty, &actual, targs, fixed);
-            let known: Vec<Ty> = targs.iter().map(|t| t.clone().unwrap_or(Ty::Error)).collect();
-            let expected = ty.subst(&known);
-            if !expected.accepts(&actual) {
-                let span = self.span(arg.value);
-                let message = format!("expected `{}`, found `{}`", self.show(&expected), self.show(&actual));
-                self.error(codes::TYPE_MISMATCH, span, message);
             }
         }
         true
@@ -3897,7 +3918,11 @@ impl Checker<'_> {
             self.error(codes::TRY_WITHOUT_FAILURE, span, "`try` marks no call that can fail");
         }
         for err in errors {
+            let err = self.vars.resolve(&err);
             let message = match &self.f.fails {
+                // A type parameter used only in `fails` that nothing gives is reported once,
+                // as such (issue #20).
+                None if self.vars.has_open(&err) => continue,
                 None if !self.f.returns => {
                     let place = if self.f.example { "an example" } else { "a `where` clause" };
                     format!("`try` in {place}, which has no function to propagate `{}` to", self.show(&err))
@@ -3906,13 +3931,16 @@ impl Checker<'_> {
                     let err = self.show(&err);
                     format!("`try` propagates `{err}`, but this function does not declare `fails {err}`")
                 }
-                Some(own) if *own != err && *own != Ty::Error && err != Ty::Error => format!(
+                // The function's error type gives one the call leaves open (issue #20).
+                Some(own) if *own == Ty::Error || err == Ty::Error => continue,
+                Some(own) if self.vars.subsume(own, &err) && self.vars.subsume(&err, own) => continue,
+                Some(own) => format!(
                     "`try` needs equal error types, but the call fails with `{}` and this function fails with `{}`",
                     self.show(&err),
                     self.show(own)
                 ),
-                Some(_) => continue,
             };
+            self.vars.poison(&err);
             self.error(codes::TRY_ERROR_MISMATCH, span, message);
         }
         ty
@@ -3928,32 +3956,16 @@ impl Checker<'_> {
         self.markers.push(Marker { handler: Some(e), errors: Vec::new() });
         self.in_chain = true;
         let ty = self.expr(inner, value_expected.as_ref());
-        let mut errors: Vec<Ty> = Vec::new();
-        for err in self.markers.pop().map(|m| m.errors).unwrap_or_default() {
-            if !errors.contains(&err) {
-                errors.push(err);
-            }
-        }
-        match errors.as_slice() {
+        let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
+        match self.one_error(errors, span, "`attempt`", "its `Result` has one error type") {
             // A chain with an error may hold the fallible call that didn't resolve.
-            [] => {
+            None => {
                 if ty != Ty::Error {
                     self.error(codes::ATTEMPT_WITHOUT_FAILURE, span, "`attempt` marks no call that can fail");
                 }
                 Ty::Error
             }
-            [err] => Ty::result(ty, err.clone()),
-            _ if errors.contains(&Ty::Error) => Ty::Error,
-            // Calls with errors of their own need methods, which come in a later slice.
-            [first, second, ..] => {
-                let message = format!(
-                    "the calls this `attempt` marks fail with `{}` and `{}`, but its `Result` has one error type",
-                    self.show(first),
-                    self.show(second)
-                );
-                self.error(codes::TYPE_MISMATCH, span, message);
-                Ty::Error
-            }
+            Some(err) => Ty::result(ty, err),
         }
     }
 
@@ -4001,15 +4013,11 @@ impl Checker<'_> {
                 Ty::Error
             }
             (Mode::Value(expected), Some(branch)) => {
-                // The then-branch gives the else-branch its type, unless its type has a
-                // `Never` argument, as `Some(fail e)` does. An expected type with one is known
-                // only in part, so the branches widen it, each from what the ones before gave.
-                let open = expected.is_some_and(Ty::has_never_arg);
-                let partial = then_ty.has_never_arg();
-                let expected = match expected {
-                    Some(_) if open && !then_ty.is_unknown() => Some(&then_ty),
-                    _ => expected.or(Some(&then_ty).filter(|t| !t.is_unknown() && !partial)),
-                };
+                // The branches' types are joined, so either may give the other its type
+                // arguments and literal types (OPEN_QUESTIONS P5; issue #10). The then-branch's
+                // type, joined with the expected one, is what the else-branch meets.
+                let known = if then_ty.is_unknown() { expected.cloned() } else { Some(then_ty.clone()) };
+                let expected = known.as_ref();
                 let else_ty = match branch {
                     ElseBranch::Block(block) => self.block_value(block, expected, copying),
                     ElseBranch::If(nested) => {
@@ -4024,16 +4032,11 @@ impl Checker<'_> {
                 if self.borrowed_tail(self.tail(then_block)) || self.borrowed_tail(else_tail) {
                     self.borrowed_values.insert(e);
                 }
-                let else_span = match branch {
-                    ElseBranch::Block(block) => block.span,
-                    ElseBranch::If(nested) => self.span(*nested),
-                };
                 match expected {
                     _ if then_ty == Ty::Never && else_ty == Ty::Never => Ty::Never,
-                    Some(_) if open => self.join_branch(&then_ty, &else_ty, else_span),
-                    Some(expected) => expected.clone(),
-                    None if partial => self.join_branch(&then_ty, &else_ty, else_span),
-                    None => else_ty,
+                    // The else-branch's type is the join, unless it has none of its own.
+                    Some(known) if else_ty.is_unknown() => known.clone(),
+                    _ => else_ty,
                 }
             }
         };
@@ -4041,12 +4044,18 @@ impl Checker<'_> {
         ty
     }
 
-    /// The type of a branch's value when one branch is `known` and another, at `span`, is
-    /// `other`. Used where a `Never` argument kept a branch from giving the other its type.
-    fn join_branch(&mut self, known: &Ty, other: &Ty, span: Span) -> Ty {
-        known.join(other).unwrap_or_else(|| {
-            let message = format!("expected `{}`, found `{}`", self.show(known), self.show(other));
-            self.error(codes::TYPE_MISMATCH, span, message);
+    /// Checks `e`, a branch's value or a tuple's element, where the others give `known`,
+    /// and returns the type of either: their join, where a `Never` part of `known` gives way
+    /// (OPEN_QUESTIONS P5). A mismatch is reported at `e`.
+    fn joined(&mut self, e: ExprId, known: &Ty) -> Ty {
+        let ty = self.expr(e, Some(known));
+        if diverges_ty(&ty) {
+            return ty;
+        }
+        self.vars.join(known, &ty).unwrap_or_else(|| {
+            let message = format!("expected `{}`, found `{}`", self.show(known), self.show(&ty));
+            self.error(codes::TYPE_MISMATCH, self.span(e), message);
+            self.vars.poison(&ty);
             Ty::Error
         })
     }
@@ -4072,6 +4081,7 @@ impl Checker<'_> {
     /// `value is pat`, whose bindings go in the innermost scope.
     fn is_test(&mut self, value: ExprId, pat: PatId) {
         let ty = self.infer(value);
+        let ty = self.force(&ty);
         self.pattern_borrowed = self.borrowed_value(value);
         self.pattern(pat, &ty);
         self.pattern_borrowed = false;
@@ -4099,47 +4109,42 @@ impl Checker<'_> {
         self.p.decls.adt(id).is_enum().then_some(id)
     }
 
-    /// The type arguments of a variant of `id` that `expected` gives, one per parameter.
-    fn expected_args(&self, id: AdtId, expected: Option<&Ty>) -> Vec<Option<Ty>> {
+    /// The type arguments of a variant of `id` built at `span`: those `expected` gives, and a
+    /// variable for each it doesn't, which the fields or the values it meets may give
+    /// (OPEN_QUESTIONS P5; issue #10).
+    fn variant_args(&mut self, id: AdtId, expected: Option<&Ty>, span: Span) -> Vec<Ty> {
         match expected {
-            Some(Ty::Adt(other, args)) if *other == id => args.iter().cloned().map(Some).collect(),
-            _ => vec![None; self.p.decls.adt(id).params],
+            Some(Ty::Adt(other, args)) if *other == id => args.to_vec(),
+            _ => {
+                let origin = Origin::Variant { adt: id, span };
+                (0..self.p.decls.adt(id).params).map(|_| self.vars.fresh(Kind::Any, origin)).collect()
+            }
         }
     }
 
-    /// The type of a variant of `id` built with type arguments `targs`. One that neither the
-    /// expected type nor the fields gave is reported, unless `reported` says the construction
-    /// already has an error (OPEN_QUESTIONS P5).
-    fn variant_type(
-        &mut self,
-        id: AdtId,
-        targs: Vec<Option<Ty>>,
-        expected: Option<&Ty>,
-        span: Span,
-        reported: bool,
-    ) -> Ty {
-        if let Some(args) = targs.iter().cloned().collect::<Option<Vec<Ty>>>() {
-            return Ty::applied(id, args);
+    /// The type of a variant of `id` built with type arguments `targs`. One left open where
+    /// the expected type is of another type is reported as that mismatch, rather than as
+    /// one that can't be inferred, and so is none where `reported` says the construction
+    /// already has an error (§15.1).
+    fn variant_type(&mut self, id: AdtId, targs: Vec<Ty>, expected: Option<&Ty>, span: Span, reported: bool) -> Ty {
+        let ty = Ty::applied(id, targs);
+        if !self.vars.has_open(&ty) {
+            return ty;
         }
         let name = self.p.decls.adt(id).name.clone();
         match expected {
             _ if reported => {}
             Some(Ty::Error) => {}
-            Some(expected) if !matches!(expected, Ty::Adt(other, _) if *other == id) => {
+            Some(expected)
+                if !matches!(expected, Ty::Adt(other, _) if *other == id) && !matches!(expected, Ty::Var(_)) =>
+            {
                 let article = if &*name == "Option" { "an" } else { "a" };
                 let message = format!("expected `{}`, found {article} `{name}`", self.show(expected));
                 self.error(codes::TYPE_MISMATCH, span, message);
             }
-            _ => {
-                let missing = targs.iter().filter(|t| t.is_none()).count();
-                let message = format!(
-                    "the {} of this `{name}` can't be inferred; give the binding a type, such as `{}`",
-                    if missing == 1 { "type argument" } else { "type arguments" },
-                    example_type(&name)
-                );
-                self.error(codes::CANNOT_INFER, span, message);
-            }
+            _ => return ty,
         }
+        self.vars.poison(&ty);
         Ty::Error
     }
 
@@ -4158,8 +4163,8 @@ impl Checker<'_> {
             return Ty::Error;
         }
         self.p.res.insert(e, Res::Ctor(id, v));
-        let targs = self.expected_args(id, expected);
         let span = self.span(e);
+        let targs = self.variant_args(id, expected, span);
         self.variant_type(id, targs, expected, span, false)
     }
 
@@ -4186,14 +4191,16 @@ impl Checker<'_> {
             return Ty::Error;
         };
         let ctor = def.ctor_name(v);
-        let mut targs = self.expected_args(id, expected);
-        if variant.rejected {
+        let (rejected, fieldless) = (variant.rejected, variant.fields.is_empty());
+        let params: Vec<(Box<str>, Ty)> = variant.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+        let targs = self.variant_args(id, expected, span);
+        if rejected {
             for arg in args {
                 self.infer(arg.value);
             }
             return self.variant_type(id, targs, expected, span, true);
         }
-        if variant.fields.is_empty() {
+        if fieldless {
             let message = format!("`{ctor}` has no fields, so it is written without parentheses");
             self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
             for arg in args {
@@ -4201,9 +4208,8 @@ impl Checker<'_> {
             }
             return self.variant_type(id, targs, expected, span, true);
         }
-        let params: Vec<(Box<str>, Ty)> = variant.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
         self.p.res.insert(e, Res::Ctor(id, v));
-        let counted = self.generic_args(&ctor, &params, &mut targs, &[], args, span, true);
+        let counted = self.generic_args(&ctor, &params, &targs, args, span, true);
         self.variant_type(id, targs, expected, span, !counted)
     }
 
@@ -4231,6 +4237,7 @@ impl Checker<'_> {
         };
         let copying = std::mem::take(&mut self.tail_copying);
         let scrutinee_ty = self.infer(*scrutinee);
+        let scrutinee_ty = self.force(&scrutinee_ty);
         // The parts of a borrowed value are borrowed too.
         let borrowed = self.borrowed_value(*scrutinee);
         let mut rows = Vec::new();
@@ -4238,8 +4245,6 @@ impl Checker<'_> {
             Mode::Value(expected) => expected.cloned(),
             _ => None,
         };
-        // Arms whose type has a `Never` argument, which give the others no type.
-        let mut partial: Vec<(Ty, Span)> = Vec::new();
         let mut diverges = true;
         for arm in arms {
             // An arm's bindings scope over its guard and body.
@@ -4258,13 +4263,10 @@ impl Checker<'_> {
                 Mode::Stmt => self.block_stmt(&arm.body, None),
                 Mode::Tail(ret) => self.block_stmt(&arm.body, Some(ret)),
                 Mode::Value(_) => {
+                    // Each arm's type is joined with what the others gave, in any order
+                    // (OPEN_QUESTIONS P5; issue #10).
                     let ty = self.block_value(&arm.body, expected.as_ref(), copying);
-                    // An arm widens an expected type known only in part for the arms after it.
-                    if expected.as_ref().is_some_and(Ty::has_never_arg) && !ty.is_unknown() {
-                        expected = Some(ty.clone());
-                    } else if expected.is_none() && ty.has_never_arg() {
-                        partial.push((ty.clone(), arm.body.span));
-                    } else if expected.is_none() && !ty.is_unknown() {
+                    if !ty.is_unknown() {
                         expected = Some(ty.clone());
                     }
                     ty
@@ -4292,13 +4294,6 @@ impl Checker<'_> {
         }
         // A value that no arm matches is a defect (OPEN_QUESTIONS P5), so a `match` whose
         // arms all diverge does too.
-        let mut partial = partial.into_iter();
-        if expected.is_none() {
-            expected = partial.next().map(|(ty, _)| ty);
-        }
-        for (ty, span) in partial {
-            expected = expected.map(|known| self.join_branch(&known, &ty, span));
-        }
         if matches!(mode, Mode::Value(_)) && arms.iter().any(|arm| self.borrowed_tail(self.tail(&arm.body))) {
             self.borrowed_values.insert(e);
         }
@@ -4644,9 +4639,9 @@ impl Checker<'_> {
         let m = self.m;
         let element = match m.exprs[iter].kind {
             ExprKind::Range { lo, hi, .. } => {
-                let (lt, rt) = self.operands(lo, hi, None);
                 let span = self.span(iter);
-                match self.unify_operands(lt, rt, span) {
+                let ty = self.operands(lo, hi, None, span);
+                match self.force(&ty) {
                     Ty::Int(it) => Ty::Int(it),
                     ty if ty.is_unknown() => Ty::Error,
                     ty => {
@@ -4674,7 +4669,7 @@ impl Checker<'_> {
 }
 
 /// Whether `ty` mentions one of the type parameters `targs` stands for.
-fn mentions_targ(ty: &Ty, targs: &[Option<Ty>]) -> bool {
+fn mentions_targ(ty: &Ty, targs: &[Ty]) -> bool {
     match ty {
         Ty::Param(i) => (*i as usize) < targs.len(),
         Ty::Adt(_, args) => args.iter().any(|arg| mentions_targ(arg, targs)),
@@ -4682,78 +4677,21 @@ fn mentions_targ(ty: &Ty, targs: &[Option<Ty>]) -> bool {
     }
 }
 
-/// Whether `ty` mentions a type parameter.
-fn mentions_param(ty: &Ty) -> bool {
+/// Whether `ty` has an inference variable in it.
+fn has_var(ty: &Ty) -> bool {
     match ty {
-        Ty::Param(_) => true,
-        Ty::Adt(_, args) => args.iter().any(mentions_param),
+        Ty::Var(_) => true,
+        Ty::Adt(_, args) => args.iter().any(has_var),
         _ => false,
     }
 }
 
-/// Whether `ty`, with the type parameters `targs` knows, says more about an argument than
-/// that it is any type, as `Result[T, Text]` does and `Option[T]` doesn't while `T` is open.
-fn says_more(ty: &Ty, targs: &[Option<Ty>]) -> bool {
+/// Whether `ty` has `Never` in it, outside the variables it holds.
+fn mentions_never(ty: &Ty) -> bool {
     match ty {
-        Ty::Param(i) => targs.get(*i as usize).is_none_or(Option::is_some),
-        Ty::Adt(_, args) => args.is_empty() || args.iter().any(|arg| says_more(arg, targs)),
-        _ => true,
-    }
-}
-
-/// Learns the type parameters in `declared` from an argument of type `actual`. One not known
-/// yet takes the part of `actual` in its place, and one known as `Never`, or with a `Never`
-/// inside, widens to it, unless `::[…]` gave it (`fixed`). An error gives every one it
-/// covers, so nothing more is reported about them (§15.1). Parts that differ are left for
-/// the caller to report.
-fn infer_targs(declared: &Ty, actual: &Ty, targs: &mut [Option<Ty>], fixed: &[bool]) {
-    match (declared, actual) {
-        (Ty::Param(i), actual) => {
-            let i = *i as usize;
-            match targs.get(i) {
-                Some(None) => targs[i] = Some(actual.clone()),
-                // Only a `Never` in what is known yet can widen, and joining a type without one
-                // would rebuild it at every level of `Some(Some(…))` for nothing.
-                Some(Some(known))
-                    if !fixed.get(i).copied().unwrap_or(false) && (*known == Ty::Never || known.has_never_arg()) =>
-                {
-                    if let Some(joined) = known.join(actual) {
-                        targs[i] = Some(joined);
-                    }
-                }
-                _ => {}
-            }
-        }
-        (Ty::Adt(id, args), Ty::Adt(other, actual_args)) if id == other && args.len() == actual_args.len() => {
-            for (arg, actual) in args.iter().zip(actual_args.iter()) {
-                infer_targs(arg, actual, targs, fixed);
-            }
-        }
-        (Ty::Adt(_, args), Ty::Error | Ty::Never) => {
-            for arg in args.iter() {
-                infer_targs(arg, actual, targs, fixed);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Gives each type parameter in `declared` that `targs` doesn't know yet the part of
-/// `actual` in its place, so `Option[T]` and `Option[Int]` make `T` an `Int`. Parts that
-/// differ are left for the caller to report.
-fn unify(declared: &Ty, actual: &Ty, targs: &mut [Option<Ty>]) {
-    match (declared, actual) {
-        (Ty::Param(i), actual) => {
-            if let Some(slot @ None) = targs.get_mut(*i as usize) {
-                *slot = Some(actual.clone());
-            }
-        }
-        (Ty::Adt(id, args), Ty::Adt(other, actual_args)) if id == other && args.len() == actual_args.len() => {
-            for (arg, actual) in args.iter().zip(actual_args.iter()) {
-                unify(arg, actual, targs);
-            }
-        }
-        _ => {}
+        Ty::Never => true,
+        Ty::Adt(_, args) => args.iter().any(mentions_never),
+        _ => false,
     }
 }
 

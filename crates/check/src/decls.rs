@@ -553,7 +553,7 @@ impl Decls {
             Ty::Bool => matches!(iface, IfaceId::EQ | IfaceId::SHOW | IfaceId::HASH) || by_impl(),
             Ty::Unit => matches!(iface, IfaceId::EQ | IfaceId::HASH) || by_impl(),
             Ty::IoError => iface == IfaceId::SHOW || by_impl(),
-            Ty::Cap(_) | Ty::Never | Ty::Error => false,
+            Ty::Cap(_) | Ty::Never | Ty::Error | Ty::Var(_) => false,
         }
     }
 
@@ -645,7 +645,7 @@ impl Decls {
                 Ty::IoError => std("IoError", "std.io.IoError"),
                 Ty::Cap(cap) if cap.iface == IfaceId::OUT => std("Out", "std.io.Out"),
                 Ty::Cap(cap) => &self.iface(cap.iface).name,
-                Ty::Param(_) => "_",
+                Ty::Param(_) | Ty::Var(_) => "_",
                 Ty::Error => "{unknown}",
             })
         })

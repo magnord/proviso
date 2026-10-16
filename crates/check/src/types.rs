@@ -106,6 +106,9 @@ pub enum Ty {
     /// The type parameter at this index of the generic declaration whose fields mention it,
     /// such as `T` in the prelude's `Option[T]`.
     Param(u32),
+    /// An inference variable of the body being checked (see [`crate::infer`]). None is
+    /// left in [`crate::Program`] once the body is checked.
+    Var(u32),
     /// The type of an expression that already has an error; it is compatible with
     /// everything, so one mistake is reported once.
     Error,
@@ -161,44 +164,5 @@ impl Ty {
     /// Whether the type has no value yet to report against: an error or a diverging expression.
     pub fn is_unknown(&self) -> bool {
         matches!(self, Ty::Error | Ty::Never)
-    }
-
-    /// Whether `actual` may be used where `self` is expected. `Never` is a subtype of every
-    /// type (REFERENCE §9.2), also as a type argument, so a `Some(fail e)` is an `Option[T]`
-    /// for any `T`. Values of a generic type are immutable, so this is sound.
-    pub fn accepts(&self, actual: &Ty) -> bool {
-        match (self, actual) {
-            // Shared parts are the same type, so an expected type built from the argument's own
-            // isn't walked again, and checking `Some(Some(…))` stays linear in its depth.
-            (Ty::Adt(id, args), Ty::Adt(other, actual_args)) if id == other && args.len() == actual_args.len() => {
-                Arc::ptr_eq(args, actual_args)
-                    || args.iter().zip(actual_args.iter()).all(|(arg, actual)| arg.accepts(actual))
-            }
-            _ => self == actual || actual.is_unknown() || *self == Ty::Error,
-        }
-    }
-
-    /// Whether `Never` appears in a type argument, as in `Option[Never]`. Such a type says
-    /// less than it seems to, so it doesn't give a later branch its type.
-    pub fn has_never_arg(&self) -> bool {
-        match self {
-            Ty::Adt(_, args) => args.iter().any(|arg| *arg == Ty::Never || arg.has_never_arg()),
-            _ => false,
-        }
-    }
-
-    /// The type of a value that is either a `self` or an `other`, where `Never` gives way to
-    /// the other side, so `Option[Never]` and `Option[Int]` join to `Option[Int]`. `None` when
-    /// they have no such type.
-    pub fn join(&self, other: &Ty) -> Option<Ty> {
-        match (self, other) {
-            (Ty::Error, _) | (_, Ty::Error) => Some(Ty::Error),
-            (Ty::Never, ty) | (ty, Ty::Never) => Some(ty.clone()),
-            (Ty::Adt(id, args), Ty::Adt(other, other_args)) if id == other && args.len() == other_args.len() => {
-                let args = args.iter().zip(other_args.iter()).map(|(a, b)| a.join(b)).collect::<Option<Vec<_>>>()?;
-                Some(Ty::applied(*id, args))
-            }
-            (a, b) => (a == b).then(|| a.clone()),
-        }
     }
 }
