@@ -99,6 +99,12 @@ impl Plank {
     }
 }
 
+pub(crate) impl Plank {                                     // <- E0101
+    fn width(self) -> Int {
+        return self.n
+    }
+}
+
 fn more(p: Plank) -> Int {
-    return p.len() + Plank(n: 1).n + shaped()
+    return p.len() + p.width() + Plank(n: 1).n + shaped()
 }

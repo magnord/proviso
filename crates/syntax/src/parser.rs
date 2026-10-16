@@ -447,21 +447,23 @@ impl Parser<'_> {
         // A broken `pub(…)` is reported once, and the rest of it is skipped through its `)` or
         // up to the item's keyword, so the item is still declared (§15.1). It most likely
         // meant `pub(pkg)`, the only restricted visibility.
-        let written = self.pub_scope().is_ok();
-        if !written && !self.skip_broken_visibility() {
-            return Err(());
-        }
+        let written = match self.pub_scope() {
+            Ok(written) => written,
+            Err(()) if self.skip_broken_visibility() => false,
+            Err(()) => return Err(()),
+        };
         Ok((Visibility::PubPkg, written))
     }
 
-    /// The `pkg)` of `pub(pkg)`.
-    fn pub_scope(&mut self) -> PResult<()> {
+    /// The `pkg)` of `pub(pkg)`, and whether it says `pkg`.
+    fn pub_scope(&mut self) -> PResult<bool> {
         let scope = self.ident("`pkg`")?;
-        if self.m.text(scope.sym) != "pkg" {
+        let pkg = self.m.text(scope.sym) == "pkg";
+        if !pkg {
             self.error(codes::UNEXPECTED_TOKEN, scope.span, "the only restricted visibility is `pub(pkg)`");
         }
         self.expect(T::RParen, "`)`")?;
-        Ok(())
+        Ok(pkg)
     }
 
     /// Skips what is left of a broken `pub(…)` on its line, through its `)` or up to an item's
