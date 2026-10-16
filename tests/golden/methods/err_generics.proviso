@@ -97,6 +97,8 @@ fn calls(sys: System, p: Plain) {
     twice::[Int, Text](1)
     twice::[Int](1)
     twice::[Int, Text, Bool](1)                     // <- E0317
+    triple::[Int, Text](x: 1, y: "y")
+    triple::[Int](x: 1, y: "y")                     // <- E0317
     twice(1)
     cased::[Int, Int](1)                            // <- E0317
     shadows("s")
@@ -128,6 +130,9 @@ fn cased[t](x: t) {                                 // <- E0204
 }
 
 fn twice[T, T](x: T) {                              // <- E0210
+}
+
+fn triple[T, U, T](x: T, y: U) {                    // <- E0210
 }
 
 fn shadows[Int](x: Int) {                           // <- E0203
