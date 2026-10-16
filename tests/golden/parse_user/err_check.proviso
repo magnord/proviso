@@ -126,7 +126,8 @@ fn broken_block(o: Option[Int], n: Int) -> Int {
         let total = n
         return total
     }
-    let total = x4 + n
+    check match n { 0 => o, _ => None } is Some(x5) // <- E0101
+    let total = x4 + x5 + n
     return total
 }
 

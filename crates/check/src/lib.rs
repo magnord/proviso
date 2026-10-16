@@ -1831,6 +1831,12 @@ impl Checker<'_> {
             };
             match &decl.expect {
                 Expectation::Equals(value) => {
+                    // A call that was rejected has nothing to compare with (§15.1).
+                    if ty == Ty::Error {
+                        self.infer(*value);
+                        self.p.examples.push(ExampleInfo { item: index, locals: self.f.locals.len() });
+                        continue;
+                    }
                     let value_ty = self.check(*value, &ty);
                     let ty = if ty.is_unknown() { value_ty } else { ty };
                     let defined = matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::EQ);

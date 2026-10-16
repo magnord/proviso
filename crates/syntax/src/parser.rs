@@ -1331,13 +1331,17 @@ impl Parser<'_> {
         // For each open bracket, how many names were bound before it, and whether an `or`
         // in it means its group binds none.
         let mut groups: Vec<(usize, bool)> = Vec::new();
+        // Whether a `match` in the condition has yet to open its arms.
+        let mut arms_next = false;
         let mut i = start;
         while let Some(token) = self.tokens.get(i) {
             match token.kind {
                 // A `{` on the line of a `check` that lacks its `else` opens the block meant
                 // for it, whose names the condition doesn't bind.
-                T::LBrace if depth == 0 => break,
+                T::LBrace if depth == 0 && !arms_next => break,
+                T::Keyword(Kw::Match) => arms_next = true,
                 T::LParen | T::LBracket | T::LBrace => {
+                    arms_next &= token.kind != T::LBrace;
                     depth += 1;
                     groups.push((names.len(), false));
                 }
