@@ -1,0 +1,31 @@
+// phase: 2.2
+// expect-error: E0101
+// A bracket that is never closed is reported where it opens. The item ends before the next
+// item, which is parsed as usual, and uses of what it declares aren't reported (REFERENCE
+// §15.1). That holds for an enum's braces, a variant's parentheses and a `match`'s braces.
+enum Open {                                         // <- E0101
+    A
+
+enum After {
+    B
+}
+
+enum Fields {
+    C(n: Int                                        // <- E0101
+    D
+}
+
+fn matching(a: After) -> Int {
+    return match a {                                // <- E0101
+        B => 1
+
+enum Last {
+    E
+}
+
+fn reads(o: Open, a: After, f: Fields, l: Last) -> Int {
+    let x = Open.A
+    let y = Fields.D
+    let z = Last.E
+    return matching(a)
+}

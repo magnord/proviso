@@ -1,0 +1,25 @@
+// phase: 2.2
+// expect-error: E0102
+// expect-error: E0201
+// The bindings of `x is P` scope over the rest of its `and` chain and over the then-block,
+// not over an `or`, an `else` block, a `not`, or the code after the `if` (REFERENCE §6.4).
+// `x is P` is a value, not a statement (§2).
+enum Shape {
+    Circle(radius: Int)
+    Empty
+}
+
+fn scopes(s: Shape) -> Int {
+    s is Empty                                      // <- E0102
+    if s is Circle(r) or r > 0 {                    // <- E0201
+        return 1
+    }
+    if s is Circle(radius) {
+        let x = radius
+    } else {
+        return radius                               // <- E0201
+    }
+    let y = not (s is Circle(q)) and q > 0          // <- E0201
+    let z = s is Circle(k)
+    return k                                        // <- E0201
+}

@@ -1,0 +1,37 @@
+// phase: 2.2
+// A recursive enum may be as deep as memory allows (REFERENCE §4.5). Building, walking,
+// comparing, showing and dropping a list of a million nodes uses no native stack per node, so
+// it neither crashes nor reports stack exhaustion (OPEN_QUESTIONS P5). The second comparison
+// differs only in the deepest node.
+use std.io { IoError }
+
+enum IntList derives(Eq, Show) {
+    Nil
+    Cons(head: Int, tail: IntList)
+}
+
+fn build(n: Int, last: Int) -> IntList {
+    var list = IntList.Nil
+    for i in 0..n {
+        let head = if i == 0 { last } else { i }
+        list = IntList.Cons(head: head, tail: list)
+    }
+    return list
+}
+
+fn sum(list: IntList) -> Int {
+    var total = 0
+    var rest = list
+    while rest is Cons(head, tail) {
+        total += head
+        rest = tail
+    }
+    return total
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let a = build(n: 1_000_000, last: 0)
+    let b = build(n: 1_000_000, last: 0)
+    let c = build(n: 1_000_000, last: -1)
+    try sys.stdout.write_line(f"{sum(a)} {a == b} {a == c} {a.show().byte_len()}")
+}

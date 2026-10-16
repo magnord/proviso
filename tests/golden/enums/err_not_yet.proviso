@@ -1,0 +1,36 @@
+// phase: 2.2
+// expect-error: E0901
+// Generic enums, the `Ord` and `Hash` derives, associated functions, tuple patterns, and the
+// `Option` and `Result` variants come in later slices of phase 2. Uses of what they declare
+// aren't reported again (REFERENCE §15.1).
+enum Maybe[T] {                                     // <- E0901
+    Just(value: T)
+    Nothing
+}
+
+enum Ranked derives(Ord) {                          // <- E0901
+    Low
+    High
+}
+
+enum Keyed derives(Hash) {                          // <- E0901
+    K
+}
+
+fn later(m: Maybe, r: Ranked, k: Keyed) -> Int {
+    let a = Maybe.Just(value: 1)
+    let b = r < Ranked.High
+    let d = Ranked.lowest()                         // <- E0901
+    let e = match m {
+        Just(v) => v
+        Nothing => 0
+    }
+    let f = match r {
+        (x, y) => 1                                 // <- E0901
+    }
+    let g = match r {
+        Some(x) => 1                                // <- E0901
+        _ => 2
+    }
+    return e + f + g
+}

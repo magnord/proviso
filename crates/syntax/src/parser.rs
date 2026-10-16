@@ -35,6 +35,7 @@ pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> M
         exprs: Arena::new(),
         stmts: Arena::new(),
         types: Arena::new(),
+        pats: Arena::new(),
         interner: Interner::default(),
         poisoned: HashSet::new(),
         impls: HashSet::new(),
@@ -204,8 +205,8 @@ impl Parser<'_> {
     fn starts_item(&self) -> bool {
         let T::Keyword(kw) = self.kind() else { return false };
         // `let` also starts a statement, so it never ends one.
-        let item =
-            matches!(kw, Kw::Fn | Kw::Pub | Kw::Use | Kw::Record) || (kw != Kw::Let && planned_item(kw).is_some());
+        let item = matches!(kw, Kw::Fn | Kw::Pub | Kw::Use | Kw::Record | Kw::Enum)
+            || (kw != Kw::Let && planned_item(kw).is_some());
         let span = self.peek().span;
         item && self.starts_line(span) && self.indent(span) <= self.item_indent
     }
@@ -386,6 +387,7 @@ impl Parser<'_> {
             }
             T::Keyword(Kw::Use) => ItemKind::Use(self.use_decl()?),
             T::Keyword(Kw::Record) => ItemKind::Record(self.record_decl()?),
+            T::Keyword(Kw::Enum) => ItemKind::Enum(self.enum_decl()?),
             T::Keyword(kw) => match planned_item(kw) {
                 Some((what, planned)) => {
                     self.poison_declared_type();
@@ -509,17 +511,7 @@ impl Parser<'_> {
         if self.at(T::LBracket) {
             return self.not_implemented("generic records", Planned::Phase(2));
         }
-        let mut derives = Vec::new();
-        if self.eat(T::Keyword(Kw::Derives)) {
-            let open = self.expect(T::LParen, "`(` and the interfaces to derive")?;
-            while !self.at(T::RParen) {
-                derives.push(self.ident("an interface name")?);
-                if !self.eat(T::Comma) {
-                    break;
-                }
-            }
-            self.close(&open, T::RParen, "`,` or `)`")?;
-        }
+        let derives = self.derives()?;
         let open = self.expect(T::LBrace, "`{` and the record's fields")?;
         let mut fields = Vec::new();
         loop {
@@ -547,6 +539,84 @@ impl Parser<'_> {
         }
         let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
         Ok(RecordDecl { name, derives, fields, refinement })
+    }
+
+    /// `derives(Eq, Show)`, or nothing.
+    fn derives(&mut self) -> PResult<Vec<Ident>> {
+        let mut derives = Vec::new();
+        if self.eat(T::Keyword(Kw::Derives)) {
+            let open = self.expect(T::LParen, "`(` and the interfaces to derive")?;
+            while !self.at(T::RParen) {
+                derives.push(self.ident("an interface name")?);
+                if !self.eat(T::Comma) {
+                    break;
+                }
+            }
+            self.close(&open, T::RParen, "`,` or `)`")?;
+        }
+        Ok(derives)
+    }
+
+    fn enum_decl(&mut self) -> PResult<EnumDecl> {
+        self.bump();
+        let name = self.ident("an enum name")?;
+        let decl = self.enum_rest(name);
+        if decl.is_err() {
+            self.m.poisoned.insert(name.sym);
+        }
+        decl
+    }
+
+    fn enum_rest(&mut self, name: Ident) -> PResult<EnumDecl> {
+        if self.at(T::LBracket) {
+            return self.not_implemented("generic enums", Planned::Phase(2));
+        }
+        let derives = self.derives()?;
+        let open = self.expect(T::LBrace, "`{` and the enum's variants")?;
+        let mut variants = Vec::new();
+        loop {
+            while matches!(self.kind(), T::Newline | T::DocComment) {
+                self.bump();
+            }
+            if self.eat(T::RBrace) {
+                break;
+            }
+            if self.at(T::Eof) || self.starts_item() {
+                return self.unclosed(&open);
+            }
+            let saved = self.stmt_indent;
+            self.stmt_indent = self.indent(self.peek().span);
+            let variant = self.variant_decl();
+            self.stmt_indent = saved;
+            variants.push(variant?);
+            if !self.eat(T::Comma) && !self.at(T::Newline) {
+                self.close(&open, T::RBrace, "`,`, a new line or `}`")?;
+                break;
+            }
+        }
+        Ok(EnumDecl { name, derives, variants })
+    }
+
+    /// `Circle(radius: Float)` or `Empty`.
+    fn variant_decl(&mut self) -> PResult<VariantDecl> {
+        let name = self.ident("a variant name")?;
+        let mut fields = Vec::new();
+        if self.at(T::LParen) {
+            let open = self.bump();
+            if self.at(T::RParen) {
+                let span = open.span.to(self.peek().span);
+                self.error(codes::UNEXPECTED_TOKEN, span, "a variant without fields is written without parentheses");
+                return Err(());
+            }
+            loop {
+                fields.push(self.field_decl()?);
+                if !self.eat(T::Comma) || self.at(T::RParen) {
+                    break;
+                }
+            }
+            self.close(&open, T::RParen, "`,` or `)`")?;
+        }
+        Ok(VariantDecl { name, fields })
     }
 
     fn field_decl(&mut self) -> PResult<FieldDecl> {
@@ -721,7 +791,8 @@ impl Parser<'_> {
             self.stmt_indent = self.indent(next);
             let stmt = match self.stmt() {
                 Ok(stmt) => {
-                    if !matches!(self.kind(), T::Newline | T::RBrace | T::Eof) {
+                    // A statement whose block was never closed ends before the next item.
+                    if !matches!(self.kind(), T::Newline | T::RBrace | T::Eof) && !self.starts_item() {
                         let _ = self.unexpected::<()>("end of statement");
                         self.recover(start, Stop::Stmt);
                     }
@@ -904,32 +975,45 @@ impl Parser<'_> {
         self.comparison()
     }
 
-    fn comparison_op(&mut self) -> PResult<Option<BinOp>> {
-        Ok(Some(match self.kind() {
+    /// The comparison at the current token: an operator, or `None` for `is`.
+    fn comparison_op(&mut self) -> PResult<Option<Option<BinOp>>> {
+        Ok(Some(Some(match self.kind() {
             T::EqEq => BinOp::Eq,
             T::NotEq => BinOp::Ne,
             T::Lt => BinOp::Lt,
             T::Le => BinOp::Le,
             T::Gt => BinOp::Gt,
             T::Ge => BinOp::Ge,
+            T::Keyword(Kw::Is) => return Ok(Some(None)),
             T::Keyword(Kw::In) => return self.not_implemented("`in` tests", Planned::Phase(2)),
-            T::Keyword(Kw::Is) => return self.not_implemented("`is` tests", Planned::Phase(2)),
             _ => return Ok(None),
-        }))
+        })))
     }
 
     fn comparison(&mut self) -> PResult<ExprId> {
         let lhs = self.range()?;
         let Some(op) = self.comparison_op()? else { return Ok(lhs) };
         self.bump();
-        let rhs = self.range()?;
-        let e = self.binary(op, lhs, rhs);
+        let e = match op {
+            Some(op) => {
+                let rhs = self.range()?;
+                self.binary(op, lhs, rhs)
+            }
+            None => {
+                let pat = self.pattern()?;
+                let span = self.span_of(lhs).to(self.prev_span());
+                self.alloc(ExprKind::Is { value: lhs, pat }, span)
+            }
+        };
         if self.comparison_op()?.is_some() {
             let span = self.peek().span;
             self.error(codes::CHAINED_COMPARISON, span, "comparisons cannot be chained; write `a < b and b < c`");
-            while self.comparison_op()?.is_some() {
+            while let Some(op) = self.comparison_op()? {
                 self.bump();
-                self.range()?;
+                match op {
+                    Some(_) => self.range().map(|_| ())?,
+                    None => self.pattern().map(|_| ())?,
+                }
             }
         }
         Ok(e)
@@ -1102,7 +1186,10 @@ impl Parser<'_> {
                     if self.at(T::Comma) {
                         return self.not_implemented("tuples", Planned::Phase(2));
                     }
-                    self.close(&open, T::RParen, "`)`")?;
+                    let close = self.close(&open, T::RParen, "`)`")?;
+                    // The parentheses belong to the expression, so its text quoted in a
+                    // message, such as a refinement's, keeps them balanced.
+                    self.m.exprs[inner].span = open.span.to(close.span);
                     return Ok(inner);
                 }
             }
@@ -1138,7 +1225,7 @@ impl Parser<'_> {
             }
             T::LBracket => return self.not_implemented("list and map literals", Planned::Phase(2)),
             T::Pipe => return self.not_implemented("closures", Planned::Phase(2)),
-            T::Keyword(Kw::Match) => return self.not_implemented("`match` expressions", Planned::Phase(2)),
+            T::Keyword(Kw::Match) => return self.match_expr(),
             T::Keyword(Kw::Scope) => return self.not_implemented("`scope` blocks", Planned::Phase(6)),
             T::Keyword(Kw::Attempt) => return self.not_implemented("`attempt` expressions", Planned::Phase(2)),
             T::Keyword(Kw::Fail) => return self.not_implemented("`fail` expressions", Planned::Phase(2)),
@@ -1180,6 +1267,191 @@ impl Parser<'_> {
         let e = self.expr()?;
         self.skip_newlines();
         if self.at(T::Eof) { Ok(e) } else { self.unexpected("`}` to end the interpolation") }
+    }
+
+    fn match_expr(&mut self) -> PResult<ExprId> {
+        let start = self.bump().span;
+        let scrutinee = self.condition()?;
+        let open = self.expect(T::LBrace, "`{` and the arms of the `match`")?;
+        let indent = self.stmt_indent;
+        let (arms, complete) = self.nested(|p| Ok(p.arms(&open, indent)))?;
+        let span = start.to(self.prev_span());
+        Ok(self.alloc(ExprKind::Match { scrutinee, arms, complete }, span))
+    }
+
+    /// Parses arms up to the `}` that closes `open`, one per line or separated by commas. A
+    /// `match` that is never closed ends as a block does (see [`Parser::block_rest`]). Also
+    /// returns whether every arm parsed and the braces closed.
+    fn arms(&mut self, open: &Token, indent: usize) -> (Vec<Arm>, bool) {
+        let mut arms = Vec::new();
+        let mut complete = true;
+        loop {
+            while matches!(self.kind(), T::Newline | T::DocComment) {
+                self.bump();
+            }
+            let next = self.peek().span;
+            let unclosed = match self.kind() {
+                T::RBrace if self.indent(next) >= indent || !self.starts_line(next) => {
+                    self.bump();
+                    break;
+                }
+                T::RBrace | T::Eof => true,
+                _ if self.field_indent.is_some_and(|field| self.starts_line(next) && self.indent(next) <= field) => {
+                    true
+                }
+                _ => self.starts_item(),
+            };
+            if unclosed {
+                self.recovered = true;
+                if !self.unclosed_reported {
+                    self.unclosed_reported = true;
+                    let _ = self.unclosed::<()>(open);
+                }
+                return (arms, false);
+            }
+            let start = self.pos;
+            let saved = (self.depth, self.stmt_indent);
+            self.stmt_indent = self.indent(next);
+            match self.arm() {
+                Ok(arm) => {
+                    arms.push(arm);
+                    if !self.eat(T::Comma)
+                        && !matches!(self.kind(), T::Newline | T::RBrace | T::Eof)
+                        && !self.starts_item()
+                    {
+                        let _ = self.unexpected::<()>("the end of the arm");
+                        self.recover(start, Stop::Stmt);
+                        complete = false;
+                    }
+                }
+                Err(()) => {
+                    self.recover(start, Stop::Stmt);
+                    if self.pos == start {
+                        self.bump();
+                    }
+                    complete = false;
+                }
+            }
+            (self.depth, self.stmt_indent) = saved;
+        }
+        (arms, complete)
+    }
+
+    /// `pattern if guard => body`, where the body is a block or one statement.
+    fn arm(&mut self) -> PResult<Arm> {
+        let pat = self.pattern()?;
+        let guard = if self.eat(T::Keyword(Kw::If)) { Some(self.nested(Self::logical)?) } else { None };
+        self.expect(T::FatArrow, "`=>` and the arm's body")?;
+        let body = if self.at(T::LBrace) {
+            self.block()?
+        } else {
+            if matches!(self.kind(), T::Keyword(Kw::Let | Kw::Var)) {
+                return self.unexpected("an expression or `{` after `=>`");
+            }
+            let start = self.peek().span;
+            let stmt = self.stmt()?;
+            Block { stmts: vec![stmt], span: start.to(self.prev_span()), unclosed: false }
+        };
+        Ok(Arm { pat, guard, body })
+    }
+
+    // ---- patterns (REFERENCE §6.4) ----
+
+    fn pattern(&mut self) -> PResult<PatId> {
+        self.nested(Self::pattern_kind)
+    }
+
+    fn pattern_kind(&mut self) -> PResult<PatId> {
+        let start = self.peek().span;
+        let kind = match self.kind() {
+            T::Ident => {
+                let name = self.ident("a pattern")?;
+                let text = self.m.text(name.sym);
+                let upper = text.starts_with(|c: char| c.is_ascii_uppercase());
+                if text == "_" {
+                    PatKind::Wild
+                } else if upper || matches!(self.kind(), T::Dot | T::LParen) {
+                    self.ctor_pattern(name)?
+                } else {
+                    PatKind::Bind(name)
+                }
+            }
+            T::Int | T::Float | T::Char | T::Text | T::Minus | T::Keyword(Kw::True | Kw::False) => {
+                let lo = self.literal_pattern()?;
+                let inclusive = match self.kind() {
+                    T::DotDot => false,
+                    T::DotDotEq => true,
+                    _ => {
+                        let span = start.to(self.prev_span());
+                        return Ok(self.m.pats.alloc(Pat { kind: PatKind::Lit(lo), span }));
+                    }
+                };
+                self.bump();
+                let hi = self.literal_pattern()?;
+                PatKind::Range { lo, hi, inclusive }
+            }
+            T::LParen if self.nth(1) == T::RParen => {
+                self.bump();
+                self.bump();
+                let span = start.to(self.prev_span());
+                PatKind::Lit(self.alloc(ExprKind::Unit, span))
+            }
+            T::LParen => return self.not_implemented("tuple patterns", Planned::Phase(2)),
+            _ => return self.unexpected("a pattern"),
+        };
+        let span = start.to(self.prev_span());
+        Ok(self.m.pats.alloc(Pat { kind, span }))
+    }
+
+    /// `Empty`, `Shape.Circle(r)` or `Rect(w: width, ..)`, after its first name.
+    fn ctor_pattern(&mut self, first: Ident) -> PResult<PatKind> {
+        let (qualifier, name) =
+            if self.eat(T::Dot) { (Some(first), self.member_name("a variant name")?) } else { (None, first) };
+        let mut rest = false;
+        let fields = if self.at(T::LParen) {
+            let open = self.bump();
+            let mut fields = Vec::new();
+            while !self.at(T::RParen) {
+                if self.eat(T::DotDot) {
+                    rest = true;
+                    break;
+                }
+                let label = if self.at(T::Ident) && self.nth(1) == T::Colon {
+                    let label = self.ident("a field name")?;
+                    self.bump();
+                    Some(label)
+                } else {
+                    None
+                };
+                let pat = self.pattern()?;
+                fields.push(FieldPat { label, pat });
+                if !self.eat(T::Comma) {
+                    break;
+                }
+            }
+            self.close(&open, T::RParen, "`,` or `)`")?;
+            Some(fields)
+        } else {
+            None
+        };
+        Ok(PatKind::Ctor { qualifier, name, fields, rest })
+    }
+
+    /// A literal in a pattern, possibly a negated number.
+    fn literal_pattern(&mut self) -> PResult<ExprId> {
+        if self.at(T::Minus) {
+            let minus = self.bump();
+            if !matches!(self.kind(), T::Int | T::Float) {
+                return self.unexpected("a number after `-`");
+            }
+            let operand = self.primary()?;
+            let span = minus.span.to(self.prev_span());
+            return Ok(self.alloc(ExprKind::Unary { op: UnaryOp::Neg, operand }, span));
+        }
+        match self.kind() {
+            T::Int | T::Float | T::Char | T::Text | T::Keyword(Kw::True | Kw::False) => self.primary(),
+            _ => self.unexpected("a literal"),
+        }
     }
 
     fn if_expr(&mut self) -> PResult<ExprId> {
@@ -1246,7 +1518,6 @@ impl Parser<'_> {
 /// Item keywords that belong to later phases, with what to call them.
 fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
     Some(match kw {
-        Kw::Enum => ("`enum` declarations", Planned::Phase(2)),
         Kw::Type => ("`type` declarations", Planned::Phase(2)),
         Kw::Distinct => ("distinct types", Planned::Phase(2)),
         Kw::Unique | Kw::Opaque | Kw::Resource => ("`unique`, `opaque` and `resource` records", Planned::Phase(2)),

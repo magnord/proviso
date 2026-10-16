@@ -1,0 +1,3 @@
+defect[no_arm_matched]: no arm of this `match` matches 10
+  at enums/no_arm_matched.proviso:21:12 (no_arm_matched.digit+2)
+  called from enums/no_arm_matched.proviso:31:31 (no_arm_matched.main+5)

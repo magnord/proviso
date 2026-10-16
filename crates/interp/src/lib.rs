@@ -49,13 +49,39 @@ const _: () = {
     send_sync::<Value>()
 };
 
-/// A record value. Writes go through `Arc::make_mut`, so a shared record is copied one level
-/// at the first write (value semantics, REFERENCE §5.1).
+/// A record or enum value. Writes go through `Arc::make_mut`, so a shared value is copied one
+/// level at the first write (value semantics, REFERENCE §5.1).
 #[derive(Clone, Debug)]
 pub struct Adt {
     pub def: AdtId,
     pub variant: VariantIdx,
     pub fields: Arc<[Value]>,
+}
+
+impl Drop for Adt {
+    /// Drops the values this one alone holds with a list of its own rather than recursion, so
+    /// a recursive enum as long as memory allows, such as a list of a million nodes, does not
+    /// overflow the native stack when it goes away.
+    fn drop(&mut self) {
+        let mut owned = Vec::new();
+        take_parts(&mut self.fields, &mut owned);
+        while let Some(mut value) = owned.pop() {
+            if let Value::Adt(adt) = &mut value {
+                take_parts(&mut adt.fields, &mut owned);
+            }
+            // `value` now holds no other record or enum, so dropping it doesn't recurse.
+        }
+    }
+}
+
+/// Moves the records and enums out of `fields` into `owned`, if nothing else shares them.
+fn take_parts(fields: &mut Arc<[Value]>, owned: &mut Vec<Value>) {
+    let Some(fields) = Arc::get_mut(fields) else { return };
+    for field in fields {
+        if let Value::Adt(_) = field {
+            owned.push(std::mem::replace(field, Value::Unit));
+        }
+    }
 }
 
 /// A capability. Copies share the underlying state, the one exception to value semantics
@@ -74,6 +100,7 @@ pub enum DefectKind {
     UnreachableReached,
     StackExhausted,
     RefinementFailed,
+    NoArmMatched,
 }
 
 impl DefectKind {
@@ -86,6 +113,7 @@ impl DefectKind {
             DefectKind::UnreachableReached => "unreachable_reached",
             DefectKind::StackExhausted => "stack_exhausted",
             DefectKind::RefinementFailed => "refinement_failed",
+            DefectKind::NoArmMatched => "no_arm_matched",
         }
     }
 }
@@ -309,7 +337,8 @@ impl Interp<'_> {
                 Some(i) => {
                     let shown = debug_repr(&adt.fields[i.index()], &p.decls);
                     let field = &variant.fields[i.index()].name;
-                    format!("`{}.{field}` is {shown}, which breaks its refinement `{text}`", def.name)
+                    let ctor = def.ctor_name(adt.variant);
+                    format!("`{ctor}.{field}` is {shown}, which breaks its refinement `{text}`")
                 }
                 None => format!("{} breaks `{}`'s refinement `{text}`", debug_repr(value, &p.decls), def.name),
             };
@@ -408,13 +437,23 @@ impl Interp<'_> {
                 }
             }
             ExprKind::MethodCall { receiver, args, .. } => {
-                let receiver = self.expr(*receiver, frame)?;
+                // The receiver of a variant's construction is the enum's name, not a value.
+                let receiver = match self.p.res(e) {
+                    Some(Res::Ctor(..)) => Value::Unit,
+                    _ => self.expr(*receiver, frame)?,
+                };
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.expr(arg.value, frame)?);
                 }
                 match self.p.res(e) {
                     Some(Res::Method(builtin)) => return self.builtin(builtin, receiver, values),
+                    // Labels follow the declaration order, so argument `i` is field `i`.
+                    Some(Res::Ctor(def, variant)) => {
+                        let value = Value::Adt(Adt { def, variant, fields: values.into() });
+                        self.refine(&value, span)?;
+                        value
+                    }
                     Some(Res::With) => {
                         let Value::Adt(mut adt) = receiver else { unreachable!("`with` copies a record") };
                         let replaced = self.p.with_fields.get(e).expect("`with` is resolved");
@@ -430,6 +469,9 @@ impl Interp<'_> {
                 }
             }
             ExprKind::Field { base, .. } => {
+                if let Some(Res::Ctor(def, variant)) = self.p.res(e) {
+                    return Ok(Value::Adt(Adt { def, variant, fields: Arc::from([]) }));
+                }
                 let Some(Res::Field(i)) = self.p.res(e) else { unreachable!("fields are resolved") };
                 let Value::Adt(adt) = self.expr(*base, frame)? else { unreachable!("fields are read from records") };
                 adt.fields[i.index()].clone()
@@ -522,6 +564,27 @@ impl Interp<'_> {
                 return Err(defect(DefectKind::TodoReached, message, span));
             }
             ExprKind::Unreachable => return Err(defect(DefectKind::UnreachableReached, "reached `unreachable`", span)),
+            ExprKind::Match { scrutinee, arms, .. } => {
+                let value = self.expr(*scrutinee, frame)?;
+                for arm in arms {
+                    if !self.matches(arm.pat, &value, frame)? {
+                        continue;
+                    }
+                    if let Some(guard) = arm.guard
+                        && !self.bool(guard, frame)?
+                    {
+                        continue;
+                    }
+                    return self.block(&arm.body, frame);
+                }
+                // The checker leaves integer exhaustiveness to run time (OPEN_QUESTIONS P5).
+                let shown = debug_repr(&value, &self.p.decls);
+                return Err(defect(DefectKind::NoArmMatched, format!("no arm of this `match` matches {shown}"), span));
+            }
+            ExprKind::Is { value, pat } => {
+                let value = self.expr(*value, frame)?;
+                Value::Bool(self.matches(*pat, &value, frame)?)
+            }
             ExprKind::Error => unreachable!("programs with errors don't run"),
             ExprKind::Debug(values) => {
                 let mut parts = Vec::with_capacity(values.len());
@@ -532,6 +595,39 @@ impl Interp<'_> {
                 // `debug` output is best effort; a failed write is not a program error.
                 let _ = writeln!(self.stderr, "[debug {}:{line}:{col}] {}", self.file.path, parts.join(", "));
                 Value::Unit
+            }
+        })
+    }
+
+    /// Whether `value` matches `pat`. Binds the pattern's names as it goes, so after a failed
+    /// match some of them may be set; nothing reads them then.
+    fn matches(&mut self, pat: PatId, value: &Value, frame: &mut Frame) -> Flow<bool> {
+        Ok(match &self.m.pats[pat].kind {
+            PatKind::Wild => true,
+            PatKind::Bind(_) => {
+                let id = self.p.pat_local.get(pat).expect("bindings are resolved");
+                frame[id.index()] = value.clone();
+                true
+            }
+            PatKind::Lit(lit) => equal(value, &self.expr(*lit, frame)?),
+            PatKind::Range { lo, hi, inclusive } => {
+                let lo = self.expr(*lo, frame)?;
+                let hi = self.expr(*hi, frame)?;
+                let below = if *inclusive { BinOp::Le } else { BinOp::Lt };
+                compare(BinOp::Ge, value, &lo) && compare(below, value, &hi)
+            }
+            PatKind::Ctor { fields, .. } => {
+                let ctor = self.p.pat_ctor.get(pat).expect("constructor patterns are resolved");
+                let Value::Adt(adt) = value else { unreachable!("constructor patterns match records and enums") };
+                if adt.variant != ctor.variant {
+                    return Ok(false);
+                }
+                for (field, i) in fields.iter().flatten().zip(ctor.fields.iter()) {
+                    if !self.matches(field.pat, &adt.fields[i.index()], frame)? {
+                        return Ok(false);
+                    }
+                }
+                true
             }
         })
     }
@@ -705,8 +801,8 @@ fn equal(a: &Value, b: &Value) -> bool {
 }
 
 /// The `Show` text of a value. Floats print the shortest text that reads back as the same
-/// value, always with a fraction or exponent, such as `1.0`, `0.1` and `1e21`. A record
-/// writes the expression that builds it, as a derived `Show` does (STD.md).
+/// value, always with a fraction or exponent, such as `1.0`, `0.1` and `1e21`. A record or
+/// enum writes the expression that builds it, as a derived `Show` does (STD.md).
 pub fn show(value: &Value, decls: &Decls) -> String {
     write_value(value, false, decls)
 }
@@ -747,8 +843,13 @@ fn write_value(value: &Value, quoted: bool, decls: &Decls) -> String {
             Value::Text(text) => out.push_str(text),
             Value::Unit => out.push_str("()"),
             Value::Adt(adt) => {
-                let variant = &decls.adt(adt.def).variants[adt.variant.index()];
-                out.push_str(&variant.name);
+                let def = decls.adt(adt.def);
+                let variant = &def.variants[adt.variant.index()];
+                out.push_str(&def.ctor_name(adt.variant));
+                // An enum's variant without fields is written without parentheses (STD.md).
+                if def.is_enum() && variant.fields.is_empty() {
+                    continue;
+                }
                 out.push('(');
                 // Pushed in reverse, so they are written in order.
                 parts.push(Part::Text(")"));
@@ -789,7 +890,7 @@ fn quote(text: &str, quote: char) -> String {
 
 #[cfg(test)]
 mod tests {
-    use proviso_check::decls::{AdtDef, FieldDef};
+    use proviso_check::decls::{AdtDef, FieldDef, VariantDef};
 
     use super::*;
 
@@ -855,5 +956,36 @@ mod tests {
         let expected = r#"Labelled(tag: Tag(label: "a\"b", mark: '\n'), n: -3)"#;
         assert_eq!(show(&value, &decls), expected);
         assert_eq!(debug_repr(&value, &decls), expected);
+    }
+
+    /// Dropping, comparing and writing a recursive enum use no native stack per node, so they
+    /// work on a thread whose stack holds a few hundred frames. The interpreter's own thread
+    /// has 1 GiB, which hides recursion until about ten million nodes.
+    #[test]
+    fn deep_values_need_no_native_stack() {
+        let mut decls = Decls::default();
+        let list = decls.push(AdtDef::enumeration("IntList"));
+        let def = decls.adt_mut(list);
+        def.variants.push(VariantDef::new("Nil", Vec::new()));
+        def.variants.push(VariantDef::new("Cons", vec![field("head", Ty::INT), field("tail", Ty::adt(list))]));
+        let build = move |n: usize, last: i128| {
+            let mut value = Value::Adt(Adt { def: list, variant: VariantIdx::new(0), fields: Arc::new([]) });
+            for i in 0..n {
+                let head = Value::Int(if i == 0 { last } else { i as i128 }, IntTy::I64);
+                let fields = Arc::new([head, value]);
+                value = Value::Adt(Adt { def: list, variant: VariantIdx::new(1), fields });
+            }
+            value
+        };
+        let small = std::thread::Builder::new().stack_size(64 * 1024);
+        let result = small.spawn(move || {
+            let (a, b, c) = (build(100_000, 0), build(100_000, 0), build(100_000, 1));
+            let text = show(&a, &decls);
+            let start = text.starts_with("IntList.Cons(head: 99999, tail: IntList.Cons(head: 99998, tail: ");
+            (equal(&a, &b), equal(&a, &c), text.len(), start)
+        });
+        // Each node writes `IntList.Cons(head: `, `, tail: ` and `)` around its head: 28
+        // characters, 488,890 digits in all, and 11 for `IntList.Nil`.
+        assert_eq!(result.unwrap().join().unwrap(), (true, false, 3_288_901, true));
     }
 }

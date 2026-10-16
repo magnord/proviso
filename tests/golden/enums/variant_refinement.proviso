@@ -1,0 +1,20 @@
+// phase: 2.2
+// expect-exit: 70
+// expect-report: defect refinement_failed
+// A variant's fields may carry `where` refinements, as a record's do (REFERENCE §8.2). The v1
+// profile checks them when the variant is built, and a defect names the variant's field
+// (OPEN_QUESTIONS P3, P5).
+enum Reading {
+    Celsius(degrees: Int where degrees >= -273)
+    Missing
+}
+
+fn make(d: Int) -> Reading {
+    return Reading.Celsius(degrees: d)
+}
+
+pub fn main(sys: keep System) {
+    let ok = make(-273)
+    let none = Reading.Missing
+    let bad = make(-274)
+}

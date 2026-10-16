@@ -1,0 +1,20 @@
+// phase: 2.2
+// expect-exit: 70
+// expect-report: defect refinement_failed
+// A refinement may test a variant with `is` (REFERENCE §8.1), and the v1 profile checks it at
+// run time like any other (OPEN_QUESTIONS P3).
+enum Shape derives(Show) {
+    Circle(radius: Int)
+    Empty
+}
+
+record Sized {
+    shape: Shape
+    limit: Int
+} where not (shape is Circle(r) and r > limit)
+
+pub fn main(sys: keep System) {
+    let ok = Sized(shape: Shape.Circle(radius: 5), limit: 5)
+    let empty = Sized(shape: Shape.Empty, limit: 0)
+    let bad = Sized(shape: Shape.Circle(radius: 6), limit: 5)
+}

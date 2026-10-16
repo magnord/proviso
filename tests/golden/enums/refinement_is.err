@@ -1,0 +1,2 @@
+defect[refinement_failed]: Sized(shape: Shape.Circle(radius: 6), limit: 5) breaks `Sized`'s refinement `not (shape is Circle(r) and r > limit)`
+  at enums/refinement_is.proviso:19:15 (refinement_is.main+4)

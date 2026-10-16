@@ -1,0 +1,32 @@
+// phase: 2.2
+// expect-exit: 70
+// expect-report: defect no_arm_matched
+// Exhaustiveness over integers uses refinement facts, so it is `[verified]` rather than
+// `[type]` (REFERENCE §6.3). Before the verifier exists, the v1 profile checks it at run time
+// instead (§8.4): a value that no arm matches is a defect at the `match` (OPEN_QUESTIONS P5).
+use std.io { IoError }
+
+record Person {
+    age: Int where 0 <= age and age < 150
+}
+
+fn label(p: Person) -> Text {
+    return match p.age {
+        0..18 => "minor"
+        18..150 => "adult"
+    }
+}
+
+fn digit(n: Int) -> Text {
+    return match n {
+        0 => "zero"
+        1..=9 => "digit"
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(label(Person(age: 17)))
+    try sys.stdout.write_line(label(Person(age: 18)))
+    try sys.stdout.write_line(digit(9))
+    try sys.stdout.write_line(digit(10))
+}

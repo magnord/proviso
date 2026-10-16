@@ -1,0 +1,28 @@
+// phase: 2.2
+// expect-error: E0211
+// A `pub` enum may not mention a less visible type in its variants' fields, and a `pub`
+// function may not mention a private enum (REFERENCE §3).
+record Secret {
+    n: Int
+}
+
+pub(pkg) record Inner {
+    n: Int
+}
+
+pub enum Leaky {
+    Open
+    Hidden(s: Secret)                               // <- E0211
+    Half(i: Inner)                                  // <- E0211
+}
+
+pub(pkg) enum Fine {
+    Has(i: Inner)
+}
+
+enum Private {
+    P
+}
+
+pub fn expose(p: Private) {                         // <- E0211
+}

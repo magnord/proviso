@@ -1,0 +1,5 @@
+true false false true
+true false true true
+5 9 4 9 8
+321 IntList.Cons(head: 1, tail: IntList.Cons(head: 20, tail: IntList.Cons(head: 300, tail: IntList.Nil)))
+Shape.Circle(radius: 5)

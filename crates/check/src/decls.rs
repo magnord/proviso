@@ -1,4 +1,4 @@
-//! Nominal declarations: the records of the prelude and of the module. Questions about a type
+//! Nominal declarations: the records of the prelude, and the records and enums of the module. Questions about a type
 //! that depend on what it declares, such as its name or the interfaces it implements, are
 //! answered here.
 
@@ -8,7 +8,7 @@ use proviso_syntax::ast::ExprId;
 
 use crate::types::Ty;
 
-/// A record declared in Proviso. The prelude's come first, at fixed ids.
+/// A record or enum declared in Proviso. The prelude's come first, at fixed ids.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct AdtId(u32);
 
@@ -53,14 +53,26 @@ impl VariantIdx {
     /// The one variant of a record, named like the record.
     pub const RECORD: VariantIdx = VariantIdx(0);
 
+    pub fn new(index: usize) -> VariantIdx {
+        VariantIdx(index as u32)
+    }
+
     pub fn index(self) -> usize {
         self.0 as usize
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AdtKind {
+    Record,
+    Enum,
+}
+
 pub struct AdtDef {
     pub name: Box<str>,
-    /// A record has one.
+    pub kind: AdtKind,
+    /// A record has one, named like it. An enum has one per variant it keeps, in
+    /// declaration order.
     pub variants: Vec<VariantDef>,
     /// What `derives` names, including a derive whose fields don't all implement it, so that
     /// its uses aren't reported again.
@@ -71,32 +83,69 @@ pub struct AdtDef {
     /// A rejected `impl` block may have given it methods, so a call of a method it doesn't
     /// have isn't reported.
     pub unknown_methods: bool,
+    /// A rejected variant may be the one a pattern meant, so a `match` on the enum isn't
+    /// checked for exhaustiveness.
+    pub unknown_variants: bool,
 }
 
 impl AdtDef {
     pub fn record(name: &str, fields: Vec<FieldDef>) -> AdtDef {
-        let variant = VariantDef { name: name.into(), locals: fields.len(), fields, preds: Vec::new() };
+        let mut def = AdtDef::new(name, AdtKind::Record);
+        def.variants.push(VariantDef::new(name, fields));
+        def
+    }
+
+    /// An enum, whose variants are added once their names are checked.
+    pub fn enumeration(name: &str) -> AdtDef {
+        AdtDef::new(name, AdtKind::Enum)
+    }
+
+    fn new(name: &str, kind: AdtKind) -> AdtDef {
         AdtDef {
             name: name.into(),
-            variants: vec![variant],
+            kind,
+            variants: Vec::new(),
             derives: Vec::new(),
             unknown_interfaces: false,
             unknown_methods: false,
+            unknown_variants: false,
         }
+    }
+
+    pub fn is_enum(&self) -> bool {
+        self.kind == AdtKind::Enum
     }
 
     /// The one variant of a record.
     pub fn variant(&self) -> &VariantDef {
+        debug_assert_eq!(self.kind, AdtKind::Record, "only a record has exactly one variant");
         &self.variants[VariantIdx::RECORD.index()]
     }
 
-    pub fn variant_mut(&mut self) -> &mut VariantDef {
-        &mut self.variants[VariantIdx::RECORD.index()]
-    }
-
+    /// A field of a record. An enum has none: its variants do.
     pub fn field(&self, name: &str) -> Option<(FieldIdx, &FieldDef)> {
+        if self.is_enum() {
+            return None;
+        }
         let i = self.variant().fields.iter().position(|f| &*f.name == name)?;
         Some((FieldIdx(i as u32), &self.variant().fields[i]))
+    }
+
+    /// An enum's variant called `name`.
+    pub fn variant_named(&self, name: &str) -> Option<(VariantIdx, &VariantDef)> {
+        if !self.is_enum() {
+            return None;
+        }
+        let i = self.variants.iter().position(|v| &*v.name == name)?;
+        Some((VariantIdx::new(i), &self.variants[i]))
+    }
+
+    /// How code names a variant: `Point` for a record, `Shape.Circle` for an enum's variant.
+    pub fn ctor_name(&self, variant: VariantIdx) -> String {
+        match self.kind {
+            AdtKind::Record => self.name.to_string(),
+            AdtKind::Enum => format!("{}.{}", self.name, self.variants[variant.index()].name),
+        }
     }
 }
 
@@ -108,6 +157,14 @@ pub struct VariantDef {
     pub preds: Vec<Pred>,
     /// The local slots its predicates need, fields first.
     pub locals: usize,
+    /// Declared twice, so uses of it are not checked (REFERENCE §15.1).
+    pub rejected: bool,
+}
+
+impl VariantDef {
+    pub fn new(name: &str, fields: Vec<FieldDef>) -> VariantDef {
+        VariantDef { name: name.into(), locals: fields.len(), fields, preds: Vec::new(), rejected: false }
+    }
 }
 
 pub struct FieldDef {
