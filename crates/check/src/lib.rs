@@ -490,6 +490,8 @@ enum Pending {
     Unmarked { ty: Ty, callee: Box<str>, span: Span },
     /// A `try` that propagates `errs` where there is no `fails` to take them (E0702).
     Try { errs: Vec<Ty>, span: Span },
+    /// The fallback of a `check`, of type `ty`, which must not finish (E0415).
+    Leaves { ty: Ty, span: Span },
 }
 
 impl Pending {
@@ -501,7 +503,8 @@ impl Pending {
             | Pending::Bound { ty, .. }
             | Pending::Neg { ty, .. }
             | Pending::Arith { ty, .. }
-            | Pending::Unmarked { ty, .. } => std::slice::from_ref(ty),
+            | Pending::Unmarked { ty, .. }
+            | Pending::Leaves { ty, .. } => std::slice::from_ref(ty),
             Pending::Try { errs, .. } => errs,
         }
     }
@@ -572,11 +575,24 @@ impl Checker<'_> {
         self.vars.zonk(ty)
     }
 
+    /// Reports the fallback of a `check`, of type `ty`, if it can finish (E0415). An error
+    /// counts as leaving, since it was reported where it went wrong.
+    fn check_leaves(&mut self, ty: &Ty, span: Span) {
+        if !diverges_ty(&self.vars.zonk(ty)) {
+            self.error(
+                codes::CHECK_FALLS_THROUGH,
+                span,
+                "the `else` of a `check` must not finish; use `fail`, or a block that returns, breaks or continues",
+            );
+        }
+    }
+
     /// Settles the open variables in `ty` that the statement being checked made, as its end
     /// would, so a type argument that only `Never` gave is `Never` when it is asked whether
     /// the statement can finish. Those the expression around the statement may still give
     /// stay open, such as the error type of `it`, which the `let` around a fallback settles
-    /// (OPEN_QUESTIONS P5). A type with one counts as one that can finish.
+    /// (OPEN_QUESTIONS P5). A statement whose type has one counts as one that can finish
+    /// (issue #30).
     fn settle_own(&mut self, ty: &Ty) -> Ty {
         if !self.vars.has_var(ty) {
             return ty.clone();
@@ -705,6 +721,7 @@ impl Checker<'_> {
                 self.unmarked(&callee, &ty, span);
             }
             Pending::Try { errs, span } => self.try_without_fails(errs, span),
+            Pending::Leaves { ty, span } => self.check_leaves(&ty, span),
         }
     }
 
@@ -2304,12 +2321,12 @@ impl Checker<'_> {
                     }
                     Fallback::Block(block) => (self.block_stmt(block, None), block.span),
                 };
-                if !diverges_ty(&ty) {
-                    self.error(
-                        codes::CHECK_FALLS_THROUGH,
-                        span,
-                        "the `else` of a `check` must not finish; use `fail`, or a block that returns, breaks or continues",
-                    );
+                // What the `let` around a fallback still gives, such as the error type of
+                // `it`, is waited for (OPEN_QUESTIONS P5).
+                if self.vars.has_open(&ty) {
+                    self.pending.push(Pending::Leaves { ty, span });
+                } else {
+                    self.check_leaves(&ty, span);
                 }
                 if let Some(scope) = self.f.scopes.last_mut() {
                     scope.extend(bindings);
