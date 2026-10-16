@@ -484,21 +484,21 @@ enum Pending {
     /// A call of `callee` that can fail with `ty` but has no marker, which is reported with
     /// the error type the statement settles (E0701).
     Unmarked { ty: Ty, callee: Box<str>, span: Span },
-    /// A `try` that propagates `ty` from a function without `fails` (E0702).
-    Try { ty: Ty, span: Span },
+    /// A `try` that propagates `errs` where there is no `fails` to take them (E0702).
+    Try { errs: Vec<Ty>, span: Span },
 }
 
 impl Pending {
-    /// The type whose variables the check waits on.
-    fn ty(&self) -> &Ty {
+    /// The types whose variables the check waits on.
+    fn tys(&self) -> &[Ty] {
         match self {
             Pending::Int { ty, .. }
             | Pending::Float { ty, .. }
             | Pending::Bound { ty, .. }
             | Pending::Neg { ty, .. }
             | Pending::Arith { ty, .. }
-            | Pending::Unmarked { ty, .. }
-            | Pending::Try { ty, .. } => ty,
+            | Pending::Unmarked { ty, .. } => std::slice::from_ref(ty),
+            Pending::Try { errs, .. } => errs,
         }
     }
 }
@@ -551,7 +551,7 @@ impl Checker<'_> {
         self.settle_vars(open);
         let checks = self.pending.split_off(pending.min(self.pending.len()));
         for check in checks {
-            if self.vars.has_open(check.ty()) {
+            if check.tys().iter().any(|ty| self.vars.has_open(ty)) {
                 self.pending.push(check);
             } else {
                 self.run_pending(check);
@@ -568,6 +568,17 @@ impl Checker<'_> {
         self.vars.zonk(ty)
     }
 
+    /// Settles `vars` as their defaults, or as errors where nothing gave them a type.
+    ///
+    /// Which error stands for a type argument that nothing gave, so each mistake is reported
+    /// once (REFERENCE §15.1; issue #20):
+    /// - One a rejected value was to give (quiet) is that value's error, never E0312.
+    /// - The error type of a call without a marker (unmarked) is that call's E0701, unless a
+    ///   `try` with no `fails` to take it also needs it (owed). Then it is E0312.
+    /// - Any other is E0312.
+    ///
+    /// A `try` with no `fails` to take its error then reports each error type the statement
+    /// settles in [`Checker::try_without_fails`].
     fn settle_vars(&mut self, vars: Vec<u32>) {
         let mut unknown: Vec<Origin> = Vec::new();
         for v in vars {
@@ -576,7 +587,7 @@ impl Checker<'_> {
                 Kind::Int => Ty::INT,
                 Kind::Float => Ty::Float(FloatTy::F64),
                 Kind::Any if open.never => Ty::Never,
-                Kind::Any if open.quiet && !open.owed => Ty::Error,
+                Kind::Any if open.quiet || (open.unmarked && !open.owed) => Ty::Error,
                 Kind::Any => {
                     unknown.push(open.origin);
                     Ty::Error
@@ -671,13 +682,7 @@ impl Checker<'_> {
                 let ty = self.vars.zonk(&ty);
                 self.unmarked(&callee, &ty, span);
             }
-            Pending::Try { ty, span } => {
-                // One that nothing gave is reported once, as such (issue #20).
-                let ty = self.vars.zonk(&ty);
-                if ty != Ty::Error {
-                    self.try_without_fails(&ty, span);
-                }
-            }
+            Pending::Try { errs, span } => self.try_without_fails(errs, span),
         }
     }
 
@@ -3962,10 +3967,9 @@ impl Checker<'_> {
                 }
             }
             _ => {
-                // An error type that only a marker could give is left unsaid, and nothing
-                // else reports it (§15.1). A later value may still give it, so the message
-                // waits for the statement to settle it.
-                self.vars.quiet(err);
+                // A later value may still give the error type, so the message waits for the
+                // statement to settle it, and this E0701 stands for one nothing gives.
+                self.vars.unmarked(err);
                 if self.vars.has_var(err) {
                     self.pending.push(Pending::Unmarked { ty: err.clone(), callee: callee.into(), span });
                 } else {
@@ -3976,7 +3980,11 @@ impl Checker<'_> {
     }
 
     fn unmarked(&mut self, callee: &str, err: &Ty, span: Span) {
-        let with = if err.is_unknown() { String::new() } else { format!(" with `{}`", self.show(err)) };
+        // An error type that settled as `Never` can't happen, so the call can't fail.
+        if *err == Ty::Never {
+            return;
+        }
+        let with = if *err == Ty::Error { String::new() } else { format!(" with `{}`", self.show(err)) };
         let message =
             format!("`{callee}` can fail{with}, so the call must be marked with `try`, `else` or `attempt` (§7.2)");
         self.error(codes::UNMARKED_FALLIBLE_CALL, span, message);
@@ -3992,19 +4000,21 @@ impl Checker<'_> {
         if errors.is_empty() && ty != Ty::Error {
             self.error(codes::TRY_WITHOUT_FAILURE, span, "`try` marks no call that can fail");
         }
+        if self.f.fails.is_none() && !errors.is_empty() {
+            // Error types the statement has yet to settle are reported with the types it
+            // settles, and nothing else reports one that nothing gives.
+            if errors.iter().any(|err| self.vars.has_var(err)) {
+                errors.iter().for_each(|err| self.vars.owe(err));
+                self.pending.push(Pending::Try { errs: errors, span });
+            } else {
+                self.try_without_fails(errors, span);
+            }
+            return ty;
+        }
         for err in errors {
             let err = self.vars.resolve(&err);
             let message = match &self.f.fails {
-                // One the statement has yet to settle is reported with the type it settles.
-                None if self.vars.has_var(&err) => {
-                    self.vars.owe(&err);
-                    self.pending.push(Pending::Try { ty: err, span });
-                    continue;
-                }
-                None => {
-                    self.try_without_fails(&err, span);
-                    continue;
-                }
+                None => unreachable!("a `try` without `fails` is reported above"),
                 // The function's error type gives one the call leaves open (issue #20).
                 Some(own) if *own == Ty::Error || err == Ty::Error => continue,
                 Some(own) if self.vars.subsume(own, &err) && self.vars.subsume(&err, own) => continue,
@@ -4020,17 +4030,29 @@ impl Checker<'_> {
         ty
     }
 
-    /// Reports a `try` that propagates `err` where there is no `fails` to take it.
-    fn try_without_fails(&mut self, err: &Ty, span: Span) {
-        let message = if self.f.returns {
-            let err = self.show(err);
-            format!("`try` propagates `{err}`, but this function does not declare `fails {err}`")
-        } else {
-            let place = if self.f.example { "an example" } else { "a `where` clause" };
-            format!("`try` in {place}, which has no function to propagate `{}` to", self.show(err))
-        };
-        self.vars.poison(err);
-        self.error(codes::TRY_ERROR_MISMATCH, span, message);
+    /// Reports a `try` whose calls fail with `errs` where there is no `fails` to take them.
+    /// An error type that is an error was reported where it went wrong, as the rule on
+    /// [`Checker::settle_vars`] says. One that is `Never` can't happen, so a `try` whose calls
+    /// all fail with `Never` marks no call that can fail (OPEN_QUESTIONS P5).
+    fn try_without_fails(&mut self, errs: Vec<Ty>, span: Span) {
+        let errs: Vec<Ty> = errs.iter().map(|err| self.vars.zonk(err)).filter(|err| *err != Ty::Error).collect();
+        if errs.is_empty() {
+            return;
+        }
+        if errs.iter().all(|err| *err == Ty::Never) {
+            self.error(codes::TRY_WITHOUT_FAILURE, span, "`try` marks no call that can fail");
+            return;
+        }
+        for err in errs.iter().filter(|err| **err != Ty::Never) {
+            let message = if self.f.returns {
+                let err = self.show(err);
+                format!("`try` propagates `{err}`, but this function does not declare `fails {err}`")
+            } else {
+                let place = if self.f.example { "an example" } else { "a `where` clause" };
+                format!("`try` in {place}, which has no function to propagate `{}` to", self.show(err))
+            };
+            self.error(codes::TRY_ERROR_MISMATCH, span, message);
+        }
     }
 
     /// `attempt f(…)`: a `Result` of the chain's value and the error of the calls it marks

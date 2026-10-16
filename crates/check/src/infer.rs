@@ -43,10 +43,12 @@ pub struct Open {
     pub kind: Kind,
     /// Only `Never` has reached it so far, so it is `Never` if nothing else does.
     pub never: bool,
-    /// A rejected value was the one to give it, so it is an error, not reported, if nothing
-    /// else does (REFERENCE §15.1).
+    /// Why it is not reported if nothing gives it; [`crate::Checker`]'s `settle_vars` holds
+    /// the rule. A rejected value was the one to give it.
     pub quiet: bool,
-    /// A `try` needs it, so it is reported if nothing gives it, even when quiet (issue #20).
+    /// It is the error type of a call without a marker.
+    pub unmarked: bool,
+    /// A `try` with no `fails` to take it needs it.
     pub owed: bool,
     pub origin: Origin,
 }
@@ -172,7 +174,7 @@ impl Vars {
     }
 
     pub fn fresh(&mut self, kind: Kind, origin: Origin) -> Ty {
-        self.states.push(State::Open(Open { kind, never: false, quiet: false, owed: false, origin }));
+        self.states.push(State::Open(Open { kind, never: false, quiet: false, unmarked: false, owed: false, origin }));
         Ty::Var(self.count() - 1)
     }
 
@@ -182,6 +184,7 @@ impl Vars {
             kind: Kind::Any,
             never: true,
             quiet: false,
+            unmarked: false,
             owed: false,
             origin: Origin::Defaulted,
         }));
@@ -335,8 +338,12 @@ impl Vars {
         self.mark(ty, |open| open.quiet = true);
     }
 
-    /// Marks every open variable in `ty` as one a `try` needs, which is reported if nothing
-    /// gives it, even when a rejected value was also to give it.
+    /// Marks every open variable in `ty` as the error type of a call without a marker.
+    pub fn unmarked(&mut self, ty: &Ty) {
+        self.mark(ty, |open| open.unmarked = true);
+    }
+
+    /// Marks every open variable in `ty` as one a `try` with no `fails` to take it needs.
     pub fn owe(&mut self, ty: &Ty) {
         self.mark(ty, |open| open.owed = true);
     }
@@ -416,10 +423,11 @@ impl Vars {
         };
         let never = kept.never || other.never;
         let quiet = kept.quiet || other.quiet;
+        let unmarked = kept.unmarked || other.unmarked;
         let owed = kept.owed || other.owed;
         // An error about the class names the value that first left it open.
         let origin = if matches!(kept.origin, Origin::Defaulted) { other.origin } else { kept.origin };
-        self.states[keep as usize] = State::Open(Open { kind, never, quiet, owed, origin });
+        self.states[keep as usize] = State::Open(Open { kind, never, quiet, unmarked, owed, origin });
         self.states[gone as usize] = State::Bound(Ty::Var(keep));
         self.trail.push(gone);
         true

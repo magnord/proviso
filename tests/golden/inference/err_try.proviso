@@ -1,11 +1,17 @@
 // phase: 2.5
+// expect-error: E0201
+// expect-error: E0301
 // expect-error: E0312
 // expect-error: E0701
 // expect-error: E0702
+// expect-error: E0703
 // A `try` where there is no `fails` to take its error is E0702 with the error type the
 // statement settles, also when only a literal gives it (REFERENCE §7.2). One whose error
 // type nothing gives is E0312, reported once, as such (issue #20). An unmarked call that
-// shares the error type is a second mistake, which hides neither (§15.1).
+// shares the error type is a second mistake, which hides neither (§15.1). One that a
+// rejected value was to give is that value's error alone, in either order. An error type
+// that only `Never` reaches can't happen, so a `try` on it marks no call that can fail
+// (E0703), and a call without a marker needs none (OPEN_QUESTIONS P5, `fails Never`).
 
 fn both[T: Copy](x: T) -> T fails T {
     return x
@@ -21,6 +27,15 @@ fn pass[E: Copy]() -> Int fails E {
 
 fn rethrow[E: Copy](e: E) -> Int fails E {
     fail e
+}
+
+fn wrap[E: Copy](e: Option[E]) -> Int fails E {
+    return 1
+}
+
+fn stop() -> Never {
+    loop {
+    }
 }
 
 record Bounded {
@@ -57,4 +72,26 @@ fn fallbacks() -> Int {
         0
     }
     return c1 + c2
+}
+
+fn rejected(c: Bool) -> Int {
+    let d1 = try wrap(e: 5)                         // <- E0301
+    let d2 = wrap(e: 5)                             // <- E0701, E0301
+    let d3 = if c { try both(x: None) } else { nosuch } // <- E0201
+    let d5 = try both(x: nosuch)                    // <- E0201
+    let d6 = first(a: nosuch, b: try both(x: 5))    // <- E0201
+    let d7 = first(a: try both(x: 5), b: nosuch)    // <- E0201
+    return 0
+}
+
+fn never_fails(c: Bool) -> Int {
+    let e1 = if c { try rethrow(e: stop()) } else { 1 } // <- E0703
+    let e2 = first(a: try rethrow(e: stop()), b: 1) // <- E0703
+    let e3 = if c { try both(x: stop()) } else { 1 } // <- E0702
+    return 0
+}
+
+fn never_unmarked() -> Int {
+    let e4 = rethrow(e: stop())
+    let e5 = both(x: stop())
 }
