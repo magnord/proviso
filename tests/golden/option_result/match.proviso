@@ -5,8 +5,9 @@
 // variant whose field has no values needs no arm: `Err` of a `Result[Int, Never]`, `Some` of
 // an `Option[Never]`, or a variant with a field of type `Result[Void, Never]`, so a `match` on
 // an enum whose only variant holds a `Result[Void, Void]` needs none at all (OPEN_QUESTIONS
-// P5). `Never` has no values, so as a type argument it takes nothing from `Eq` or `Show`. A pattern names the variants of the scrutinee's type, so on an enum that declares its
-// own `Some`, `Some(x)` matches that variant.
+// P5). `Never` has no values, so as a type argument it takes nothing from `Eq` or `Show`. A
+// pattern names the variants of the scrutinee's type, so on an enum that declares its own
+// `Some`, `Some(x)` matches that variant.
 use std.io { IoError }
 
 enum Maybe derives(Show) {

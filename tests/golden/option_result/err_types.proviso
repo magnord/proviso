@@ -16,6 +16,42 @@
 // takes its type from them (REFERENCE §2). `Option` and `Result` implement `Eq` and `Show`
 // only when their type arguments do, so `Option[Float]` has no `==` (§12.2, STD.md), and
 // their ordering waits for the `Ord` derives. A mistake is reported once (§15.1).
+// An unqualified `Some` is always `Option`'s (§3). The first branch of an `if` gives the
+// others their type, as for literals, unless its type has a `Never` argument, since `Never`
+// is a subtype of every type (§9.2). A variant with fields gives its own type, so it goes
+// first in `==` (P5).
+enum Maybe {
+    Some(n: Int)
+    Nothing
+}
+
+fn take_maybe(m: Maybe) -> Int {
+    return 0
+}
+
+fn prelude_names() -> Int {
+    let b = Maybe.Some(n: 2)
+    return take_maybe(Some(4))                      // <- E0301
+}
+
+fn branches(c: Bool, o: Option[Int]) -> Option[Int] fails Text {
+    let a = if c { Some(fail "a") } else { Some(1) }
+    let b = match o {
+        Some(_) => Some(fail "b")
+        None => Some(2)
+    }
+    let d = if c { Some(1) } else { None }
+    let e = if c { None } else { Some(1) }          // <- E0312
+    let g = if c { Some(fail "g") } else { 3 }      // <- E0301
+    let h: Option[Never] = Some(1)                  // <- E0301
+    let i = None == Some(1)
+    let j = Some(1) != None
+    let k = Some(fail "k")
+    let l: Option[Int] = k
+    let m = Some(fail "m") == Some(1)
+    return if a == b { d } else { a }
+}
+
 record Gauge derives(Eq) {
     reading: Option[Float]                          // <- E0309
 }

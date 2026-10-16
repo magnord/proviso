@@ -162,7 +162,7 @@ pub mod codes {
         UNSUPPORTED_OPERATOR = "E0306", "unsupported_operator",
             "An operator, interpolation, or literal or range pattern that the type does not support.";
         UNKNOWN_TYPE = "E0307", "unknown_type",
-            "A type name that does not resolve.";
+            "A type name that does not resolve, or that has the wrong number of type arguments.";
         INVALID_MAIN = "E0308", "invalid_main",
             "A program needs `pub fn main(sys: keep System)`, optionally with `fails E` (REFERENCE §7.4).";
         MISSING_IMPLEMENTATION = "E0309", "missing_implementation",

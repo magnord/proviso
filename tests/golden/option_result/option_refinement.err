@@ -1,2 +1,2 @@
-defect[refinement_failed]: `Config.retries` is Some(0), which breaks its refinement `retries != Some(0)`
-  at option_result/option_refinement.proviso:13:13 (option_refinement.main+4)
+defect[refinement_failed]: `Config.retries` is Some(0), which breaks its refinement `not (retries is Some(0))`
+  at option_result/option_refinement.proviso:14:13 (option_refinement.main+4)

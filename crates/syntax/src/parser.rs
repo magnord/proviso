@@ -765,8 +765,9 @@ impl Parser<'_> {
             T::Ident => {
                 let name = self.ident("a type")?;
                 if self.at(T::LBracket) {
-                    // A numeric type takes a unit, which is not a type (REFERENCE §4.7).
-                    let args = if is_numeric_type(self.m.text(name.sym)) {
+                    // A numeric type takes a unit, and `Array[T, N]` a length, which are not
+                    // types (REFERENCE §4.2, §4.7).
+                    let args = if takes_non_type_args(self.m.text(name.sym)) {
                         self.skip_group()?;
                         None
                     } else {
@@ -1624,11 +1625,13 @@ fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
     })
 }
 
-/// The types that take a unit in brackets, as `Float[m]` does (REFERENCE §4.7).
-fn is_numeric_type(name: &str) -> bool {
+/// The types whose brackets hold something other than types: a unit, as in `Float[m]`
+/// (REFERENCE §4.7), or the length of an `Array[T, N]` (§4.2).
+fn takes_non_type_args(name: &str) -> bool {
     matches!(
         name,
-        "Int"
+        "Array"
+            | "Int"
             | "Int8"
             | "Int16"
             | "Int32"

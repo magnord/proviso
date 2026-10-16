@@ -1403,7 +1403,12 @@ impl Checker<'_> {
             ty if ty.is_numeric() || matches!(ty, Ty::Adt(..)) => Some(ty.clone()),
             _ => hint.cloned(),
         };
-        if self.needs_context(lhs) && !self.needs_context(rhs) {
+        // A variant with fields can give its own type, as `Some(1)` does, so in
+        // `None == Some(1)` it goes first.
+        let has_fields = |e: ExprId| matches!(&self.m.exprs[e].kind, ExprKind::Call { args, .. } if !args.is_empty());
+        let lhs_needs = self.needs_context(lhs);
+        let rhs_needs = self.needs_context(rhs);
+        if lhs_needs && (!rhs_needs || (!has_fields(lhs) && has_fields(rhs))) {
             let rt = self.expr(rhs, hint);
             let lt = self.expr(lhs, numeric_or(&rt).as_ref());
             (lt, rt)
@@ -1447,12 +1452,12 @@ impl Checker<'_> {
         }
     }
 
+    /// The type both operands have, where `Never` gives way to the other side, also as a
+    /// type argument, so `Some(fail e) == Some(1)` compares `Option[Int]`s.
     fn unify_operands(&mut self, lt: Ty, rt: Ty, span: Span) -> Ty {
-        match (lt, rt) {
-            (Ty::Error, _) | (_, Ty::Error) => Ty::Error,
-            (lt, rt) if lt == rt => lt,
-            (Ty::Never, other) | (other, Ty::Never) => other,
-            (lt, rt) => {
+        match lt.join(&rt) {
+            Some(ty) => ty,
+            None => {
                 let message = format!(
                     "mismatched operand types `{}` and `{}`; Proviso has no implicit conversions",
                     self.show(&lt),
@@ -1518,7 +1523,11 @@ impl Checker<'_> {
             self.p.res.insert(e, Res::Local(id));
             return self.f.locals[id.index()].ty.clone();
         }
+        // A module item that reuses a variant's name has been reported, and so are its uses.
         if let Some(id) = bare_variant(text) {
+            if self.poisoned.contains(&name.sym) {
+                return Ty::Error;
+            }
             return self.unit_variant(e, id, name, expected);
         }
         if self.fn_names.contains_key(&name.sym) {
@@ -1538,6 +1547,12 @@ impl Checker<'_> {
             && self.lookup_local(name.sym).is_none()
             && let Some(id) = bare_variant(m.text(name.sym))
         {
+            if self.poisoned.contains(&name.sym) {
+                for arg in args {
+                    self.infer(arg.value);
+                }
+                return Ty::Error;
+            }
             return self.construct_variant(callee, id, name, args, span, expected);
         }
         if let ExprKind::Name(name) = m.exprs[callee].kind
@@ -1862,7 +1877,11 @@ impl Checker<'_> {
                 _ => {}
             }
             match ty {
-                Ty::Param(i) if targs[*i as usize].is_none() => targs[*i as usize] = Some(self.infer(arg.value)),
+                // An expected `Never` argument says nothing about the field, which gives it
+                // instead, so the field of `Some(1)` is an `Int` whatever was expected.
+                Ty::Param(i) if matches!(targs[*i as usize], None | Some(Ty::Never)) => {
+                    targs[*i as usize] = Some(self.infer(arg.value))
+                }
                 ty => {
                     let known: Vec<Ty> = targs.iter().map(|t| t.clone().unwrap_or(Ty::Error)).collect();
                     self.check(arg.value, &ty.subst(&known));
@@ -1999,7 +2018,10 @@ impl Checker<'_> {
                 Ty::Error
             }
             (Mode::Value(expected), Some(branch)) => {
-                let expected = expected.or(Some(&then_ty).filter(|t| !t.is_unknown()));
+                // The then-branch gives the else-branch its type, unless its type has a
+                // `Never` argument, as `Some(fail e)` does.
+                let partial = then_ty.has_never_arg();
+                let expected = expected.or(Some(&then_ty).filter(|t| !t.is_unknown() && !partial));
                 let else_ty = match branch {
                     ElseBranch::Block(block) => self.block_value(block, expected),
                     ElseBranch::If(nested) => self.if_expr(*nested, Mode::Value(expected)),
@@ -2007,12 +2029,29 @@ impl Checker<'_> {
                 match expected {
                     _ if then_ty == Ty::Never && else_ty == Ty::Never => Ty::Never,
                     Some(expected) => expected.clone(),
+                    None if partial => {
+                        let span = match branch {
+                            ElseBranch::Block(block) => block.span,
+                            ElseBranch::If(nested) => self.span(*nested),
+                        };
+                        self.join_branch(&then_ty, &else_ty, span)
+                    }
                     None => else_ty,
                 }
             }
         };
         self.p.expr_ty.insert(e, ty.clone());
         ty
+    }
+
+    /// The type of a branch's value when one branch is `known` and another, at `span`, is
+    /// `other`. Used where a `Never` argument kept a branch from giving the other its type.
+    fn join_branch(&mut self, known: &Ty, other: &Ty, span: Span) -> Ty {
+        known.join(other).unwrap_or_else(|| {
+            let message = format!("expected `{}`, found `{}`", self.show(known), self.show(other));
+            self.error(codes::TYPE_MISMATCH, span, message);
+            Ty::Error
+        })
     }
 
     /// Checks a `Bool` whose `is` bindings scope over what follows it: the rest of an `and`
@@ -2084,7 +2123,8 @@ impl Checker<'_> {
             _ if reported => {}
             Some(Ty::Error) => {}
             Some(expected) if !matches!(expected, Ty::Adt(other, _) if *other == id) => {
-                let message = format!("expected `{}`, found an `{name}`", self.show(expected));
+                let article = if &*name == "Option" { "an" } else { "a" };
+                let message = format!("expected `{}`, found {article} `{name}`", self.show(expected));
                 self.error(codes::TYPE_MISMATCH, span, message);
             }
             _ => {
@@ -2192,6 +2232,8 @@ impl Checker<'_> {
             Mode::Value(expected) => expected.cloned(),
             _ => None,
         };
+        // Arms whose type has a `Never` argument, which give the others no type.
+        let mut partial: Vec<(Ty, Span)> = Vec::new();
         let mut diverges = true;
         for arm in arms {
             // An arm's bindings scope over its guard and body.
@@ -2209,7 +2251,9 @@ impl Checker<'_> {
                 Mode::Tail(ret) => self.block_stmt(&arm.body, Some(ret)),
                 Mode::Value(_) => {
                     let ty = self.block_value(&arm.body, expected.as_ref());
-                    if expected.is_none() && !ty.is_unknown() {
+                    if expected.is_none() && ty.has_never_arg() {
+                        partial.push((ty.clone(), arm.body.span));
+                    } else if expected.is_none() && !ty.is_unknown() {
                         expected = Some(ty.clone());
                     }
                     ty
@@ -2237,6 +2281,13 @@ impl Checker<'_> {
         }
         // A value that no arm matches is a defect (OPEN_QUESTIONS P5), so a `match` whose
         // arms all diverge does too.
+        let mut partial = partial.into_iter();
+        if expected.is_none() {
+            expected = partial.next().map(|(ty, _)| ty);
+        }
+        for (ty, span) in partial {
+            expected = expected.map(|known| self.join_branch(&known, &ty, span));
+        }
         let ty = match mode {
             _ if diverges => Ty::Never,
             Mode::Stmt | Mode::Tail(_) => Ty::Unit,
@@ -2653,8 +2704,13 @@ fn prelude_interface(name: &str) -> bool {
     )
 }
 
+/// A type, interface or variant name the prelude declares (REFERENCE §3). A module item or
+/// import may not reuse one (H4).
 fn prelude_type(name: &str) -> bool {
-    builtin_type(name).is_some() || prelude_adt(name).is_some() || later_type(name).is_some()
+    builtin_type(name).is_some()
+        || prelude_adt(name).is_some()
+        || bare_variant(name).is_some()
+        || later_type(name).is_some()
 }
 
 /// Prelude types that later phases implement.

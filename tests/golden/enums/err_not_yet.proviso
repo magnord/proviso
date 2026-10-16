@@ -1,7 +1,8 @@
 // phase: 2.2
 // expect-error: E0901
 // Generic enums, the `Ord` and `Hash` derives, associated functions and tuple patterns come
-// in later slices of phase 2, and units of measure after v1. Uses of what they declare aren't reported again (REFERENCE §15.1).
+// in later slices of phase 2, and units of measure after v1. Uses of what they declare aren't
+// reported again (REFERENCE §15.1).
 enum Maybe[T] {                                     // <- E0901
     Just(value: T)
     Nothing

@@ -42,7 +42,7 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0108 | `misplaced_return` | 2 | `return` outside a function body, such as in a `where` clause. | records/err_refinement_scope |
 | E0201 | `unknown_name` | 1 | A name that resolves to no local, function or import, or a variant used without its enum (§4.5). | basics/err_unknown_name, enums/err_construction, enums/err_is, enums/err_match, option_result/err_types, option_result/err_fail_attempt |
 | E0202 | `duplicate_item` | 1 | Two items with one name in a module, or a name imported twice (§3). | basics/err_duplicate, enums/err_declarations |
-| E0203 | `shadowing` | 1 | A binding that reuses a name already in scope in the function, including functions and imports, or an import, record or enum that reuses a prelude name, such as `Text` or `Show` (§3, H4). | basics/err_shadowing, basics/err_import_alias, records/err_declarations, enums/err_declarations, enums/err_match |
+| E0203 | `shadowing` | 1 | A binding that reuses a name already in scope in the function, including functions and imports, or an import, record or enum that reuses a prelude name, such as `Text` or `Show` (§3, H4). | basics/err_shadowing, basics/err_import_alias, records/err_declarations, enums/err_declarations, enums/err_match, option_result/err_fail_attempt |
 | E0204 | `wrong_case` | 1 | A type or variant that isn't PascalCase, or any other name that isn't snake_case (§2). | basics/err_case, enums/err_declarations |
 | E0205 | `unknown_import` | 1 | A `use` that names a module or item that doesn't exist. | basics/err_unknown_import |
 | E0206 | `missing_label` | 1 | An unlabelled argument in a call to a function with two or more parameters, or in any `with`, even on a one-field record, or an unlabelled part other than a bare name in a pattern for a variant or record with several fields (§3, §6.4, H3; OPEN_QUESTIONS P5). | basics/err_labels, records/err_fields, enums/err_construction, enums/err_match |
@@ -52,12 +52,12 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0210 | `duplicate_name` | 2 | A name given twice in one list: a record's or variant's fields, an enum's variants, the fields a `with` replaces or a pattern matches, or a `derives` list (§4.4, §4.5). | records/err_declarations, records/err_fields, records/err_derives, enums/err_declarations, enums/err_derives, enums/err_match |
 | E0211 | `private_in_public` | 2 | A `pub` or `pub(pkg)` item mentions a less visible type in its signature or, for a record or enum, its fields (§3). `main` is exempt (OPEN_QUESTIONS P5). | records/err_visibility, enums/err_visibility |
 | E0301 | `type_mismatch` | 1 | A value of one type where another is expected. There are no implicit conversions (§9.2). | basics/err_type_mismatch, enums/err_construction, enums/err_match, option_result/err_types, option_result/err_patterns, option_result/err_fail_attempt |
-| E0302 | `literal_out_of_range` | 1 | A literal that doesn't fit the type it meets (§2). | basics/err_literal_range, option_result/err_types |
+| E0302 | `literal_out_of_range` | 1 | A literal that doesn't fit the type it meets (§2). | basics/err_literal_range, option_result/err_types, option_result/err_fail_attempt |
 | E0303 | `unknown_member` | 1 | A field, method or variant that the type doesn't have. | basics/err_unknown_member, enums/err_construction, enums/err_match, option_result/err_types, option_result/err_patterns |
 | E0304 | `missing_return` | 1 | A path through a non-`Unit` function that doesn't end in `return` (§2). | basics/err_missing_return |
 | E0305 | `immutable_assignment` | 1 | An assignment to a `let` binding or a parameter. | basics/err_immutable |
 | E0306 | `unsupported_operator` | 1 | An operator or interpolation that the operand's type doesn't support, or a literal or range pattern that the matched type doesn't support, such as a `Float` literal (§12.2). | basics/err_unsupported_operator, enums/err_construction, enums/err_match, option_result/err_types |
-| E0307 | `unknown_type` | 1 | A type name that doesn't resolve. | basics/err_unknown_type, enums/err_declarations, enums/err_derives, option_result/err_types |
+| E0307 | `unknown_type` | 1 | A type name that doesn't resolve, or that has the wrong number of type arguments. | basics/err_unknown_type, enums/err_declarations, enums/err_derives, option_result/err_types |
 | E0308 | `invalid_main` | 1 | `main` is missing from a file that is run, or isn't declared `pub fn main(sys: keep System)` (§7.4). | basics/err_main_signature |
 | E0309 | `missing_implementation` | 2 | A type doesn't implement an interface it needs, such as a field's type in a `derives` list (§4.4, §4.9). | records/err_derives, enums/err_derives, option_result/err_types |
 | E0310 | `not_derivable` | 2 | A `derives` list names a prelude interface that can't be derived, such as `Copy` or `Add` (§4.4). | records/err_derives, enums/err_derives |
@@ -72,7 +72,7 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0602 | `reach_not_admitted` | 3 | A value's reach isn't admitted by the expected type: a closure or capability `uses` more than the parameter's `uses` or `with E` allows (§9.4). | f05, f13 |
 | E0701 | `unmarked_fallible_call` | 1 | A call that can fail but isn't marked with `try`, `else` or `attempt` (§7.2). | basics/err_unmarked_call, option_result/err_fail_attempt |
 | E0702 | `try_error_mismatch` | 1 | A `try` whose call fails with a different error type than the function declares, or in a function that declares none (§7.2). | basics/err_try_without_fails, option_result/err_fail_attempt |
-| E0703 | `try_without_failure` | 1 | A `try` that marks no call that can fail. | basics/err_try_marks_nothing |
+| E0703 | `try_without_failure` | 1 | A `try` that marks no call that can fail. | basics/err_try_marks_nothing, option_result/err_fail_attempt |
 | E0704 | `main_error_not_show` | 1 | `main`'s error type doesn't implement `Show` (§7.4). | basics/err_main_error_not_show |
 | E0705 | `fail_without_fails` | 2 | A `fail` in a function that declares no `fails`, or in a `where` clause, which has no function to fail (§7.1). | option_result/err_fail_attempt |
 | E0706 | `attempt_without_failure` | 2 | An `attempt` that marks no call that can fail. | option_result/err_fail_attempt |
