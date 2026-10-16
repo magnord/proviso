@@ -143,10 +143,12 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         f: FnState::new(Ty::Unit, None),
         in_chain: false,
         tries: Vec::new(),
+        inhabited: Vec::new(),
     };
     checker.imports();
     checker.adt_names();
     checker.adt_fields();
+    checker.inhabited = checker.p.decls.inhabited();
     checker.signatures();
     checker.adt_derives();
     checker.adt_predicates();
@@ -236,6 +238,8 @@ struct Checker<'a> {
     in_chain: bool,
     /// For each enclosing `try`, the error types of the fallible calls it marks.
     tries: Vec<Vec<Ty>>,
+    /// For each record and enum, whether it has values (see [`Decls::inhabited`]).
+    inhabited: Vec<bool>,
 }
 
 impl Checker<'_> {
@@ -1994,7 +1998,7 @@ impl Checker<'_> {
         // An arm that failed to parse may have covered what seems to be missing.
         if *complete && !scrutinee_ty.is_unknown() {
             let span = m.exprs[e].span;
-            match exhaust::uncovered(&self.p.decls, &scrutinee_ty, &rows) {
+            match exhaust::uncovered(&self.p.decls, &self.inhabited, &scrutinee_ty, &rows) {
                 Ok(None) => {}
                 Ok(Some(missing)) => {
                     let message = format!("this `match` does not cover `{missing}`; add an arm for it, or `_`");
@@ -2033,29 +2037,27 @@ impl Checker<'_> {
                 Space::Wild
             }
             PatKind::Lit(lit) => self.literal_pattern(*lit, ty),
-            PatKind::Range { lo, hi, .. } => {
-                match ty {
-                    Ty::Int(_) | Ty::Char => {
-                        let lo_ty = self.check(*lo, ty);
-                        let hi_ty = self.check(*hi, ty);
-                        if *ty == Ty::Char && lo_ty == *ty && hi_ty == *ty {
-                            return Space::Some;
-                        }
+            PatKind::Range { lo, hi, .. } => match ty {
+                Ty::Int(_) | Ty::Char => {
+                    let lo_ty = self.check(*lo, ty);
+                    let hi_ty = self.check(*hi, ty);
+                    match ty {
+                        _ if lo_ty != *ty || hi_ty != *ty => Space::Error,
+                        Ty::Char => Space::Some,
+                        // Integers are covered by facts, which the v1 profile checks at run time.
+                        _ => Space::Wild,
                     }
-                    _ if ty.is_unknown() => {
-                        self.infer(*lo);
-                        self.infer(*hi);
-                    }
-                    _ => {
-                        self.infer(*lo);
-                        self.infer(*hi);
+                }
+                _ => {
+                    self.infer(*lo);
+                    self.infer(*hi);
+                    if !ty.is_unknown() {
                         let message = format!("a range pattern needs integer or char bounds, not `{}`", self.show(ty));
                         self.error(codes::UNSUPPORTED_OPERATOR, span, message);
                     }
+                    Space::Error
                 }
-                // Integers are covered by facts, which the v1 profile checks at run time.
-                Space::Wild
-            }
+            },
             PatKind::Ctor { qualifier, name, fields, rest } => {
                 self.ctor_pattern(pat, ty, *qualifier, *name, fields.as_deref(), *rest)
             }
@@ -2071,11 +2073,11 @@ impl Checker<'_> {
             );
             let span = self.span(lit);
             self.error(codes::UNSUPPORTED_OPERATOR, span, message);
-            return Space::Wild;
+            return Space::Error;
         }
         let actual = self.check(lit, ty);
         if actual != *ty {
-            return Space::Wild;
+            return Space::Error;
         }
         match (ty, &self.m.exprs[lit].kind) {
             (Ty::Bool, ExprKind::Bool(b)) => Space::Ctor(Ctor::Bool(*b), Vec::new()),
@@ -2091,7 +2093,7 @@ impl Checker<'_> {
         for field in fields.unwrap_or_default() {
             self.pattern(field.pat, &Ty::Error);
         }
-        Space::Wild
+        Space::Error
     }
 
     /// `Empty`, `Shape.Circle(r)` or `User(name, age: a, ..)` (REFERENCE §6.4).
@@ -2179,7 +2181,7 @@ impl Checker<'_> {
             let noun = if n == 1 { "field" } else { "fields" };
             let message = format!("`{ctor}` has {n} {noun}; match them, or write `{ctor}(..)` to skip them");
             self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
-            return Space::Wild;
+            return Space::Error;
         };
         if declared.is_empty() && def.is_enum() {
             let message = format!("`{ctor}` has no fields, so its pattern is written without parentheses");
@@ -2202,9 +2204,13 @@ impl Checker<'_> {
         }
         if let Some((code, span, message)) = problem {
             self.error(code, span, message);
-            return Space::Wild;
+            return Space::Error;
         }
         self.p.pat_ctor.insert(pat, CtorPat { adt: id, variant: v, fields: targets.into() });
+        // An error inside the pattern makes all of it count as `_`.
+        if parts.iter().any(|part| matches!(part, Space::Error)) {
+            return Space::Error;
+        }
         Space::Ctor(Ctor::Variant(v), parts)
     }
 

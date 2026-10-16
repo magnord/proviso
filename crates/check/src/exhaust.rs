@@ -4,7 +4,9 @@
 //! Each arm without a guard contributes the [`Space`] its pattern covers. Integer patterns
 //! cover as much as `_` here: their exhaustiveness is `[verified]`, so before the verifier
 //! exists the v1 profile checks it at run time instead (OPEN_QUESTIONS P5). Text and chars
-//! have too many values to list, so only `_` or a binding covers them.
+//! have too many values to list, so only `_` or a binding covers them. A constructor with a
+//! field of a type that has no values, such as an enum without variants, builds nothing, so
+//! it needs no arm.
 //!
 //! The algorithm keeps its own stack and holds rows as lists that share their tails, so no
 //! pattern is too wide or deep for the native stack, and taking a column off a row costs the
@@ -21,8 +23,11 @@ pub const MAX_STEPS: usize = 10_000_000;
 /// What a pattern covers.
 #[derive(Clone, Debug)]
 pub enum Space {
-    /// Every value: `_`, a binding, an integer pattern, or a pattern with an error.
+    /// Every value: `_`, a binding or an integer pattern.
     Wild,
+    /// A pattern with an error, anywhere inside it. It counts as `_`, so that what it may
+    /// have meant to cover is not reported missing (REFERENCE §15.1).
+    Error,
     /// The values built by one constructor, whose fields are covered by the parts, one per
     /// field in declaration order.
     Ctor(Ctor, Vec<Space>),
@@ -49,25 +54,31 @@ enum Witness {
 
 /// A pattern for a value of type `ty` that none of `rows` covers, or `None` if they cover
 /// every value.
-pub fn uncovered(decls: &Decls, ty: &Ty, rows: &[Space]) -> Result<Option<String>, TooComplex> {
-    let mut m = Matrices { decls, cells: Vec::new(), tys: Vec::new(), steps: 0 };
+/// `inhabited` says which records and enums have values (see [`Decls::inhabited`]).
+pub fn uncovered(decls: &Decls, inhabited: &[bool], ty: &Ty, rows: &[Space]) -> Result<Option<String>, TooComplex> {
+    let mut m = Matrices { decls, inhabited, cells: Vec::new(), tys: Vec::new(), steps: 0 };
     let tys = Some(m.push_ty(ty.clone(), None));
     let rows = rows.iter().map(|row| Some(m.push_cell(row, None))).collect();
     let witness = m.useful(rows, tys)?;
     Ok(witness.map(|mut witness| render(decls, ty, &witness.remove(0))))
 }
 
-/// The constructors of `ty` with their field types, or `None` when its values are too many to
-/// list. An unknown type, or an enum with a rejected variant, is taken to have none, so that
-/// nothing about it is reported (REFERENCE §15.1).
-fn constructors(decls: &Decls, ty: &Ty) -> Option<Vec<(Ctor, Vec<Ty>)>> {
+/// The constructors of `ty` that build values, with their field types, or `None` when its
+/// values are too many to list. An unknown type, or an enum with a rejected variant, is taken
+/// to have none, so that nothing about it is reported (REFERENCE §15.1).
+fn constructors(decls: &Decls, inhabited: &[bool], ty: &Ty) -> Option<Vec<(Ctor, Vec<Ty>)>> {
+    let has_values = |ty: &Ty| match ty {
+        Ty::Adt(id, _) => inhabited[id.index()],
+        Ty::Never => false,
+        _ => true,
+    };
     match ty {
         Ty::Adt(id, _) => {
             let def = decls.adt(*id);
             if def.unknown_variants {
                 return Some(Vec::new());
             }
-            let variants = def.variants.iter().enumerate();
+            let variants = def.variants.iter().enumerate().filter(|(_, v)| v.fields.iter().all(|f| has_values(&f.ty)));
             let ctors = variants
                 .map(|(i, v)| (Ctor::Variant(VariantIdx::new(i)), v.fields.iter().map(|f| f.ty.clone()).collect()));
             Some(ctors.collect())
@@ -100,6 +111,7 @@ type List = Option<usize>;
 /// The pattern matrices of one check: their cells, their column types, and the work so far.
 struct Matrices<'a, 's> {
     decls: &'a Decls,
+    inhabited: &'a [bool],
     /// A pattern and the rest of its row.
     cells: Vec<(&'s Space, List)>,
     /// A column's type and the types of the columns after it.
@@ -187,7 +199,7 @@ impl<'s> Matrices<'_, 's> {
                 return Ok(Walk::Decided(rows.is_empty().then_some(heads)));
             };
             let (ty, rest) = &self.tys[column];
-            let (ctors, rest) = (constructors(self.decls, ty), *rest);
+            let (ctors, rest) = (constructors(self.decls, self.inhabited, ty), *rest);
             // No row covers the rest, so any value of the remaining columns is a witness, if
             // they all have values. A column of a type without any, such as an enum without
             // variants, is covered.
@@ -196,7 +208,7 @@ impl<'s> Matrices<'_, 's> {
                     heads.push(any(ctors)?);
                     let mut tys = rest;
                     while let Some(column) = tys {
-                        heads.push(any(constructors(self.decls, &self.tys[column].0))?);
+                        heads.push(any(constructors(self.decls, self.inhabited, &self.tys[column].0))?);
                         tys = self.tys[column].1;
                     }
                     Some(heads)
@@ -222,7 +234,7 @@ impl<'s> Matrices<'_, 's> {
             rows.retain_mut(|row| {
                 let (space, rest) = self.cells[cell(*row)];
                 *row = rest;
-                matches!(space, Space::Wild)
+                matches!(space, Space::Wild | Space::Error)
             });
             tys = rest;
         }
@@ -242,7 +254,7 @@ impl<'s> Matrices<'_, 's> {
                         list = Some(self.push_cell(part, list));
                     }
                 }
-                Space::Wild => {
+                Space::Wild | Space::Error => {
                     for _ in fields {
                         list = Some(self.push_cell(&WILD, list));
                     }

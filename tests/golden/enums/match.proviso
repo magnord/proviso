@@ -5,7 +5,8 @@
 // `_` matches anything, a name binds anything, and literals and ranges test the value; a
 // range is half-open unless written `..=` (§2). Patterns may omit the enum name (§4.5). A
 // `match` is a value, a statement, or the end of a function whose arms all return. An enum
-// without variants has no values, so a `match` on one needs no arms (OPEN_QUESTIONS P5).
+// without variants has no values, and neither does a variant or record with a field of such a
+// type or a type built only from itself, so they need no arms (OPEN_QUESTIONS P5).
 use std.io { IoError }
 
 enum Shape derives(Show) {
@@ -90,6 +91,33 @@ fn absurd(v: Void) -> Int {
     return match v {}
 }
 
+enum Maybe {
+    Value(n: Int)
+    Impossible(v: Void)
+}
+
+record Holder {
+    v: Void
+}
+
+enum Endless {
+    More(next: Endless)
+}
+
+fn value(m: Maybe) -> Int {
+    return match m {
+        Value(n) => n
+    }
+}
+
+fn hold(h: Holder) -> Int {
+    return match h {}
+}
+
+fn endless(e: Endless) -> Int {
+    return match e {}
+}
+
 fn ignore(b: Bool) {
     match b { true => return, false => return }
 }
@@ -118,6 +146,7 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(f"{word("ada")} {word("bob")} {word("eve")} {flag(true)} {flag(false)}")
     try sys.stdout.write_line(f"{depth(Solid.Cube(x: 1, y: 2, z: 3))} {depth(Solid.Cube(x: 1, y: 2, z: 200))}")
     ignore(true)
+    try sys.stdout.write_line(f"{value(Maybe.Value(n: 5))}")
     for i in 0..3 {
         match i {
             0 => try sys.stdout.write_line("first")

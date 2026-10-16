@@ -14,6 +14,10 @@ pub struct AdtId(u32);
 
 impl AdtId {
     pub const SYSTEM: AdtId = AdtId(0);
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
 /// An interface of the prelude, or of the standard library such as `std.io`'s `Out`.
@@ -204,6 +208,62 @@ impl Decls {
 
     pub fn adt_mut(&mut self, id: AdtId) -> &mut AdtDef {
         &mut self.adts[id.0 as usize]
+    }
+
+    /// For each record and enum, whether it has values: whether a variant's fields all have
+    /// types with values. An enum without variants has none, and so does a type that can only
+    /// be built from itself. A type with a rejected variant is taken to have some, so that
+    /// nothing about it is reported (REFERENCE §15.1).
+    pub fn inhabited(&self) -> Vec<bool> {
+        let mut inhabited = vec![false; self.adts.len()];
+        // For each variant, the fields whose types aren't known to have values yet, and for
+        // each type, the variants that wait on it.
+        let mut missing: Vec<Vec<usize>> = Vec::new();
+        let mut waiting: Vec<Vec<(usize, usize)>> = vec![Vec::new(); self.adts.len()];
+        let mut found = Vec::new();
+        for (a, def) in self.adts.iter().enumerate() {
+            let mut counts = Vec::new();
+            for (v, variant) in def.variants.iter().enumerate() {
+                let mut count = 0;
+                for field in &variant.fields {
+                    match field.ty {
+                        Ty::Adt(id, _) => {
+                            count += 1;
+                            waiting[id.0 as usize].push((a, v));
+                        }
+                        Ty::Never => count = usize::MAX,
+                        _ => {}
+                    }
+                    if count == usize::MAX {
+                        break;
+                    }
+                }
+                if count == 0 && !inhabited[a] {
+                    inhabited[a] = true;
+                    found.push(a);
+                }
+                counts.push(count);
+            }
+            if def.unknown_variants && !inhabited[a] {
+                inhabited[a] = true;
+                found.push(a);
+            }
+            missing.push(counts);
+        }
+        while let Some(id) = found.pop() {
+            for &(a, v) in &waiting[id] {
+                let count = &mut missing[a][v];
+                if *count == usize::MAX {
+                    continue;
+                }
+                *count -= 1;
+                if *count == 0 && !inhabited[a] {
+                    inhabited[a] = true;
+                    found.push(a);
+                }
+            }
+        }
+        inhabited
     }
 
     /// Whether `ty` implements `iface`, built in or derived (STD.md). An unknown type

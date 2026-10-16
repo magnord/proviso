@@ -77,6 +77,23 @@ fn integers(n: Int, l: IntList) -> Int {
     return a + b
 }
 
+enum Inner {
+    J(n: Int)
+}
+
+enum Outer {
+    Holds(i: Inner)
+    Bare
+}
+
+// An error anywhere in a pattern makes the whole arm count as `_`, so `Outer.Bare` isn't
+// also reported missing.
+fn inner_error(o: Outer) -> Int {
+    return match o {
+        Holds(J(wrong: n)) => n                     // <- E0303
+    }
+}
+
 fn patterns(s: Shape, n: Int, x: Float) -> Int {
     let a = match s {
         Triangle(side) => side                      // <- E0303
