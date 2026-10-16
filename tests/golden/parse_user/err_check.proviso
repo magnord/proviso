@@ -85,7 +85,8 @@ fn broken(o: Option[Int], p: (Option[Int], Option[Int])) -> Int {
     check o is Some(x1)                             // <- E0101
     check p is (Some(a1), Some(b1))                 // <- E0101
     check o is Some(y1) and p.0 > 1 else { return 0 } // <- E0101
-    return x1 + a1 + b1 + y1
+    check o is Some(_) and p is (Some(c1), _)       // <- E0101
+    return x1 + a1 + b1 + y1 + c1
 }
 
 fn finishing(n: Int) -> Int {
