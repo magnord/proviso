@@ -1811,6 +1811,7 @@ impl Checker<'_> {
             let span = self.span(decl.call);
             // Only the checker knows whether `Sure(1)` calls a misnamed function or builds a
             // value, so the parser leaves this to it (REFERENCE §14).
+            // A record's construction is resolved at its callee, and a variant's at the call.
             let callee = match m.exprs[decl.call].kind {
                 ExprKind::Call { callee, .. } => callee,
                 _ => decl.call,
@@ -3925,10 +3926,9 @@ impl Checker<'_> {
             // Where `()` is expected, an `if` without `else` is the statement §6.2 makes it.
             (Mode::Value(Some(Ty::Unit)), None) => Ty::Unit,
             (Mode::Value(_), None) => {
-                // A block that was never closed, or lost a statement, may have been followed
-                // by an `else`. One that diverges still gives the `if` no value when the
-                // condition is false.
-                if then_ty != Ty::Error && !then_block.unclosed && !then_block.lost {
+                // A block that was never closed may have been followed by an `else`. One that
+                // diverges still gives the `if` no value when the condition is false.
+                if then_ty != Ty::Error && !then_block.unclosed {
                     let span = self.span(e);
                     self.error(codes::TYPE_MISMATCH, span, "an `if` without `else` has no value; add an `else` branch");
                 }

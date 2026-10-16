@@ -108,11 +108,14 @@ fn broken_or(o: Option[Int], q: Option[Int]) -> Int {
     let y2 = 2
     check o is Some(z2) and not (q is Some(w2))     // <- E0101
     let w2 = 3
-    return x2 + y2 + z2 + w2
+    check not (q is Some(u2)) and o is Some(v2)     // <- E0101
+    let u2 = 4
+    return x2 + y2 + z2 + w2 + u2 + v2
 }
 
 fn broken_paren(o: Option[Int]) -> Int {
     check o is Some(x3                              // <- E0101
     let n3 = 2
-    return n3
+    let m3 = (n3, 3)
+    return n3 + m3.1
 }

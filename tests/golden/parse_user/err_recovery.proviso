@@ -1,10 +1,12 @@
 // phase: 2.5
 // expect-error: E0101
 // expect-error: E0201
+// expect-error: E0301
 // A fallback block that is never closed, or that loses a statement it can't parse, may be
 // missing how it ends, so it isn't reported as falling through or as lacking a value
 // (§15.1). A block that is never closed in a `match` arm without braces ends before the
-// next arm, which is still checked. So is an unrelated error in the same function.
+// next arm, which is still checked. So is an unrelated error in the same function. A block
+// that lost a statement still shows whether an `else` follows it.
 fn log() {
 }
 
@@ -33,6 +35,14 @@ fn it_unclosed() -> Int {
 fn unclosed_leaving_if(c: Bool) -> Int {
     let v = if c {                                  // <- E0101
         return 1
+}
+
+fn lost_leaving_if(c: Bool) -> Int {
+    let v = if c {                                  // <- E0301
+        log() log()                                 // <- E0101
+        return 1
+    }
+    return v
 }
 
 fn check_lost(n: Int) -> Int {
