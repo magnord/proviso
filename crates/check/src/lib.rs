@@ -1,11 +1,12 @@
 //! Name resolution and type checking for the phase-1 subset (scalar types, functions,
-//! control flow, `fails` and `try`, and the prelude's `System` with only `stdout`) and for
-//! records.
+//! control flow, `fails` and `try`, and the prelude's `System` with only `stdout`), for
+//! records, and for enums, `match` and patterns.
 //!
 //! The checker never rewrites the tree. It records what it learns in side tables of
 //! [`Program`], which the interpreter reads.
 
 pub mod decls;
+pub mod exhaust;
 pub mod types;
 
 use std::collections::hash_map::Entry;
@@ -17,7 +18,8 @@ use proviso_syntax::diag::{Code, Diagnostics, Planned, codes};
 use proviso_syntax::intern::Symbol;
 use proviso_syntax::source::Span;
 
-use crate::decls::{AdtDef, AdtId, Decls, FieldDef, FieldIdx, IfaceId, Pred, VariantIdx};
+use crate::decls::{AdtDef, AdtId, AdtKind, Decls, FieldDef, FieldIdx, IfaceId, Pred, VariantDef, VariantIdx};
+use crate::exhaust::{Ctor, Space};
 use crate::types::{FloatTy, IntTy, Ty};
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -63,7 +65,8 @@ pub enum Res {
     Method(Builtin),
     /// `base.name` on a record.
     Field(FieldIdx),
-    /// A record's constructor, called as in `Span(lo: 1, hi: 4)`.
+    /// A record's constructor, called as in `Span(lo: 1, hi: 4)`, or an enum's variant, as
+    /// in `Shape.Circle(radius: 2)` or `Shape.Empty`.
     Ctor(AdtId, VariantIdx),
     /// `r.with(...)`. The fields it replaces are in `Program::with_fields`.
     With,
@@ -86,6 +89,14 @@ pub struct ParamInfo {
     pub mode: ParamMode,
 }
 
+/// A constructor pattern: the variant it matches, and the field each of its parts matches,
+/// in the order written.
+pub struct CtorPat {
+    pub adt: AdtId,
+    pub variant: VariantIdx,
+    pub fields: Box<[FieldIdx]>,
+}
+
 /// What the checker learned about a module.
 #[derive(Default)]
 pub struct Program {
@@ -97,6 +108,10 @@ pub struct Program {
     /// The fields each `with` replaces, in the order of its arguments.
     pub with_fields: SideTable<Expr, Box<[FieldIdx]>>,
     pub let_local: SideTable<Stmt, LocalId>,
+    /// The local each binding pattern binds.
+    pub pat_local: SideTable<Pat, LocalId>,
+    /// What each constructor pattern matches.
+    pub pat_ctor: SideTable<Pat, CtorPat>,
     pub for_local: SideTable<Expr, LocalId>,
     /// The loop each `break` or `continue` leaves.
     pub jump_target: SideTable<Stmt, ExprId>,
@@ -122,19 +137,21 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         p: Program::default(),
         fn_names: HashMap::new(),
         imports: HashMap::new(),
-        record_names: HashMap::new(),
+        adt_names: HashMap::new(),
         poisoned: m.poisoned.clone(),
-        records: Vec::new(),
+        adts: Vec::new(),
         f: FnState::new(Ty::Unit, None),
         in_chain: false,
         tries: Vec::new(),
+        inhabited: Vec::new(),
     };
     checker.imports();
-    checker.record_names();
-    checker.record_fields();
+    checker.adt_names();
+    checker.adt_fields();
+    checker.inhabited = checker.p.decls.inhabited();
     checker.signatures();
-    checker.record_derives();
-    checker.record_predicates();
+    checker.adt_derives();
+    checker.adt_predicates();
     checker.check_main();
     for id in 0..checker.p.fns.len() {
         checker.body(id);
@@ -147,6 +164,19 @@ enum Import {
     Type(Ty),
     /// `use a.b` makes `b` usable as a qualifier.
     Module,
+}
+
+/// A record or enum declaration, with the parts the checker reads the same way for both.
+struct AdtSrc<'a> {
+    id: AdtId,
+    name: Ident,
+    vis: Visibility,
+    derives: &'a [Ident],
+    /// The variants the declaration keeps, in order: a record's one, named like it, or the
+    /// first of each name in an enum.
+    variants: Vec<(Ident, &'a [FieldDecl])>,
+    /// A record's record-level `where`.
+    refinement: Option<ExprId>,
 }
 
 struct Local {
@@ -195,18 +225,21 @@ struct Checker<'a> {
     p: Program,
     fn_names: HashMap<Symbol, FnId>,
     imports: HashMap<Symbol, Import>,
-    record_names: HashMap<Symbol, AdtId>,
+    /// The module's records and enums.
+    adt_names: HashMap<Symbol, AdtId>,
     /// Names whose declarations were rejected, so their uses aren't reported again: those the
-    /// parser rejected, and records whose names the checker rejects.
+    /// parser rejected, and records and enums whose names the checker rejects.
     poisoned: HashSet<Symbol>,
-    /// Every record declaration, including those whose name is rejected, with its visibility.
-    records: Vec<(AdtId, &'a RecordDecl, Visibility)>,
+    /// Every record and enum declaration, including those whose name is rejected.
+    adts: Vec<AdtSrc<'a>>,
     /// The function being checked, or the record whose refinements are.
     f: FnState,
     /// Set while checking the postfix chain a `try` covers (REFERENCE §6.1).
     in_chain: bool,
     /// For each enclosing `try`, the error types of the fallible calls it marks.
     tries: Vec<Vec<Ty>>,
+    /// For each record and enum, whether it has values (see [`Decls::inhabited`]).
+    inhabited: Vec<bool>,
 }
 
 impl Checker<'_> {
@@ -246,6 +279,7 @@ impl Checker<'_> {
         let mut others = m.items.iter().flat_map(|item| match &item.kind {
             ItemKind::Fn(decl) => vec![decl.name],
             ItemKind::Record(decl) => vec![decl.name],
+            ItemKind::Enum(decl) => vec![decl.name],
             ItemKind::Use(decl) if decl.names.is_empty() => vec![decl.path[decl.path.len() - 1]],
             ItemKind::Use(decl) => decl
                 .names
@@ -318,7 +352,7 @@ impl Checker<'_> {
                         format!("nothing else here is named `{text}`, so it needs no `as` (Q24)"),
                     );
                 } else {
-                    self.pascal_case(bound);
+                    self.pascal_case(bound, "type");
                 }
             }
             self.bind_import(bound, Import::Type(ty));
@@ -337,33 +371,61 @@ impl Checker<'_> {
         }
     }
 
-    fn record_names(&mut self) {
+    fn adt_names(&mut self) {
         let m = self.m;
         for item in &m.items {
-            let ItemKind::Record(decl) = &item.kind else { continue };
-            let name = m.text(decl.name.sym);
-            let id = self.p.decls.push(AdtDef::record(name, Vec::new()));
-            self.records.push((id, decl, item.vis));
-            // A rejected name is reported once. Its uses, and what it collides with, are not.
-            let cased = self.pascal_case(decl.name);
-            if !cased || prelude_type(name) {
-                if cased {
-                    let message = format!("this record would shadow the prelude name `{name}` (H4)");
-                    self.error(codes::SHADOWING, decl.name.span, message);
+            let (name, derives, refinement, kind) = match &item.kind {
+                ItemKind::Record(decl) => (decl.name, &decl.derives[..], decl.refinement, AdtKind::Record),
+                ItemKind::Enum(decl) => (decl.name, &decl.derives[..], None, AdtKind::Enum),
+                _ => continue,
+            };
+            let text = m.text(name.sym);
+            let mut def = match kind {
+                AdtKind::Record => AdtDef::record(text, Vec::new()),
+                AdtKind::Enum => AdtDef::enumeration(text),
+            };
+            let mut variants: Vec<(Ident, &[FieldDecl])> = Vec::new();
+            let mut variant_index: HashMap<Symbol, usize> = HashMap::new();
+            match &item.kind {
+                ItemKind::Record(decl) => variants.push((decl.name, &decl.fields)),
+                ItemKind::Enum(decl) => {
+                    for variant in &decl.variants {
+                        let cased = self.pascal_case(variant.name, "variant");
+                        let vtext = m.text(variant.name.sym);
+                        if let Some(&first) = variant_index.get(&variant.name.sym) {
+                            if cased {
+                                let message = format!("variant `{vtext}` is declared twice");
+                                self.error(codes::DUPLICATE_NAME, variant.name.span, message);
+                            }
+                            // Which one a use means is unclear, so uses of either aren't checked.
+                            def.variants[first].rejected = true;
+                            def.unknown_variants = true;
+                            continue;
+                        }
+                        variant_index.insert(variant.name.sym, variants.len());
+                        variants.push((variant.name, &variant.fields));
+                        def.variants.push(VariantDef::new(vtext, Vec::new()));
+                    }
                 }
-                self.poisoned.insert(decl.name.sym);
-            } else if self.record_names.contains_key(&decl.name.sym) || self.imports.contains_key(&decl.name.sym) {
-                if cased {
-                    self.error(
-                        codes::DUPLICATE_ITEM,
-                        decl.name.span,
-                        format!("`{name}` is defined twice in this module"),
-                    );
-                }
-            } else {
-                self.record_names.insert(decl.name.sym, id);
+                _ => {}
             }
-            if m.impls.contains(&decl.name.sym) {
+            let what = if kind == AdtKind::Enum { "enum" } else { "record" };
+            let id = self.p.decls.push(def);
+            self.adts.push(AdtSrc { id, name, vis: item.vis, derives, variants, refinement });
+            // A rejected name is reported once. Its uses, and what it collides with, are not.
+            let cased = self.pascal_case(name, "type");
+            if !cased || prelude_type(text) {
+                if cased {
+                    let message = format!("this {what} would shadow the prelude name `{text}` (H4)");
+                    self.error(codes::SHADOWING, name.span, message);
+                }
+                self.poisoned.insert(name.sym);
+            } else if self.adt_names.contains_key(&name.sym) || self.imports.contains_key(&name.sym) {
+                self.error(codes::DUPLICATE_ITEM, name.span, format!("`{text}` is defined twice in this module"));
+            } else {
+                self.adt_names.insert(name.sym, id);
+            }
+            if m.impls.contains(&name.sym) {
                 let def = self.p.decls.adt_mut(id);
                 def.unknown_interfaces = true;
                 def.unknown_methods = true;
@@ -371,30 +433,38 @@ impl Checker<'_> {
         }
     }
 
-    /// Resolves the fields of every record once every record has a name, so a field's type
-    /// may be declared later in the file (OPEN_QUESTIONS P5).
-    fn record_fields(&mut self) {
+    /// Resolves the fields of every variant once every record and enum has a name, so a
+    /// field's type may be declared later in the file (OPEN_QUESTIONS P5).
+    fn adt_fields(&mut self) {
         let m = self.m;
-        for k in 0..self.records.len() {
-            let (id, decl, vis) = self.records[k];
-            let mut fields: Vec<FieldDef> = Vec::new();
-            for field in &decl.fields {
-                let name = m.text(field.name.sym);
-                let cased = self.snake_case(field.name, "field");
-                let ty = self.resolve_type(field.ty);
-                if let Some(first) = fields.iter_mut().find(|f| &*f.name == name) {
-                    if cased {
-                        self.error(codes::DUPLICATE_NAME, field.name.span, format!("field `{name}` is declared twice"));
+        for k in 0..self.adts.len() {
+            let (id, name, vis) = (self.adts[k].id, self.adts[k].name, self.adts[k].vis);
+            for v in 0..self.adts[k].variants.len() {
+                let decls = self.adts[k].variants[v].1;
+                let mut fields: Vec<FieldDef> = Vec::new();
+                let mut index: HashMap<Symbol, usize> = HashMap::new();
+                for field in decls {
+                    let text = m.text(field.name.sym);
+                    let cased = self.snake_case(field.name, "field");
+                    let ty = self.resolve_type(field.ty);
+                    if let Some(&first) = index.get(&field.name.sym) {
+                        if cased {
+                            let message = format!("field `{text}` is declared twice");
+                            self.error(codes::DUPLICATE_NAME, field.name.span, message);
+                        }
+                        // The variant keeps the first, but which one a use means is unclear,
+                        // so its uses aren't checked.
+                        fields[first].ty = Ty::Error;
+                        continue;
                     }
-                    // The record keeps the first, but which one a use means is unclear, so
-                    // its uses aren't checked.
-                    first.ty = Ty::Error;
-                    continue;
+                    self.exposes(name, vis, &ty, field.ty);
+                    index.insert(field.name.sym, fields.len());
+                    fields.push(FieldDef { name: text.into(), ty });
                 }
-                self.exposes(decl.name, vis, &ty, field.ty);
-                fields.push(FieldDef { name: name.into(), ty });
+                let variant = &mut self.p.decls.adt_mut(id).variants[v];
+                variant.locals = fields.len();
+                variant.fields = fields;
             }
-            self.p.decls.adt_mut(id).variant_mut().fields = fields;
         }
     }
 
@@ -420,25 +490,25 @@ impl Checker<'_> {
         }
     }
 
-    /// The least visible module record that `ty` mentions.
+    /// The least visible module record or enum that `ty` mentions.
     fn least_visible(&self, ty: &Ty) -> Option<(AdtId, Visibility)> {
         let Ty::Adt(id, args) = ty else { return None };
-        let own = self.records.iter().find(|(r, ..)| r == id).map(|&(_, _, vis)| (*id, vis));
+        let own = self.adts.iter().find(|adt| adt.id == *id).map(|adt| (*id, adt.vis));
         let inner = args.iter().filter_map(|arg| self.least_visible(arg));
         own.into_iter().chain(inner).min_by_key(|&(_, vis)| reach(vis))
     }
 
     /// Resolves every `derives` list, then checks that each field implements what its
-    /// record derives, so a field's record type answers wherever it is declared.
-    fn record_derives(&mut self) {
+    /// record or enum derives, so a field's type answers wherever it is declared.
+    fn adt_derives(&mut self) {
         let m = self.m;
-        for k in 0..self.records.len() {
-            let (id, decl, _) = self.records[k];
+        for k in 0..self.adts.len() {
+            let (id, derives_of) = (self.adts[k].id, self.adts[k].derives);
             let mut seen: Vec<&str> = Vec::new();
             let mut derives = Vec::new();
             // A rejected entry may have named any interface, so it is taken to name each.
             let mut unknown = false;
-            for name in &decl.derives {
+            for name in derives_of {
                 let text = m.text(name.sym);
                 if seen.contains(&text) {
                     self.error(codes::DUPLICATE_NAME, name.span, format!("`{text}` is derived twice"));
@@ -448,7 +518,7 @@ impl Checker<'_> {
                 match text {
                     "Eq" => derives.push(IfaceId::EQ),
                     "Show" => derives.push(IfaceId::SHOW),
-                    // It still counts, unchecked, so `<` on the record isn't reported again.
+                    // It still counts, unchecked, so `<` on the type isn't reported again.
                     "Ord" => {
                         self.not_implemented(name.span, "the `Ord` and `Hash` derives", Planned::Phase(2));
                         derives.push(IfaceId::ORD);
@@ -459,7 +529,9 @@ impl Checker<'_> {
                         self.error(
                             codes::NOT_DERIVABLE,
                             name.span,
-                            format!("`{text}` can't be derived; a record can derive `Eq`, `Ord`, `Hash` and `Show`"),
+                            format!(
+                                "`{text}` can't be derived; the derivable interfaces are `Eq`, `Ord`, `Hash` and `Show`"
+                            ),
                         );
                     }
                     _ => {
@@ -467,7 +539,7 @@ impl Checker<'_> {
                         self.error(
                             codes::UNKNOWN_TYPE,
                             name.span,
-                            format!("unknown interface `{text}`; a record can derive `Eq`, `Ord`, `Hash` and `Show`"),
+                            format!("unknown interface `{text}`; the derivable interfaces are `Eq`, `Ord`, `Hash` and `Show`"),
                         );
                     }
                 }
@@ -476,21 +548,23 @@ impl Checker<'_> {
             def.derives = derives;
             def.unknown_interfaces |= unknown;
         }
-        for k in 0..self.records.len() {
-            let (id, decl, _) = self.records[k];
-            let def = self.p.decls.adt(id);
+        for k in 0..self.adts.len() {
+            let adt = &self.adts[k];
+            let def = self.p.decls.adt(adt.id);
             let mut missing = Vec::new();
             for &iface in def.derives.iter().filter(|&&iface| iface != IfaceId::ORD) {
-                for (field, field_decl) in def.variant().fields.iter().zip(kept_fields(decl)) {
-                    if !field.ty.is_unknown() && !self.p.decls.implements(&field.ty, iface) {
-                        let message = format!(
-                            "field `{}` has type `{}`, which does not implement `{}`, so `{}` cannot derive it",
-                            field.name,
-                            self.show(&field.ty),
-                            iface.name(),
-                            def.name
-                        );
-                        missing.push((m.types[field_decl.ty].span, message));
+                for (variant, (_, decls)) in def.variants.iter().zip(&adt.variants) {
+                    for (field, field_decl) in variant.fields.iter().zip(kept_fields(decls)) {
+                        if !field.ty.is_unknown() && !self.p.decls.implements(&field.ty, iface) {
+                            let message = format!(
+                                "field `{}` has type `{}`, which does not implement `{}`, so `{}` cannot derive it",
+                                field.name,
+                                self.show(&field.ty),
+                                iface.name(),
+                                def.name
+                            );
+                            missing.push((m.types[field_decl.ty].span, message));
+                        }
                     }
                 }
             }
@@ -501,33 +575,35 @@ impl Checker<'_> {
     }
 
     /// Checks each refinement as a `Bool` in a scope of the fields it sees: its own field for
-    /// a field's `where`, every field for the record's (OPEN_QUESTIONS P5).
-    fn record_predicates(&mut self) {
-        for k in 0..self.records.len() {
-            let (id, decl, _) = self.records[k];
-            let kept = kept_fields(decl);
-            let fields = &self.p.decls.adt(id).variant().fields;
-            let mut state = FnState::new(Ty::Unit, None);
-            state.returns = false;
-            state.locals = fields.iter().map(|f| Local { ty: f.ty.clone(), mutable: false }).collect();
-            self.f = state;
-            let mut preds = Vec::new();
-            for (i, field) in kept.iter().enumerate() {
-                if let Some(expr) = field.refinement {
-                    self.f.scopes = vec![vec![(field.name.sym, LocalId(i as u32))]];
-                    self.check(expr, &Ty::Bool);
-                    preds.push(Pred { expr, field: Some(FieldIdx(i as u32)) });
+    /// a field's `where`, every field for a record's (OPEN_QUESTIONS P5).
+    fn adt_predicates(&mut self) {
+        for k in 0..self.adts.len() {
+            let id = self.adts[k].id;
+            for v in 0..self.adts[k].variants.len() {
+                let kept = kept_fields(self.adts[k].variants[v].1);
+                let fields = &self.p.decls.adt(id).variants[v].fields;
+                let mut state = FnState::new(Ty::Unit, None);
+                state.returns = false;
+                state.locals = fields.iter().map(|f| Local { ty: f.ty.clone(), mutable: false }).collect();
+                self.f = state;
+                let mut preds = Vec::new();
+                for (i, field) in kept.iter().enumerate() {
+                    if let Some(expr) = field.refinement {
+                        self.f.scopes = vec![vec![(field.name.sym, LocalId(i as u32))]];
+                        self.check(expr, &Ty::Bool);
+                        preds.push(Pred { expr, field: Some(FieldIdx(i as u32)) });
+                    }
                 }
+                if let Some(expr) = self.adts[k].refinement {
+                    let all = kept.iter().enumerate().map(|(i, f)| (f.name.sym, LocalId(i as u32)));
+                    self.f.scopes = vec![all.collect()];
+                    self.check(expr, &Ty::Bool);
+                    preds.push(Pred { expr, field: None });
+                }
+                let variant = &mut self.p.decls.adt_mut(id).variants[v];
+                variant.preds = preds;
+                variant.locals = self.f.locals.len();
             }
-            if let Some(expr) = decl.refinement {
-                let all = kept.iter().enumerate().map(|(i, f)| (f.name.sym, LocalId(i as u32)));
-                self.f.scopes = vec![all.collect()];
-                self.check(expr, &Ty::Bool);
-                preds.push(Pred { expr, field: None });
-            }
-            let variant = self.p.decls.adt_mut(id).variant_mut();
-            variant.preds = preds;
-            variant.locals = self.f.locals.len();
         }
     }
 
@@ -541,7 +617,7 @@ impl Checker<'_> {
             let id = self.p.fns.len();
             if self.fn_names.contains_key(&decl.name.sym)
                 || self.imports.contains_key(&decl.name.sym)
-                || self.record_names.contains_key(&decl.name.sym)
+                || self.adt_names.contains_key(&decl.name.sym)
             {
                 if cased {
                     self.error(
@@ -643,7 +719,7 @@ impl Checker<'_> {
                 if self.poisoned.contains(&name.sym) {
                     return Ty::Error;
                 }
-                if self.record_names.contains_key(&name.sym)
+                if self.adt_names.contains_key(&name.sym)
                     || matches!(self.imports.get(&name.sym), Some(Import::Type(_)))
                 {
                     self.error(codes::UNKNOWN_TYPE, te.span, format!("`{text}` takes no type arguments"));
@@ -673,7 +749,7 @@ impl Checker<'_> {
         if let Some(ty) = builtin_type(text) {
             return ty;
         }
-        if let Some(&id) = self.record_names.get(&name.sym) {
+        if let Some(&id) = self.adt_names.get(&name.sym) {
             return Ty::adt(id);
         }
         match self.imports.get(&name.sym) {
@@ -691,15 +767,15 @@ impl Checker<'_> {
         Ty::Error
     }
 
-    /// Reports a type name that isn't PascalCase, and returns whether it is. A non-ASCII name
-    /// is already reported by the lexer.
-    fn pascal_case(&mut self, name: Ident) -> bool {
+    /// Reports a type or variant name that isn't PascalCase, and returns whether it is. A
+    /// non-ASCII name is already reported by the lexer.
+    fn pascal_case(&mut self, name: Ident, what: &str) -> bool {
         let text = self.m.text(name.sym);
         if !text.is_ascii() {
             return false;
         }
         if !is_pascal(text) {
-            self.error(codes::WRONG_CASE, name.span, format!("type names are PascalCase: `{text}`"));
+            self.error(codes::WRONG_CASE, name.span, format!("{what} names are PascalCase: `{text}`"));
             return false;
         }
         true
@@ -782,8 +858,10 @@ impl Checker<'_> {
                     );
                     return true;
                 }
-                if let ExprKind::If { .. } = m.exprs[e].kind {
-                    return diverges | diverges_ty(&self.if_expr(e, Mode::Tail(ret)));
+                match m.exprs[e].kind {
+                    ExprKind::If { .. } => return diverges | diverges_ty(&self.if_expr(e, Mode::Tail(ret))),
+                    ExprKind::Match { .. } => return diverges | diverges_ty(&self.match_expr(e, Mode::Tail(ret))),
+                    _ => {}
                 }
             }
             diverges |= self.stmt(s);
@@ -900,8 +978,10 @@ impl Checker<'_> {
     }
 
     fn expr_stmt(&mut self, e: ExprId) -> Ty {
-        if let ExprKind::If { .. } = self.m.exprs[e].kind {
-            return self.if_expr(e, Mode::Stmt);
+        match self.m.exprs[e].kind {
+            ExprKind::If { .. } => return self.if_expr(e, Mode::Stmt),
+            ExprKind::Match { .. } => return self.match_expr(e, Mode::Stmt),
+            _ => {}
         }
         let bare = self.is_bare_value(e);
         let ty = self.infer(e);
@@ -990,6 +1070,7 @@ impl Checker<'_> {
                 | ExprKind::Unary { .. }
                 | ExprKind::Binary { .. }
                 | ExprKind::Range { .. }
+                | ExprKind::Is { .. }
         )
     }
 
@@ -1140,6 +1221,9 @@ impl Checker<'_> {
                 self.method_call(e, *receiver, *method, args, span, chain)
             }
             ExprKind::Field { base, name } => {
+                if let Some(id) = self.enum_named(*base) {
+                    return self.unit_variant(e, id, *name);
+                }
                 self.in_chain = chain;
                 let base_ty = self.infer(*base);
                 self.field(e, &base_ty, *name)
@@ -1149,6 +1233,12 @@ impl Checker<'_> {
                 Ty::Bool
             }
             ExprKind::Unary { op: UnaryOp::Neg, operand } => self.negate(*operand, expected, span),
+            ExprKind::Binary { op: BinOp::And, .. } => {
+                self.f.scopes.push(Vec::new());
+                self.condition(e);
+                self.f.scopes.pop();
+                Ty::Bool
+            }
             ExprKind::Binary { op, lhs, rhs } => self.binary(*op, *lhs, *rhs, expected, span),
             ExprKind::Range { .. } => {
                 self.not_implemented(span, "ranges outside `for` loops", Planned::Phase(2));
@@ -1156,9 +1246,19 @@ impl Checker<'_> {
             }
             ExprKind::Try(inner) => self.try_expr(*inner, expected, span),
             ExprKind::If { .. } => self.if_expr(e, Mode::Value(expected)),
+            ExprKind::Match { .. } => self.match_expr(e, Mode::Value(expected)),
+            ExprKind::Is { value, pat } => {
+                self.f.scopes.push(Vec::new());
+                self.is_test(*value, *pat);
+                self.f.scopes.pop();
+                Ty::Bool
+            }
             ExprKind::While { label, cond, body } => {
-                self.check(*cond, &Ty::Bool);
+                // The bindings of an `is` in the condition scope over the body (OPEN_QUESTIONS P5).
+                self.f.scopes.push(Vec::new());
+                self.condition(*cond);
                 self.loop_body(e, *label, body);
+                self.f.scopes.pop();
                 Ty::Unit
             }
             ExprKind::Loop { label, body } => {
@@ -1336,9 +1436,9 @@ impl Checker<'_> {
         }
         if self.fn_names.contains_key(&name.sym) {
             self.not_implemented(name.span, "functions used as values", Planned::Phase(2));
-        } else if self.poisoned.contains(&name.sym) {
+        } else if self.unqualified_variant(name) || self.poisoned.contains(&name.sym) {
         } else if self.imports.contains_key(&name.sym)
-            || self.record_names.contains_key(&name.sym)
+            || self.adt_names.contains_key(&name.sym)
             || builtin_type(text).is_some()
         {
             self.error(codes::UNKNOWN_NAME, name.span, format!("`{text}` is a type or module, not a value"));
@@ -1351,8 +1451,17 @@ impl Checker<'_> {
     fn call(&mut self, callee: ExprId, args: &[Arg], span: Span, chain: bool) -> Ty {
         let m = self.m;
         if let ExprKind::Name(name) = m.exprs[callee].kind
-            && let Some(&id) = self.record_names.get(&name.sym)
+            && let Some(&id) = self.adt_names.get(&name.sym)
         {
+            if self.p.decls.adt(id).is_enum() {
+                let text = m.text(name.sym);
+                let message = format!("`{text}` is an enum; build one of its variants, as in `{text}.Variant(…)`");
+                self.error(codes::UNKNOWN_NAME, name.span, message);
+                for arg in args {
+                    self.infer(arg.value);
+                }
+                return Ty::Error;
+            }
             return self.construct(callee, id, args, span);
         }
         let resolved = match m.exprs[callee].kind {
@@ -1370,6 +1479,7 @@ impl Checker<'_> {
                     Some(name) if self.lookup_local(name.sym).is_some() => {
                         self.not_implemented(callee_span, "calls of function values", Planned::Phase(2))
                     }
+                    Some(name) if self.unqualified_variant(name) => {}
                     Some(name) if self.poisoned.contains(&name.sym) => {}
                     // Phase 3 gives `System` the rest of its fields (REFERENCE §9.1).
                     Some(name) if m.text(name.sym) == "System" => {
@@ -1416,9 +1526,14 @@ impl Checker<'_> {
     fn method_call(&mut self, e: ExprId, receiver: ExprId, method: Ident, args: &[Arg], span: Span, chain: bool) -> Ty {
         let m = self.m;
         let name = m.text(method.sym);
+        if let Some(id) = self.enum_named(receiver)
+            && (self.p.decls.adt(id).variant_named(name).is_some() || is_pascal(name))
+        {
+            return self.construct_variant(e, id, method, args, span);
+        }
         if let ExprKind::Name(receiver_name) = m.exprs[receiver].kind
             && self.lookup_local(receiver_name.sym).is_none()
-            && self.record_names.contains_key(&receiver_name.sym)
+            && self.adt_names.contains_key(&receiver_name.sym)
         {
             let record = m.text(receiver_name.sym);
             let what = format!("associated functions such as `{record}.{name}`");
@@ -1442,7 +1557,9 @@ impl Checker<'_> {
         }
         self.in_chain = chain;
         let receiver_ty = self.infer(receiver);
-        if let (Ty::Adt(id, _), "with") = (&receiver_ty, name) {
+        if let (Ty::Adt(id, _), "with") = (&receiver_ty, name)
+            && !self.p.decls.adt(*id).is_enum()
+        {
             self.p.res.insert(e, Res::With);
             self.with_args(e, *id, args, span);
             return receiver_ty;
@@ -1680,14 +1797,27 @@ impl Checker<'_> {
         let ExprKind::If { cond, then_block, else_branch } = &m.exprs[e].kind else {
             unreachable!("if_expr is called on `if` expressions")
         };
-        self.check(*cond, &Ty::Bool);
+        // The bindings of an `is` in the condition scope over the then-block (REFERENCE §6.4).
+        self.f.scopes.push(Vec::new());
+        self.condition(*cond);
+        let then_ty = match (mode, else_branch) {
+            (Mode::Stmt | Mode::Tail(_), _) => {
+                let tail = match mode {
+                    Mode::Tail(ret) => Some(ret),
+                    _ => None,
+                };
+                self.block_stmt(then_block, tail)
+            }
+            (Mode::Value(_), None) => self.block_value(then_block, None),
+            (Mode::Value(expected), Some(_)) => self.block_value(then_block, expected),
+        };
+        self.f.scopes.pop();
         let ty = match (mode, else_branch) {
             (Mode::Stmt | Mode::Tail(_), _) => {
                 let tail = match mode {
                     Mode::Tail(ret) => Some(ret),
                     _ => None,
                 };
-                let then_ty = self.block_stmt(then_block, tail);
                 let else_ty = match else_branch {
                     Some(ElseBranch::Block(block)) => self.block_stmt(block, tail),
                     Some(ElseBranch::If(nested)) => self.if_expr(*nested, mode),
@@ -1697,14 +1827,13 @@ impl Checker<'_> {
             }
             (Mode::Value(_), None) => {
                 // A block that was never closed may have been followed by an `else`.
-                if !self.block_value(then_block, None).is_unknown() {
+                if !then_ty.is_unknown() {
                     let span = self.span(e);
                     self.error(codes::TYPE_MISMATCH, span, "an `if` without `else` has no value; add an `else` branch");
                 }
                 Ty::Error
             }
             (Mode::Value(expected), Some(branch)) => {
-                let then_ty = self.block_value(then_block, expected);
                 let expected = expected.or(Some(&then_ty).filter(|t| !t.is_unknown()));
                 let else_ty = match branch {
                     ElseBranch::Block(block) => self.block_value(block, expected),
@@ -1719,6 +1848,452 @@ impl Checker<'_> {
         };
         self.p.expr_ty.insert(e, ty.clone());
         ty
+    }
+
+    /// Checks a `Bool` whose `is` bindings scope over what follows it: the rest of an `and`
+    /// chain, and the block an `if` or `while` condition guards. The caller opens the scope
+    /// they go in (REFERENCE §6.4).
+    fn condition(&mut self, e: ExprId) {
+        match self.m.exprs[e].kind {
+            ExprKind::Is { value, pat } => self.is_test(value, pat),
+            ExprKind::Binary { op: BinOp::And, lhs, rhs } => {
+                self.condition(lhs);
+                self.condition(rhs);
+            }
+            _ => {
+                self.check(e, &Ty::Bool);
+                return;
+            }
+        }
+        self.p.expr_ty.insert(e, Ty::Bool);
+    }
+
+    /// `value is pat`, whose bindings go in the innermost scope.
+    fn is_test(&mut self, value: ExprId, pat: PatId) {
+        let ty = self.infer(value);
+        self.pattern(pat, &ty);
+    }
+
+    /// The enum that `e` names, when it is a name that is not a local.
+    fn enum_named(&self, e: ExprId) -> Option<AdtId> {
+        let ExprKind::Name(name) = self.m.exprs[e].kind else { return None };
+        if self.lookup_local(name.sym).is_some() {
+            return None;
+        }
+        let id = *self.adt_names.get(&name.sym)?;
+        self.p.decls.adt(id).is_enum().then_some(id)
+    }
+
+    /// `Shape.Empty`, a variant without fields (REFERENCE §4.5).
+    fn unit_variant(&mut self, e: ExprId, id: AdtId, name: Ident) -> Ty {
+        let text = self.m.text(name.sym);
+        let def = self.p.decls.adt(id);
+        let Some((v, variant)) = def.variant_named(text) else {
+            let message = format!("`{}` has no variant `{text}`", def.name);
+            self.error(codes::UNKNOWN_MEMBER, name.span, message);
+            return Ty::Error;
+        };
+        if !variant.fields.is_empty() && !variant.rejected {
+            let what = format!("variants with fields used as values, such as `{}`,", def.ctor_name(v));
+            self.not_implemented(name.span, &what, Planned::Phase(2));
+            return Ty::Error;
+        }
+        self.p.res.insert(e, Res::Ctor(id, v));
+        Ty::adt(id)
+    }
+
+    /// `Shape.Circle(radius: 2)`: a variant's fields are passed as the arguments of a call
+    /// (REFERENCE §4.5, §3).
+    fn construct_variant(&mut self, e: ExprId, id: AdtId, name: Ident, args: &[Arg], span: Span) -> Ty {
+        let text = self.m.text(name.sym);
+        let def = self.p.decls.adt(id);
+        let Some((v, variant)) = def.variant_named(text) else {
+            let message = format!("`{}` has no variant `{text}`", def.name);
+            self.error(codes::UNKNOWN_MEMBER, name.span, message);
+            for arg in args {
+                self.infer(arg.value);
+            }
+            return Ty::Error;
+        };
+        let ctor = def.ctor_name(v);
+        if variant.rejected {
+            for arg in args {
+                self.infer(arg.value);
+            }
+            return Ty::adt(id);
+        }
+        if variant.fields.is_empty() {
+            let message = format!("`{ctor}` has no fields, so it is written without parentheses");
+            self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
+            for arg in args {
+                self.infer(arg.value);
+            }
+            return Ty::adt(id);
+        }
+        let params: Vec<(Box<str>, Ty)> = variant.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+        self.p.res.insert(e, Res::Ctor(id, v));
+        self.args(&ctor, &params, args, span);
+        Ty::adt(id)
+    }
+
+    /// Reports a variant used without its enum, and returns whether `name` is one. Only
+    /// `Some`, `None`, `Ok` and `Err` may be (REFERENCE §3, §4.5), and those come with
+    /// `Option` and `Result`.
+    fn unqualified_variant(&mut self, name: Ident) -> bool {
+        let m = self.m;
+        let text = m.text(name.sym);
+        if matches!(text, "Some" | "None" | "Ok" | "Err") {
+            self.not_implemented(name.span, "`Option` and `Result` values", Planned::Phase(2));
+            return true;
+        }
+        let owner = self.adts.iter().find(|adt| {
+            self.adt_names.get(&adt.name.sym) == Some(&adt.id) && self.p.decls.adt(adt.id).variant_named(text).is_some()
+        });
+        let Some(owner) = owner else { return false };
+        let qualified = format!("{}.{text}", m.text(owner.name.sym));
+        let message = format!("variants are qualified in expressions; write `{qualified}`");
+        self.error(codes::UNKNOWN_NAME, name.span, message);
+        true
+    }
+
+    // ---- match and patterns (REFERENCE §6.3, §6.4) ----
+
+    fn match_expr(&mut self, e: ExprId, mode: Mode) -> Ty {
+        let m = self.m;
+        let ExprKind::Match { scrutinee, arms, complete } = &m.exprs[e].kind else {
+            unreachable!("match_expr is called on `match` expressions")
+        };
+        let scrutinee_ty = self.infer(*scrutinee);
+        let mut rows = Vec::new();
+        let mut expected = match mode {
+            Mode::Value(expected) => expected.cloned(),
+            _ => None,
+        };
+        let mut diverges = true;
+        for arm in arms {
+            // An arm's bindings scope over its guard and body.
+            self.f.scopes.push(Vec::new());
+            let space = self.pattern(arm.pat, &scrutinee_ty);
+            match arm.guard {
+                Some(guard) => {
+                    self.check(guard, &Ty::Bool);
+                }
+                // A guarded arm may not match, so it covers nothing.
+                None => rows.push(space),
+            }
+            let ty = match mode {
+                Mode::Stmt => self.block_stmt(&arm.body, None),
+                Mode::Tail(ret) => self.block_stmt(&arm.body, Some(ret)),
+                Mode::Value(_) => {
+                    let ty = self.block_value(&arm.body, expected.as_ref());
+                    if expected.is_none() && !ty.is_unknown() {
+                        expected = Some(ty.clone());
+                    }
+                    ty
+                }
+            };
+            diverges &= ty == Ty::Never;
+            self.f.scopes.pop();
+        }
+        // An arm that failed to parse may have covered what seems to be missing.
+        if *complete && !scrutinee_ty.is_unknown() {
+            let span = m.exprs[e].span;
+            match exhaust::uncovered(&self.p.decls, &self.inhabited, &scrutinee_ty, &rows) {
+                Ok(None) => {}
+                Ok(Some(missing)) => {
+                    let message = format!("this `match` does not cover `{missing}`; add an arm for it, or `_`");
+                    self.error(codes::NON_EXHAUSTIVE_MATCH, span, message);
+                }
+                Err(exhaust::TooComplex) => {
+                    let message =
+                        "this `match` is too complex to check for exhaustiveness; split it into smaller matches";
+                    self.error(codes::MATCH_TOO_COMPLEX, span, message);
+                }
+            }
+        }
+        // A value that no arm matches is a defect (OPEN_QUESTIONS P5), so a `match` whose
+        // arms all diverge does too.
+        let ty = match mode {
+            _ if diverges => Ty::Never,
+            Mode::Stmt | Mode::Tail(_) => Ty::Unit,
+            Mode::Value(_) if !complete => Ty::Error,
+            Mode::Value(_) => expected.unwrap_or(Ty::Error),
+        };
+        self.p.expr_ty.insert(e, ty.clone());
+        ty
+    }
+
+    /// Checks `pat` against a value of type `ty`, declares its bindings in the innermost
+    /// scope, and returns what it covers. A pattern with an error covers everything, so the
+    /// `match` around it isn't reported as well (REFERENCE §15.1).
+    fn pattern(&mut self, pat: PatId, ty: &Ty) -> Space {
+        let m = self.m;
+        let span = m.pats[pat].span;
+        match &m.pats[pat].kind {
+            PatKind::Wild => Space::Wild,
+            PatKind::Bind(name) => {
+                let id = self.declare(*name, ty.clone(), false, "binding");
+                self.p.pat_local.insert(pat, id);
+                Space::Wild
+            }
+            PatKind::Lit(lit) => self.literal_pattern(*lit, ty),
+            PatKind::Range { lo, hi, .. } => match ty {
+                Ty::Int(_) | Ty::Char => {
+                    let lo_ty = self.check(*lo, ty);
+                    let hi_ty = self.check(*hi, ty);
+                    match ty {
+                        _ if lo_ty != *ty || hi_ty != *ty => Space::Error,
+                        Ty::Char => Space::Some,
+                        // Integers are covered by facts, which the v1 profile checks at run time.
+                        _ => Space::Wild,
+                    }
+                }
+                _ => {
+                    self.infer(*lo);
+                    self.infer(*hi);
+                    if !ty.is_unknown() {
+                        let message = format!("a range pattern needs integer or char bounds, not `{}`", self.show(ty));
+                        self.error(codes::UNSUPPORTED_OPERATOR, span, message);
+                    }
+                    Space::Error
+                }
+            },
+            PatKind::Ctor { qualifier, name, fields, rest } => {
+                self.ctor_pattern(pat, ty, *qualifier, *name, fields.as_deref(), *rest)
+            }
+        }
+    }
+
+    fn literal_pattern(&mut self, lit: ExprId, ty: &Ty) -> Space {
+        if let Ty::Float(_) = ty {
+            self.infer(lit);
+            let message = format!(
+                "`{}` has no `Eq`, so its values can't be matched against literals (REFERENCE §12.2)",
+                self.show(ty)
+            );
+            let span = self.span(lit);
+            self.error(codes::UNSUPPORTED_OPERATOR, span, message);
+            return Space::Error;
+        }
+        let actual = self.check(lit, ty);
+        if actual != *ty {
+            return Space::Error;
+        }
+        match (ty, &self.m.exprs[lit].kind) {
+            (Ty::Bool, ExprKind::Bool(b)) => Space::Ctor(Ctor::Bool(*b), Vec::new()),
+            (Ty::Unit, _) => Space::Ctor(Ctor::Unit, Vec::new()),
+            (Ty::Char | Ty::Text, _) => Space::Some,
+            // Integers are covered by facts, which the v1 profile checks at run time.
+            _ => Space::Wild,
+        }
+    }
+
+    /// Checks the parts of a pattern that has an error, so that its names are still bound.
+    fn unknown_parts(&mut self, fields: Option<&[FieldPat]>) -> Space {
+        for field in fields.unwrap_or_default() {
+            self.pattern(field.pat, &Ty::Error);
+        }
+        Space::Error
+    }
+
+    /// `Empty`, `Shape.Circle(r)` or `User(name, age: a, ..)` (REFERENCE §6.4).
+    fn ctor_pattern(
+        &mut self,
+        pat: PatId,
+        ty: &Ty,
+        qualifier: Option<Ident>,
+        name: Ident,
+        fields: Option<&[FieldPat]>,
+        rest: bool,
+    ) -> Space {
+        let m = self.m;
+        let text = m.text(name.sym);
+        let span = m.pats[pat].span;
+        let Ty::Adt(id, _) = ty else {
+            if matches!(text, "Some" | "None" | "Ok" | "Err") && qualifier.is_none() {
+                self.not_implemented(name.span, "`Option` and `Result` patterns", Planned::Phase(2));
+            } else if !ty.is_unknown() && !qualifier.is_some_and(|q| self.poisoned.contains(&q.sym)) {
+                let message = format!("expected a pattern for `{}`, found the variant pattern `{text}`", self.show(ty));
+                self.error(codes::TYPE_MISMATCH, span, message);
+            }
+            return self.unknown_parts(fields);
+        };
+        let id = *id;
+        if let Some(q) = qualifier {
+            let q_text = m.text(q.sym);
+            let def = self.p.decls.adt(id);
+            let problem = match self.adt_names.get(&q.sym) {
+                _ if self.poisoned.contains(&q.sym) => None,
+                Some(&other) if other == id && def.is_enum() => None,
+                Some(&other) => Some((
+                    codes::TYPE_MISMATCH,
+                    q.span,
+                    format!("expected a pattern for `{}`, found one for `{}`", def.name, self.p.decls.adt(other).name),
+                )),
+                None if self.imports.contains_key(&q.sym) || builtin_type(q_text).is_some() => Some((
+                    codes::TYPE_MISMATCH,
+                    q.span,
+                    format!("expected a pattern for `{}`, found one for `{q_text}`", def.name),
+                )),
+                None => Some((codes::UNKNOWN_TYPE, q.span, format!("unknown type `{q_text}`"))),
+            };
+            let rejected = problem.is_some() || self.poisoned.contains(&q.sym);
+            if let Some((code, span, message)) = problem {
+                self.error(code, span, message);
+            }
+            if rejected {
+                return self.unknown_parts(fields);
+            }
+        }
+        let def = self.p.decls.adt(id);
+        let found = match def.kind {
+            AdtKind::Enum => def.variant_named(text).map(|(v, _)| v),
+            AdtKind::Record => (*def.name == *text).then_some(VariantIdx::RECORD),
+        };
+        let Some(v) = found else {
+            if matches!(text, "Some" | "None" | "Ok" | "Err") && qualifier.is_none() {
+                self.not_implemented(name.span, "`Option` and `Result` patterns", Planned::Phase(2));
+            } else if self.poisoned.contains(&name.sym) {
+            } else if let Some(&other) = self.adt_names.get(&name.sym).filter(|_| !def.is_enum()) {
+                let message =
+                    format!("expected a pattern for `{}`, found one for `{}`", def.name, self.p.decls.adt(other).name);
+                self.error(codes::TYPE_MISMATCH, span, message);
+            } else if def.is_enum() {
+                self.error(codes::UNKNOWN_MEMBER, name.span, format!("`{}` has no variant `{text}`", def.name));
+            } else {
+                let message = format!("`{text}` is not `{}`; its pattern is written `{}(…)`", def.name, def.name);
+                self.error(codes::TYPE_MISMATCH, span, message);
+            }
+            return self.unknown_parts(fields);
+        };
+        let variant = &def.variants[v.index()];
+        if variant.rejected {
+            return self.unknown_parts(fields);
+        }
+        let ctor = def.ctor_name(v);
+        let declared: Vec<(Box<str>, Ty)> = variant.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+        let Some(fields) = fields else {
+            if declared.is_empty() {
+                self.p.pat_ctor.insert(pat, CtorPat { adt: id, variant: v, fields: Box::new([]) });
+                return Space::Ctor(Ctor::Variant(v), Vec::new());
+            }
+            let n = declared.len();
+            let noun = if n == 1 { "field" } else { "fields" };
+            let message = format!("`{ctor}` has {n} {noun}; match them, or write `{ctor}(..)` to skip them");
+            self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
+            return Space::Error;
+        };
+        if declared.is_empty() && def.is_enum() {
+            let message = format!("`{ctor}` has no fields, so its pattern is written without parentheses");
+            self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
+            return self.unknown_parts(Some(fields));
+        }
+        let problem = self.field_pattern_problem(&ctor, &declared, fields, rest, span);
+        let mut parts = vec![Space::Wild; declared.len()];
+        let mut targets = Vec::new();
+        for (field, target) in fields.iter().zip(self.field_targets(&declared, fields)) {
+            match target {
+                Some(i) => {
+                    parts[i] = self.pattern(field.pat, &declared[i].1);
+                    targets.push(FieldIdx(i as u32));
+                }
+                None => {
+                    self.pattern(field.pat, &Ty::Error);
+                }
+            }
+        }
+        if let Some((code, span, message)) = problem {
+            self.error(code, span, message);
+            return Space::Error;
+        }
+        self.p.pat_ctor.insert(pat, CtorPat { adt: id, variant: v, fields: targets.into() });
+        // An error inside the pattern makes all of it count as `_`.
+        if parts.iter().any(|part| matches!(part, Space::Error)) {
+            return Space::Error;
+        }
+        Space::Ctor(Ctor::Variant(v), parts)
+    }
+
+    /// The field each part of a constructor pattern matches. One unlabelled part of a
+    /// one-field variant matches that field whatever it is called; otherwise a part names
+    /// its field with a label or, when it is a bare name, with that name (REFERENCE §6.4).
+    fn field_targets(&self, declared: &[(Box<str>, Ty)], fields: &[FieldPat]) -> Vec<Option<usize>> {
+        let m = self.m;
+        let index: HashMap<&str, usize> = declared.iter().enumerate().map(|(i, (name, _))| (&**name, i)).collect();
+        fields
+            .iter()
+            .map(|field| match (field.label, &m.pats[field.pat].kind) {
+                (None, _) if declared.len() == 1 && fields.len() == 1 => Some(0),
+                (Some(name), _) | (None, &PatKind::Bind(name)) => index.get(m.text(name.sym)).copied(),
+                (None, _) => None,
+            })
+            .collect()
+    }
+
+    /// The first problem with how a constructor pattern names its fields. They follow the
+    /// labels of a construction (H3): in declaration order, each once, all of them unless
+    /// the pattern ends with `..` (OPEN_QUESTIONS P5).
+    fn field_pattern_problem(
+        &self,
+        ctor: &str,
+        declared: &[(Box<str>, Ty)],
+        fields: &[FieldPat],
+        rest: bool,
+        span: Span,
+    ) -> Option<(Code, Span, String)> {
+        let m = self.m;
+        let labelled = declared.iter().map(|(name, _)| format!("{name}: …")).collect::<Vec<_>>().join(", ");
+        let n = declared.len();
+        let noun = if n == 1 { "field" } else { "fields" };
+        if fields.len() > n {
+            let message = format!("`{ctor}` has {n} {noun}, but the pattern has {} parts", fields.len());
+            return Some((codes::WRONG_ARGUMENT_COUNT, span, message));
+        }
+        let mut seen = vec![false; n];
+        let (mut last, mut count) = (None, 0);
+        for (field, target) in fields.iter().zip(self.field_targets(declared, fields)) {
+            let at = field.label.map_or(m.pats[field.pat].span, |label| label.span);
+            let named = field.label.or(match m.pats[field.pat].kind {
+                PatKind::Bind(name) => Some(name),
+                _ => None,
+            });
+            let Some(i) = target else {
+                return Some(match named {
+                    Some(name) => {
+                        let text = m.text(name.sym);
+                        let hint = if field.label.is_none() {
+                            format!("; a bare name is a field name, and `field: {text}` binds another")
+                        } else {
+                            String::new()
+                        };
+                        (codes::UNKNOWN_MEMBER, at, format!("`{ctor}` has no field `{text}`{hint}"))
+                    }
+                    None => (
+                        codes::MISSING_LABEL,
+                        at,
+                        format!("each part of a pattern with several fields is labelled, as in `{ctor}({labelled})`"),
+                    ),
+                });
+            };
+            let field_name = &declared[i].0;
+            if seen[i] {
+                return Some((codes::DUPLICATE_NAME, at, format!("the pattern matches `{field_name}` twice")));
+            }
+            if last.is_some_and(|last| last > i) {
+                let message = format!(
+                    "`{field_name}` is out of order; fields follow the declaration order, as in `{ctor}({labelled})`"
+                );
+                return Some((codes::WRONG_LABEL, at, message));
+            }
+            (seen[i], last, count) = (true, Some(i), count + 1);
+        }
+        if !rest && count < n {
+            let message = format!(
+                "`{ctor}` has {n} {noun}, but the pattern matches {count}; match the rest, or end it with `..`"
+            );
+            return Some((codes::WRONG_ARGUMENT_COUNT, span, message));
+        }
+        None
     }
 
     /// Checks a loop body and returns whether a `break` leaves the loop.
@@ -1812,15 +2387,10 @@ fn reach(vis: Visibility) -> u8 {
     }
 }
 
-/// The fields of `decl` that its record keeps: the first of each name, in order.
-fn kept_fields(decl: &RecordDecl) -> Vec<&FieldDecl> {
-    let mut kept: Vec<&FieldDecl> = Vec::new();
-    for field in &decl.fields {
-        if !kept.iter().any(|k| k.name.sym == field.name.sym) {
-            kept.push(field);
-        }
-    }
-    kept
+/// The fields a record or variant keeps: the first of each name, in order.
+fn kept_fields(fields: &[FieldDecl]) -> Vec<&FieldDecl> {
+    let mut seen = HashSet::new();
+    fields.iter().filter(|field| seen.insert(field.name.sym)).collect()
 }
 
 /// The interfaces of the prelude (REFERENCE §3).

@@ -1,0 +1,34 @@
+// phase: 2.2
+// expect-error: E0210
+// expect-error: E0307
+// expect-error: E0309
+// expect-error: E0310
+// An enum derives `Eq` or `Show` only if the fields of every variant implement it (STD.md),
+// and a recursive enum may derive them (REFERENCE §4.5). A rejected derive still counts, so
+// its uses aren't reported again.
+enum Reading derives(Eq, Show) {
+    Celsius(degrees: Float)                         // <- E0309
+    Missing
+}
+
+enum Tree derives(Eq, Show) {
+    Leaf
+    Node(left: Tree, value: Int, right: Tree)
+}
+
+record Plain {
+    n: Int
+}
+
+enum Holder derives(Show) {
+    Has(p: Plain)                                   // <- E0309
+}
+
+enum Bad derives(Copy, Nope, Show, Show) {          // <- E0310, E0307, E0210
+    X
+}
+
+fn derived(r: Reading, t: Tree, h: Holder, b: Bad) -> Bool {
+    let s = f"{r} {t} {h} {b}"
+    return r == Reading.Missing and t == Tree.Leaf and b == Bad.X
+}

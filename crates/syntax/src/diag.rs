@@ -127,40 +127,40 @@ pub mod codes {
             "`return` outside a function body, such as in a `where` clause.";
 
         UNKNOWN_NAME = "E0201", "unknown_name",
-            "A name that does not resolve to any local, function or import.";
+            "A name that does not resolve to any local, function or import, or a variant used without its enum (REFERENCE §4.5).";
         DUPLICATE_ITEM = "E0202", "duplicate_item",
             "A module may hold at most one item per name, and a name may be imported once (REFERENCE §3).";
         SHADOWING = "E0203", "shadowing",
-            "A binding may not reuse a name already in scope in the same function, including imported names, and an import or record may not reuse a prelude name (REFERENCE §3, H4).";
+            "A binding may not reuse a name already in scope in the same function, including imported names, and an import, record or enum may not reuse a prelude name (REFERENCE §3, H4).";
         WRONG_CASE = "E0204", "wrong_case",
             "Types and variants are PascalCase; everything else is snake_case (REFERENCE §2).";
         UNKNOWN_IMPORT = "E0205", "unknown_import",
             "A `use` names a module or item that does not exist.";
         MISSING_LABEL = "E0206", "missing_label",
-            "Calls to functions with two or more parameters label every argument, and so does every `with` (REFERENCE §3, H3).";
+            "Calls to functions with two or more parameters label every argument, and so does every `with` and every part of a pattern for several fields, except a bare field name (REFERENCE §3, §6.4, H3).";
         WRONG_LABEL = "E0207", "wrong_label",
-            "An argument label that does not match the parameter in that position.";
+            "An argument label that does not match the parameter in that position, or pattern fields out of declaration order.";
         WRONG_ARGUMENT_COUNT = "E0208", "wrong_argument_count",
-            "A call passes more or fewer arguments than the function has parameters, or a `with` replaces no field.";
+            "A call passes more or fewer arguments than the function has parameters, a `with` replaces no field, or a pattern matches the wrong number of fields.";
         NEEDLESS_ALIAS = "E0209", "needless_alias",
             "`as` renames an import only to resolve a name collision (REFERENCE §3, Q24).";
         DUPLICATE_NAME = "E0210", "duplicate_name",
-            "A name given twice in one list: a record's fields, the fields a `with` replaces, or a `derives` list (REFERENCE §4.4).";
+            "A name given twice in one list: a record's or variant's fields, an enum's variants, the fields a `with` replaces or a pattern matches, or a `derives` list (REFERENCE §4.4, §4.5).";
         PRIVATE_IN_PUBLIC = "E0211", "private_in_public",
-            "A `pub` item mentions a less visible type in its signature or, for a `pub record`, its fields (REFERENCE §3).";
+            "A `pub` item mentions a less visible type in its signature or, for a `pub` record or enum, its fields (REFERENCE §3).";
 
         TYPE_MISMATCH = "E0301", "type_mismatch",
             "A value of one type where another is expected. Proviso has no implicit conversions (REFERENCE §9.2).";
         LITERAL_OUT_OF_RANGE = "E0302", "literal_out_of_range",
             "A literal that does not fit the type it meets (REFERENCE §2).";
         UNKNOWN_MEMBER = "E0303", "unknown_member",
-            "A field or method the type does not have.";
+            "A field, method or variant the type does not have.";
         MISSING_RETURN = "E0304", "missing_return",
             "Every path of a non-Unit function ends with an explicit `return` (REFERENCE §2).";
         IMMUTABLE_ASSIGNMENT = "E0305", "immutable_assignment",
             "Assignment to a `let` binding or a parameter; declare it with `var`.";
         UNSUPPORTED_OPERATOR = "E0306", "unsupported_operator",
-            "An operator or interpolation the operand's type does not support.";
+            "An operator, interpolation, or literal or range pattern that the type does not support.";
         UNKNOWN_TYPE = "E0307", "unknown_type",
             "A type name that does not resolve.";
         INVALID_MAIN = "E0308", "invalid_main",
@@ -169,6 +169,8 @@ pub mod codes {
             "A type does not implement an interface it needs, such as a field's type in a `derives` list (REFERENCE §4.4, §4.9).";
         NOT_DERIVABLE = "E0310", "not_derivable",
             "A `derives` list names a prelude interface that can't be derived, such as `Copy` or `Add` (REFERENCE §4.4).";
+        NON_EXHAUSTIVE_MATCH = "E0311", "non_exhaustive_match",
+            "A `match` does not cover every value of its type; add the missing arms or `_` (REFERENCE §6.3).";
 
         // Reserved for later phases: the §F goldens already expect these.
         REFINEMENT_REFUTED = "E0412", "refinement_refuted",
@@ -199,6 +201,8 @@ pub mod codes {
             "A construct the language has that this implementation does not support yet.";
         NESTING_TOO_DEEP = "E0902", "nesting_too_deep",
             "Expressions and blocks nest at most 1,000 levels deep in this implementation (OPEN_QUESTIONS P5).";
+        MATCH_TOO_COMPLEX = "E0903", "match_too_complex",
+            "A `match` whose exhaustiveness takes too many steps to check (OPEN_QUESTIONS P5).";
     }
 
     pub fn find(id: &str) -> Option<Code> {

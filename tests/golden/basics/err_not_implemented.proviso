@@ -16,9 +16,7 @@ impl Show for Span {                                // <- E0901
 
 fn f(xs: List[Int]) -> Int {                        // <- E0901
     let ys = [1, 2, 3]                              // <- E0901
-    let n = match 3 {                               // <- E0901
-        _ => 1
-    }
+    let n = (1, 2)                                  // <- E0901
     let copy = ys
     return n
 }

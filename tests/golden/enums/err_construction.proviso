@@ -1,0 +1,40 @@
+// phase: 2.2
+// expect-error: E0201
+// expect-error: E0206
+// expect-error: E0207
+// expect-error: E0208
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0306
+// expect-error: E0901
+// Variants are built qualified, with the labels of a call (REFERENCE §4.5, §3); only `Some`,
+// `None`, `Ok` and `Err` may be used unqualified. A variant without fields takes no
+// parentheses. An enum has no fields and no `with`, and it has `==` and `show` only when it
+// derives them. Each mistake is reported once.
+enum Shape {
+    Circle(radius: Int)
+    Rect(w: Int, h: Int)
+    Empty
+}
+
+fn build() -> Shape {
+    let a = Circle(radius: 1)                       // <- E0201
+    let b = Shape.Triangle(side: 1)                 // <- E0303
+    let c = Shape.Rect(1, 2)                        // <- E0206
+    let d = Shape.Rect(h: 1, w: 2)                  // <- E0207
+    let e = Shape.Rect(w: 1)                        // <- E0208
+    let f = Shape.Empty()                           // <- E0208
+    let g = Shape.Circle(radius: "big")             // <- E0301
+    let h = Shape(radius: 1)                        // <- E0201
+    let i = Shape.Circle                            // <- E0901
+    let m = Shape.Unknown                           // <- E0303
+    let j = Shape.Empty
+    let r = j.radius                                // <- E0303
+    let k = j.with(radius: 2)                       // <- E0303
+    let same = j == Shape.Empty                     // <- E0306
+    let t = j.show()                                // <- E0303
+    let u = f"{j}"                                  // <- E0306
+    let v = Shape                                   // <- E0201
+    let all_of = f"{a} {b} {h} {i} {m} {r} {k} {t} {u} {v}"
+    return Shape.Empty
+}

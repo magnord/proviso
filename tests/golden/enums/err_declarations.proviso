@@ -1,0 +1,53 @@
+// phase: 2.2
+// expect-error: E0202
+// expect-error: E0203
+// expect-error: E0204
+// expect-error: E0210
+// expect-error: E0307
+// An enum's name is PascalCase and unique in the module, and its variants are PascalCase and
+// unique in the enum. Variant fields follow the rules of record fields (REFERENCE §2, §4.4).
+// A rejected name, variant or field is reported once, and its uses are not (§15.1).
+enum Shape {
+    Circle(radius: Int)
+    Empty
+}
+
+record Shape {                                      // <- E0202
+    n: Int
+}
+
+enum Option {                                       // <- E0203
+    Nope
+}
+
+enum bad_enum {                                     // <- E0204
+    A
+}
+
+enum Cased {
+    lower_variant                                   // <- E0204
+    Fine(Upper: Int)                                // <- E0204
+}
+
+enum Dups {
+    A
+    A(n: Int)                                       // <- E0210
+    B(x: Int, x: Text)                              // <- E0210
+    C(t: Nowhere)                                   // <- E0307
+}
+
+fn uses_them(s: Shape, o: Option, b: bad_enum, c: Cased, d: Dups) -> Int {
+    let sx = Shape.Circle(radius: 1)
+    let y = Cased.lower_variant
+    let f = Cased.Fine(Upper: 1)
+    let z = Dups.A(n: 2)
+    let w = Dups.A
+    let v = Dups.B(x: "anything")
+    let u = Dups.C(t: 3)
+    let n = Option.Nope
+    match d {
+        A => return 1
+        B(x) => return 2
+        C(t) => return 3
+    }
+}

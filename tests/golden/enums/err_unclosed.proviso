@@ -1,0 +1,55 @@
+// phase: 2.2
+// expect-error: E0101
+// A bracket that is never closed is reported where it opens. The item ends before the next
+// item, which is parsed as usual, and uses of what it declares aren't reported (REFERENCE
+// §15.1). That holds for an enum's braces, a variant's parentheses and a `match`'s braces.
+// A block in an arm that is never closed ends before the next arm, so the `match` isn't also
+// reported as missing that arm, and a block in a variant field's `where` ends before the next
+// variant, as in a record (OPEN_QUESTIONS P5).
+enum Open {                                         // <- E0101
+    A
+
+enum After {
+    B
+}
+
+enum Fields {
+    C(n: Int                                        // <- E0101
+    D
+}
+
+fn matching(a: After) -> Int {
+    return match a {                                // <- E0101
+        B => 1
+
+enum Last {
+    E
+}
+
+enum Pair {
+    P(n: Int)
+    Q
+}
+
+fn arm_block(p: Pair) -> Int {
+    return match p {
+        P(n) => {                                   // <- E0101
+            n + 1
+        Q => 2
+    }
+}
+
+enum Checked {
+    Small(n: Int where match n {                    // <- E0101
+        0 => true
+        _ => n < 10
+    Large(n: Int)
+}
+
+fn reads(o: Open, a: After, f: Fields, l: Last) -> Int {
+    let x = Open.A
+    let y = Fields.D
+    let z = Last.E
+    let w = Checked.Large(n: 100)
+    return matching(a)
+}

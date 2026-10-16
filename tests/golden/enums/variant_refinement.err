@@ -1,0 +1,3 @@
+defect[refinement_failed]: `Reading.Celsius.degrees` is -274, which breaks its refinement `degrees >= -273`
+  at enums/variant_refinement.proviso:13:12 (variant_refinement.make+2)
+  called from enums/variant_refinement.proviso:19:15 (variant_refinement.main+4)

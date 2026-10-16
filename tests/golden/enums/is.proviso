@@ -1,0 +1,60 @@
+// phase: 2.2
+// `x is P` tests a value against a pattern (REFERENCE §6.4). Its bindings scope over the rest
+// of the `and` chain and over the then-block, and in a `while` condition over the body
+// (OPEN_QUESTIONS P5). `is` binds looser than arithmetic and tighter than `not` (§6.1). A
+// refinement may use `is` (§8.1). A recursive enum needs no annotation (§4.5).
+use std.io { IoError }
+
+enum Shape derives(Show) {
+    Circle(radius: Int)
+    Rect(w: Int, h: Int)
+    Empty
+}
+
+enum IntList derives(Eq, Show) {
+    Nil
+    Cons(head: Int, tail: IntList)
+}
+
+record Sized {
+    shape: Shape
+    limit: Int
+} where not (shape is Circle(r) and r > limit)
+
+fn big(s: Shape) -> Bool {
+    return s is Circle(r) and r > 1
+}
+
+fn radius_or(s: Shape, d: Int) -> Int {
+    if s is Shape.Circle(radius: r) and r > 0 {
+        return r
+    } else if s is Rect(w, h) and w == h {
+        return w
+    }
+    return d
+}
+
+fn sum(list: IntList) -> Int {
+    var total = 0
+    var rest = list
+    while rest is Cons(head, tail) {
+        total += head
+        rest = tail
+    }
+    return total
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let c = Shape.Circle(radius: 2)
+    try sys.stdout.write_line(f"{big(c)} {big(Shape.Circle(radius: 1))} {big(Shape.Empty)} {not c is Empty}")
+    try sys.stdout.write_line(f"{c is Circle(2)} {c is Circle(3)} {Shape.Rect(w: 1, h: 2) is Rect(w: 1, ..)} {3 + 4 is 7}")
+    let r1 = radius_or(s: Shape.Circle(radius: 5), d: 9)
+    let r2 = radius_or(s: Shape.Circle(radius: 0), d: 9)
+    let r3 = radius_or(s: Shape.Rect(w: 4, h: 4), d: 9)
+    let r4 = radius_or(s: Shape.Rect(w: 4, h: 2), d: 9)
+    try sys.stdout.write_line(f"{r1} {r2} {r3} {r4} {radius_or(s: Shape.Empty, d: 8)}")
+    let list = IntList.Cons(head: 1, tail: IntList.Cons(head: 20, tail: IntList.Cons(head: 300, tail: IntList.Nil)))
+    try sys.stdout.write_line(f"{sum(list)} {list}")
+    let ok = Sized(shape: Shape.Circle(radius: 5), limit: 5)
+    try sys.stdout.write_line(f"{ok.shape}")
+}

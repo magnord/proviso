@@ -1,0 +1,30 @@
+// phase: 2.2
+// Variants are qualified in expressions (REFERENCE §4.5): `E.V(field: x)` builds a variant
+// with fields, labelled per §3, and `E.V` one without. A derived `Show` writes the expression
+// that builds the value, such as `LoadError.MissingComma(line_no: 7)` or `Stop.Halt`, with
+// text and chars quoted (STD.md), and `debug` writes any enum that way. A derived `Eq`
+// compares the variants, then each field, so variants with equal fields still differ.
+use std.io { IoError }
+
+enum Stop derives(Eq, Show) {
+    Halt
+    Pause(ticks: Int)
+    Resume(ticks: Int)
+    Wait(label: Text, mark: Char)
+}
+
+enum Plain {
+    One
+    Two(n: Int)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let h = Stop.Halt
+    let p = Stop.Pause(ticks: 3)
+    let w = Stop.Wait(label: "a \"b\"", mark: '\n')
+    try sys.stdout.write_line(h.show())
+    try sys.stdout.write_line(f"{p} {w}")
+    try sys.stdout.write_line(f"{h == Stop.Halt} {p == Stop.Pause(3)} {p == Stop.Pause(ticks: 4)} {p != h}")
+    try sys.stdout.write_line(f"{p == Stop.Resume(ticks: 3)} {p.eq(Stop.Pause(ticks: 3))} {h.eq(p)}")
+    debug(Plain.One, Plain.Two(n: -1), w)
+}

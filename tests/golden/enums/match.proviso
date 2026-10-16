@@ -1,0 +1,159 @@
+// phase: 2.2
+// `match` runs the first arm whose pattern matches and whose guard holds (REFERENCE §6.3).
+// A variant with one field binds it with any name, a bare name in a variant with several
+// fields names a field, and `field: name` renames (§6.4). `..` skips the fields it doesn't name,
+// `_` matches anything, a name binds anything, and literals and ranges test the value; a
+// range is half-open unless written `..=` (§2). Patterns may omit the enum name (§4.5). A
+// `match` is a value, a statement, or the end of a function whose arms all return. An enum
+// without variants has no values, and neither does a variant or record with a field of such a
+// type or a type built only from itself, so they need no arms (OPEN_QUESTIONS P5).
+use std.io { IoError }
+
+enum Shape derives(Show) {
+    Circle(radius: Int)
+    Rect(w: Int, h: Int)
+    Empty
+}
+
+enum Solid {
+    Cube(x: Int, y: Int, z: Int)
+}
+
+enum Wrap {
+    Inner(shape: Shape)
+    Nothing
+}
+
+fn area(s: Shape) -> Int {
+    match s {
+        Circle(r) => return 3 * r * r
+        Rect(w, h) => return w * h
+        Empty => return 0
+    }
+}
+
+fn describe(s: Shape) -> Text {
+    let label = match s {
+        Shape.Circle(radius) if radius > 10 => "big circle"
+        Circle(_) => "circle"
+        Rect(w: width, h: height) if width == height => f"square {width}"
+        Rect(w, ..) => f"rect {w} wide"
+        Shape.Empty => "empty"
+    }
+    return label
+}
+
+fn inner_area(x: Wrap) -> Int {
+    return match x {
+        Inner(Rect(w: 2, h)) => h
+        Inner(shape: Circle(r)) => {
+            let d = 2 * r
+            d
+        }
+        Inner(s) => area(s)
+        Nothing => -1
+    }
+}
+
+fn depth(s: Solid) -> Int {
+    return match s {
+        Cube(z, ..) if z > 100 => -1
+        Cube(y: tall, z, ..) => tall * 10 + z
+    }
+}
+
+fn bucket(n: Int) -> Text {
+    return match n {
+        -1 => "minus one"
+        0 => "zero"
+        1..10 => "small"
+        10..=99 => "medium"
+        _ => "large"
+    }
+}
+
+fn kind(c: Char) -> Text {
+    return match c {
+        'a'..='z' => "lower"
+        'A'..'Z' => "upper but not Z"
+        '_' => "underscore"
+        other => f"other {other}"
+    }
+}
+
+fn word(t: Text) -> Int {
+    return match t { "ada" => 1, "bob" => 2, _ => 0 }
+}
+
+enum Void {}
+
+fn absurd(v: Void) -> Int {
+    return match v {}
+}
+
+enum Maybe {
+    Value(n: Int)
+    Impossible(v: Void)
+}
+
+record Holder {
+    v: Void
+}
+
+enum Endless {
+    More(next: Endless)
+}
+
+fn value(m: Maybe) -> Int {
+    return match m {
+        Value(n) => n
+    }
+}
+
+fn hold(h: Holder) -> Int {
+    return match h {}
+}
+
+fn endless(e: Endless) -> Int {
+    return match e {}
+}
+
+fn ignore(b: Bool) {
+    match b { true => return, false => return }
+}
+
+fn flag(b: Bool) -> Int {
+    match b {
+        true => return 1
+        false => return 0
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{area(Shape.Circle(radius: 2))} {area(Shape.Rect(w: 3, h: 5))} {area(Shape.Empty)}")
+    try sys.stdout.write_line(describe(Shape.Circle(radius: 11)))
+    try sys.stdout.write_line(describe(Shape.Circle(radius: 10)))
+    try sys.stdout.write_line(describe(Shape.Rect(w: 3, h: 3)))
+    try sys.stdout.write_line(describe(Shape.Rect(w: 4, h: 2)))
+    try sys.stdout.write_line(describe(Shape.Empty))
+    let a = inner_area(Wrap.Inner(shape: Shape.Rect(w: 2, h: 7)))
+    let b = inner_area(Wrap.Inner(shape: Shape.Rect(w: 3, h: 7)))
+    let c = inner_area(Wrap.Inner(Shape.Circle(radius: 4)))
+    let d = inner_area(Wrap.Inner(shape: Shape.Empty))
+    try sys.stdout.write_line(f"{a} {b} {c} {d} {inner_area(Wrap.Nothing)}")
+    try sys.stdout.write_line(f"{bucket(-1)}/{bucket(0)}/{bucket(1)}/{bucket(9)}/{bucket(10)}/{bucket(99)}/{bucket(100)}/{bucket(-5)}")
+    try sys.stdout.write_line(f"{kind('a')}/{kind('z')}/{kind('A')}/{kind('Z')}/{kind('_')}/{kind('3')}")
+    try sys.stdout.write_line(f"{word("ada")} {word("bob")} {word("eve")} {flag(true)} {flag(false)}")
+    try sys.stdout.write_line(f"{depth(Solid.Cube(x: 1, y: 2, z: 3))} {depth(Solid.Cube(x: 1, y: 2, z: 200))}")
+    ignore(true)
+    try sys.stdout.write_line(f"{value(Maybe.Value(n: 5))}")
+    for i in 0..3 {
+        match i {
+            0 => try sys.stdout.write_line("first")
+            1 => {
+                try sys.stdout.write_line("second")
+            }
+            _ => try sys.stdout.write_line("rest")
+        }
+    }
+}

@@ -9,6 +9,7 @@ use crate::source::Span;
 pub type ExprId = Id<Expr>;
 pub type StmtId = Id<Stmt>;
 pub type TypeId = Id<TypeExpr>;
+pub type PatId = Id<Pat>;
 
 pub struct Module {
     /// The module path, such as `users` for `users.proviso`.
@@ -17,9 +18,10 @@ pub struct Module {
     pub exprs: Arena<Expr>,
     pub stmts: Arena<Stmt>,
     pub types: Arena<TypeExpr>,
+    pub pats: Arena<Pat>,
     pub interner: Interner,
     /// Names of items whose declarations were rejected, such as a function that failed to
-    /// parse or a later-phase `enum`. Uses of them are not reported again.
+    /// parse or a later-phase `impl`. Uses of them are not reported again.
     pub poisoned: HashSet<Symbol>,
     /// Types named by a rejected `impl` block, such as `Point` in `impl Show for Point`. The
     /// block may have given them methods and interfaces, so uses of those aren't reported.
@@ -71,6 +73,7 @@ impl Item {
         match &self.kind {
             ItemKind::Fn(decl) => Some(decl.name),
             ItemKind::Record(decl) => Some(decl.name),
+            ItemKind::Enum(decl) => Some(decl.name),
             ItemKind::Use(_) => None,
         }
     }
@@ -80,6 +83,7 @@ pub enum ItemKind {
     Fn(FnDecl),
     Use(UseDecl),
     Record(RecordDecl),
+    Enum(EnumDecl),
 }
 
 pub struct FnDecl {
@@ -116,6 +120,19 @@ pub struct RecordDecl {
     pub fields: Vec<FieldDecl>,
     /// The record-level `where` predicate, which sees every field.
     pub refinement: Option<ExprId>,
+}
+
+/// `enum Shape derives(Show) { Circle(radius: Float), Empty }` (REFERENCE §4.5).
+pub struct EnumDecl {
+    pub name: Ident,
+    pub derives: Vec<Ident>,
+    pub variants: Vec<VariantDecl>,
+}
+
+/// `Rect(w: Int, h: Int)`, or `Empty` with no fields.
+pub struct VariantDecl {
+    pub name: Ident,
+    pub fields: Vec<FieldDecl>,
 }
 
 /// `name: Text where not name.is_empty()`
@@ -259,8 +276,61 @@ pub enum ExprKind {
     Todo(Option<String>),
     Unreachable,
     Debug(Vec<ExprId>),
+    /// `match scrutinee { arms }` (REFERENCE §6.3).
+    Match {
+        scrutinee: ExprId,
+        arms: Vec<Arm>,
+        /// False when an arm failed to parse or the braces were never closed, so the arms
+        /// that would have made it exhaustive may be missing.
+        complete: bool,
+    },
+    /// `value is pattern` (REFERENCE §6.4).
+    Is {
+        value: ExprId,
+        pat: PatId,
+    },
     /// Stands in for code that failed to parse, which is already reported.
     Error,
+}
+
+/// `pattern if guard => body`. A body written without braces is one statement.
+pub struct Arm {
+    pub pat: PatId,
+    pub guard: Option<ExprId>,
+    pub body: Block,
+}
+
+pub struct Pat {
+    pub kind: PatKind,
+    pub span: Span,
+}
+
+/// The patterns of REFERENCE §6.4.
+pub enum PatKind {
+    /// `_`
+    Wild,
+    /// A snake_case name, which binds the value.
+    Bind(Ident),
+    /// A literal, possibly negated, such as `-1`, `'a'` or `"ada"`. It is an expression so
+    /// that the checker types it as it types any literal.
+    Lit(ExprId),
+    /// `lo..hi` or `lo..=hi`, with literal bounds.
+    Range { lo: ExprId, hi: ExprId, inclusive: bool },
+    /// A variant or record: `Empty`, `Shape.Circle(r)`, `Rect(w: width, ..)`.
+    Ctor {
+        qualifier: Option<Ident>,
+        name: Ident,
+        /// `None` when written without parentheses.
+        fields: Option<Vec<FieldPat>>,
+        /// Ends with `..`, which skips the remaining fields.
+        rest: bool,
+    },
+}
+
+/// One field of a constructor pattern: `w`, `w: width` or a pattern with no label.
+pub struct FieldPat {
+    pub label: Option<Ident>,
+    pub pat: PatId,
 }
 
 pub enum ElseBranch {

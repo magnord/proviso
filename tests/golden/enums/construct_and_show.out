@@ -1,0 +1,4 @@
+Stop.Halt
+Stop.Pause(ticks: 3) Stop.Wait(label: "a \"b\"", mark: '\n')
+true true false true
+false true false

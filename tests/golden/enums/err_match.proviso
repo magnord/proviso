@@ -1,0 +1,126 @@
+// phase: 2.2
+// expect-error: E0201
+// expect-error: E0203
+// expect-error: E0206
+// expect-error: E0207
+// expect-error: E0208
+// expect-error: E0210
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0306
+// expect-error: E0311
+// A `match` covers every value of its type (REFERENCE §6.3). Guarded arms don't count, and
+// only `_` or a name covers text. Integers are the exception: their exhaustiveness is
+// `[verified]`, so the v1 profile checks it at run time (OPEN_QUESTIONS P5). A pattern names
+// the scrutinee's own variants, and its fields follow the labels of a construction (§6.4,
+// H3; P5). A mistake in a pattern is reported once. Its names are still bound, and the arm
+// then counts as covering everything, so the `match` isn't also reported (§15.1).
+enum Shape {
+    Circle(radius: Int)
+    Rect(w: Int, h: Int)
+    Empty
+}
+
+enum Other {
+    Thing
+}
+
+enum IntList {
+    Nil
+    Cons(head: Int, tail: IntList)
+}
+
+fn missing_variant(s: Shape) -> Int {
+    return match s {                                // <- E0311
+        Circle(r) => r
+        Rect(..) => 0
+    }
+}
+
+fn guarded(s: Shape) -> Int {
+    return match s {                                // <- E0311
+        Circle(r) if r > 0 => r
+        Rect(..) => 0
+        Empty => 0
+    }
+}
+
+fn nested(l: IntList) -> Int {
+    return match l {                                // <- E0311
+        Nil => 0
+        Cons(tail: Nil, ..) => 1
+        Cons(tail: Cons(tail: Nil, ..), ..) => 2
+    }
+}
+
+fn booleans(b: Bool) -> Int {
+    return match b {                                // <- E0311
+        true => 1
+    }
+}
+
+fn texts(t: Text) -> Int {
+    return match t {                                // <- E0311
+        "a" => 1
+        "b" => 2
+    }
+}
+
+fn integers(n: Int, l: IntList) -> Int {
+    let a = match n {
+        0 => 1
+    }
+    let b = match l {
+        Nil => 0
+        Cons(head: 0, ..) => 1
+    }
+    return a + b
+}
+
+enum Inner {
+    J(n: Int)
+}
+
+enum Outer {
+    Holds(i: Inner)
+    Bare
+}
+
+// An error anywhere in a pattern makes the whole arm count as `_`, so `Outer.Bare` isn't
+// also reported missing.
+fn inner_error(o: Outer) -> Int {
+    return match o {
+        Holds(J(wrong: n)) => n                     // <- E0303
+    }
+}
+
+fn patterns(s: Shape, n: Int, x: Float) -> Int {
+    let a = match s {
+        Triangle(side) => side                      // <- E0303
+        Other.Thing => 2                            // <- E0301
+        Shape.Rect(width, h) => width               // <- E0303
+        Rect(1, 2) => 4                             // <- E0206
+        Rect(h, w) => h                             // <- E0207
+        Rect(w, w: z) => z                          // <- E0210
+        Rect(w) => w                                // <- E0208
+        Empty(..) => 7                              // <- E0208
+        Circle => 8                                 // <- E0208
+        Circle(r: q) => q                           // <- E0303
+        Rect(w: v, h: v) => v                       // <- E0203
+    }
+    let b = match n {
+        "one" => 1                                  // <- E0301
+        1.5 => 2                                    // <- E0301
+        Circle(r) => r                              // <- E0301
+        _ => 4
+    }
+    let c = match x {
+        1.5 => 1                                    // <- E0306
+        _ => 2
+    }
+    let d = match "t" {
+        "a".."b" => 1                               // <- E0306
+        _ => 2
+    }
+    return r                                        // <- E0201
+}
