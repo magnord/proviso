@@ -1,12 +1,13 @@
-//! Nominal declarations: the records and enums of the prelude, and those of the module.
-//! Questions about a type that depend on what it declares, such as its name or the
-//! interfaces it implements, are answered here.
+//! Nominal declarations: the records, enums and interfaces of the prelude, and those of the
+//! module, with the module's implementations. Questions about a type that depend on what it
+//! declares, such as its name or the interfaces it implements, are answered here.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use proviso_syntax::ast::ExprId;
+use proviso_syntax::ast::{ExprId, ParamMode};
 
-use crate::types::Ty;
+use crate::types::{FloatTy, IntTy, Ty};
 
 /// A record or enum declared in Proviso. The prelude's come first, at fixed ids.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -22,7 +23,8 @@ impl AdtId {
     }
 }
 
-/// An interface of the prelude, or of the standard library such as `std.io`'s `Out`.
+/// An interface: one of the prelude's, `std.io`'s `Out`, or one the module declares. The
+/// prelude's come first, at fixed ids.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct IfaceId(u32);
 
@@ -32,15 +34,98 @@ impl IfaceId {
     pub const SHOW: IfaceId = IfaceId(2);
     /// The capability interface of `std.io`.
     pub const OUT: IfaceId = IfaceId(3);
+    pub const HASH: IfaceId = IfaceId(4);
+    pub const COPY: IfaceId = IfaceId(5);
 
-    pub fn name(self) -> &'static str {
-        ["Eq", "Ord", "Show", "Out"][self.0 as usize]
+    /// The interfaces declared before the module's, in id order: the prelude's (REFERENCE §3),
+    /// and `std.io`'s `Out`.
+    const BUILT_IN: [&str; 13] =
+        ["Eq", "Ord", "Show", "Out", "Hash", "Copy", "Abandon", "Index", "Add", "Sub", "Mul", "Div", "Neg"];
+
+    /// The prelude interface named `name`. `Out` comes from `std.io`, so it isn't one.
+    pub fn prelude(name: &str) -> Option<IfaceId> {
+        let i = Self::BUILT_IN.iter().position(|n| *n == name && name != "Out")?;
+        Some(IfaceId(i as u32))
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
     }
 
     /// Whether a record can derive it (REFERENCE §4.4).
     pub fn derivable(self) -> bool {
-        matches!(self, IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW)
+        matches!(self, IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW | IfaceId::HASH)
     }
+
+    /// Whether it is a prelude interface whose methods come later: `Abandon`, whose `abandon`
+    /// takes `take self` (STD.md), and `Index` and the operator interfaces, whose methods
+    /// STD.md doesn't declare yet.
+    pub fn methods_later(self) -> bool {
+        (6..13).contains(&self.0)
+    }
+}
+
+/// An interface's declaration.
+pub struct IfaceDef {
+    pub name: Box<str>,
+    pub methods: Vec<IfaceMethod>,
+    /// A rejected method declaration may be the one an implementation or a call names, so
+    /// neither is checked against the methods it lists (REFERENCE §15.1).
+    pub incomplete: bool,
+}
+
+impl IfaceDef {
+    pub fn method(&self, name: &str) -> Option<usize> {
+        self.methods.iter().position(|m| &*m.name == name)
+    }
+}
+
+/// A method an interface declares. Every method takes `self`, and its types write the
+/// implementing type, `Self`, as `Ty::Param(0)`.
+pub struct IfaceMethod {
+    pub name: Box<str>,
+    /// The parameters after `self`.
+    pub params: Vec<(Box<str>, Ty)>,
+    /// The mode of each parameter in `params`, which an implementation must repeat.
+    pub modes: Vec<ParamMode>,
+    pub ret: Ty,
+    pub fails: Option<Ty>,
+}
+
+/// The type an `impl` is for, told apart as its values tell it at run time. Phase 2
+/// implements interfaces only for types without type arguments, so this names one.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ImplKey {
+    Int(IntTy),
+    Float(FloatTy),
+    Bool,
+    Char,
+    Text,
+    Unit,
+    IoError,
+    Adt(AdtId),
+}
+
+impl ImplKey {
+    pub fn of(ty: &Ty) -> Option<ImplKey> {
+        Some(match ty {
+            Ty::Int(it) => ImplKey::Int(*it),
+            Ty::Float(ft) => ImplKey::Float(*ft),
+            Ty::Bool => ImplKey::Bool,
+            Ty::Char => ImplKey::Char,
+            Ty::Text => ImplKey::Text,
+            Ty::Unit => ImplKey::Unit,
+            Ty::IoError => ImplKey::IoError,
+            Ty::Adt(id, args) if args.is_empty() => ImplKey::Adt(*id),
+            _ => return None,
+        })
+    }
+}
+
+/// An `impl I for T`: the function of each of `I`'s methods, in `I`'s order, or `None` for
+/// one the block lacks or declares differently.
+pub struct ImplDef {
+    pub methods: Vec<Option<usize>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -206,6 +291,12 @@ pub struct Pred {
 
 pub struct Decls {
     adts: Vec<AdtDef>,
+    ifaces: Vec<IfaceDef>,
+    impls: HashMap<(IfaceId, ImplKey), ImplDef>,
+    /// Types other than records and enums that a rejected `impl` block names, such as
+    /// `Int`. It may have given them methods and interfaces, so uses of those aren't
+    /// reported. A record or enum keeps this in its [`AdtDef`].
+    unknown: HashSet<ImplKey>,
 }
 
 impl Default for Decls {
@@ -217,7 +308,7 @@ impl Default for Decls {
             let mut def = AdtDef::enumeration(name);
             def.params = params;
             def.bare_variants = true;
-            def.derives = vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW];
+            def.derives = vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW, IfaceId::HASH];
             for (variant, field) in variants {
                 let fields = field.map(|(name, param)| FieldDef { name: name.into(), ty: Ty::Param(param) });
                 def.variants.push(VariantDef::new(variant, fields.into_iter().collect()));
@@ -226,7 +317,27 @@ impl Default for Decls {
         };
         let option = generic("Option", 1, [("Some", Some(("value", 0))), ("None", None)]);
         let result = generic("Result", 2, [("Ok", Some(("value", 0))), ("Err", Some(("error", 1)))]);
-        Decls { adts: vec![system, option, result] }
+        // `Ord`'s `cmp` returns an `Ordering`, which comes later, so its calls are rejected.
+        let method = |name: &str, params: Vec<(&str, Ty)>, ret: Ty| IfaceMethod {
+            name: name.into(),
+            modes: vec![ParamMode::Borrow; params.len()],
+            params: params.into_iter().map(|(n, t)| (n.into(), t)).collect(),
+            ret,
+            fails: None,
+        };
+        let ifaces = IfaceId::BUILT_IN
+            .iter()
+            .map(|&name| {
+                let methods = match name {
+                    "Eq" => vec![method("eq", vec![("other", Ty::Param(0))], Ty::Bool)],
+                    "Ord" => vec![method("cmp", vec![("other", Ty::Param(0))], Ty::Error)],
+                    "Show" => vec![method("show", vec![], Ty::Text)],
+                    _ => Vec::new(),
+                };
+                IfaceDef { name: name.into(), methods, incomplete: false }
+            })
+            .collect();
+        Decls { adts: vec![system, option, result], ifaces, impls: HashMap::new(), unknown: HashSet::new() }
     }
 }
 
@@ -242,6 +353,82 @@ impl Decls {
 
     pub fn adt_mut(&mut self, id: AdtId) -> &mut AdtDef {
         &mut self.adts[id.0 as usize]
+    }
+
+    pub fn push_iface(&mut self, def: IfaceDef) -> IfaceId {
+        self.ifaces.push(def);
+        IfaceId(self.ifaces.len() as u32 - 1)
+    }
+
+    pub fn iface(&self, id: IfaceId) -> &IfaceDef {
+        &self.ifaces[id.index()]
+    }
+
+    pub fn iface_mut(&mut self, id: IfaceId) -> &mut IfaceDef {
+        &mut self.ifaces[id.index()]
+    }
+
+    /// Every interface, with its id.
+    pub fn ifaces(&self) -> impl Iterator<Item = (IfaceId, &IfaceDef)> {
+        self.ifaces.iter().enumerate().map(|(i, def)| (IfaceId(i as u32), def))
+    }
+
+    /// Records the `impl` of `iface` for `key`, unless there is one; returns whether it was new.
+    pub fn add_impl(&mut self, iface: IfaceId, key: ImplKey, def: ImplDef) -> bool {
+        match self.impls.entry((iface, key)) {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(def);
+                true
+            }
+        }
+    }
+
+    pub fn impl_of(&self, iface: IfaceId, key: ImplKey) -> Option<&ImplDef> {
+        self.impls.get(&(iface, key))
+    }
+
+    /// The function that runs method `method` of `iface` for values of `key`, when an `impl`
+    /// declares one rather than `derives` or the prelude.
+    pub fn impl_method(&self, iface: IfaceId, key: ImplKey, method: usize) -> Option<usize> {
+        self.impls.get(&(iface, key))?.methods.get(method).copied().flatten()
+    }
+
+    /// The interfaces implemented for `key` by an `impl`.
+    pub fn impls_for(&self, key: ImplKey) -> impl Iterator<Item = IfaceId> + '_ {
+        self.impls.keys().filter(move |(_, k)| *k == key).map(|(iface, _)| *iface)
+    }
+
+    /// Notes that a rejected `impl` block names `key`, so it may have methods and interfaces
+    /// that nothing records.
+    pub fn mark_unknown(&mut self, key: ImplKey) {
+        match key {
+            ImplKey::Adt(id) => {
+                let def = self.adt_mut(id);
+                def.unknown_interfaces = true;
+                def.unknown_methods = true;
+            }
+            key => {
+                self.unknown.insert(key);
+            }
+        }
+    }
+
+    /// Whether a rejected `impl` block may have given `ty` methods that nothing records.
+    pub fn unknown_methods(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Adt(id, _) => self.adt(*id).unknown_methods,
+            ty => ImplKey::of(ty).is_some_and(|key| self.unknown.contains(&key)),
+        }
+    }
+
+    /// Whether a rejected `impl` block or `derives` entry may have given `ty` interfaces that
+    /// nothing records, so that [`Decls::implements`] answers yes for every interface.
+    pub fn unknown_interfaces(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Adt(id, _) => self.adt(*id).unknown_interfaces,
+            ty => ImplKey::of(ty).is_some_and(|key| self.unknown.contains(&key)),
+        }
     }
 
     /// Which records and enums have values: those with a variant whose fields all have types
@@ -272,25 +459,55 @@ impl Decls {
         Inhabited { adts: graph.nodes[..self.adts.len()].iter().map(|n| n.fired).collect() }
     }
 
-    /// Whether `ty` implements `iface`, built in or derived (STD.md). An unknown type
-    /// implements nothing, so callers decide whether it is worth reporting.
-    pub fn implements(&self, ty: &Ty, iface: IfaceId) -> bool {
+    /// Whether `ty` implements `iface`: built in, derived (STD.md) or by an `impl`. Type
+    /// parameter `i` implements the interfaces `params[i]` lists. An unknown type implements
+    /// nothing, so callers decide whether it is worth reporting.
+    pub fn implements(&self, ty: &Ty, iface: IfaceId, params: &[Vec<IfaceId>]) -> bool {
+        if iface == IfaceId::COPY {
+            return self.copyable(ty, params, &mut Vec::new());
+        }
+        let by_impl =
+            || ImplKey::of(ty).is_some_and(|key| self.impls.contains_key(&(iface, key)) || self.unknown.contains(&key));
         match ty {
+            Ty::Param(i) => params.get(*i as usize).is_some_and(|bounds| bounds.contains(&iface)),
             // `Option` and `Result` implement what their type arguments do (STD.md). `Never` has
             // no values, so it implements everything as an argument.
-            Ty::Adt(id, args) => {
-                let def = self.adt(*id);
-                (def.derives.contains(&iface) || (def.unknown_interfaces && iface.derivable()))
-                    && args.iter().all(|arg| *arg == Ty::Never || self.implements(arg, iface))
+            Ty::Adt(id, args) if self.adt(*id).derives.contains(&iface) => {
+                args.iter().all(|arg| *arg == Ty::Never || self.implements(arg, iface, params))
             }
+            Ty::Adt(id, _) => self.adt(*id).unknown_interfaces || by_impl(),
             // Text is ordered by code point (REFERENCE §12.3).
-            Ty::Int(_) | Ty::Char | Ty::Text => matches!(iface, IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW),
+            Ty::Int(_) | Ty::Char | Ty::Text => {
+                matches!(iface, IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW | IfaceId::HASH) || by_impl()
+            }
             // `Float` has IEEE `==` built in, but no `Eq` (REFERENCE §12.2, Q22).
-            Ty::Float(_) => iface == IfaceId::SHOW,
-            Ty::Bool => matches!(iface, IfaceId::EQ | IfaceId::SHOW),
-            Ty::Unit => iface == IfaceId::EQ,
-            Ty::IoError => iface == IfaceId::SHOW,
-            Ty::Cap(_) | Ty::Param(_) | Ty::Never | Ty::Error => false,
+            Ty::Float(_) => iface == IfaceId::SHOW || by_impl(),
+            Ty::Bool => matches!(iface, IfaceId::EQ | IfaceId::SHOW | IfaceId::HASH) || by_impl(),
+            Ty::Unit => matches!(iface, IfaceId::EQ | IfaceId::HASH) || by_impl(),
+            Ty::IoError => iface == IfaceId::SHOW || by_impl(),
+            Ty::Cap(_) | Ty::Never | Ty::Error => false,
+        }
+    }
+
+    /// Whether `ty` is `Copy`: copyable with no reach, which a capability has (REFERENCE
+    /// §5.1). A record or enum is when its fields are; one already being asked about in
+    /// `seen` is taken to be, since only its other fields can decide.
+    fn copyable(&self, ty: &Ty, params: &[Vec<IfaceId>], seen: &mut Vec<AdtId>) -> bool {
+        match ty {
+            Ty::Cap(_) => false,
+            Ty::Param(i) => params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)),
+            Ty::Adt(id, args) => {
+                if args.is_empty() && seen.contains(id) {
+                    return true;
+                }
+                seen.push(*id);
+                let def = self.adt(*id);
+                let copyable = (0..def.variants.len())
+                    .all(|v| def.field_types(VariantIdx::new(v), args).iter().all(|f| self.copyable(f, params, seen)));
+                seen.pop();
+                copyable
+            }
+            _ => true,
         }
     }
 
@@ -298,6 +515,11 @@ impl Decls {
     /// library type is qualified when a record of the module has its name, so the two can be
     /// told apart.
     pub fn display<'a>(&'a self, ty: &'a Ty) -> impl fmt::Display + 'a {
+        self.display_in(ty, &[])
+    }
+
+    /// Like [`Decls::display`], where type parameter `i` is called `names[i]`.
+    pub fn display_in<'a>(&'a self, ty: &'a Ty, names: &'a [Box<str>]) -> impl fmt::Display + 'a {
         let std = move |name: &'static str, qualified: &'static str| {
             if self.adts.iter().any(|adt| &*adt.name == name) { qualified } else { name }
         };
@@ -308,9 +530,14 @@ impl Decls {
                 write!(f, "{}[", self.adt(*id).name)?;
                 for (i, arg) in args.iter().enumerate() {
                     let sep = if i == 0 { "" } else { ", " };
-                    write!(f, "{sep}{}", self.display(arg))?;
+                    write!(f, "{sep}{}", self.display_in(arg, names))?;
                 }
                 return f.write_str("]");
+            }
+            if let Ty::Param(i) = ty
+                && let Some(name) = names.get(*i as usize)
+            {
+                return f.write_str(name);
             }
             f.write_str(match ty {
                 Ty::Int(it) => it.name(),
@@ -323,7 +550,7 @@ impl Decls {
                 Ty::Adt(id, _) => &self.adt(*id).name,
                 Ty::IoError => std("IoError", "std.io.IoError"),
                 Ty::Cap(cap) if cap.iface == IfaceId::OUT => std("Out", "std.io.Out"),
-                Ty::Cap(cap) => cap.iface.name(),
+                Ty::Cap(cap) => &self.iface(cap.iface).name,
                 Ty::Param(_) => "_",
                 Ty::Error => "{unknown}",
             })

@@ -22,7 +22,7 @@ Run the lanes in parallel, one subagent each. Each lane saves every finding as a
 1. **One lane per changed crate** (syntax, check, interp). Each gets the checklist in step 3.
 2. **Regression and capacity.** Run every golden from earlier phases and slices through both binaries with `check`, `check --json` and `run`, plus about 20 new stress programs. Diff stdout, stderr and exit codes, and explain every difference. Measure each capacity that CLAUDE.md or a test states, at the stated size, with the worst per-level shape, in debug and release, on main and on the PR.
 3. **Docs and tests.** Check DIAGNOSTICS.md against diag.rs, each new golden against REFERENCE, each new P5 bullet against actual behavior, the slice table in tests/golden/README.md, and the PR body's claims. Goldens test the spec, not the code.
-4. **Unprimed, from another model family.** This reviewer gets only the diff and the spec, with no list of bug classes. Run `codex review --base origin/main` when the CLI is installed. It finds the classes the primed lanes were never told about.
+4. **Unprimed, from another model family.** This reviewer gets only the diff and the spec, with no list of bug classes. The user runs it by hand in Codex, so don't run Codex yourself. Ask the user for its findings and triage them like any lane's. It finds the classes the primed lanes were never told about.
 
 These count as findings:
 

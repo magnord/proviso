@@ -1,0 +1,166 @@
+// phase: 2.4
+// expect-error: E0901
+// Receivers that mutate or take `self`, generic records and `impl` blocks, implementations
+// for generic types such as `Option[Int]`, a hand-written `Ord`, `Hash` or `Abandon`, `cmp`,
+// interface functions without `self`, generic interface methods, generic interfaces such
+// as `Index[Int]`, tag parameters, `Self` in expressions and patterns, and functions used
+// as values, such as `id::[Int]` without a call, come later. So do `take` and `inout`
+// parameters, implementations for `Never` and for capability types such as `Out`,
+// capability interfaces in an `impl`, a constraint or a call, and calls of the methods of
+// `Abandon`, `Index` and the operator interfaces. Uses of what they declare aren't reported
+// again (REFERENCE §15.1), and an `impl` may declare the methods its interface couldn't.
+use std.io { IoError, Out }
+
+record Counter {
+    n: Int
+}
+
+impl Counter {
+    fn bump(inout self) {                           // <- E0901
+        self.n += 1
+    }
+
+    fn close(take self) -> Int {                    // <- E0901
+        return self.n
+    }
+
+    fn fresh() -> Self {
+        return Self(n: 0)                           // <- E0901
+    }
+
+    fn empty(self) -> Bool {
+        match self {
+            Self(n: 0) => return true               // <- E0901
+            _ => return false
+        }
+    }
+
+    fn zeroed(self) -> Bool {
+        return self is Self(n: 0)                   // <- E0901
+    }
+}
+
+record Pair[A, B] {                                 // <- E0901
+    first: A
+    second: B
+}
+
+impl[T] Pair[T, T] {                                // <- E0901
+    fn swap(self) -> Int {
+        return 0
+    }
+}
+
+interface Size {
+    fn size(self) -> Int
+    fn zero() -> Int                                // <- E0901
+    fn convert[U](self, u: U) -> Int                // <- E0901
+}
+
+impl Index[Int] for Counter {                       // <- E0901
+    fn get(self, i: Int) -> Int {
+        return self.n
+    }
+}
+
+fn first[T: Index[Int]](x: T) -> Int {              // <- E0901
+    return 0
+}
+
+fn scaled[S: tag](x: Int) -> Int {                  // <- E0901
+    return x
+}
+
+fn id[T: Copy](x: T) -> T {
+    return x
+}
+
+interface Greet {
+    fn greet(self) -> Text
+}
+
+impl Greet for Never {                              // <- E0901
+    fn greet(self) -> Text {
+        return "never"
+    }
+}
+
+impl Greet for Out {                                // <- E0901
+    fn greet(self) -> Text {
+        return "out"
+    }
+}
+
+impl Out for Counter {                              // <- E0901
+    fn write_line(self, text: Text) fails IoError {
+    }
+}
+
+fn logged[T: Out](x: T) -> Int {                    // <- E0901
+    return 0
+}
+
+fn consume[T](x: take T) -> T {                     // <- E0901
+    let y = x
+    return y
+}
+
+fn update[T](x: inout T) -> T {                     // <- E0901
+    let y = x
+    return y
+}
+
+impl Size for Option[Int] {                         // <- E0901
+    fn size(self) -> Int {
+        return 1
+    }
+}
+
+impl Size for Counter {
+    fn size(self) -> Int {
+        return self.n
+    }
+
+    fn zero() -> Int {
+        return 0
+    }
+}
+
+impl Ord for Counter {                              // <- E0901
+    fn cmp(self, other: Self) -> Ordering {
+        return Ordering.Less
+    }
+}
+
+impl Hash for Counter {                             // <- E0901
+}
+
+impl Abandon for Counter {                          // <- E0901
+    fn abandon(take self) {
+    }
+}
+
+fn calls(c: Counter, o: Option[Int], p: Pair) -> Int {
+    var d = c
+    d.bump()
+    let e = c.close() + o.size() + p.swap() + Counter.fresh().n + c.size()
+    let f = c < c
+    let g = c.n.cmp(2)                              // <- E0901
+    let h = id::[Int]                               // <- E0901
+    let k = c.size::[Int]                           // <- E0901
+    let i = c.get(i: 0) + first(x: c) + scaled(x: 1) + id(x: 2)
+    let j = c.empty() or c.zeroed()
+    return e
+}
+
+fn greeting[T: Greet](x: T) -> Text {
+    return x.greet()
+}
+
+fn spellings(c: Counter, n: Never, sys: keep System) -> Text {
+    Out.write_line(c, "hi")                         // <- E0901
+    Abandon.abandon(c)                              // <- E0901
+    let negated = Neg.neg(c)                        // <- E0901
+    let greeted = greeting(x: sys.stdout)
+    return f"{n.greet()} {sys.stdout.greet()}"
+}

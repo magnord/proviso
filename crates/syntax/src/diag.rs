@@ -131,7 +131,7 @@ pub mod codes {
         DUPLICATE_ITEM = "E0202", "duplicate_item",
             "A module may hold at most one item per name, and a name may be imported once (REFERENCE §3).";
         SHADOWING = "E0203", "shadowing",
-            "A binding may not reuse a name already in scope in the same function, including imported names, and an import, record or enum may not reuse a prelude name (REFERENCE §3, H4).";
+            "A binding may not reuse a name already in scope in the same function, including imported names, an import, record, enum or interface may not reuse a prelude name, and a type parameter may not reuse a type's name (REFERENCE §3, H4).";
         WRONG_CASE = "E0204", "wrong_case",
             "Types and variants are PascalCase; everything else is snake_case (REFERENCE §2).";
         UNKNOWN_IMPORT = "E0205", "unknown_import",
@@ -145,9 +145,11 @@ pub mod codes {
         NEEDLESS_ALIAS = "E0209", "needless_alias",
             "`as` renames an import only to resolve a name collision (REFERENCE §3, Q24).";
         DUPLICATE_NAME = "E0210", "duplicate_name",
-            "A name given twice in one list: a record's or variant's fields, an enum's variants, the fields a `with` replaces or a pattern matches, or a `derives` list (REFERENCE §4.4, §4.5).";
+            "A name given twice in one list: a record's or variant's fields, an enum's variants, the fields a `with` replaces or a pattern matches, a `derives` list, a type's methods or a function's type parameters (REFERENCE §3, §4.4, §4.5).";
         PRIVATE_IN_PUBLIC = "E0211", "private_in_public",
-            "A `pub` item mentions a less visible type in its signature or, for a `pub` record or enum, its fields (REFERENCE §3).";
+            "A `pub` item mentions a less visible type in its signature or, for a `pub` record or enum, its fields, or a less visible interface in its constraints (REFERENCE §3).";
+        AMBIGUOUS_METHOD = "E0212", "ambiguous_method",
+            "A method call that the methods of two interfaces match, or a type's own method, declared or built in, named like a method of an interface it implements. Call it as `I.f(x)` (REFERENCE §3).";
 
         TYPE_MISMATCH = "E0301", "type_mismatch",
             "A value of one type where another is expected. Proviso has no implicit conversions (REFERENCE §9.2).";
@@ -162,19 +164,30 @@ pub mod codes {
         UNSUPPORTED_OPERATOR = "E0306", "unsupported_operator",
             "An operator, interpolation, or literal or range pattern that the type does not support.";
         UNKNOWN_TYPE = "E0307", "unknown_type",
-            "A type name that does not resolve, or that has the wrong number of type arguments.";
+            "A type or interface name that does not resolve to one, or a type with the wrong number of type arguments.";
         INVALID_MAIN = "E0308", "invalid_main",
             "A program needs `pub fn main(sys: keep System)`, optionally with `fails E` (REFERENCE §7.4).";
         MISSING_IMPLEMENTATION = "E0309", "missing_implementation",
-            "A type does not implement an interface it needs, such as a field's type in a `derives` list (REFERENCE §4.4, §4.9).";
+            "A type does not implement an interface it needs, such as a field's type in a `derives` list or a type argument that a constraint of its parameter names (REFERENCE §4.4, §4.8, §4.9).";
         NOT_DERIVABLE = "E0310", "not_derivable",
             "A `derives` list names a prelude interface that can't be derived, such as `Copy` or `Add` (REFERENCE §4.4).";
         NON_EXHAUSTIVE_MATCH = "E0311", "non_exhaustive_match",
             "A `match` does not cover every value of its type; add the missing arms or `_` (REFERENCE §6.3).";
         CANNOT_INFER = "E0312", "cannot_infer",
-            "A value whose type arguments neither its expected type nor its fields give, such as `let x = None` (OPEN_QUESTIONS P5).";
+            "A value or call whose type arguments neither its expected type nor its fields or arguments give, such as `let x = None` (OPEN_QUESTIONS P5).";
+        DUPLICATE_IMPLEMENTATION = "E0313", "duplicate_implementation",
+            "A type implements an interface twice, by two `impl` blocks or by an `impl` and `derives` (REFERENCE §4.9).";
+        IMPL_MISMATCH = "E0314", "impl_mismatch",
+            "An `impl I for T` lacks a method of `I` or declares one `I` does not, or a method's receiver, parameters and their modes, return type or `fails` differ from the interface's with `Self` read as `T` (REFERENCE §4.9).";
+        ORPHAN_IMPL = "E0315", "orphan_impl",
+            "An `impl` lives in neither the module of the interface nor that of the type (REFERENCE §3, §4.9).";
+        NOT_IMPLEMENTABLE = "E0316", "not_implementable",
+            "An `impl` of an interface that cannot be implemented by hand, such as `Copy` (REFERENCE §5.1).";
+        TYPE_ARGUMENT_COUNT = "E0317", "type_argument_count",
+            "A call whose `::[…]` gives a function or method more or fewer type arguments than it has type parameters (REFERENCE §4.8).";
 
-        // Reserved for later phases: the §F goldens already expect these.
+        // E0412 to E0502, E0601 and E0602 are reserved for later phases: the §F goldens
+        // already expect them.
         REFINEMENT_REFUTED = "E0412", "refinement_refuted",
             "A refinement obligation is refuted: values consistent with every admissible fact violate it (REFERENCE §8.3, §8.5).";
         PARTIAL_INOUT_OF_REFINED_PART = "E0413", "partial_inout_of_refined_part",
@@ -185,6 +198,8 @@ pub mod codes {
             "A unique or resource value is used after it moved (REFERENCE §5.1).";
         LENT_RESOURCE_CONSUMED = "E0502", "lent_resource_consumed",
             "A borrowed or `inout` resource cannot be passed to `take` or used by a `take self` method (REFERENCE §10).";
+        NOT_COPYABLE = "E0503", "not_copyable",
+            "A borrowed value of a type parameter without `Copy`, or of a type built from one, is copied: bound to a new name, assigned, stored in a value, returned or failed with (REFERENCE §4.8).";
         EFFECTS_CALL_IN_OBSERVES = "E0601", "effects_call_in_observes",
             "An operation that needs only `observes` permissions calls an `effects` operation (REFERENCE §9.2).";
         REACH_NOT_ADMITTED = "E0602", "reach_not_admitted",

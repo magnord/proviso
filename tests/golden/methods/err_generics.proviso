@@ -1,0 +1,152 @@
+// phase: 2.4
+// expect-error: E0201
+// expect-error: E0203
+// expect-error: E0204
+// expect-error: E0210
+// expect-error: E0301
+// expect-error: E0302
+// expect-error: E0303
+// expect-error: E0306
+// expect-error: E0307
+// expect-error: E0309
+// expect-error: E0312
+// expect-error: E0317
+// A call infers each type parameter from the expected type and the arguments, or takes it
+// from `::[…]`, which gives each parameter once (REFERENCE §4.8). Every argument for one
+// parameter has its type, and that type implements the parameter's constraints. `Float`
+// has no `Eq` (§12.2), `Bool` has no `Ord` (OPEN_QUESTIONS P5), and `System` holds a
+// capability, so it isn't `Copy` (§5.1). Inside the function, a `T` has only what its
+// constraints give it, also when it is passed on. A constraint names an interface, and an
+// interface is a type only as a parameter's (§4.9). A type parameter is PascalCase,
+// declared once, and doesn't reuse a type's name (§2, H4). A parameter declared twice may
+// have been meant as one, so either count of type arguments is accepted. A type given with
+// `::[…]` is fixed, so `Never` there is a type no value has. A call of a function whose
+// type parameters or constraints are rejected, or whose argument or expected type is
+// rejected, isn't reported again (§15.1). The branches of an `if` widen a type argument
+// that `value_or` doesn't know yet, and a branch that can't is reported (P5).
+record Plain {
+    n: Int
+}
+
+record Holder {
+    item: Show                                      // <- E0307
+}
+
+fn same[T: Eq](a: T, b: T) -> Bool {
+    return a == b
+}
+
+fn largest[T: Ord + Copy](a: T, b: T) -> T {
+    if a < b {
+        return b
+    }
+    return a
+}
+
+fn keep_one[T: Copy](x: T) -> T {
+    return x
+}
+
+fn nothing[T]() -> Option[T] {
+    return None
+}
+
+fn tell[T: Show](x: T) -> Text {
+    return x.show()
+}
+
+fn pass[T](x: T) -> Int {
+    return 0
+}
+
+fn is_some[T](o: Option[T]) -> Bool {
+    return match o {
+        Some(_) => true
+        None => false
+    }
+}
+
+fn checked[T: Copy](x: T) -> Result[T, Text] {
+    return Ok(x)
+}
+
+fn value_or[T: Copy](r: Result[Option[T], Text], d: T) -> T {
+    return match r {
+        Ok(Some(v)) => v
+        _ => d
+    }
+}
+
+fn takes(o: Bogus) {                                // <- E0307
+}
+
+fn takes_some(o: Option[Bogus]) {                   // <- E0307
+}
+
+fn calls(sys: System, p: Plain) {
+    let a = same(a: 1, b: "one")                    // <- E0301
+    let b = same(a: 1.5, b: 2.5)                    // <- E0309
+    let c = largest(a: true, b: false)              // <- E0309
+    let d = keep_one(sys)                           // <- E0309
+    let e = tell(p)                                 // <- E0309
+    let f: Int8 = keep_one(300)                     // <- E0302
+    let g = nothing()                               // <- E0312
+    let h: Option[Text] = nothing()
+    let i = nothing::[Int, Text]()                  // <- E0317
+    let j = tell::[Text](5)                         // <- E0301
+    let k = p.n.show::[Int]()                       // <- E0317
+    let l = same::[Int](a: 1, b: 2)
+    let m = pass::[Never](5)                        // <- E0301
+    let n = pass::[Option[Never]](Some("s"))        // <- E0301
+    let o = is_some(bogus)                          // <- E0201
+    let q = is_some(Some(bogus))                    // <- E0201
+    let u = is_some(None)                           // <- E0312
+    let v = bogus::[Int](2)                         // <- E0201
+    let w = Option.Bogus::[Int](1)                  // <- E0303
+    let r: Bogus = nothing()                        // <- E0307
+    takes(nothing())
+    takes_some(nothing())
+    twice::[Int, Text](1)
+    twice::[Int](1)
+    twice::[Int, Text, Bool](1)                     // <- E0317
+    triple::[Int, Text](x: 1, y: "y")
+    triple::[Int](x: 1, y: "y")                     // <- E0317
+    twice(1)
+    cased::[Int, Int](1)                            // <- E0317
+    shadows("s")
+    shadows::[Text]("s")
+    shadows::[Text, Text]("s")                      // <- E0317
+    let s = bounded::[Float, Float](x: 1.5, y: 2.5)
+    let t = bounded(x: 1.5, y: 2.5)
+    let x = value_or(r: checked(if p.n > 0 { 1 } else { 2 }), d: 5)   // <- E0301, E0301
+}
+
+fn body[T, U: Show](x: T, y: U) -> Text {
+    let a = x == x                                  // <- E0306
+    let b = x.show()                                // <- E0303
+    let c = f"{x}"                                  // <- E0306
+    let d = y < y                                   // <- E0306
+    let e = y.size()                                // <- E0303
+    let f = tell(x)                                 // <- E0309
+    return tell(y)
+}
+
+fn bounded[T: Sortable, U: Int](x: T, y: U) -> Bool {   // <- E0307, E0307
+    return x == x and y.size() > 0
+}
+
+fn shown() -> Show {                                // <- E0307
+    return 1
+}
+
+fn cased[t](x: t) {                                 // <- E0204
+}
+
+fn twice[T, T](x: T) {                              // <- E0210
+}
+
+fn triple[T, U, T](x: T, y: U) {                    // <- E0210
+}
+
+fn shadows[Int](x: Int) {                           // <- E0203
+}

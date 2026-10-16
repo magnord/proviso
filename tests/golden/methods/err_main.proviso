@@ -1,0 +1,7 @@
+// phase: 2.4
+// expect-error: E0308
+// `main` is declared `pub fn main(sys: keep System)`, so it has no type parameters, and a
+// type parameter of a rejected `main` isn't reported again as an error type without `Show`
+// (REFERENCE §7.4, §15.1).
+pub fn main[E](sys: keep System) fails E {          // <- E0308
+}

@@ -168,8 +168,11 @@ impl Ty {
     /// for any `T`. Values of a generic type are immutable, so this is sound.
     pub fn accepts(&self, actual: &Ty) -> bool {
         match (self, actual) {
+            // Shared parts are the same type, so an expected type built from the argument's own
+            // isn't walked again, and checking `Some(Some(…))` stays linear in its depth.
             (Ty::Adt(id, args), Ty::Adt(other, actual_args)) if id == other && args.len() == actual_args.len() => {
-                args.iter().zip(actual_args.iter()).all(|(arg, actual)| arg.accepts(actual))
+                Arc::ptr_eq(args, actual_args)
+                    || args.iter().zip(actual_args.iter()).all(|(arg, actual)| arg.accepts(actual))
             }
             _ => self == actual || actual.is_unknown() || *self == Ty::Error,
         }

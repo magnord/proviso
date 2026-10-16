@@ -1,0 +1,202 @@
+// phase: 2.4
+// A generic method or associated function infers its type arguments as a generic function
+// does (REFERENCE §4.8; OPEN_QUESTIONS P5). So `bx.id(1)` needs its context as `id(1)`
+// does, and an argument or operand that says more about its type goes first, in either
+// position. That holds for a receiver whose type shows without checking it, such as a
+// local, `self`, a field of one, a construction or variant, `try` of one, or what a method
+// or function that isn't generic returns. `try` and `attempt` of a call need the call's context. A
+// method that isn't generic, or one given `::[…]`, needs none. A `Never` in the expected
+// type is a type argument known only in part, which an argument widens, so `ok(1)` meets a
+// `Result[Int8, Never]` as `Ok(1)` does, and arguments still go in rank order. A type
+// argument that only a `Never` gives stays `Never`, so `errs(r: ok2(6))` is `None`. The
+// branches of an `if` or `match` widen such a type too, in any order, so `checked`'s `T` in
+// `value_or(r: checked(if no { None } else { Some(3) }), d: 5)` is an `Option[Int]`. Each
+// call is bound on its own, since an operand's type would give the other its `T`.
+use std.io { IoError }
+
+record Box {
+    n: Int8
+}
+
+record Holder {
+    box: Box
+}
+
+impl Box {
+    fn id[T: Copy](self, v: T) -> T {
+        return v
+    }
+
+    fn none[T](self) -> Option[T] {
+        return None
+    }
+
+    fn make[T: Copy](v: T) -> T {
+        return v
+    }
+
+    fn me(self) -> Box {
+        return self
+    }
+
+    fn size(self) -> Int8 {
+        return self.n
+    }
+
+    fn ok[T: Copy](self, v: T) -> Result[T, Never] {
+        return Ok(v)
+    }
+
+    fn twice(self, small: Int8) -> Int8 {
+        let x = first(a: self.id(1), b: small)
+        let y = second(a: small, b: self.id(2))
+        return x + y
+    }
+}
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn second[T: Copy](a: T, b: T) -> T {
+    return b
+}
+
+fn box_of(n: Int8) -> Box {
+    return Box(n: n)
+}
+
+fn load(n: Int8) -> Box fails Text {
+    return Box(n: n)
+}
+
+fn idf[T: Copy](x: T) -> T fails Text {
+    return x
+}
+
+fn tried(small: Int8) -> Int8 fails Text {
+    let x = first(a: (try load(small)).id(1), b: small)
+    let y = first(a: try idf(2), b: small)
+    let z = second(a: None, b: try idf(Some(small)))
+    return x + y + or_zero(z)
+}
+
+fn or_zero(o: Option[Int8]) -> Int8 {
+    return match o {
+        Some(n) => n
+        None => 0
+    }
+}
+
+fn ok[T: Copy](x: T) -> Result[T, Never] {
+    return Ok(x)
+}
+
+fn err[E: Copy](e: E) -> Result[Never, E] {
+    return Err(e)
+}
+
+fn ok2[T: Copy, E](x: T) -> Result[T, E] {
+    return Ok(x)
+}
+
+fn nested_ok[T: Copy](x: T) -> Option[Result[T, Never]] {
+    return Some(Ok(x))
+}
+
+fn errs[U: Copy](r: Result[Int8, U]) -> Option[U] {
+    return match r {
+        Ok(_) => None
+        Err(u) => Some(u)
+    }
+}
+
+fn opt_both[E: Copy](a: Option[E], b: Option[E]) -> Result[Int8, E] {
+    return match b {
+        Some(e) => Err(e)
+        None => Ok(0)
+    }
+}
+
+fn ok_text(r: Result[Int8, Never]) -> Text {
+    return f"{r}"
+}
+
+fn returned() -> Result[Int8, Never] {
+    return ok(1)
+}
+
+enum Kind {
+    A
+    B(n: Int8)
+}
+
+impl Kind {
+    fn id[T: Copy](self, v: T) -> T {
+        return v
+    }
+}
+
+fn checked[T: Copy](x: T) -> Result[T, Text] {
+    return Ok(x)
+}
+
+fn value_or[T: Copy](r: Result[Option[T], Text], d: T) -> T {
+    return match r {
+        Ok(Some(v)) => v
+        _ => d
+    }
+}
+
+fn ok_or[T: Copy](r: Result[T, Text], d: T) -> T {
+    return match r {
+        Ok(v) => v
+        Err(_) => d
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let small: Int8 = 100
+    let wide: Int16 = 300
+    let bx = Box(n: 7)
+    let h = Holder(box: bx)
+    let a1 = first(a: bx.id(1), b: small)
+    let a2 = second(a: small, b: bx.id(2))
+    let b1 = first(a: Box.make(3), b: small)
+    let b2 = second(a: small, b: Box.make(4))
+    let c = first(a: bx.none(), b: Some(small))
+    let d = second(a: Some(small), b: bx.none())
+    let e = first(a: Some(bx.id(5)), b: Some(small))
+    let f1 = first(a: h.box.id(6), b: small)
+    let f2 = first(a: box_of(1).id(7), b: small)
+    let f3 = first(a: bx.me().id(8), b: small)
+    let g = first(a: Box(n: 2).id(9), b: small)
+    let i = bx.id(10) == small
+    let j1 = first(a: bx.size(), b: 1)
+    let j2 = first(a: 1, b: bx.size())
+    let j3 = first(a: 11, b: bx.id::[Int8](12))
+    let k = first(a: attempt idf(13), b: attempt idf(small))
+    try sys.stdout.write_line(f"{a1 + a2} {b1 + b2} {c} {d} {e} {f1 + f2 + f3} {g + bx.twice(small)} {i} {j1 + j2 + j3} {k} {attempt tried(small)}")
+    let r: Result[Int8, Never] = ok(1)
+    let s: Result[Never, Int8] = err(2)
+    let t: Option[Result[Int8, Never]] = nested_ok(3)
+    let u: Result[Int8, Never] = bx.ok(4)
+    let v: Result[Int8, Never] = ok2(5)
+    let w = errs(r: ok2(6))
+    let x = errs(r: opt_both(a: Some(1), b: Some(wide)))
+    let y = errs(r: first(a: Err(1), b: Err(wide)))
+    try sys.stdout.write_line(f"{r} {s} {t} {u} {v} {w} {x} {y} {ok_text(ok(7))} {returned()}")
+    let m1 = first(a: Kind.B(n: 1).id(13), b: small)
+    let m2 = first(a: Kind.A.id(14), b: small)
+    let yes = true
+    let no = false
+    let l1 = value_or(r: checked(if yes { Some(2) } else { None }), d: 5)
+    let l2 = value_or(r: checked(if no { None } else { Some(3) }), d: 5)
+    let l3 = value_or(r: checked(match no { true => None, false => Some(4) }), d: 5)
+    let l4 = value_or(r: checked(if no { None } else if no { None } else { Some(6) }), d: 5)
+    let l5 = ok_or(r: if no { Ok(1) } else { Err("x") }, d: 7)
+    let l6 = value_or(r: checked(if yes { Some(small) } else { Some(1) }), d: small)
+    let l7 = value_or(r: checked(if no { None } else { Some(small) }), d: 1)
+    let l8 = value_or(r: checked(match no { true => None, false => Some(small) }), d: 1)
+    try sys.stdout.write_line(f"{m1} {m2} {l1} {l2} {l3} {l4} {l5} {l6} {l7 - small} {l8 - small}")
+}

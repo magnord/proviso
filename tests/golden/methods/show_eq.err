@@ -1,0 +1,1 @@
+[debug methods/show_eq.proviso:99:5] Span(lo: 1, hi: 4), Booking(ticket: Ticket(id: 7, note: "window"), span: Span(lo: 1, hi: 4))

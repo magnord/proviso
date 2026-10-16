@@ -1,0 +1,162 @@
+// phase: 2.4
+// expect-error: E0301
+// expect-error: E0307
+// expect-error: E0313
+// expect-error: E0314
+// expect-error: E0315
+// expect-error: E0316
+// An `impl I for T` gives `T` exactly the methods `I` declares, each with the same receiver,
+// parameters and their modes, return type and `fails`, reading `Self` as `T` (REFERENCE
+// §4.9). A type implements an interface once, by `derives` or by one `impl`. An `impl` lives
+// in the module of the interface or of the type, so this module can't implement the
+// prelude's `Show` for `Int`, nor `Ord` or `Add` for a prelude type, although a later
+// phase lets a module implement those for its own types. `Copy` holds by itself and can't be
+// implemented by hand (§5.1). A type with a rejected `impl` still implements its interface,
+// so calls of its methods aren't reported again (§15.1). The interface and the target of an
+// `impl` are checked apart, and the bodies of a rejected `impl` are still checked.
+interface Shape {
+    fn area(self) -> Int
+    fn same(self, other: Self) -> Bool
+}
+
+interface Load {
+    fn load(self, n: Int) -> Int fails Text
+}
+
+interface Run {
+    fn run(self, sys: keep System) -> Int
+}
+
+record Square {
+    side: Int
+}
+
+record Circle {
+    r: Int
+}
+
+record Tri {
+    base: Int
+}
+
+record Blob derives(Show) {
+    n: Int
+}
+
+impl Shape for Square {
+    fn area(self) -> Int {
+        return self.side * self.side
+    }
+
+    fn same(self, other: Square) -> Bool {
+        return self.side == other.side
+    }
+}
+
+impl Shape for Square {                             // <- E0313
+    fn area(self) -> Int {
+        return "zero"                               // <- E0301
+    }
+
+    fn same(self, other: Self) -> Bool {
+        return true
+    }
+}
+
+impl Shape for Circle {                             // <- E0314
+    fn area(self) -> Int {
+        return 3 * self.r * self.r
+    }
+}
+
+impl Shape for Tri {
+    fn area(self) -> Bool {                         // <- E0314
+        return true
+    }
+
+    fn same(self, other: Square) -> Bool {          // <- E0314
+        return false
+    }
+}
+
+impl Load for Square {
+    fn load(self, n: Int) -> Int {                  // <- E0314
+        return n
+    }
+}
+
+impl Load for Circle {
+    fn load(self, n: Text) -> Int fails Text {      // <- E0314
+        return 0
+    }
+
+    fn extra(self) -> Int {                         // <- E0314
+        return 1
+    }
+}
+
+impl Run for Square {
+    fn run(self, sys: keep System) -> Int {
+        return 1
+    }
+}
+
+impl Run for Circle {
+    fn run(self, sys: System) -> Int {              // <- E0314
+        return 2
+    }
+}
+
+impl Show for Blob {                                // <- E0313
+    fn show(self) -> Text {
+        return 0                                    // <- E0301
+    }
+}
+
+impl Show for Int {                                 // <- E0315
+    fn show(self) -> Text {
+        return self                                 // <- E0301
+    }
+}
+
+impl Copy for Square {                              // <- E0316
+    fn copied(self) -> Int {
+        return "copied"                             // <- E0301
+    }
+}
+
+impl Ord for Int {                                  // <- E0315
+}
+
+impl Add for Bool {                                 // <- E0315
+}
+
+impl Shape for Ghost {                              // <- E0307
+    fn area(self) -> Int {
+        return "ghost"                              // <- E0301
+    }
+}
+
+impl Drawable for Square {                          // <- E0307
+    fn draw(self) -> Int {
+        return "drawn"                              // <- E0301
+    }
+}
+
+impl Drawable for Ghost {                           // <- E0307, E0307
+    fn sketch(self) -> Int {
+        return "sketched"                           // <- E0301
+    }
+}
+
+impl Phantom {                                      // <- E0307
+    fn haunt(self) -> Int {
+        return self.n + "boo"
+    }
+}
+
+fn calls(s: Square, c: Circle, t: Tri, b: Blob) -> Int {
+    let a = c.same(c) and t.same(t)
+    let shown = f"{b} {s.draw()}"
+    return c.area() + t.area() + s.area()
+}

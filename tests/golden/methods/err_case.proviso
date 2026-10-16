@@ -1,0 +1,71 @@
+// phase: 2.4
+// expect-error: E0204
+// expect-error: E0210
+// expect-error: E0211
+// expect-error: E0301
+// expect-error: E0307
+// A method's name is snake_case (REFERENCE §2). A wrongly cased method stands for the name
+// it misspells (§15.1), in an interface, in an `impl` of one and among a type's own methods
+// and associated functions, so its uses aren't reported again. Its signature and body are
+// still checked, as a duplicate method's are, since their mistakes don't depend on its name.
+interface Named {
+    fn Name(self) -> Text                           // <- E0204
+}
+
+interface Sized {
+    fn size(self) -> Int
+}
+
+interface Labelled {
+    fn Label(self, x: Bogus) -> Missing             // <- E0204, E0307, E0307
+    fn mark(self) -> Int
+    fn mark(self) -> Unknown                        // <- E0210, E0307
+}
+
+record Secret {
+    n: Int
+}
+
+pub interface Peeking {
+    fn Peek(self) -> Secret                         // <- E0204, E0211
+}
+
+record Tag {
+    n: Int
+}
+
+impl Named for Tag {
+    fn name(self) -> Text {
+        return "tag"
+    }
+}
+
+record Pen {
+    n: Int
+}
+
+impl Sized for Pen {
+    fn Size(self) -> Int {                          // <- E0204
+        return "one"                                // <- E0301
+    }
+}
+
+record Brush {
+    n: Int
+}
+
+impl Brush {
+    fn Grip(self, hand: Glove) -> Int {             // <- E0204, E0307
+        return 2
+    }
+
+    fn Make() -> Brush {                            // <- E0204
+        return Brush(n: 0)
+    }
+}
+
+fn calls(t: Tag, p: Pen, b: Brush) -> Int {
+    let named = t.name()
+    let made = Brush.make()
+    return p.size() + b.grip() + made.n
+}

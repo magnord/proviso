@@ -1,0 +1,89 @@
+// phase: 2.4
+// expect-error: E0202
+// expect-error: E0301
+// expect-error: E0307
+// expect-error: E0310
+// expect-error: E0901
+// A use of a rejected declaration isn't reported again (REFERENCE §15.1). A rejected
+// `derives` entry may have named any interface, so the type may have any method, a call
+// takes the type's own method, and a name that two interfaces share isn't ambiguous on that
+// type. An interface declared twice may be either declaration where it is used. A rejected
+// `impl` may have been the type's `impl Add` or `impl Neg`, or have given a generic type
+// such as `Option` its methods. Wrongly cased methods are in err_case.
+interface Front {
+    fn label(self) -> Text
+}
+
+interface Back {
+    fn label(self) -> Text
+}
+
+record Odd derives(Bogus) {                         // <- E0307
+    n: Int
+}
+
+record Copied derives(Copy) {                       // <- E0310
+    n: Int
+}
+
+impl Odd {
+    fn show(self) -> Text {
+        return "odd"
+    }
+}
+
+impl Copied {
+    fn eq(self, other: Copied) -> Bool {
+        return true
+    }
+}
+
+interface Sized {
+    fn size(self) -> Int
+}
+
+interface Dup {
+    fn a(self) -> Int
+}
+
+interface Dup {                                     // <- E0202
+    fn b(self) -> Int
+}
+
+record Cup {
+    n: Int
+}
+
+impl Dup for Cup {
+    fn b(self) -> Int {
+        return 3
+    }
+}
+
+record Money {
+    cents: Int
+}
+
+impl Add for Money {                                // <- E0901
+}
+
+impl Neg for Money {                                // <- E0901
+}
+
+impl Sized for Option {                             // <- E0307
+    fn size(self) -> Int {
+        return 0
+    }
+}
+
+fn calls(o: Odd, c: Copied, u: Cup, m: Money, opt: Option[Int]) -> Int {
+    let shown = o.show()
+    let counted: Int = o.show()                     // <- E0301
+    let labelled = o.label()
+    let other = o.missing()
+    let same = c.eq(other: c)
+    let dup = u.a() + u.b()
+    let sum = m + m
+    let negated = -m
+    return opt.size()
+}

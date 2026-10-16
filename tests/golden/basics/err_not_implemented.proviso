@@ -8,9 +8,9 @@ record Span {
     hi: Int
 }
 
-impl Show for Span {                                // <- E0901
-    fn show(self) -> Text {
-        return "span"
+impl Ord for Span {                                 // <- E0901
+    fn cmp(self, other: Self) -> Ordering {
+        return Ordering.Less
     }
 }
 
@@ -46,7 +46,7 @@ fn pair(p: (Int, Int)) -> Int {                     // <- E0901
     return 1
 }
 
-fn id[T](x: T) -> T {                               // <- E0901
+fn id(x: Int) -> Int requires x > 0 {               // <- E0901
     return x
 }
 

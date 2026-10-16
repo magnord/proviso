@@ -1,0 +1,4 @@
+point 3,4 / dime / int 7 / point 3,4 / penny
+int 5 label 5
+3 abcd true 25 5
+Ok(10) Err("not a digit: x") Ok(1)

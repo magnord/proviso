@@ -1,0 +1,55 @@
+// phase: 2.4
+// expect-error: E0101
+// An interface declares its methods without bodies, since there are no default methods
+// (REFERENCE §4.9, Q13). A method's receiver comes before its other parameters (§5.2). An
+// `impl` block has no visibility of its own; its methods have theirs. Each mistake is
+// reported once, and the rest of the declaration is kept (§15.1). An `impl` that loses a
+// method this way isn't reported for lacking it, and calls of the method aren't reported.
+interface Shape {
+    fn area(self) -> Int {                          // <- E0101
+        return 0
+    }
+    fn sides(self) -> Int
+}
+
+record Box {
+    n: Int
+}
+
+impl Box {
+    fn get(n: Int, self) -> Int {                   // <- E0101
+        return n
+    }
+
+    fn count(self) -> Int {
+        return self.n
+    }
+}
+
+pub impl Shape for Box {                            // <- E0101
+    fn area(self) -> Int {
+        return self.count()
+    }
+
+    fn sides(self) -> Int {
+        return 4
+    }
+}
+
+record Crate {
+    n: Int
+}
+
+impl Shape for Crate {
+    fn area(n: Int, self) -> Int {                  // <- E0101
+        return n
+    }
+
+    fn sides(self) -> Int {
+        return 6
+    }
+}
+
+fn calls(b: Box, c: Crate) -> Int {
+    return b.area() + b.sides() + b.get() + c.area() + c.sides()
+}

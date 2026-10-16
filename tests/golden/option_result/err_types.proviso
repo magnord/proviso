@@ -13,9 +13,9 @@
 // `Option` takes one type argument and `Result` two (STD.md). A variant's type arguments
 // come from the expected type, which for `==` is the other operand's, or else from its fields,
 // and a variant that neither determines is rejected (OPEN_QUESTIONS P5). A literal inside
-// takes its type from them (REFERENCE §2). `Option` and `Result` implement `Eq` and `Show`
-// only when their type arguments do, so `Option[Float]` has no `==` (§12.2, STD.md), and
-// their ordering waits for the `Ord` derives. A mistake is reported once (§15.1).
+// takes its type from them (REFERENCE §2). `Option` and `Result` implement `Eq`, `Show`
+// and `Ord` only when their type arguments do, so `Option[Float]` has no `==` (§12.2,
+// STD.md). A mistake is reported once (§15.1).
 // An unqualified `Some` is always `Option`'s (§3). The first branch of an `if` gives the
 // others their type, as for literals, unless its type has a `Never` argument, since `Never`
 // is a subtype of every type (§9.2). A field widens a `Never` that the expected type gives,
@@ -93,7 +93,7 @@ fn values(o: Option[Int], f: Option[Float]) {
     let q = Result.None                             // <- E0303
     let r = o == Some(1.5)                          // <- E0301
     let s = f == f                                  // <- E0306
-    let t = o < Some(2)                             // <- E0901
+    let t = o < Some(2)
     let u = Some(unknown)                           // <- E0201
     let v: Option[Int] = Some(unknown_too)          // <- E0201
     let w: Missing = None                           // <- E0307

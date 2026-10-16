@@ -1,26 +1,21 @@
 // phase: 2.2
 // expect-error: E0901
-// Generic enums, the `Ord` and `Hash` derives, associated functions and tuple patterns come
-// in later slices of phase 2, and units of measure after v1. Uses of what they declare aren't
-// reported again (REFERENCE §15.1).
+// Generic enums, `cmp` and tuple patterns come in later slices of phase 2, and units of
+// measure after v1. Uses of what they declare aren't reported again (REFERENCE §15.1).
 enum Maybe[T] {                                     // <- E0901
     Just(value: T)
     Nothing
 }
 
-enum Ranked derives(Ord) {                          // <- E0901
+enum Ranked derives(Eq, Ord) {
     Low
     High
 }
 
-enum Keyed derives(Hash) {                          // <- E0901
-    K
-}
-
-fn later(m: Maybe, r: Ranked, k: Keyed) -> Int {
+fn later(m: Maybe, r: Ranked) -> Int {
     let a = Maybe.Just(value: 1)
     let b = r < Ranked.High
-    let d = Ranked.lowest()                         // <- E0901
+    let d = r.cmp(Ranked.High)                      // <- E0901
     let e = match m {
         Just(v) => v
         Nothing => 0
