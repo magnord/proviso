@@ -212,6 +212,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         copying: false,
         tail_copying: false,
         pattern_borrowed: false,
+        borrowed_values: HashSet::new(),
     };
     checker.imports();
     checker.adt_names();
@@ -394,6 +395,9 @@ struct Checker<'a> {
     tail_copying: bool,
     /// Set while checking a pattern that matches a borrowed value, so its bindings are too.
     pattern_borrowed: bool,
+    /// The `if` and `match` expressions whose value may be a borrowed value, because a
+    /// branch's value may be.
+    borrowed_values: HashSet<ExprId>,
 }
 
 impl Checker<'_> {
@@ -2148,6 +2152,31 @@ impl Checker<'_> {
         }
     }
 
+    /// Whether the value of `e` may be a borrowed value: a borrowed place, or an `if` or
+    /// `match` with a branch whose value may be one. Copying an `if` or `match` copies the
+    /// value of each branch, which [`Checker::copied`] checks there, so only a pattern that
+    /// matches the value asks this (OPEN_QUESTIONS P5).
+    fn borrowed_value(&self, e: ExprId) -> bool {
+        match self.m.exprs[e].kind {
+            ExprKind::If { .. } | ExprKind::Match { .. } => self.borrowed_values.contains(&e),
+            _ => self.borrowed_place(e),
+        }
+    }
+
+    /// Whether a branch whose block ends with `tail` may have a borrowed value.
+    fn borrowed_tail(&self, tail: Option<ExprId>) -> bool {
+        tail.is_some_and(|tail| self.borrowed_value(tail))
+    }
+
+    /// The expression a block ends with, which is its value.
+    fn tail(&self, block: &Block) -> Option<ExprId> {
+        let &last = block.stmts.last()?;
+        match self.m.stmts[last].kind {
+            StmtKind::Expr(e) => Some(e),
+            _ => None,
+        }
+    }
+
     fn expr_kind(&mut self, e: ExprId, expected: Option<&Ty>, chain: bool, copying: bool) -> Ty {
         let m = self.m;
         let span = self.span(e);
@@ -2378,13 +2407,15 @@ impl Checker<'_> {
             ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. } => {
                 args.iter().map(|arg| self.context_rank(arg.value)).min().map_or(3, |rank| rank.max(1))
             }
+            ExprKind::Try(inner) | ExprKind::Attempt(inner) => self.context_rank(*inner),
             _ => 3,
         }
     }
 
-    /// A literal, a variant of `Option` or `Result`, or a call of a generic function whose
-    /// result type only its context can give, as in `id(1)` or `nothing()`, whose type comes
-    /// from its context when it has one (OPEN_QUESTIONS P5).
+    /// A literal, a variant of `Option` or `Result`, or a call of a generic function or
+    /// method whose result type only its context can give, as in `id(1)`, `nothing()` or
+    /// `bx.id(1)`, whose type comes from its context when it has one. `try` and `attempt`
+    /// pass their context on to the call they mark (OPEN_QUESTIONS P5).
     fn needs_context(&self, e: ExprId) -> bool {
         let m = self.m;
         let prelude_variant =
@@ -2393,19 +2424,81 @@ impl Checker<'_> {
             ExprKind::Name(name) => prelude_adt(m.text(name.sym)).is_some() && !self.poisoned.contains(&name.sym),
             _ => false,
         };
+        let generic = |f: FnId, args: &[Arg]| {
+            let info = &self.p.fns[f];
+            !info.generics.is_empty()
+                && mentions_param(&info.ret)
+                && args.iter().all(|arg| self.needs_context(arg.value))
+        };
         match &m.exprs[e].kind {
             ExprKind::Name(name) => prelude_variant(*name),
-            ExprKind::Call { callee, targs: None, args } if let Some(f) = self.fn_named(*callee) => {
-                let info = &self.p.fns[f];
-                !info.generics.is_empty()
-                    && mentions_param(&info.ret)
-                    && args.iter().all(|arg| self.needs_context(arg.value))
-            }
+            ExprKind::Call { callee, targs: None, args } if let Some(f) = self.fn_named(*callee) => generic(f, args),
             ExprKind::Call { callee, .. } => {
                 matches!(m.exprs[*callee].kind, ExprKind::Name(name) if prelude_variant(name))
             }
+            ExprKind::MethodCall { receiver, method, targs: None, args }
+                if let Some(f) = self.method_named(*receiver, *method) =>
+            {
+                generic(f, args)
+            }
             ExprKind::Field { base, .. } | ExprKind::MethodCall { receiver: base, .. } => prelude_enum(*base),
+            ExprKind::Try(inner) | ExprKind::Attempt(inner) => self.needs_context(*inner),
             _ => self.is_untyped_literal(e),
+        }
+    }
+
+    /// The method or associated function that `receiver.method(…)` calls, where that shows
+    /// without checking the receiver: one of a type's own, called on the type or on a value
+    /// whose type [`Checker::static_ty`] knows. Only a type's own methods may be generic.
+    fn method_named(&self, receiver: ExprId, method: Ident) -> Option<FnId> {
+        let (adt, associated) = match self.m.exprs[receiver].kind {
+            ExprKind::Name(name) if self.lookup_local(name.sym).is_none() => (self.adt_named(name.sym)?, true),
+            _ => match self.static_ty(receiver)? {
+                Ty::Adt(id, _) => (id, false),
+                _ => return None,
+            },
+        };
+        let mut named = self.inherent.get(&adt)?.iter().filter(|entry| entry.name == method.sym);
+        let first = named.next()?;
+        // A rejected declaration of the name may be the one the call means.
+        if first.rejected || named.any(|entry| entry.rejected) {
+            return None;
+        }
+        (self.p.fns[first.f].receiver.is_none() == associated).then_some(first.f)
+    }
+
+    /// The type `e` has in any context, where that shows without checking it: a local, a
+    /// field of a record known so, a construction, `try` of one, or what a call returns
+    /// whose function or method isn't generic.
+    fn static_ty(&self, e: ExprId) -> Option<Ty> {
+        let m = self.m;
+        let returned = |f: FnId| {
+            let info = &self.p.fns[f];
+            (info.generics.is_empty() && !info.rejected).then(|| info.ret.clone())
+        };
+        match &m.exprs[e].kind {
+            ExprKind::Name(name) => self.lookup_local(name.sym).map(|id| self.f.locals[id.index()].ty.clone()),
+            ExprKind::Field { base, name } => {
+                let Ty::Adt(id, _) = self.static_ty(*base)? else { return None };
+                let def = self.p.decls.adt(id);
+                let text = m.text(name.sym);
+                let field = (!def.is_enum()).then(|| def.variant().fields.iter().find(|f| *f.name == *text))??;
+                Some(field.ty.clone())
+            }
+            ExprKind::Call { callee, .. } => {
+                if let Some(f) = self.fn_named(*callee) {
+                    return returned(f);
+                }
+                let ExprKind::Name(name) = m.exprs[*callee].kind else { return None };
+                if self.lookup_local(name.sym).is_some() || bare_variant(m.text(name.sym)).is_some() {
+                    return None;
+                }
+                let id = self.adt_named(name.sym)?;
+                (!self.p.decls.adt(id).is_enum()).then(|| Ty::adt(id))
+            }
+            ExprKind::MethodCall { receiver, method, .. } => returned(self.method_named(*receiver, *method)?),
+            ExprKind::Try(inner) => self.static_ty(*inner),
+            _ => None,
         }
     }
 
@@ -2671,8 +2764,10 @@ impl Checker<'_> {
                     }
                 }
             }
+            // A `Never` in the expected type gives a type argument known only in part, which
+            // the arguments may widen, as they widen a `Never` that `Ok(1)` meets.
             None => {
-                if let Some(expected) = expected.filter(|t| !t.is_unknown() && !t.has_never_arg()) {
+                if let Some(expected) = expected.filter(|t| !t.is_unknown()) {
                     unify(&ret, expected, &mut tvars);
                 }
             }
@@ -3206,9 +3301,11 @@ impl Checker<'_> {
             }
         }
         // Arguments that say more about their type go first, so that a literal or a `None`
-        // takes the type the others give, in any position (OPEN_QUESTIONS P5).
+        // takes the type the others give, in any position, also where the expected type gave
+        // only a `Never` (OPEN_QUESTIONS P5).
         let mut order: Vec<usize> = (0..args.len()).collect();
-        if targs.iter().any(Option::is_none) && args.len() > 1 {
+        let open = |t: &Option<Ty>| t.as_ref().is_none_or(|t| *t == Ty::Never || t.has_never_arg());
+        if targs.iter().any(open) && args.len() > 1 {
             order.sort_by_key(|&i| self.context_rank(args[i].value));
         }
         for i in order {
@@ -3379,6 +3476,13 @@ impl Checker<'_> {
                         self.if_expr(*nested, Mode::Value(expected))
                     }
                 };
+                let else_tail = match branch {
+                    ElseBranch::Block(block) => self.tail(block),
+                    ElseBranch::If(nested) => Some(*nested),
+                };
+                if self.borrowed_tail(self.tail(then_block)) || self.borrowed_tail(else_tail) {
+                    self.borrowed_values.insert(e);
+                }
                 match expected {
                     _ if then_ty == Ty::Never && else_ty == Ty::Never => Ty::Never,
                     Some(expected) => expected.clone(),
@@ -3428,7 +3532,7 @@ impl Checker<'_> {
     /// `value is pat`, whose bindings go in the innermost scope.
     fn is_test(&mut self, value: ExprId, pat: PatId) {
         let ty = self.infer(value);
-        self.pattern_borrowed = self.borrowed_place(value);
+        self.pattern_borrowed = self.borrowed_value(value);
         self.pattern(pat, &ty);
         self.pattern_borrowed = false;
     }
@@ -3584,7 +3688,7 @@ impl Checker<'_> {
         let copying = std::mem::take(&mut self.tail_copying);
         let scrutinee_ty = self.infer(*scrutinee);
         // The parts of a borrowed value are borrowed too.
-        let borrowed = self.borrowed_place(*scrutinee);
+        let borrowed = self.borrowed_value(*scrutinee);
         let mut rows = Vec::new();
         let mut expected = match mode {
             Mode::Value(expected) => expected.cloned(),
@@ -3647,6 +3751,9 @@ impl Checker<'_> {
         }
         for (ty, span) in partial {
             expected = expected.map(|known| self.join_branch(&known, &ty, span));
+        }
+        if matches!(mode, Mode::Value(_)) && arms.iter().any(|arm| self.borrowed_tail(self.tail(&arm.body))) {
+            self.borrowed_values.insert(e);
         }
         let ty = match mode {
             _ if diverges => Ty::Never,

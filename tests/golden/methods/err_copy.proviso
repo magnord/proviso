@@ -4,7 +4,9 @@
 // parameter or a binding into one, may be passed on, compared and shown, but binding it to
 // a new name, storing it in a value or returning it copies it, which needs `T: Copy`. So
 // does an `Option[T]`. A `T` that a call returns isn't borrowed, so it may be bound and
-// returned without `Copy`.
+// returned without `Copy`. The value of an `if` or `match` is borrowed when the value of
+// any of its branches may be, so matching it or testing it with `is` borrows its parts
+// (OPEN_QUESTIONS P5). Copying an `if`'s value copies each branch's.
 fn give[T](x: T) -> T {
     return x                                        // <- E0503
 }
@@ -47,4 +49,62 @@ fn borrows[T: Eq + Show](x: T, y: T, o: Option[T]) -> Text {
 fn relay[T](x: T) -> T {
     let r = give(x)
     return r
+}
+
+fn branches[T](x: T, flag: Bool) -> T {
+    return if flag { x } else { x }                 // <- E0503, E0503
+}
+
+fn through_if[T](x: T, flag: Bool) -> T {
+    return match (if flag { x } else { x }) {
+        y => y                                      // <- E0503
+    }
+}
+
+fn through_match[T](x: T) -> T {
+    return match (match x {
+        y => y
+    }) {
+        z => z                                      // <- E0503
+    }
+}
+
+fn else_branch[T](o: Option[T], flag: Bool) -> Option[T] {
+    return match (if flag { give(o) } else { o }) {
+        p => p                                      // <- E0503
+    }
+}
+
+fn else_if[T](o: Option[T], a: Bool, b: Bool) -> Option[T] {
+    return match (if a { give(o) } else if b { give(o) } else { o }) {
+        p => p                                      // <- E0503
+    }
+}
+
+fn last_arm[T](o: Option[T]) -> Option[T] {
+    return match (match o {
+        Some(_) => give(o)
+        None => o
+    }) {
+        p => p                                      // <- E0503
+    }
+}
+
+fn through_is[T](o: Option[T], flag: Bool) -> Option[T] {
+    if (if flag { o } else { o }) is Some(v) {
+        return Some(v)                              // <- E0503
+    }
+    return None
+}
+
+fn owned[T](x: T, o: Option[T], flag: Bool) -> T {
+    let p = match (match o {
+        Some(_) => give(o)
+        None => give(o)
+    }) {
+        q => q
+    }
+    return match (if flag { give(x) } else { give(x) }) {
+        y => y
+    }
 }
