@@ -1,0 +1,96 @@
+// phase: 2.5
+// A generic call's type arguments come from its expected type and all of its arguments
+// together, whatever their order and spelling (OPEN_QUESTIONS P5; issue #10). Each group
+// is one call and its rewrites: swapped arguments, a qualified or bare constructor, one
+// more level of nesting, a value inside a tuple, and an argument whose own type arguments
+// only a later argument gives. Every rewrite checks, so each `T` is the one `small` gives.
+use std.io { IoError }
+
+record Box {
+    n: Int8
+}
+
+impl Box {
+    fn none[T](self) -> Option[T] {
+        return None
+    }
+
+    fn pick[T: Copy](a: T, b: T) -> T {
+        return b
+    }
+}
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn second[T: Copy](a: T, b: T) -> T {
+    return b
+}
+
+fn nothing[T]() -> Option[T] {
+    return None
+}
+
+fn int8(x: Int8) -> Int8 {
+    return x
+}
+
+fn opt8(x: Option[Int8]) -> Option[Int8] {
+    return x
+}
+
+fn res8(x: Result[Int8, Text]) -> Result[Int8, Text] {
+    return x
+}
+
+fn literals(c: Bool, small: Int8) -> Text {
+    let a1 = first(a: if c { 1 } else { 2 }, b: small)
+    let a2 = second(a: small, b: if c { 1 } else { 2 })
+    let a3 = first(a: match c { true => 1, false => 2 }, b: small)
+    let a4 = second(a: small, b: match c { true => 1, false => 2 })
+    let a5 = first(a: first(a: 1, b: 2), b: small)
+    let a6 = second(a: small, b: first(a: 1, b: 2))
+    let a7 = Box.pick(a: 3, b: small)
+    let a8 = Box.pick(a: small, b: 3)
+    return f"{int8(a1) + int8(a2) + int8(a3) + int8(a4)} {int8(a5) + int8(a6) + int8(a7) + int8(a8)}"
+}
+
+fn variants(small: Int8, bx: Box) -> Text {
+    let b1 = second(a: None, b: Some(small))
+    let b2 = first(a: Some(small), b: None)
+    let b3 = second(a: Option.None, b: Option.Some(small))
+    let b4 = second(a: nothing(), b: Some(small))
+    let b5 = first(a: Some(small), b: nothing())
+    let b6 = second(a: bx.none(), b: Some(small))
+    let b7 = second(a: first(a: bx, b: bx).none(), b: Some(small))
+    let b8 = first(a: Some(small), b: first(a: bx, b: bx).none())
+    return f"{opt8(b1)} {opt8(b2)} {opt8(b3)} {opt8(b4)} {opt8(b5)} {opt8(b6)} {opt8(b7)} {opt8(b8)}"
+}
+
+fn results(small: Int8) -> Text {
+    let r1 = first(a: Ok(small), b: Err("x"))
+    let r2 = second(a: Err("x"), b: Ok(small))
+    let r3 = first(a: Result.Ok(small), b: Result.Err("x"))
+    let r4 = first(a: Ok(1), b: Err("x"))
+    let r5 = second(a: Err("x"), b: Ok(1))
+    return f"{res8(r1)} {res8(r2)} {res8(r3)} {res8(r4)} {res8(r5)}"
+}
+
+fn tuples(small: Int8) -> Text {
+    let t1 = first(a: (1, None), b: (small, Some(small)))
+    let t2 = second(a: (small, Some(small)), b: (1, None))
+    let t3 = first(a: (small, None), b: (1, Some(small)))
+    let t4 = second(a: (1, Some(small)), b: (small, None))
+    let joined: (Int8, Option[Int8]) = first(a: t1, b: second(a: t2, b: first(a: t3, b: t4)))
+    return f"{joined}"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let small: Int8 = 7
+    try sys.stdout.write_line(literals(c: true, small: small))
+    try sys.stdout.write_line(literals(c: false, small: small))
+    try sys.stdout.write_line(variants(small: small, bx: Box(n: 1)))
+    try sys.stdout.write_line(results(small))
+    try sys.stdout.write_line(tuples(small))
+}

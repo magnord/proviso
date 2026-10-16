@@ -1,0 +1,65 @@
+// phase: 2.5
+// expect-error: E0312
+// A type argument that nothing gives is an error once, whatever the order and spelling of
+// the values that leave it open (OPEN_QUESTIONS P5; issue #10). A `let` without a type
+// needs its value's type, so a later use doesn't give it, and a comparison's operands give
+// only each other theirs. Each line is one rewrite of the others, and each reports E0312
+// once, never also for the value or call that shares the unknown type argument.
+
+fn id[T: Copy](x: T) -> T {
+    return x
+}
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn nothing[T]() -> Option[T] {
+    return None
+}
+
+fn never_fails[E]() -> Int fails E {
+    return 1
+}
+
+fn opt(x: Option[Int]) -> Option[Int] {
+    return x
+}
+
+fn alone(c: Bool) {
+    let a1 = None                                   // <- E0312
+    let a2 = Option.None                            // <- E0312
+    let a3 = (1, None)                              // <- E0312
+    let a4 = (None, 1)                              // <- E0312
+    let a5 = Some(None)                             // <- E0312
+    let a6 = id(None)                               // <- E0312
+    let a7 = nothing()                              // <- E0312
+    let a8 = if c { None } else { None }            // <- E0312
+    let a9 = if c { None } else { nothing() }       // <- E0312
+    let a10 = match c {
+        true => None                                // <- E0312
+        false => Option.None
+    }
+}
+
+fn joined(c: Bool) -> Bool {
+    let b1 = None == None                           // <- E0312
+    let b2 = None == nothing()                      // <- E0312
+    let b3 = nothing() == None                      // <- E0312
+    let b4 = (1, None) == (2, None)                 // <- E0312
+    let b5 = Some(None) == Some(None)               // <- E0312
+    let b6 = first(a: None, b: nothing())           // <- E0312
+    let b7 = first(a: nothing(), b: None)           // <- E0312
+    let b8 = id(None) == id(None)                   // <- E0312
+    return b1 or b2 or b3 or b4 or b5 or b8
+}
+
+fn later_use(c: Bool) {
+    let d1 = None                                   // <- E0312
+    let d2 = opt(d1)
+}
+
+fn errors() -> Int {
+    let e1 = attempt never_fails()                  // <- E0312
+    return e1 else 0
+}

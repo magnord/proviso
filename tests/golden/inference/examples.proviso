@@ -1,0 +1,31 @@
+// phase: 2.5
+// run: test
+// expect-exit: 1
+// An example's call and expected value give each other their types as the operands of
+// `==` do, whatever spells the value (OPEN_QUESTIONS P5; issue #10). Each example is a
+// rewrite of the others, and each passes but the last, which shows the types it compared.
+fn id[T: Copy](x: T) -> T {
+    return x
+}
+
+fn second[T: Copy](a: T, b: T) -> T {
+    return b
+}
+
+fn nothing[T]() -> Option[T] {
+    return None
+}
+
+fn small() -> Int8 {
+    return 5
+}
+
+example id(5) == small()
+example id(if true { 5 } else { 6 }) == small()
+example id(Some(5)) == Some(small())
+example id(Some(small())) == Some(5)
+example second(a: None, b: Some(small())) == Some(5)
+example second(a: Some(small()), b: None) == None
+example id((5, None)) == (small(), Option.None)
+example second(a: nothing(), b: Some(small())) == Some(5)
+example id(None) == Some(small())
