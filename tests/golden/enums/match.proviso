@@ -4,7 +4,8 @@
 // fields names a field, and `field: name` renames (§6.4). `..` skips the fields it doesn't name,
 // `_` matches anything, a name binds anything, and literals and ranges test the value; a
 // range is half-open unless written `..=` (§2). Patterns may omit the enum name (§4.5). A
-// `match` is a value, a statement, or the end of a function whose arms all return.
+// `match` is a value, a statement, or the end of a function whose arms all return. An enum
+// without variants has no values, so a `match` on one needs no arms (OPEN_QUESTIONS P5).
 use std.io { IoError }
 
 enum Shape derives(Show) {
@@ -83,6 +84,16 @@ fn word(t: Text) -> Int {
     return match t { "ada" => 1, "bob" => 2, _ => 0 }
 }
 
+enum Void {}
+
+fn absurd(v: Void) -> Int {
+    return match v {}
+}
+
+fn ignore(b: Bool) {
+    match b { true => return, false => return }
+}
+
 fn flag(b: Bool) -> Int {
     match b {
         true => return 1
@@ -106,6 +117,7 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(f"{kind('a')}/{kind('z')}/{kind('A')}/{kind('Z')}/{kind('_')}/{kind('3')}")
     try sys.stdout.write_line(f"{word("ada")} {word("bob")} {word("eve")} {flag(true)} {flag(false)}")
     try sys.stdout.write_line(f"{depth(Solid.Cube(x: 1, y: 2, z: 3))} {depth(Solid.Cube(x: 1, y: 2, z: 200))}")
+    ignore(true)
     for i in 0..3 {
         match i {
             0 => try sys.stdout.write_line("first")

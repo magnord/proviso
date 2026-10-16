@@ -79,11 +79,15 @@ fn constructors(decls: &Decls, ty: &Ty) -> Option<Vec<(Ctor, Vec<Ty>)>> {
     }
 }
 
-/// A value built by the first of `ctors`, with any fields, or any value if there are none.
-fn any(ctors: Option<Vec<(Ctor, Vec<Ty>)>>) -> Witness {
-    match ctors.and_then(|ctors| ctors.into_iter().next()) {
-        Some((ctor, fields)) => Witness::Ctor(ctor, fields.iter().map(|_| Witness::Any).collect()),
-        None => Witness::Any,
+/// A value built by the first of `ctors`, with any fields, or any value if they are too many
+/// to list. `None` if the type has no constructors, and so no values.
+fn any(ctors: Option<Vec<(Ctor, Vec<Ty>)>>) -> Option<Witness> {
+    match ctors {
+        Some(ctors) => {
+            let (ctor, fields) = ctors.into_iter().next()?;
+            Some(Witness::Ctor(ctor, fields.iter().map(|_| Witness::Any).collect()))
+        }
+        None => Some(Witness::Any),
     }
 }
 
@@ -184,15 +188,20 @@ impl<'s> Matrices<'_, 's> {
             };
             let (ty, rest) = &self.tys[column];
             let (ctors, rest) = (constructors(self.decls, ty), *rest);
+            // No row covers the rest, so any value of the remaining columns is a witness, if
+            // they all have values. A column of a type without any, such as an enum without
+            // variants, is covered.
             if rows.is_empty() {
-                heads.push(any(ctors));
-                let mut tys = rest;
-                while let Some(column) = tys {
-                    self.step(1)?;
-                    heads.push(any(constructors(self.decls, &self.tys[column].0)));
-                    tys = self.tys[column].1;
-                }
-                return Ok(Walk::Decided(Some(heads)));
+                let witness = || -> Option<Vec<Witness>> {
+                    heads.push(any(ctors)?);
+                    let mut tys = rest;
+                    while let Some(column) = tys {
+                        heads.push(any(constructors(self.decls, &self.tys[column].0))?);
+                        tys = self.tys[column].1;
+                    }
+                    Some(heads)
+                };
+                return Ok(Walk::Decided(witness()));
             }
             let cells = &self.cells;
             let used =
@@ -203,7 +212,10 @@ impl<'s> Matrices<'_, 's> {
                 }
                 // Some values of this column match no constructor pattern, so only the rows
                 // with `_` there can cover them.
-                Some(ctors) => any(Some(ctors.into_iter().filter(|(ctor, _)| !used(*ctor)).collect())),
+                Some(ctors) => {
+                    let unused = ctors.into_iter().filter(|(ctor, _)| !used(*ctor)).collect();
+                    any(Some(unused)).expect("a constructor is unused")
+                }
                 None => Witness::Any,
             };
             heads.push(head);

@@ -52,6 +52,7 @@ pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> M
         recovered: false,
         unclosed_reported: false,
         field_indent: None,
+        arm_depth: 0,
     };
     parser.items();
     parser.m
@@ -78,6 +79,9 @@ struct Parser<'a> {
     /// The indentation of the record field being parsed. A line of a block in its `where`
     /// that is no deeper starts the next field, so the block was never closed.
     field_indent: Option<usize>,
+    /// How many `match`es' arms are being parsed. Within them, a line with `=>` starts an arm
+    /// (see [`Parser::starts_arm`]).
+    arm_depth: u32,
 }
 
 impl Parser<'_> {
@@ -221,6 +225,27 @@ impl Parser<'_> {
         let what = open.kind.describe();
         self.error(codes::UNEXPECTED_TOKEN, open.span, format!("this {what} is never closed"));
         Err(())
+    }
+
+    /// Whether the current line is a `match` arm: it starts a line and has a `=>` outside
+    /// brackets. Nothing but an arm has one, so in an arm's block that was never closed, such
+    /// a line starts the next arm.
+    fn starts_arm(&self) -> bool {
+        if self.arm_depth == 0 || !self.starts_line(self.peek().span) {
+            return false;
+        }
+        let mut depth = 0usize;
+        for token in &self.tokens[self.pos..] {
+            match token.kind {
+                T::LParen | T::LBracket | T::LBrace => depth += 1,
+                T::RParen | T::RBracket | T::RBrace if depth == 0 => return false,
+                T::RParen | T::RBracket | T::RBrace => depth -= 1,
+                T::FatArrow if depth == 0 => return true,
+                T::Newline | T::Eof if depth == 0 => return false,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Expects the bracket that closes `open`. When the next token starts a line no deeper
@@ -589,7 +614,8 @@ impl Parser<'_> {
             let variant = self.variant_decl();
             self.stmt_indent = saved;
             variants.push(variant?);
-            if !self.eat(T::Comma) && !self.at(T::Newline) {
+            let next = self.peek().span;
+            if !self.eat(T::Comma) && !self.at(T::Newline) && !(self.unclosed_reported && self.starts_line(next)) {
                 self.close(&open, T::RBrace, "`,`, a new line or `}`")?;
                 break;
             }
@@ -609,12 +635,21 @@ impl Parser<'_> {
                 return Err(());
             }
             loop {
-                fields.push(self.field_decl()?);
+                let indent = self.indent(self.peek().span);
+                let saved = (self.stmt_indent, self.field_indent);
+                (self.stmt_indent, self.field_indent) = (indent, Some(indent));
+                let field = self.field_decl();
+                (self.stmt_indent, self.field_indent) = saved;
+                fields.push(field?);
                 if !self.eat(T::Comma) || self.at(T::RParen) {
                     break;
                 }
             }
-            self.close(&open, T::RParen, "`,` or `)`")?;
+            // A field's `where` block that was never closed ends before the next line, and
+            // has been reported, so the parentheses around it are not.
+            if self.at(T::RParen) || !(self.unclosed_reported && self.starts_line(self.peek().span)) {
+                self.close(&open, T::RParen, "`,` or `)`")?;
+            }
         }
         Ok(VariantDecl { name, fields })
     }
@@ -757,8 +792,9 @@ impl Parser<'_> {
 
     /// Parses statements up to the `}` that closes `open`. A block that is never closed is
     /// reported where it opens, and ends where its enclosing block or item does: before a
-    /// `}` indented less than the statement that opened it, before an item or, in a field's
-    /// `where`, before the next field, or at the end of the file.
+    /// `}` indented less than the statement that opened it, before an item, in a field's
+    /// `where` before the next field, in a `match` arm before the next arm, or at the end of
+    /// the file.
     fn block_rest(&mut self, open: &Token, indent: usize) -> Block {
         let mut stmts = Vec::new();
         loop {
@@ -776,7 +812,7 @@ impl Parser<'_> {
                 _ if self.field_indent.is_some_and(|field| self.starts_line(next) && self.indent(next) <= field) => {
                     true
                 }
-                _ => self.starts_item(),
+                _ => self.starts_item() || self.starts_arm(),
             };
             if unclosed {
                 self.recovered = true;
@@ -833,8 +869,11 @@ impl Parser<'_> {
             T::Keyword(Kw::Let | Kw::Var) => self.let_stmt()?,
             T::Keyword(Kw::Return) => {
                 self.bump();
-                let value =
-                    if matches!(self.kind(), T::Newline | T::RBrace | T::Eof) { None } else { Some(self.expr()?) };
+                let value = if matches!(self.kind(), T::Newline | T::Comma | T::RBrace | T::Eof) {
+                    None
+                } else {
+                    Some(self.expr()?)
+                };
                 StmtKind::Return(value)
             }
             T::Keyword(Kw::Break) => {
@@ -1274,7 +1313,10 @@ impl Parser<'_> {
         let scrutinee = self.condition()?;
         let open = self.expect(T::LBrace, "`{` and the arms of the `match`")?;
         let indent = self.stmt_indent;
-        let (arms, complete) = self.nested(|p| Ok(p.arms(&open, indent)))?;
+        self.arm_depth += 1;
+        let arms = self.nested(|p| Ok(p.arms(&open, indent)));
+        self.arm_depth -= 1;
+        let (arms, complete) = arms?;
         let span = start.to(self.prev_span());
         Ok(self.alloc(ExprKind::Match { scrutinee, arms, complete }, span))
     }
@@ -1314,8 +1356,13 @@ impl Parser<'_> {
             self.stmt_indent = self.indent(next);
             match self.arm() {
                 Ok(arm) => {
+                    // A body that was never closed may have swallowed arms, and ends before
+                    // the next one.
+                    let unclosed = arm.body.unclosed;
+                    complete &= !unclosed;
                     arms.push(arm);
-                    if !self.eat(T::Comma)
+                    if !unclosed
+                        && !self.eat(T::Comma)
                         && !matches!(self.kind(), T::Newline | T::RBrace | T::Eof)
                         && !self.starts_item()
                     {
@@ -1444,14 +1491,24 @@ impl Parser<'_> {
             if !matches!(self.kind(), T::Int | T::Float) {
                 return self.unexpected("a number after `-`");
             }
-            let operand = self.primary()?;
+            let operand = self.number_pattern()?;
             let span = minus.span.to(self.prev_span());
             return Ok(self.alloc(ExprKind::Unary { op: UnaryOp::Neg, operand }, span));
         }
         match self.kind() {
-            T::Int | T::Float | T::Char | T::Text | T::Keyword(Kw::True | Kw::False) => self.primary(),
+            T::Int | T::Float => self.number_pattern(),
+            T::Char | T::Text | T::Keyword(Kw::True | Kw::False) => self.primary(),
             _ => self.unexpected("a literal"),
         }
+    }
+
+    /// A number in a pattern, which may not carry a unit yet.
+    fn number_pattern(&mut self) -> PResult<ExprId> {
+        let number = self.primary()?;
+        if self.at(T::LBracket) {
+            return self.not_implemented("units of measure", Planned::PastV1);
+        }
+        Ok(number)
     }
 
     fn if_expr(&mut self) -> PResult<ExprId> {

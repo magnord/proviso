@@ -1,8 +1,8 @@
 // phase: 2.2
 // expect-error: E0901
 // Generic enums, the `Ord` and `Hash` derives, associated functions, tuple patterns, and the
-// `Option` and `Result` variants come in later slices of phase 2. Uses of what they declare
-// aren't reported again (REFERENCE §15.1).
+// `Option` and `Result` variants come in later slices of phase 2, and units of measure after
+// v1. Uses of what they declare aren't reported again (REFERENCE §15.1).
 enum Maybe[T] {                                     // <- E0901
     Just(value: T)
     Nothing
@@ -32,5 +32,9 @@ fn later(m: Maybe, r: Ranked, k: Keyed) -> Int {
         Some(x) => 1                                // <- E0901
         _ => 2
     }
-    return e + f + g
+    let h = match 2.5 {
+        0.0[m]..1.0[m] => 1                         // <- E0901
+        _ => 2
+    }
+    return e + f + g + h
 }
