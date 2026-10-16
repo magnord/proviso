@@ -4,7 +4,8 @@
 // the values that leave it open (OPEN_QUESTIONS P5; issue #10). A `let` without a type
 // needs its value's type, so a later use doesn't give it, and a comparison's operands give
 // only each other theirs. Each line is one rewrite of the others, and each reports E0312
-// once, never also for the value or call that shares the unknown type argument.
+// once, never also for the value or call that shares the unknown type argument. So
+// `errs(r: ok2(6))` is an error, since neither call gives the `U` and `E` they share.
 
 fn id[T: Copy](x: T) -> T {
     return x
@@ -28,6 +29,14 @@ fn both[T, U]() -> Result[T, U] {
 
 fn fail_never() -> Never {
     unreachable
+}
+
+fn ok2[T: Copy, E](x: T) -> Result[T, E] {
+    return Ok(x)
+}
+
+fn errs[U: Copy](r: Result[Int8, U]) -> Option[U] {
+    return None
 }
 
 fn opt(x: Option[Int]) -> Option[Int] {
@@ -60,6 +69,7 @@ fn joined(c: Bool) -> Bool {
     let b7 = first(a: nothing(), b: None)           // <- E0312
     let b8 = id(None) == id(None)                   // <- E0312
     let b9 = both() == both()                       // <- E0312
+    let b10 = errs(r: ok2(6))                       // <- E0312
     return b1 or b2 or b3 or b4 or b5 or b8
 }
 
