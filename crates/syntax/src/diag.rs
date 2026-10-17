@@ -120,7 +120,7 @@ pub mod codes {
         MISPLACED_JUMP = "E0105", "misplaced_jump",
             "`break` or `continue` outside a loop, or naming a label no enclosing loop has.";
         INVALID_ASSIGNMENT_TARGET = "E0106", "invalid_assignment_target",
-            "Only variables and their parts can be assigned.";
+            "Only variables and their fields and elements can be assigned, or changed by a method such as `push` (REFERENCE §5.2).";
         TODO_REQUIRES_INCOMPLETE = "E0107", "todo_requires_incomplete",
             "`todo` holes are accepted only with `--incomplete` (REFERENCE §15.2, Q25).";
         MISPLACED_RETURN = "E0108", "misplaced_return",
@@ -160,21 +160,21 @@ pub mod codes {
         MISSING_RETURN = "E0304", "missing_return",
             "Every path of a non-Unit function ends with an explicit `return` (REFERENCE §2).";
         IMMUTABLE_ASSIGNMENT = "E0305", "immutable_assignment",
-            "Assignment to a `let` binding or a parameter; declare it with `var`.";
+            "Assignment to a `let` binding, a parameter or a loop variable, or a call of a method that changes it, such as `push`; declare it with `var`.";
         UNSUPPORTED_OPERATOR = "E0306", "unsupported_operator",
-            "An operator, interpolation, or literal or range pattern that the type does not support.";
+            "An operator, interpolation, index, `for` loop, or literal or range pattern that the type does not support.";
         UNKNOWN_TYPE = "E0307", "unknown_type",
             "A type or interface name that does not resolve to one, or a type with the wrong number of type arguments.";
         INVALID_MAIN = "E0308", "invalid_main",
             "A program needs `pub fn main(sys: keep System)`, optionally with `fails E` (REFERENCE §7.4).";
         MISSING_IMPLEMENTATION = "E0309", "missing_implementation",
-            "A type does not implement an interface it needs, such as a field's type in a `derives` list or a type argument that a constraint of its parameter names (REFERENCE §4.4, §4.8, §4.9).";
+            "A type does not implement an interface it needs, such as a field's type in a `derives` list, a type argument that a constraint of its parameter names, or a map's key type without `Eq` and `Hash` (REFERENCE §4.2, §4.4, §4.8, §4.9).";
         NOT_DERIVABLE = "E0310", "not_derivable",
             "A `derives` list names a prelude interface that can't be derived, such as `Copy` or `Add` (REFERENCE §4.4).";
         NON_EXHAUSTIVE_MATCH = "E0311", "non_exhaustive_match",
             "A `match` does not cover every value of its type; add the missing arms or `_` (REFERENCE §6.3).";
         CANNOT_INFER = "E0312", "cannot_infer",
-            "A value or call whose type arguments neither its expected type nor its fields or arguments give, such as `let x = None` (OPEN_QUESTIONS P5).";
+            "A value or call whose type arguments neither its expected type nor its fields or arguments give, such as `let x = None` or `var xs = []` (OPEN_QUESTIONS P5).";
         DUPLICATE_IMPLEMENTATION = "E0313", "duplicate_implementation",
             "A type implements an interface twice, by two `impl` blocks or by an `impl` and `derives` (REFERENCE §4.9).";
         IMPL_MISMATCH = "E0314", "impl_mismatch",
@@ -186,7 +186,7 @@ pub mod codes {
         TYPE_ARGUMENT_COUNT = "E0317", "type_argument_count",
             "A call whose `::[…]` gives a function or method more or fewer type arguments than it has type parameters (REFERENCE §4.8).";
         REFUTABLE_PATTERN = "E0318", "refutable_pattern",
-            "A `let` pattern that may not match its value, such as `let Some(x) = o` or one with a literal; use `match`, `is` or an `else` form (REFERENCE §6.4, §6.6).";
+            "A `let` or `for` pattern that may not match its value, such as `let Some(x) = o` or one with a literal; use `match`, `is` or an `else` form (REFERENCE §6.4, §6.6).";
 
         // E0412 to E0414, E0501, E0502, E0601 and E0602 are reserved for later phases: the §F
         // goldens already expect them.
