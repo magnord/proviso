@@ -50,8 +50,9 @@ pub struct Open {
     pub unmarked: bool,
     /// A `try` with no `fails` to take it needs it.
     pub owed: bool,
-    /// A `todo` hole met it, which stands for a value of a type no one wrote, so a `Never`
-    /// it settles as may stand for another type (Q25; issue #30).
+    /// A `todo` hole met it, which stands for a value of a type no one wrote. So it is
+    /// `Never`, as the hole is, unless something gives it a type, and a `Never` it settles as
+    /// may stand for another type (Q25; issue #30).
     pub hole: bool,
     pub origin: Origin,
 }
@@ -491,21 +492,24 @@ impl Vars {
             open.never = true;
             return true;
         }
-        let (kind, quiet) = (open.kind, open.quiet);
+        let (kind, marks) = (open.kind, (open.quiet, open.hole));
         if !Self::fits(kind, ty) || self.occurs(v, ty) {
             return false;
         }
         let ty = self.open_nevers(ty);
-        self.bind_quiet(quiet, &ty);
+        self.bind_marks(marks, &ty);
         self.settle(v, ty);
         true
     }
 
-    /// A variable that a rejected value was to give, bound to `ty`, leaves what `ty` leaves
-    /// open to that value too.
-    fn bind_quiet(&mut self, quiet: bool, ty: &Ty) {
+    /// A variable that a rejected value was to give, or that a `todo` hole met, bound to
+    /// `ty`, passes that on to what `ty` leaves open.
+    fn bind_marks(&mut self, (quiet, hole): (bool, bool), ty: &Ty) {
         if quiet {
             self.quiet(ty);
+        }
+        if hole {
+            self.hole(ty);
         }
     }
 
@@ -513,11 +517,11 @@ impl Vars {
     fn exact(&mut self, v: u32, ty: &Ty) -> bool {
         let v = self.root(v);
         let State::Open(open) = &self.states[v as usize] else { unreachable!("roots are open") };
-        let quiet = open.quiet;
+        let marks = (open.quiet, open.hole);
         if !Self::fits(open.kind, ty) || self.occurs(v, ty) {
             return false;
         }
-        self.bind_quiet(quiet, ty);
+        self.bind_marks(marks, ty);
         self.settle(v, ty.clone());
         true
     }

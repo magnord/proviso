@@ -718,6 +718,7 @@ impl Checker<'_> {
     /// - One a rejected value was to give (quiet) is that value's error, never E0312. It is
     ///   not `Never`, even where a `Never` reached it too, since the value may have been of
     ///   any type (issue #30).
+    /// - One a `todo` hole met is `Never`, as the hole is (Q25).
     /// - The error type of a call without a marker (unmarked) is that call's E0701, unless a
     ///   `try` with no `fails` to take it also needs it (owed). Then it is E0312.
     /// - Any other is E0312.
@@ -728,14 +729,14 @@ impl Checker<'_> {
         let mut unknown: Vec<Origin> = Vec::new();
         for v in vars {
             let Some(open) = self.vars.open(v).cloned() else { continue };
-            if open.hole && open.never && !open.quiet {
+            if open.hole && !open.quiet {
                 self.vars.settled_hole(v);
             }
             let ty = match open.kind {
                 Kind::Int => Ty::INT,
                 Kind::Float => Ty::Float(FloatTy::F64),
                 Kind::Any if open.quiet => Ty::Error,
-                Kind::Any if open.never => Ty::Never,
+                Kind::Any if open.never || open.hole => Ty::Never,
                 Kind::Any if open.unmarked && !open.owed => Ty::Error,
                 Kind::Any => {
                     unknown.push(open.origin);
