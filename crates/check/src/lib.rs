@@ -2207,6 +2207,7 @@ impl Checker<'_> {
         let ty = self.expr(decl.call, None);
         let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
         let span = self.span(decl.call);
+        let hole = self.met_hole(&errors);
         let err = self.one_error(errors, span, "example", "an example expects one error type");
         match &decl.expect {
             Expectation::Equals(value) => {
@@ -2241,7 +2242,7 @@ impl Checker<'_> {
                 let err = match err {
                     Some(err) => {
                         let forced = self.force(&err);
-                        if ty != Ty::Error {
+                        if ty != Ty::Error && !hole {
                             self.can_fail(&err, Handler::Example, span);
                         }
                         forced
@@ -3119,6 +3120,7 @@ impl Checker<'_> {
         let value_ty = self.expr(value, None);
         let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
         let span = self.span(e);
+        let hole = self.met_hole(&errors);
         let it = match self.one_error(errors, span, "`else`", "`it` has one type") {
             // It may have been a call that can fail, so `it` is not reported again (§15.1).
             None if value_ty == Ty::Error => Some(Ty::Error),
@@ -3126,6 +3128,7 @@ impl Checker<'_> {
         };
         if let Some(err) = &it
             && value_ty != Ty::Error
+            && !hole
         {
             self.wait_can_fail(err, Handler::Else, span);
         }
@@ -4297,6 +4300,7 @@ impl Checker<'_> {
         self.in_chain = true;
         let ty = self.expr(inner, value_expected.as_ref());
         let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
+        let hole = self.met_hole(&errors);
         match self.one_error(errors, span, "`attempt`", "its `Result` has one error type") {
             // A chain with an error may hold the fallible call that didn't resolve.
             None => {
@@ -4306,7 +4310,7 @@ impl Checker<'_> {
                 Ty::Error
             }
             Some(err) => {
-                if ty != Ty::Error {
+                if ty != Ty::Error && !hole {
                     self.wait_can_fail(&err, Handler::Attempt, span);
                 }
                 Ty::result(ty, err)
@@ -4316,6 +4320,13 @@ impl Checker<'_> {
 
     /// Reports the `attempt` or `else` form at `span` if its calls fail with `Never`, which
     /// can't happen, once the statement settles `err` (OPEN_QUESTIONS P5, `fails Never`).
+    /// Whether a `todo` hole met one of `errors`, the error types of the calls a handler
+    /// marks, which a chain may have settled before [`Checker::one_error`] joins them, as a
+    /// receiver's type is (Q25).
+    fn met_hole(&self, errors: &[Ty]) -> bool {
+        errors.iter().any(|err| self.vars.from_hole(err))
+    }
+
     fn wait_can_fail(&mut self, err: &Ty, handler: Handler, span: Span) {
         if self.vars.has_open(err) {
             self.pending.push(Pending::CanFail { err: err.clone(), handler, span });

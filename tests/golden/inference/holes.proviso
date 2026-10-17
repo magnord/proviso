@@ -1,7 +1,9 @@
 // phase: 2.5
 // flags: --incomplete
 // expect-error: E0703
+// expect-error: E0706
 // expect-error: E0707
+// expect-error: E0708
 // A `todo` hole stands for a value of any type, so an error type it meets may be one a call
 // fails with. `else`, `attempt` and an example's `fails` are not reported as marking a call
 // that can't fail there (Q25; OPEN_QUESTIONS P5, `fails Never`; issue #30). A `let` fixes
@@ -9,7 +11,8 @@
 // type can't fail. A hole may be the `Option` an `else` unwraps. A `try` without `fails` is
 // wrong whatever fills the hole, and a call the hole doesn't meet is still checked. A type
 // argument the hole meets is `Never`, as the hole is, unless something gives it a type, in
-// either argument order.
+// either argument order. A chain whose receiver needs its type settled early, as `.show()`
+// does, keeps what the hole met.
 
 fn rethrow[E: Copy](e: E) -> Int fails E {
     fail e
@@ -76,4 +79,18 @@ fn wrap[E: Copy](o: Option[E]) -> Int fails E {
     return 1
 }
 
+fn wrapped[E: Copy](e: E) -> Option[E] fails E {
+    return None
+}
+
+fn chained() -> Int {
+    let w1 = attempt wrapped(e: todo).show()
+    let w2 = wrapped(e: todo).show() else "w2"
+    let w3 = attempt wrapped(e: stop()).show()      // <- E0706
+    let w4 = wrapped(e: stop()).show() else "w4"    // <- E0707
+    return 0
+}
+
 example rethrow(e: todo) fails _
+example wrapped(e: todo).show() fails _
+example wrapped(e: stop()).show() fails _           // <- E0708
