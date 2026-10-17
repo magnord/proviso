@@ -74,3 +74,8 @@ fn parts() {
     c.items.push(1)
     c.items[0] = 2
 }
+
+fn copies(xs: List[Int], m: Map[Text, Int]) {
+    let a = xs.with(len: 3)                          // <- E0303
+    let b = m.with()                                 // <- E0303
+}

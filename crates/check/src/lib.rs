@@ -276,6 +276,8 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         pending: Vec::new(),
         stmt_start: (0, 0),
         typed: Vec::new(),
+        written_keys: Some(Vec::new()),
+        reported_keys: Vec::new(),
     };
     checker.imports();
     checker.adt_names();
@@ -287,6 +289,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     checker.adt_derives();
     checker.signatures();
     checker.impls();
+    checker.written_keys();
     checker.collisions();
     checker.derived_fields();
     checker.adt_predicates();
@@ -513,10 +516,29 @@ struct Checker<'a> {
     /// The expressions whose recorded type has a variable, which the side table gets
     /// without once the body is checked.
     typed: Vec<ExprId>,
+    /// The key types of the `Map` types written in declarations, with where they are written
+    /// and the bounds of the type parameters there. They are checked once every `derives`
+    /// and `impl` is known, and `None` after that, when a written type is checked at once.
+    written_keys: Option<Vec<WrittenKey>>,
+    /// The key types the statements of this body have reported, by variable, so literals
+    /// that share one report it once.
+    reported_keys: Vec<u32>,
+}
+
+/// The key type of a `Map` type a declaration writes, which is checked once every `derives`
+/// and `impl` is known: where it is written, and the bounds and names of the type parameters
+/// there.
+struct WrittenKey {
+    key: Ty,
+    span: Span,
+    bounds: Vec<Vec<IfaceId>>,
+    names: Vec<Box<str>>,
 }
 
 /// A check on a type with a variable in it, made once the statement has solved it.
 enum Pending {
+    /// The key type of a map literal, which must implement `Eq` and `Hash` (REFERENCE §4.2).
+    Key { ty: Ty, span: Span },
     /// An integer literal of `magnitude`, negated or not, that must fit its type.
     Int { ty: Ty, magnitude: u128, negative: bool, span: Span },
     /// A float literal that must be finite in its type.
@@ -561,7 +583,8 @@ impl Pending {
     /// The types whose variables the check waits on.
     fn tys(&self) -> &[Ty] {
         match self {
-            Pending::Int { ty, .. }
+            Pending::Key { ty, .. }
+            | Pending::Int { ty, .. }
             | Pending::Float { ty, .. }
             | Pending::Bound { ty, .. }
             | Pending::Neg { ty, .. }
@@ -826,6 +849,18 @@ impl Checker<'_> {
 
     fn run_pending(&mut self, check: Pending) {
         match check {
+            Pending::Key { ty, span } => {
+                // Literals whose keys meet share one key type, which is reported once.
+                if let Ty::Var(v) = ty {
+                    let root = self.vars.root(v);
+                    if self.reported_keys.contains(&root) {
+                        return;
+                    }
+                    if !self.key_bound(&self.vars.zonk(&ty), span) {
+                        self.reported_keys.push(root);
+                    }
+                }
+            }
             Pending::Int { ty, magnitude, negative, span } => {
                 if let Ty::Int(it) = self.vars.zonk(&ty) {
                     self.int_range(it, magnitude, negative, span);
@@ -890,6 +925,18 @@ impl Checker<'_> {
             local.ty = self.vars.zonk(&local.ty);
         }
         self.vars.clear();
+        self.reported_keys.clear();
+    }
+
+    /// Checks the key types of the `Map` types the declarations write, now that every
+    /// `derives` and `impl` is known (REFERENCE §4.2).
+    fn written_keys(&mut self) {
+        let outer = (std::mem::take(&mut self.f.bounds), std::mem::take(&mut self.param_names));
+        for written in self.written_keys.take().unwrap_or_default() {
+            (self.f.bounds, self.param_names) = (written.bounds, written.names);
+            self.key_bound(&written.key, written.span);
+        }
+        (self.f.bounds, self.param_names) = outer;
     }
 
     fn iface_name(&self, iface: IfaceId) -> &str {
@@ -1191,7 +1238,8 @@ impl Checker<'_> {
     /// Notes that a rejected `impl` block is for the type `sym` names, if any.
     fn unknown_target(&mut self, sym: Symbol) {
         let text = self.m.text(sym);
-        let ty = match (self.adt_names.get(&sym), builtin_type(text), prelude_adt(text), self.imports.get(&sym)) {
+        let prelude = prelude_adt(text).or_else(|| collection_adt(text));
+        let ty = match (self.adt_names.get(&sym), builtin_type(text), prelude, self.imports.get(&sym)) {
             (Some(&id), ..) => Ty::adt(id),
             (_, Some(ty), _, _) => ty,
             (_, _, Some(id), _) => Ty::adt(id),
@@ -2075,8 +2123,13 @@ impl Checker<'_> {
                     }
                     // A map's keys implement `Eq` and `Hash` (REFERENCE §4.2), so its methods
                     // need not ask again.
-                    if id == AdtId::MAP && !self.key_bound(&tys[0], te.span) {
-                        return Ty::Error;
+                    if id == AdtId::MAP {
+                        let (bounds, names) = (self.f.bounds.clone(), self.param_names.clone());
+                        if let Some(keys) = self.written_keys.as_mut() {
+                            keys.push(WrittenKey { key: tys[0].clone(), span: te.span, bounds, names });
+                        } else if !self.key_bound(&tys[0], te.span) {
+                            return Ty::Error;
+                        }
                     }
                     return Ty::applied(id, tys);
                 }
@@ -2856,16 +2909,28 @@ impl Checker<'_> {
     fn map(&mut self, e: ExprId, entries: &[(ExprId, ExprId)], expected: Option<&Ty>) -> Ty {
         let span = self.span(e);
         let origin = Origin::Variant { adt: AdtId::MAP, span };
-        let (mut key, mut value) = match expected {
-            Some(Ty::Adt(AdtId::MAP, args)) => (args[0].clone(), args[1].clone()),
-            Some(Ty::Error) => (self.vars.rejected(), self.vars.rejected()),
-            _ => (self.vars.fresh(Kind::Any, origin), self.vars.fresh(Kind::Any, origin)),
+        // An expected map type has had its key type checked where it was written or built.
+        let (mut key, mut value, checked) = match expected {
+            Some(Ty::Adt(AdtId::MAP, args)) => (args[0].clone(), args[1].clone(), true),
+            Some(Ty::Error) => (self.vars.rejected(), self.vars.rejected(), true),
+            _ => (self.vars.fresh(Kind::Any, origin), self.vars.fresh(Kind::Any, origin), false),
         };
         for &(k, v) in entries {
             key = self.element(k, key);
             value = self.element(v, value);
         }
-        self.key_bound(&key, span);
+        if !checked {
+            match self.vars.resolve(&key) {
+                ty @ Ty::Var(_) => self.pending.push(Pending::Key { ty, span }),
+                ty if self.vars.has_var(&ty) => {
+                    let (ifaces, callee, param) = (vec![IfaceId::EQ, IfaceId::HASH], "Map".into(), "K".into());
+                    self.pending.push(Pending::Bound { ty, ifaces, callee, param, span });
+                }
+                ty => {
+                    self.key_bound(&ty, span);
+                }
+            }
+        }
         Ty::map(key, value)
     }
 
@@ -2881,15 +2946,10 @@ impl Checker<'_> {
     }
 
     /// Reports a map's key type that doesn't implement `Eq` and `Hash` (REFERENCE §4.2),
-    /// or waits for the statement to settle it, and returns whether it may do.
+    /// and returns whether it does.
     fn key_bound(&mut self, key: &Ty, span: Span) -> bool {
-        let key = self.vars.resolve(key);
-        if self.vars.has_var(&key) {
-            let (ifaces, callee, param) = (vec![IfaceId::EQ, IfaceId::HASH], "Map".into(), "K".into());
-            self.pending.push(Pending::Bound { ty: key, ifaces, callee, param, span });
-            return true;
-        }
-        if key.is_unknown() || self.unknown_interfaces(&key) {
+        let key = self.vars.zonk(key);
+        if key.is_unknown() || self.vars.has_open(&key) || self.unknown_interfaces(&key) {
             return true;
         }
         let Some(iface) = [IfaceId::EQ, IfaceId::HASH].into_iter().find(|&iface| !self.implements(&key, iface)) else {
@@ -2901,19 +2961,39 @@ impl Checker<'_> {
         false
     }
 
+    /// Reports `ty`, a type argument of a collection, if it doesn't implement `iface`, which
+    /// `what` needs of `param` (STD.md), or waits for the statement to settle it.
+    fn needs(&mut self, ty: Ty, iface: IfaceId, what: &str, param: &str, span: Span) {
+        if self.vars.has_open(&ty) {
+            let (ifaces, callee, param) = (vec![iface], what.into(), param.into());
+            self.pending.push(Pending::Bound { ty, ifaces, callee, param, span });
+            return;
+        }
+        if !ty.is_unknown() && !self.implements(&ty, iface) && !self.unknown_interfaces(&ty) {
+            let message = format!(
+                "`{}` does not implement `{}`, which `{what}` needs of `{param}`",
+                self.show(&ty),
+                self.iface_name(iface)
+            );
+            self.error(codes::MISSING_IMPLEMENTATION, span, message);
+        }
+    }
+
     /// `xs[i]`, which reads element `i` of a list (STD.md). Reading it copies the element, so
-    /// it needs `T: Copy`, unless the element is only `borrowed`.
+    /// it needs `T: Copy`, unless the element is only `borrowed`. The element's type need not
+    /// be known yet, so what the element meets may still give it (issue #10).
     fn index(&mut self, e: ExprId, base: ExprId, index: ExprId, chain: bool, borrowed: bool) -> Ty {
         self.in_chain = chain;
         self.index_borrowed = matches!(self.m.exprs[base].kind, ExprKind::Index { .. });
         let base_ty = self.infer(base);
-        let base_ty = self.force(&base_ty);
+        let base_ty = match self.vars.resolve(&base_ty) {
+            list @ Ty::Adt(AdtId::LIST, _) => list,
+            _ => self.force(&base_ty),
+        };
         let span = self.span(e);
         let Some(element) = self.indexed(&base_ty, index, span) else { return Ty::Error };
-        if !borrowed && !self.implements(&element, IfaceId::COPY) && !self.unknown_interfaces(&element) {
-            let message =
-                format!("`{}` does not implement `Copy`, which `xs[i]` needs of the element", self.show(&element));
-            self.error(codes::MISSING_IMPLEMENTATION, span, message);
+        if !borrowed {
+            self.needs(element.clone(), IfaceId::COPY, "xs[i]", "T", span);
         }
         element
     }
@@ -3913,11 +3993,17 @@ impl Checker<'_> {
         }
         self.in_chain = chain;
         self.index_borrowed = matches!(m.exprs[receiver].kind, ExprKind::Index { .. });
-        // Which method this is depends on the receiver's type, so it must be known here.
+        // Which method this is depends on the receiver's type, so it must be known here. A
+        // list's or map's own methods don't depend on its type arguments, so what the call
+        // meets may still give them (OPEN_QUESTIONS P5; issue #10).
         let receiver_ty = self.infer(receiver);
-        let receiver_ty = self.force(&receiver_ty);
+        let open = self.vars.resolve(&receiver_ty);
+        let receiver_ty = match open {
+            Ty::Adt(AdtId::LIST | AdtId::MAP, _) if builtin_method(&open, name).is_some() => open,
+            _ => self.force(&receiver_ty),
+        };
         if let (Ty::Adt(id, _), "with") = (&receiver_ty, name)
-            && !self.p.decls.adt(*id).is_enum()
+            && self.p.decls.adt(*id).kind == AdtKind::Record
             && !self.p.decls.adt(*id).tuple
         {
             self.no_targs(targs, name, span);
@@ -3946,16 +4032,8 @@ impl Checker<'_> {
             if sig.builtin.changes_receiver() {
                 self.changes(receiver, name);
             }
-            if let Some((ty, iface, param)) = &sig.needs
-                && !self.implements(ty, *iface)
-                && !self.unknown_interfaces(ty)
-            {
-                let message = format!(
-                    "`{}` does not implement `{}`, which `{name}` needs of `{param}`",
-                    self.show(ty),
-                    self.iface_name(*iface)
-                );
-                self.error(codes::MISSING_IMPLEMENTATION, span, message);
+            if let Some((ty, iface, param)) = sig.needs {
+                self.needs(ty, iface, name, param, span);
             }
             self.generic_args(name, &sig.params, &[], args, span, sig.takes);
             if let Some(err) = sig.fails {
@@ -5107,11 +5185,16 @@ impl Checker<'_> {
                         self.p.decls.name(other)
                     ),
                 )),
-                None if self.imports.contains_key(&q.sym) || builtin_type(q_text).is_some() => Some((
-                    codes::TYPE_MISMATCH,
-                    q.span,
-                    format!("expected a pattern for `{}`, found one for `{q_text}`", self.p.decls.name(id)),
-                )),
+                None if self.imports.contains_key(&q.sym)
+                    || builtin_type(q_text).is_some()
+                    || collection_adt(q_text).is_some() =>
+                {
+                    Some((
+                        codes::TYPE_MISMATCH,
+                        q.span,
+                        format!("expected a pattern for `{}`, found one for `{q_text}`", self.p.decls.name(id)),
+                    ))
+                }
                 None => Some((codes::UNKNOWN_TYPE, q.span, format!("unknown type `{q_text}`"))),
             };
             let rejected = problem.is_some() || self.poisoned.contains(&q.sym);
@@ -5314,8 +5397,9 @@ impl Checker<'_> {
                     Ty::Adt(AdtId::MAP, args) => self.p.decls.tuple_ty(args.to_vec()),
                     ty if ty.is_unknown() => Ty::Error,
                     ty => {
-                        let message = format!("`for` goes over a range, a list or a map, not `{}`", self.show(&ty));
-                        self.error(codes::UNSUPPORTED_OPERATOR, span, message);
+                        let message =
+                            format!("expected a range, a list or a map to go over, found `{}`", self.show(&ty));
+                        self.error(codes::TYPE_MISMATCH, span, message);
                         Ty::Error
                     }
                 };
@@ -5438,8 +5522,11 @@ fn builtin_method(ty: &Ty, name: &str) -> Option<BuiltinSig> {
 fn later_collection_method(name: &str) -> Option<(&'static str, Planned)> {
     Some(match name {
         "map" | "filter" => ("operations that take a closure", Planned::Phase(3)),
-        "is_sorted" | "is_permutation_of" | "is_unique" => ("the predicates of §8.1", Planned::Phase(5)),
-        "swap" | "replace" | "sort" => ("collection operations that STD.md doesn't declare", Planned::Unscheduled),
+        // Phase 4 checks contracts at run time, which may call them.
+        "is_sorted" | "is_permutation_of" | "is_unique" => ("the predicates of §8.1", Planned::Phase(4)),
+        // `replace` returns a resource it would otherwise discard (REFERENCE §10 rule 5).
+        "replace" => ("operations on collections of resources", Planned::Phase(2)),
+        "swap" | "sort" => ("collection operations that STD.md doesn't declare", Planned::Unscheduled),
         _ => return None,
     })
 }
@@ -5545,10 +5632,9 @@ fn prelude_type(name: &str) -> bool {
 /// Prelude types that later phases implement.
 fn later_type(name: &str) -> Option<Planned> {
     match name {
-        "Bytes" | "Ordering" | "Rounding" | "Invalid" => Some(Planned::Phase(2)),
-        // `Set` has no literal or constructor yet (OPEN_QUESTIONS §G), and STD.md doesn't
-        // declare `Array`.
-        "Set" | "Array" => Some(Planned::Unscheduled),
+        "Array" | "Bytes" | "Ordering" | "Rounding" | "Invalid" => Some(Planned::Phase(2)),
+        // Nothing builds a `Set` yet (OPEN_QUESTIONS Q37).
+        "Set" => Some(Planned::Unscheduled),
         "Outcome" | "Defect" => Some(Planned::Phase(6)),
         _ => None,
     }

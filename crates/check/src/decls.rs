@@ -558,6 +558,11 @@ impl Decls {
             Ty::Param(i) => params.get(*i as usize).is_some_and(|bounds| bounds.contains(&iface)),
             // A rejected `impl` block may have given it this interface for any type arguments.
             Ty::Adt(id, _) if self.adt(*id).unknown_interfaces => true,
+            // A map's keys implement `Eq` and `Hash` wherever its type is checked (REFERENCE
+            // §4.2), so only its values decide, and a rejected key type isn't reported again.
+            Ty::Adt(AdtId::MAP, args) if matches!(iface, IfaceId::EQ | IfaceId::HASH) => {
+                args[1] == Ty::Never || self.implements(&args[1], iface, params)
+            }
             // `Option` and `Result` implement what their type arguments do (STD.md). `Never` has
             // no values, so it implements everything as an argument.
             Ty::Adt(id, args) if self.adt(*id).derives.contains(&iface) => {

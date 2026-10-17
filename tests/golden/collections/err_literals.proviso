@@ -77,3 +77,22 @@ fn patterns(xs: List[Int], m: Map[Int, Int]) -> Int {
     }
     return c
 }
+
+fn shared_keys(c: Bool, x: Float) -> Bool {
+    let a = [:] == [1.5: 1]                          // <- E0309
+    let b = if c { [:] } else { [1.5: 1] }           // <- E0309
+    let d = [[1.5: 1], [:]]                          // <- E0309
+    let e: Map[Float, Int] = [x: 1]                  // <- E0309
+    return a
+}
+
+fn written_key(x: Float) -> Map[Float, Int] {      // <- E0309
+    return [x: 1]
+}
+
+fn qualified(o: Option[Int]) -> Int {
+    return match o {
+        List.Empty => 1                              // <- E0301
+        _ => 2
+    }
+}

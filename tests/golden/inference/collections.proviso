@@ -5,7 +5,8 @@
 // rewrites of it: swapped operands, branches and arguments, the empty literal first or
 // last, inline or bound by `let` first, and one more level of nesting. Every rewrite
 // checks, so an integer literal that meets `small` is an `Int8`, and `[]` that meets a
-// `List[Int8]` is one too.
+// `List[Int8]` is one too. A list's own methods and an index leave its element type open,
+// so `[1].get(5) else small` and `[1][0] == small` make `[1]` a `List[Int8]`.
 use std.io { IoError }
 
 fn id[T: Copy](x: T) -> T {
@@ -91,8 +92,12 @@ fn fallbacks(o: Option[List[Int8]], m: Map[Text, List[Int8]], small: Int8) -> Te
     let e3 = (o else []) == [1]
     let e4 = [1] == (o else [])
     let e5 = [small].get(5) else 1
-    let e6 = e5 == small
-    return f"{e1} {e2} {e3} {e4} {e5} {e6}"
+    let e6 = [1].get(5) else small
+    let e7 = e5 == e6
+    let e8 = [1][0] == small
+    let e9 = small == [1][0]
+    let e10: Int8 = [1][0]
+    return f"{e1} {e2} {e3} {e4} {e5} {e6} {e7} {e8} {e9} {e10}"
 }
 
 fn places(small: Int8) -> Text {

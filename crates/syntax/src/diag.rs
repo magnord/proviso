@@ -160,9 +160,9 @@ pub mod codes {
         MISSING_RETURN = "E0304", "missing_return",
             "Every path of a non-Unit function ends with an explicit `return` (REFERENCE §2).";
         IMMUTABLE_ASSIGNMENT = "E0305", "immutable_assignment",
-            "Assignment to a `let` binding, a parameter or a loop variable, or a call of a method that changes it, such as `push`; declare it with `var`.";
+            "Assignment to a `let` binding, a parameter or a loop variable, or a call of a method that changes it, such as `push`.";
         UNSUPPORTED_OPERATOR = "E0306", "unsupported_operator",
-            "An operator, interpolation, index, `for` loop, or literal or range pattern that the type does not support.";
+            "An operator, interpolation, index, or literal or range pattern that the type does not support.";
         UNKNOWN_TYPE = "E0307", "unknown_type",
             "A type or interface name that does not resolve to one, or a type with the wrong number of type arguments.";
         INVALID_MAIN = "E0308", "invalid_main",

@@ -110,6 +110,15 @@ impl MapValue {
         Ok(None)
     }
 
+    /// The places of the keys whose hash is `hash`.
+    fn candidates(&self, hash: u64) -> &[usize] {
+        self.buckets.get(&hash).map_or(&[], Vec::as_slice)
+    }
+
+    fn key_at(&self, at: usize) -> &Value {
+        &self.entries[at].as_ref().expect("found entries are present").1
+    }
+
     fn value_at(&self, at: usize) -> &Value {
         &self.entries[at].as_ref().expect("found entries are present").2
     }
@@ -571,7 +580,7 @@ impl Interp<'_> {
                 // Each record on the path has changed, so each is checked, innermost first
                 // (OPEN_QUESTIONS P5).
                 for depth in (0..path.len()).rev() {
-                    self.refine(at(&frame[root.index()], &path[..depth]), stmt.span)?;
+                    self.refine(at(&frame[root.index()], &path[..depth])?, stmt.span)?;
                 }
             }
             StmtKind::Expr(e) => {
@@ -748,18 +757,7 @@ impl Interp<'_> {
                 if let Res::Method(builtin) = res
                     && builtin.changes_receiver()
                 {
-                    let (root, path) = self.place(*receiver, frame)?;
-                    let mut values = Vec::with_capacity(args.len());
-                    for arg in args {
-                        values.push(self.expr(arg.value, frame)?);
-                    }
-                    let place = slot(&mut frame[root.index()], &path)?;
-                    let value = self.change(builtin, place, values, span)?;
-                    // Each record on the path has changed, as after an assignment.
-                    for depth in (0..path.len()).rev() {
-                        self.refine(at(&frame[root.index()], &path[..depth]), span)?;
-                    }
-                    return Ok(value);
+                    return self.change_call(builtin, *receiver, args, frame, span);
                 }
                 // The receiver of a variant's construction or an associated function is a type's
                 // name, and that of `I.f(x)` an interface's, not a value. Otherwise the receiver
@@ -818,27 +816,9 @@ impl Interp<'_> {
                 let Value::Adt(adt) = self.expr(*base, frame)? else { unreachable!("fields are read from records") };
                 adt.fields[i.index()].clone()
             }
-            ExprKind::Index { base, index } => {
-                let Value::List(list) = self.expr(*base, frame)? else { unreachable!("only lists are indexed") };
-                let (i, _) = self.int(*index, frame)?;
-                list.items[element_at(i, list.items.len(), span)?].clone()
-            }
-            ExprKind::List(elements) => {
-                let mut items = Vec::with_capacity(elements.len());
-                for &element in elements {
-                    items.push(self.expr(element, frame)?);
-                }
-                Value::List(Arc::new(ListValue { items }))
-            }
-            ExprKind::Map(entries) => {
-                let mut map = MapValue::default();
-                for &(key, value) in entries {
-                    let key = self.expr(key, frame)?;
-                    let value = self.expr(value, frame)?;
-                    self.set(&mut map, key, value, span)?;
-                }
-                Value::Map(Arc::new(map))
-            }
+            ExprKind::Index { base, index } => return self.index(*base, *index, frame, span),
+            ExprKind::List(elements) => return self.list(elements, frame),
+            ExprKind::Map(entries) => return self.map(entries, frame, span),
             ExprKind::Unary { op: UnaryOp::Not, operand } => Value::Bool(!self.bool(*operand, frame)?),
             ExprKind::Unary { op: UnaryOp::Neg, operand } => {
                 if let ExprKind::Int(value) = m.exprs[*operand].kind {
@@ -930,28 +910,7 @@ impl Interp<'_> {
                     }
                     return Ok(Value::Unit);
                 }
-                // The loop goes over the collection as it was when the loop started, so the
-                // body may change it (OPEN_QUESTIONS P5).
-                match self.expr(*iter, frame)? {
-                    Value::List(list) => {
-                        for item in &list.items {
-                            self.matches(*pat, item, frame)?;
-                            if self.loop_body(e, body, frame)?.is_break() {
-                                break;
-                            }
-                        }
-                    }
-                    Value::Map(map) => {
-                        for (key, value) in map.iter() {
-                            self.matches(*pat, &pair(key.clone(), value.clone()), frame)?;
-                            if self.loop_body(e, body, frame)?.is_break() {
-                                break;
-                            }
-                        }
-                    }
-                    other => unreachable!("`for` goes over ranges and collections, not {other:?}"),
-                }
-                Value::Unit
+                return self.for_collection(e, *pat, *iter, body, frame);
             }
             ExprKind::Todo(message) => {
                 let message = match message {
@@ -1023,6 +982,93 @@ impl Interp<'_> {
         })
     }
 
+    // The collection forms are functions of their own, kept out of [`Interp::expr`], so its
+    // native frame, which every level of nesting and every call takes, stays small.
+
+    /// `xs[i]`, a copy of element `i`.
+    #[inline(never)]
+    fn index(&mut self, base: ExprId, index: ExprId, frame: &mut Frame, span: Span) -> Flow<Value> {
+        let Value::List(list) = self.expr(base, frame)? else { unreachable!("only lists are indexed") };
+        let (i, _) = self.int(index, frame)?;
+        Ok(list.items[element_at(i, list.items.len(), span)?].clone())
+    }
+
+    /// `[a, b]`.
+    #[inline(never)]
+    fn list(&mut self, elements: &[ExprId], frame: &mut Frame) -> Flow<Value> {
+        let mut items = Vec::with_capacity(elements.len());
+        for &element in elements {
+            items.push(self.expr(element, frame)?);
+        }
+        Ok(Value::List(Arc::new(ListValue { items })))
+    }
+
+    /// `["k": v]`, which sets its entries in order, so a key named twice keeps its first
+    /// place and its last value.
+    #[inline(never)]
+    fn map(&mut self, entries: &[(ExprId, ExprId)], frame: &mut Frame, span: Span) -> Flow<Value> {
+        let mut map = MapValue::default();
+        for &(key, value) in entries {
+            let key = self.expr(key, frame)?;
+            let value = self.expr(value, frame)?;
+            self.set(&mut map, key, value, span)?;
+        }
+        Ok(Value::Map(Arc::new(map)))
+    }
+
+    /// A call of `builtin`, which changes its receiver, a place, in place.
+    #[inline(never)]
+    fn change_call(
+        &mut self,
+        builtin: Builtin,
+        receiver: ExprId,
+        args: &[Arg],
+        frame: &mut Frame,
+        span: Span,
+    ) -> Flow<Value> {
+        let (root, path) = self.place(receiver, frame)?;
+        // The receiver's indices are checked before the arguments run, as when a method that
+        // doesn't change it reads it.
+        at(&frame[root.index()], &path)?;
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            values.push(self.expr(arg.value, frame)?);
+        }
+        let place = slot(&mut frame[root.index()], &path)?;
+        let value = self.change(builtin, place, values, span)?;
+        // Each record on the path has changed, as after an assignment.
+        for depth in (0..path.len()).rev() {
+            self.refine(at(&frame[root.index()], &path[..depth])?, span)?;
+        }
+        Ok(value)
+    }
+
+    /// `for pat in xs` over a list or a map. The loop goes over the collection as it was when
+    /// the loop started, so the body may change it (OPEN_QUESTIONS P5).
+    #[inline(never)]
+    fn for_collection(&mut self, e: ExprId, pat: PatId, iter: ExprId, body: &Block, frame: &mut Frame) -> Flow<Value> {
+        match self.expr(iter, frame)? {
+            Value::List(list) => {
+                for item in &list.items {
+                    self.matches(pat, item, frame)?;
+                    if self.loop_body(e, body, frame)?.is_break() {
+                        break;
+                    }
+                }
+            }
+            Value::Map(map) => {
+                for (key, value) in map.iter() {
+                    self.matches(pat, &pair(key.clone(), value.clone()), frame)?;
+                    if self.loop_body(e, body, frame)?.is_break() {
+                        break;
+                    }
+                }
+            }
+            other => unreachable!("`for` goes over ranges and collections, not {other:?}"),
+        }
+        Ok(Value::Unit)
+    }
+
     /// The fallback of an `else` form or a `check`.
     fn fallback(&mut self, fallback: &Fallback, frame: &mut Frame) -> Flow<Value> {
         match fallback {
@@ -1050,7 +1096,7 @@ impl Interp<'_> {
                 frame[id.index()] = value.clone();
                 true
             }
-            PatKind::Lit(lit) => equal(value, &self.expr(*lit, frame)?, &self.p.decls),
+            PatKind::Lit(lit) => equal(value, &self.expr(*lit, frame)?),
             PatKind::Range { lo, hi, inclusive } => {
                 let lo = self.expr(*lo, frame)?;
                 let hi = self.expr(*hi, frame)?;
@@ -1261,7 +1307,7 @@ impl Interp<'_> {
     /// `site`.
     fn equal(&mut self, a: &Value, b: &Value, site: Span) -> Flow<bool> {
         let p = self.p;
-        equal_with(a, b, &p.decls, &mut |a, b| {
+        equal_with(a, b, &mut |a, b| {
             let Some(f) = hand_written(a, IfaceId::EQ, &p.decls) else { return Ok(None) };
             match self.call(f, vec![a.clone(), b.clone()], site)? {
                 Value::Bool(same) => Ok(Some(same)),
@@ -1277,7 +1323,8 @@ fn pair(a: Value, b: Value) -> Value {
 }
 
 /// The lines of `text` without their `\n` or `\r\n` endings. A final line ending doesn't
-/// start an empty line, and a `\r` without a `\n` after it ends nothing (STD.md).
+/// start an empty line (STD.md), and a `\r` without a `\n` after it ends nothing
+/// (OPEN_QUESTIONS P5).
 fn lines(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut rest = text;
@@ -1362,16 +1409,16 @@ enum Step {
     Index(i128, Span),
 }
 
-/// The value at `path` inside `value`, whose indices [`slot`] has checked.
-fn at<'v>(mut value: &'v Value, path: &[Step]) -> &'v Value {
+/// The value at `path` inside `value`. An index outside its list is a defect.
+fn at<'v>(mut value: &'v Value, path: &[Step]) -> Flow<&'v Value> {
     for step in path {
         value = match (step, value) {
             (Step::Field(i), Value::Adt(adt)) => &adt.fields[i.index()],
-            (Step::Index(i, _), Value::List(list)) => &list.items[*i as usize],
+            (Step::Index(i, span), Value::List(list)) => &list.items[element_at(*i, list.items.len(), *span)?],
             _ => unreachable!("paths go through records and lists"),
         };
     }
-    value
+    Ok(value)
 }
 
 /// The slot `path` names inside `value`. Each record and list on the way is copied first if
@@ -1524,8 +1571,8 @@ fn sorted_entries(map: &MapValue) -> Vec<(&Value, &Value)> {
 
 /// `==` as built into scalars and derived for records and enums, which are equal when their
 /// variants and every field are. Floats follow IEEE, so NaN is unequal to everything.
-fn equal(a: &Value, b: &Value, decls: &Decls) -> bool {
-    match equal_with(a, b, decls, &mut |_, _| Ok::<_, Infallible>(None)) {
+fn equal(a: &Value, b: &Value) -> bool {
+    match equal_with(a, b, &mut |_, _| Ok::<_, Infallible>(None)) {
         Ok(same) => same,
         Err(never) => match never {},
     }
@@ -1539,8 +1586,8 @@ type HandWrittenEq<'a, E> = dyn FnMut(&Value, &Value) -> Result<Option<bool>, E>
 /// are equal when their elements are, in order, and maps when they map the same keys to equal
 /// values, in any order (OPEN_QUESTIONS P5). It walks nested values with a list of its own
 /// rather than recursion, so no value is too deep for the native stack. Only finding a key
-/// in a map compares keys by recursion.
-fn equal_with<E>(a: &Value, b: &Value, decls: &Decls, hand_written: &mut HandWrittenEq<'_, E>) -> Result<bool, E> {
+/// among several with its hash compares keys by recursion.
+fn equal_with<E>(a: &Value, b: &Value, hand_written: &mut HandWrittenEq<'_, E>) -> Result<bool, E> {
     let mut pairs = vec![(a, b)];
     while let Some(pair) = pairs.pop() {
         let same = match pair {
@@ -1566,14 +1613,22 @@ fn equal_with<E>(a: &Value, b: &Value, decls: &Decls, hand_written: &mut HandWri
             }
             (Value::Map(x), Value::Map(y)) => {
                 let mut same = x.len() == y.len();
-                for (key, value) in x.iter() {
+                for (hash, key, value) in x.entries.iter().flatten() {
                     if !same {
                         break;
                     }
-                    let hash = hash_value(key, decls);
-                    match y.find(key, hash, &mut |p, q| equal_with(p, q, decls, hand_written))? {
-                        Some(at) => pairs.push((value, y.value_at(at))),
-                        None => same = false,
+                    // A key with the only hash of its kind in `y` is equal to that key or to
+                    // none, so the two are compared with the rest, with no native stack.
+                    match y.candidates(*hash) {
+                        [] => same = false,
+                        &[at] => {
+                            pairs.push((value, y.value_at(at)));
+                            pairs.push((key, y.key_at(at)));
+                        }
+                        _ => match y.find(key, *hash, &mut |p, q| equal_with(p, q, hand_written))? {
+                            Some(at) => pairs.push((value, y.value_at(at))),
+                            None => same = false,
+                        },
                     }
                 }
                 same
@@ -1822,7 +1877,7 @@ mod tests {
     #[test]
     fn nan_is_unequal_to_itself() {
         let nan = Value::F64(f64::NAN);
-        assert!(!equal(&nan, &nan, &Decls::default()));
+        assert!(!equal(&nan, &nan));
         assert!(!compare(BinOp::Lt, &nan, &nan));
         assert!(!compare(BinOp::Ge, &nan, &nan));
     }
@@ -1871,7 +1926,7 @@ mod tests {
             let (a, b, c) = (build(100_000, 0), build(100_000, 0), build(100_000, 1));
             let text = show(&a, &decls);
             let start = text.starts_with("IntList.Cons(head: 99999, tail: IntList.Cons(head: 99998, tail: ");
-            (equal(&a, &b, &decls), equal(&a, &c, &decls), text.len(), start)
+            (equal(&a, &b), equal(&a, &c), text.len(), start)
         });
         // Each node writes `IntList.Cons(head: `, `, tail: ` and `)` around its head: 28
         // characters, 488,890 digits in all, and 11 for `IntList.Nil`.
@@ -1880,7 +1935,7 @@ mod tests {
 
     /// Lists and maps nested through a recursive enum, as `Node(kids: [t])` and
     /// `Fork(kids: [0: t])` nest them, are also dropped, compared, ordered, hashed and written
-    /// without native stack per level.
+    /// without native stack per level, and so are maps nested through their keys.
     #[test]
     fn deep_collections_need_no_native_stack() {
         let mut decls = Decls::default();
@@ -1893,6 +1948,16 @@ mod tests {
         };
         let node =
             move |kids: Value| Value::Adt(Adt { def: tree, variant: VariantIdx::new(1), fields: Arc::new([kids]) });
+        // A map whose one key is the tree so far, as `Fork(kids: [t: 0])` nests it.
+        let keyed = move |n: usize, last: i128| {
+            let mut value = leaf(last);
+            for _ in 0..n {
+                let mut kids = MapValue::default();
+                kids.insert(hash_value(&value, &Decls::default()), value, Value::Int(0, IntTy::I64));
+                value = node(Value::Map(Arc::new(kids)));
+            }
+            value
+        };
         let build = move |n: usize, last: i128, map: bool| {
             let mut value = leaf(last);
             for _ in 0..n {
@@ -1915,13 +1980,21 @@ mod tests {
                 let (a, b, c) = (build(100_000, 0, map), build(100_000, 0, map), build(100_000, 1, map));
                 let ordered = order(&a, &c) == Some(Ordering::Less);
                 let hashed = hash_value(&a, &decls) == hash_value(&b, &decls);
-                out.push((equal(&a, &b, &decls), equal(&a, &c, &decls), ordered, hashed, show(&a, &decls).len()));
+                out.push((equal(&a, &b), equal(&a, &c), ordered, hashed, show(&a, &decls).len()));
             }
+            let (a, b, c) = (keyed(100_000, 0), keyed(100_000, 0), keyed(100_000, 1));
+            let ordered = order(&a, &c) == Some(Ordering::Less);
+            let hashed = hash_value(&a, &decls) == hash_value(&b, &decls);
+            out.push((equal(&a, &b), equal(&a, &c), ordered, hashed, show(&a, &decls).len()));
             out
         });
         // `Tree.Node(kids: [` and `])` are 19 characters a level, and `Tree.Leaf(n: 0)` 15.
         // A map's level writes `0: ` too.
-        let expected = vec![(true, false, true, true, 1_900_015), (true, false, true, true, 2_200_015)];
+        let expected = vec![
+            (true, false, true, true, 1_900_015),
+            (true, false, true, true, 2_200_015),
+            (true, false, true, true, 2_200_015),
+        ];
         assert_eq!(result.unwrap().join().unwrap(), expected);
     }
 }

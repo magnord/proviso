@@ -4,7 +4,8 @@
 // An index outside the list is an `index_out_of_bounds` defect, for a read and for an
 // assignment, at 0's other side and at the length (STD.md). The last element and the
 // first are in bounds. `get` gives `None` instead. A failed assignment changes nothing,
-// since the defect ends the example.
+// since the defect ends the example. A method that changes its receiver checks the
+// receiver's indices before its arguments run, so `at` writes nothing (OPEN_QUESTIONS P5).
 fn read(i: Int) -> Int {
     let xs = [10, 20, 30]
     return xs[i]
@@ -22,6 +23,17 @@ fn nested(i: Int) -> Int {
     return grid[1][i]
 }
 
+fn at(i: Int) -> Int {
+    debug(i)
+    return i
+}
+
+fn pushed(i: Int) -> List[List[Int]] {
+    var grid = [[1], [2]]
+    grid[i].push(at(7))
+    return grid
+}
+
 example read(2) == 30
 example read(0) == 10
 example read(3) == 0
@@ -31,3 +43,5 @@ example write(2) == [10, 20, 0]
 example write(3) == []
 example nested(1) == 4
 example nested(2) == 0
+example pushed(1) == [[1], [2, 7]]
+example pushed(2) == []
