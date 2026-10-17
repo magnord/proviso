@@ -14,6 +14,7 @@ pub mod types;
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use proviso_syntax::arena::SideTable;
 use proviso_syntax::ast::*;
@@ -267,15 +268,22 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         checker.body(id);
     }
     checker.examples();
-    debug_assert!(!checker.p.expr_ty.values().any(holds_var), "an inference variable was left in `expr_ty`");
+    debug_assert!(
+        !checker.p.expr_ty.values().any(|ty| holds_var(ty, &mut HashSet::new())),
+        "an inference variable was left in `expr_ty`"
+    );
     checker.p
 }
 
-/// Whether `ty` has an inference variable in it, which [`Program`] never does.
-fn holds_var(ty: &Ty) -> bool {
+/// Whether `ty` has an inference variable in it, which [`Program`] never does. `seen` holds
+/// the addresses of the argument lists already walked, so a type that shares a part, as
+/// `(t, t)` does, costs each part once.
+fn holds_var(ty: &Ty, seen: &mut HashSet<usize>) -> bool {
     match ty {
         Ty::Var(_) => true,
-        Ty::Adt(_, args) => args.iter().any(holds_var),
+        Ty::Adt(_, args) => {
+            seen.insert(Arc::as_ptr(args) as *const Ty as usize) && args.iter().any(|arg| holds_var(arg, seen))
+        }
         _ => false,
     }
 }
@@ -388,6 +396,9 @@ struct Marker {
     /// What handles their failure (see [`Program::handler_of`]), or `None` for a `try`.
     handler: Option<ExprId>,
     errors: Vec<Ty>,
+    /// The error type the handler gives its calls before its chain is checked: the function's
+    /// `fails` under `try`, or the error type of the `Result` an `attempt` is expected to be.
+    target: Option<Ty>,
 }
 
 /// Whether an `if` is used for its value, as a statement, or as the last statement of a
@@ -2202,7 +2213,7 @@ impl Checker<'_> {
     /// Checks one example. `call == v` reads its operands as `==` does, so either may give
     /// the other its type (OPEN_QUESTIONS P5; issue #10).
     fn example(&mut self, decl: &ExampleDecl) {
-        self.markers.push(Marker { handler: Some(decl.call), errors: Vec::new() });
+        self.markers.push(Marker { handler: Some(decl.call), errors: Vec::new(), target: None });
         self.in_chain = true;
         let ty = self.expr(decl.call, None);
         let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
@@ -3114,7 +3125,7 @@ impl Checker<'_> {
     /// and the fallback's are joined, so either may give the other its type arguments and
     /// literal types, and so may the type the form is expected to have (issue #10).
     fn else_expr(&mut self, e: ExprId, value: ExprId, fallback: &Fallback, expected: Option<&Ty>, copying: bool) -> Ty {
-        self.markers.push(Marker { handler: Some(e), errors: Vec::new() });
+        self.markers.push(Marker { handler: Some(e), errors: Vec::new(), target: None });
         self.in_chain = true;
         self.copying = copying;
         let value_ty = self.expr(value, None);
@@ -4178,9 +4189,28 @@ impl Checker<'_> {
         }
         match self.markers.last_mut() {
             Some(marker) if chain => {
+                // A later part of the chain may need its type settled, as a receiver does,
+                // which would settle an error type that only `Never` or a hole has reached as
+                // `Never`. So it joins what the handler knows now, as the handler will. A `try`
+                // knows its function's `fails`, and the others the error type of the chain's
+                // first call, or else the one an `attempt` is expected to have (OPEN_QUESTIONS
+                // P5).
+                let known = match marker.handler {
+                    None => marker.target.clone(),
+                    Some(_) => marker.errors.first().or(marker.target.as_ref()).cloned(),
+                };
                 marker.errors.push(err.clone());
                 if let Some(handler) = marker.handler {
                     self.p.handler_of.insert(call, handler);
+                }
+                // A mismatch is reported once the handler joins them all. An error isn't
+                // joined, since it would poison the other side and hide that side's own
+                // mistakes (§15.1).
+                if let Some(known) = known
+                    && self.vars.resolve(&known) != Ty::Error
+                    && self.vars.resolve(err) != Ty::Error
+                {
+                    let _ = self.vars.subsume(&known, err) && self.vars.subsume(err, &known);
                 }
             }
             _ => {
@@ -4208,7 +4238,8 @@ impl Checker<'_> {
     }
 
     fn try_expr(&mut self, inner: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
-        self.markers.push(Marker { handler: None, errors: Vec::new() });
+        let target = self.f.fails.clone().filter(|own| *own != Ty::Error);
+        self.markers.push(Marker { handler: None, errors: Vec::new(), target });
         self.in_chain = true;
         let ty = self.expr(inner, expected);
         let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
@@ -4292,11 +4323,11 @@ impl Checker<'_> {
     /// `attempt f(…)`: a `Result` of the chain's value and the error of the calls it marks
     /// (REFERENCE §7.2).
     fn attempt_expr(&mut self, e: ExprId, inner: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
-        let value_expected = match expected {
-            Some(Ty::Adt(AdtId::RESULT, args)) => Some(args[0].clone()),
-            _ => None,
+        let (value_expected, target) = match expected {
+            Some(Ty::Adt(AdtId::RESULT, args)) => (Some(args[0].clone()), Some(args[1].clone())),
+            _ => (None, None),
         };
-        self.markers.push(Marker { handler: Some(e), errors: Vec::new() });
+        self.markers.push(Marker { handler: Some(e), errors: Vec::new(), target });
         self.in_chain = true;
         let ty = self.expr(inner, value_expected.as_ref());
         let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
@@ -4318,8 +4349,6 @@ impl Checker<'_> {
         }
     }
 
-    /// Reports the `attempt` or `else` form at `span` if its calls fail with `Never`, which
-    /// can't happen, once the statement settles `err` (OPEN_QUESTIONS P5, `fails Never`).
     /// Whether a `todo` hole met one of `errors`, the error types of the calls a handler
     /// marks, which a chain may have settled before [`Checker::one_error`] joins them, as a
     /// receiver's type is (Q25).
@@ -4327,6 +4356,8 @@ impl Checker<'_> {
         errors.iter().any(|err| self.vars.from_hole(err))
     }
 
+    /// Reports the `attempt` or `else` form at `span` if its calls fail with `Never`, which
+    /// can't happen, once the statement settles `err` (OPEN_QUESTIONS P5, `fails Never`).
     fn wait_can_fail(&mut self, err: &Ty, handler: Handler, span: Span) {
         if self.vars.has_open(err) {
             self.pending.push(Pending::CanFail { err: err.clone(), handler, span });

@@ -188,6 +188,52 @@ fn a_deep_chain_of_blocks_is_too_deep_once() {
     }
 }
 
+/// Runs `proviso check` on `file`, and fails the test if it takes longer than `secs`.
+fn check_within(file: &PathBuf, secs: u64) -> Output {
+    let mut child = proviso().arg("check").arg(file).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let start = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed().as_secs() >= secs {
+            child.kill().unwrap();
+            panic!("checking {} took longer than {secs} s", file.display());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    child.wait_with_output().unwrap()
+}
+
+/// Whether a type has values is asked of each part once, though `(t, t)` doubles the tree
+/// that the type stands for, so a `match` or `let` pattern on it checks as fast as the rest
+/// (OPEN_QUESTIONS P5, Exhaustiveness limit). The answer still comes from the leaves: an
+/// enum without variants leaves the tuples built from it without values (P5).
+#[test]
+fn exhaustiveness_asks_a_shared_type_part_once() {
+    let lets: String = (1..=40).map(|i| format!("    let t{i} = (t{}, t{})\n", i - 1, i - 1)).collect();
+    let cases = [
+        ("Int", "    return match t40 {\n        _ => 1\n    }\n", 0),
+        ("Int", "    let (a, b) = t40\n    return 0\n", 0),
+        ("Int", "    return match Some(t40) {\n        Some(_) => 1\n        None => 0\n    }\n", 0),
+        ("Void", "    return match t40 {}\n", 0),
+        ("Void", "    return match Some(t40) {\n        None => 0\n    }\n", 0),
+        ("Int", "    return match t40 {}\n", 65),
+        ("Int", "    return match Some(t40) {\n        None => 0\n    }\n", 65),
+        ("Int", "    return match (t40, v) {}\n", 0),
+        ("Int", "    return match (v, t40) {}\n", 0),
+        ("Int", "    return match (t40, Some(v)) {}\n", 65),
+        ("Int", "    return match Some((t39, (t40, v))) {\n        None => 0\n    }\n", 0),
+    ];
+    for (i, (leaf, tail, code)) in cases.into_iter().enumerate() {
+        let text =
+            format!("enum Void {{}}\n\nfn f(x: {leaf}, v: Void) -> Int {{\n    let t0 = (x, x)\n{lets}{tail}}}\n");
+        let file = source(&format!("shared_{i}.proviso"), &text);
+        let output = check_within(&file, 20);
+        assert_eq!(output.status.code(), Some(code), "case {i}: {}", stderr(&output));
+        if code == 65 {
+            assert_eq!(stderr(&output).matches("error[E0311]").count(), 1, "case {i}: {}", stderr(&output));
+        }
+    }
+}
+
 /// A program whose recursion runs the interpreter's stack low while each call compares or
 /// shows a value nested `depth` records deep, so that work runs right next to the limit.
 fn deep_records(depth: usize, probe: &str) -> String {

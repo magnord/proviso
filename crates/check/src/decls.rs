@@ -2,8 +2,10 @@
 //! module, with the module's implementations. Questions about a type that depend on what it
 //! declares, such as its name or the interfaces it implements, are answered here.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 
 use proviso_syntax::ast::{ExprId, ParamMode};
 
@@ -522,7 +524,8 @@ impl Decls {
             }
         }
         graph.run();
-        Inhabited { adts: graph.nodes[..self.adts.len()].iter().map(|n| n.fired).collect() }
+        let adts = graph.nodes[..self.adts.len()].iter().map(|n| n.fired).collect();
+        Inhabited { adts, applied: RefCell::default() }
     }
 
     /// Whether `ty` implements `iface`: built in, derived (STD.md) or by an `impl`. Type
@@ -655,17 +658,30 @@ impl Decls {
 /// Which types have values (see [`Decls::inhabited`]).
 pub struct Inhabited {
     adts: Vec<bool>,
+    /// Whether each record or enum with type arguments asked about so far has values, by its
+    /// id and the address of its argument list. A type never changes, so the answer stays,
+    /// and the entry holds the list so its address isn't reused. A type that shares a part,
+    /// as `(t, t)` does, is then asked about once per part, not once per leaf of its tree.
+    applied: RefCell<Applied>,
 }
+
+type Applied = HashMap<(AdtId, usize), (Arc<[Ty]>, bool)>;
 
 impl Inhabited {
     pub fn has_values(&self, decls: &Decls, ty: &Ty) -> bool {
         match ty {
             Ty::Never => false,
             Ty::Adt(id, args) if !args.is_empty() => {
+                let key = (*id, Arc::as_ptr(args) as *const Ty as usize);
+                if let Some((_, answer)) = self.applied.borrow().get(&key) {
+                    return *answer;
+                }
                 let def = decls.adt(*id);
-                (0..def.variants.len()).any(|v| {
+                let answer = (0..def.variants.len()).any(|v| {
                     def.field_types(VariantIdx::new(v), args).iter().all(|field| self.has_values(decls, field))
-                })
+                });
+                self.applied.borrow_mut().insert(key, (args.clone(), answer));
+                answer
             }
             Ty::Adt(id, _) => self.adts[id.index()],
             _ => true,
