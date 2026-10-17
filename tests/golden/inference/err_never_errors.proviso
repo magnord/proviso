@@ -5,6 +5,7 @@
 // expect-error: E0701
 // expect-error: E0702
 // expect-error: E0703
+// expect-error: E0705
 // expect-error: E0706
 // expect-error: E0707
 // expect-error: E0708
@@ -14,7 +15,8 @@
 // `else` E0707, and an example of its failure is E0708. An error type that a rejected value
 // also reached is that value's error, so the call can still fail, and a `try` chain with a
 // call that didn't resolve may have held one that fails (REFERENCE §15.1; issue #30). Two
-// calls of one chain that fail with the same type are one E0702.
+// calls of one chain that fail with the same type are one E0702. A `fail` without `fails`
+// leaves but gives no `Never`, so it is its own error alone.
 
 record Box {
     n: Int
@@ -80,5 +82,13 @@ fn handled() -> Int {
     return 0
 }
 
+fn rejected_fails() -> Int {
+    let f1 = rethrow(e: fail "f1") else 0           // <- E0705
+    let f2 = attempt rethrow(e: fail "f2")          // <- E0705
+    let f3 = try rethrow(e: fail "f3")              // <- E0705
+    return f1
+}
+
+example rethrow(e: fail "f4") fails _              // <- E0705
 example rethrow(e: stop()) fails _                  // <- E0708
 example rethrow::[Never](e: stop()) fails _         // <- E0708

@@ -1,4 +1,5 @@
 // phase: 2.5
+// expect-error: E0201
 // expect-error: E0301
 // expect-error: E0312
 // expect-error: E0415
@@ -99,7 +100,11 @@ fn values(c: Bool) -> Int fails Text {
         let t = zero(second(a: it, b: "a12"))
         fail "a12b"
     }
-    return a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12
+    let a13 = opened() else {                       // <- E0707
+        let p = (nope, second(a: fail "a13", b: it)) // <- E0201
+        fail "a13b"
+    }
+    return a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13
 }
 
 fn branch_values(c: Bool) -> Int fails Text {
@@ -132,7 +137,26 @@ fn branch_values(c: Bool) -> Int fails Text {
         }
         fail "v3"
     }
-    return v1 + v2 + v3
+    let v4 = opened() else {                        // <- E0707
+        let x = if c {
+            5
+        } else {
+            second(a: fail "v4", b: it)
+            let z = 1
+        }
+        fail "v4b"
+    }
+    let v5 = opened() else {                        // <- E0707
+        let x = match c {
+            false => 5
+            true => {
+                second(a: fail "v5", b: it)
+                let z = 1
+            }
+        }
+        fail "v5b"
+    }
+    return v1 + v2 + v3 + v4 + v5
 }
 
 fn checks(c: Bool) -> Int fails Text {

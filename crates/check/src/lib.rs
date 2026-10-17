@@ -692,6 +692,16 @@ impl Checker<'_> {
         self.now(flow)
     }
 
+    /// Whether a value of type `expected` may be `()`: it is `Unit`, an error, or a variable
+    /// that isn't a literal's.
+    fn takes_unit(&self, expected: &Ty) -> bool {
+        match self.vars.resolve(expected) {
+            Ty::Unit | Ty::Error => true,
+            Ty::Var(v) => self.vars.open(v).is_some_and(|open| open.kind == Kind::Any),
+            _ => false,
+        }
+    }
+
     /// Reports a block that ends without the value of type `expected` it must give.
     fn ends_without_value(&mut self, expected: &Ty, span: Span) {
         self.error(
@@ -718,6 +728,9 @@ impl Checker<'_> {
         let mut unknown: Vec<Origin> = Vec::new();
         for v in vars {
             let Some(open) = self.vars.open(v).cloned() else { continue };
+            if open.hole && open.never && !open.quiet {
+                self.vars.settled_hole(v);
+            }
             let ty = match open.kind {
                 Kind::Int => Ty::INT,
                 Kind::Float => Ty::Float(FloatTy::F64),
@@ -2226,11 +2239,11 @@ impl Checker<'_> {
             Expectation::Fails(pat) => {
                 let err = match err {
                     Some(err) => {
-                        let err = self.force(&err);
+                        let forced = self.force(&err);
                         if ty != Ty::Error {
                             self.can_fail(&err, Handler::Example, span);
                         }
-                        err
+                        forced
                     }
                     None => {
                         if !ty.is_unknown() {
@@ -2734,7 +2747,7 @@ impl Checker<'_> {
             // reported then if it can finish (issue #30).
             (None, Some(expected))
                 if let Flow::Waits(v) = flow
-                    && !matches!(self.vars.resolve(expected), Ty::Unit | Ty::Var(_) | Ty::Error) =>
+                    && !self.takes_unit(expected) =>
             {
                 let must = Must::Value { expected: expected.clone(), span: block.span.end() };
                 self.pending.push(Pending::Leaves { ty: Ty::Var(v), must });
@@ -2981,6 +2994,8 @@ impl Checker<'_> {
                             "`fail` in a `where` clause, which has no function to fail"
                         };
                         self.error(codes::FAIL_WITHOUT_FAILS, span, message);
+                        // It leaves, and gives what it meets no `Never` (§15.1).
+                        return Ty::Error;
                     }
                 }
                 Ty::Never
@@ -3015,7 +3030,7 @@ impl Checker<'_> {
                 }
             }
             ExprKind::For { label, binding, iter, body } => self.for_loop(e, *label, *binding, *iter, body),
-            ExprKind::Todo(_) if self.opts.incomplete => Ty::Never,
+            ExprKind::Todo(_) if self.opts.incomplete => self.vars.hole(),
             ExprKind::Todo(_) => {
                 self.error(
                     codes::TODO_REQUIRES_INCOMPLETE,
@@ -3071,13 +3086,16 @@ impl Checker<'_> {
             };
             tys.push(ty);
         }
-        // A tuple with an error is one, which was the one to give the others' type arguments.
-        self.rejected_parts(&tys);
+        // An element with an error gives the tuple a part that a later value may still give a
+        // type, so a tuple that meets another is not reported again. It gives the others no
+        // type, so what they leave open is still reported (§15.1; issue #30).
+        let tys = tys.into_iter().map(|ty| if ty == Ty::Error { self.vars.rejected() } else { ty }).collect();
         self.p.decls.tuple_ty(tys)
     }
 
     /// Marks the type arguments that `tys` leave open as a rejected value's when one of them
-    /// is an error: the parts of a tuple, or the branches of an `if` or `match` (§15.1).
+    /// is an error: the branches of an `if` or `match`, one of which may have given them
+    /// (§15.1).
     fn rejected_parts(&mut self, tys: &[Ty]) {
         if tys.contains(&Ty::Error) {
             tys.iter().for_each(|ty| self.vars.quiet(ty));
@@ -4233,6 +4251,8 @@ impl Checker<'_> {
     /// was `rejected` or a call's error type has an error, which may have been one that can
     /// fail (§15.1; issue #30). Calls that fail with one type are one mistake.
     fn try_without_fails(&mut self, errs: Vec<Ty>, rejected: bool, span: Span) {
+        // A `todo` hole may stand for a value of the type a call fails with (Q25).
+        let rejected = rejected || errs.iter().any(|err| self.vars.from_hole(err));
         let mut settled: Vec<Ty> = Vec::new();
         for err in errs.iter().map(|err| self.vars.zonk(err)) {
             if !settled.contains(&err) {
@@ -4302,7 +4322,7 @@ impl Checker<'_> {
     }
 
     fn can_fail(&mut self, err: &Ty, handler: Handler, span: Span) {
-        if self.vars.zonk(err) != Ty::Never {
+        if self.vars.zonk(err) != Ty::Never || self.vars.from_hole(err) {
             return;
         }
         match handler {

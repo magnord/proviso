@@ -50,6 +50,9 @@ pub struct Open {
     pub unmarked: bool,
     /// A `try` with no `fails` to take it needs it.
     pub owed: bool,
+    /// A `todo` hole reached it, which stands for a value of any type, so a `Never` it
+    /// settles as is not one that a call's failure can be told from (Q25; issue #30).
+    pub hole: bool,
     pub origin: Origin,
 }
 
@@ -81,6 +84,8 @@ pub struct Vars {
     /// Each variable in the order it was bound, so a statement can find the variables of the
     /// expressions around it that it gave a type.
     trail: Vec<u32>,
+    /// The roots that settled as `Never` with a `todo` hole among what reached them.
+    holes: Vec<u32>,
 }
 
 type Shapes = HashMap<usize, (Arc<[Ty]>, Shape), BuildHasherDefault<AddressHasher>>;
@@ -115,6 +120,7 @@ impl Vars {
         self.shapes.get_mut().clear();
         self.ground.get_mut().clear();
         self.trail.clear();
+        self.holes.clear();
     }
 
     /// How many variables have been bound so far.
@@ -174,21 +180,68 @@ impl Vars {
     }
 
     pub fn fresh(&mut self, kind: Kind, origin: Origin) -> Ty {
-        self.states.push(State::Open(Open { kind, never: false, quiet: false, unmarked: false, owed: false, origin }));
+        self.states.push(State::Open(Open {
+            kind,
+            never: false,
+            quiet: false,
+            unmarked: false,
+            owed: false,
+            hole: false,
+            origin,
+        }));
         Ty::Var(self.count() - 1)
     }
 
     /// A variable that only `Never` has reached, as a `Never` in an expected type is.
     fn never(&mut self) -> Ty {
+        self.never_from(false)
+    }
+
+    /// The type of a `todo` hole: `Never` unless what it meets gives it a type, and marked
+    /// as a hole's.
+    pub fn hole(&mut self) -> Ty {
+        self.never_from(true)
+    }
+
+    fn never_from(&mut self, hole: bool) -> Ty {
         self.states.push(State::Open(Open {
             kind: Kind::Any,
             never: true,
             quiet: false,
             unmarked: false,
             owed: false,
+            hole,
             origin: Origin::Defaulted,
         }));
         Ty::Var(self.count() - 1)
+    }
+
+    /// A variable that a rejected value stands for in a type built from parts, such as a
+    /// tuple's element, so the others keep their own type arguments (§15.1).
+    pub fn rejected(&mut self) -> Ty {
+        let ty = self.fresh(Kind::Any, Origin::Defaulted);
+        self.quiet(&ty);
+        ty
+    }
+
+    /// Notes that open variable `v`, which a `todo` hole reached, settled as `Never`.
+    pub fn settled_hole(&mut self, v: u32) {
+        self.holes.push(self.root(v));
+    }
+
+    /// Whether `ty` is a variable that settled as `Never` because a `todo` hole reached it.
+    pub fn from_hole(&self, ty: &Ty) -> bool {
+        let mut ty = ty;
+        while let Ty::Var(v) = ty {
+            if self.holes.contains(v) {
+                return true;
+            }
+            match &self.states[*v as usize] {
+                State::Bound(next) => ty = next,
+                State::Open(_) => return false,
+            }
+        }
+        false
     }
 
     /// The variable `v` stands for: itself, or the one it was joined with.
@@ -425,9 +478,10 @@ impl Vars {
         let quiet = kept.quiet || other.quiet;
         let unmarked = kept.unmarked || other.unmarked;
         let owed = kept.owed || other.owed;
+        let hole = kept.hole || other.hole;
         // An error about the class names the value that first left it open.
         let origin = if matches!(kept.origin, Origin::Defaulted) { other.origin } else { kept.origin };
-        self.states[keep as usize] = State::Open(Open { kind, never, quiet, unmarked, owed, origin });
+        self.states[keep as usize] = State::Open(Open { kind, never, quiet, unmarked, owed, hole, origin });
         self.states[gone as usize] = State::Bound(Ty::Var(keep));
         self.trail.push(gone);
         true
