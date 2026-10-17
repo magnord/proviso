@@ -4,8 +4,8 @@
 // given isn't reported again (§15.1). `Set` has no literal or constructor yet (OPEN_QUESTIONS
 // §G), and STD.md doesn't declare `Array`. Consuming loops wait for moves, the operations
 // that take a closure for effect variables (STD.md), the predicates of §8.1 for the
-// verifier, and `inout` parameters and `&` arguments for `inout` atomicity. `split` is one
-// of the `Text` functions of §12.3 that STD.md doesn't declare.
+// verifier, and `inout` parameters and `&` arguments for `inout` atomicity. STD.md declares
+// no `swap` (§5.3), and `split` is one of the `Text` functions of §12.3 it doesn't declare.
 fn sets(s: Set[Int]) -> Int {                       // <- E0901
     return s.len()
 }

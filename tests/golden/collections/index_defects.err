@@ -1,12 +1,12 @@
 defect[index_out_of_bounds]: index 3 is out of bounds for a list of length 3
-  at collections/index_defects.proviso:10:12 (index_defects.read+2)
+  at collections/index_defects.proviso:10:12 (index_defects.read+3)
   called from collections/index_defects.proviso:27:9 (index_defects)
 defect[index_out_of_bounds]: index -1 is out of bounds for a list of length 3
-  at collections/index_defects.proviso:10:12 (index_defects.read+2)
+  at collections/index_defects.proviso:10:12 (index_defects.read+3)
   called from collections/index_defects.proviso:28:9 (index_defects)
 defect[index_out_of_bounds]: index 3 is out of bounds for a list of length 3
-  at collections/index_defects.proviso:15:5 (index_defects.write+2)
+  at collections/index_defects.proviso:15:5 (index_defects.write+3)
   called from collections/index_defects.proviso:31:9 (index_defects)
 defect[index_out_of_bounds]: index 2 is out of bounds for a list of length 2
-  at collections/index_defects.proviso:21:5 (index_defects.nested+2)
+  at collections/index_defects.proviso:21:5 (index_defects.nested+3)
   called from collections/index_defects.proviso:33:9 (index_defects)

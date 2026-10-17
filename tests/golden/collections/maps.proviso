@@ -4,7 +4,8 @@
 // again goes last. `for` goes over the entries as `(k, v)` (§6.5). `Show` writes the
 // literal form in insertion order, and `[:]` when empty. Two maps are equal when they map
 // the same keys to equal values, in any order, and they are ordered by their entries
-// sorted by key (OPEN_QUESTIONS P5). REFERENCE §1's `bump` counts words.
+// sorted by key (OPEN_QUESTIONS P5). `bump` is REFERENCE §1's, returning a new map, since
+// `inout` parameters come later.
 use std.io { IoError }
 
 fn basics() -> Text {
