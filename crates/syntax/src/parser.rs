@@ -1980,12 +1980,29 @@ impl Parser<'_> {
         Ok(self.alloc(kind, span))
     }
 
-    /// Reports `open` as never closed when the next token starts a line no deeper than the
-    /// line that opened it, as [`Parser::close`] does, so a trailing comma before a missing
-    /// `]` doesn't make the next statement an element.
+    /// Reports `open` as never closed when what follows a comma can only start a statement
+    /// or an item, or close a block, on a line no deeper than the line that opened it, so a
+    /// trailing comma before a missing `]` doesn't make the next statement an element. An
+    /// element may start any line, since the bracket continues the statement (REFERENCE §2).
     fn still_open(&mut self, open: &Token) -> PResult<()> {
         let next = self.peek().span;
-        if self.at(T::Eof) || (self.starts_line(next) && self.indent(next) <= self.indent(open.span)) {
+        let statement = matches!(
+            self.kind(),
+            T::RBrace
+                | T::Keyword(
+                    Kw::Let
+                        | Kw::Var
+                        | Kw::Return
+                        | Kw::Break
+                        | Kw::Continue
+                        | Kw::Check
+                        | Kw::Assert
+                        | Kw::For
+                        | Kw::While
+                        | Kw::Loop
+                )
+        ) || self.starts_item();
+        if self.at(T::Eof) || (statement && self.starts_line(next) && self.indent(next) <= self.indent(open.span)) {
             return self.unclosed(open);
         }
         Ok(())

@@ -5,7 +5,8 @@
 // over the list as it was when the loop started (OPEN_QUESTIONS P5). `pop` takes the last
 // element, and `get` gives `None` for an index outside the list, also below 0. `Show`
 // writes the literal form with its elements quoted, as a tuple's (STD.md). Lists are
-// ordered element by element from the left, so a prefix comes first.
+// ordered element by element from the left, so a prefix comes first. A literal may span
+// lines at any indent, since its bracket continues the statement (§2).
 use std.io { IoError }
 
 record Point derives(Eq, Show) {
@@ -136,6 +137,22 @@ fn generic() -> Text {
     return f"{a} {b} {c} {d} {e}"
 }
 
+fn layouts() -> Text {
+    let a = [1,
+    2]
+    let b = [
+    3,
+    4,
+    ]
+    let c = ["k": 5,
+    "j": 6]
+    let d = [
+        [7,
+        8],
+    ]
+    return f"{a} {b} {c} {d}"
+}
+
 pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(basics())
     try sys.stdout.write_line(copies())
@@ -147,4 +164,5 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(comparing())
     try sys.stdout.write_line(shown())
     try sys.stdout.write_line(generic())
+    try sys.stdout.write_line(layouts())
 }

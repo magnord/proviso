@@ -2,8 +2,8 @@
 // expect-error: E0101
 // expect-error: E0102
 // A broken literal or index is one error at the token that breaks it, and the next
-// statement still parses. A `[` that a trailing comma leaves open is reported at the
-// bracket, as an unclosed `(` is (OPEN_QUESTIONS P5). A literal or an index alone is an
+// statement still parses. A `[` that a trailing comma leaves open before the next
+// statement is reported at the bracket, as one that no comma leaves open is. A literal or an index alone is an
 // unused value (REFERENCE §2), with no other error, even when nothing gives it a type, as
 // for a bare `None` (§15.1). Uses of a binding whose value failed to parse report nothing.
 fn broken(xs: List[Int]) -> Int {

@@ -8,3 +8,4 @@ Some("b") Some("a") None 0 Some(5) Some(7) None None true false
 true false true true true true true true
 ["a\"b", "c"] ['x', '\n'] [(1, "one")] [Some(1), None] []
 7 4 2 ['q', 'q'] 6
+[1, 2] [3, 4] ["k": 5, "j": 6] [[7, 8]]

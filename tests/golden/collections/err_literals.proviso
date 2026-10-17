@@ -96,3 +96,24 @@ fn qualified(o: Option[Int]) -> Int {
         _ => 2
     }
 }
+
+record Rejected {
+    m: Map[Float, Int]                               // <- E0309
+}
+
+fn meets_rejected(m: Map[Float, Int], r: Rejected, c: Bool) -> Bool {   // <- E0309
+    let a = [:] == m
+    let b = if c { [:] } else { m }
+    let d = [[:], m]
+    let e = [:] == r.m
+    let f = m < m
+    let g = f"{m}"
+    return m == [:]
+}
+
+fn set_qualifier(o: Option[Int]) -> Int {
+    return match o {
+        Set.Empty => 1                               // <- E0301
+        _ => 2
+    }
+}

@@ -450,6 +450,32 @@ impl Decls {
         &self.ifaces[id.index()]
     }
 
+    /// Replaces the type of every field of a record or enum, and of every parameter, result
+    /// and error of an interface's method, by what `f` makes of it.
+    pub fn rewrite_types(&mut self, f: &mut dyn FnMut(&Decls, &Ty) -> Ty) {
+        for a in 0..self.adts.len() {
+            for v in 0..self.adts[a].variants.len() {
+                for i in 0..self.adts[a].variants[v].fields.len() {
+                    let ty = f(self, &self.adts[a].variants[v].fields[i].ty);
+                    self.adts[a].variants[v].fields[i].ty = ty;
+                }
+            }
+        }
+        for k in 0..self.ifaces.len() {
+            for j in 0..self.ifaces[k].methods.len() {
+                for i in 0..self.ifaces[k].methods[j].params.len() {
+                    let ty = f(self, &self.ifaces[k].methods[j].params[i].1);
+                    self.ifaces[k].methods[j].params[i].1 = ty;
+                }
+                let ret = f(self, &self.ifaces[k].methods[j].ret);
+                self.ifaces[k].methods[j].ret = ret;
+                if let Some(fails) = self.ifaces[k].methods[j].fails.clone() {
+                    self.ifaces[k].methods[j].fails = Some(f(self, &fails));
+                }
+            }
+        }
+    }
+
     pub fn iface_mut(&mut self, id: IfaceId) -> &mut IfaceDef {
         &mut self.ifaces[id.index()]
     }

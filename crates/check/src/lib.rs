@@ -863,6 +863,10 @@ impl Checker<'_> {
                 if ty.is_unknown() || self.vars.has_open(&ty) {
                     return;
                 }
+                if *callee == *"Map" {
+                    self.key_bound(&ty, span);
+                    return;
+                }
                 if let Some(&iface) = ifaces.iter().find(|&&iface| !self.implements(&ty, iface)) {
                     let message = format!(
                         "`{}` does not implement `{}`, which `{callee}` needs of `{param}`",
@@ -920,6 +924,23 @@ impl Checker<'_> {
             self.key_bound(&written.key, written.span);
         }
         (self.f.bounds, self.param_names) = outer;
+        // A type written with a rejected key type is an error, as one written in a body is,
+        // so nothing that meets it is reported again (§15.1).
+        let unknown = self.unknown_tys.clone();
+        for f in 0..self.p.fns.len() {
+            let bounds: Vec<Vec<IfaceId>> = self.p.fns[f].generics.iter().map(|g| g.bounds.clone()).collect();
+            let decls = &self.p.decls;
+            let fix = |ty: &Ty| without_bad_keys(decls, ty, &bounds, &unknown);
+            let info = &self.p.fns[f];
+            let params: Vec<Ty> = info.params.iter().map(|p| fix(&p.ty)).collect();
+            let (ret, fails) = (fix(&info.ret), info.fails.as_ref().map(fix));
+            let info = &mut self.p.fns[f];
+            for (param, ty) in info.params.iter_mut().zip(params) {
+                param.ty = ty;
+            }
+            (info.ret, info.fails) = (ret, fails);
+        }
+        self.p.decls.rewrite_types(&mut |decls, ty| without_bad_keys(decls, ty, &[], &unknown));
     }
 
     fn iface_name(&self, iface: IfaceId) -> &str {
@@ -5172,7 +5193,8 @@ impl Checker<'_> {
                 )),
                 None if self.imports.contains_key(&q.sym)
                     || builtin_type(q_text).is_some()
-                    || collection_adt(q_text).is_some() =>
+                    || collection_adt(q_text).is_some()
+                    || later_type(q_text).is_some() =>
                 {
                     Some((
                         codes::TYPE_MISMATCH,
@@ -5401,6 +5423,27 @@ impl Checker<'_> {
     }
 }
 
+/// `ty` with each map whose key type doesn't implement `Eq` and `Hash` an error, where type
+/// parameter `i` implements `bounds[i]`, and `unknown` may implement anything.
+fn without_bad_keys(decls: &Decls, ty: &Ty, bounds: &[Vec<IfaceId>], unknown: &[Ty]) -> Ty {
+    let Ty::Adt(id, args) = ty else { return ty.clone() };
+    if args.is_empty() {
+        return ty.clone();
+    }
+    let args: Vec<Ty> = args.iter().map(|arg| without_bad_keys(decls, arg, bounds, unknown)).collect();
+    if *id == AdtId::MAP {
+        let key = &args[0];
+        let keyed = key.is_unknown()
+            || unknown.contains(key)
+            || decls.unknown_interfaces(key)
+            || [IfaceId::EQ, IfaceId::HASH].iter().all(|&iface| decls.implements(key, iface, bounds));
+        if !keyed {
+            return Ty::Error;
+        }
+    }
+    Ty::applied(*id, args)
+}
+
 /// Whether `ty` mentions one of the type parameters `targs` stands for.
 fn mentions_targ(ty: &Ty, targs: &[Ty]) -> bool {
     match ty {
@@ -5507,8 +5550,8 @@ fn builtin_method(ty: &Ty, name: &str) -> Option<BuiltinSig> {
 fn later_collection_method(name: &str) -> Option<(&'static str, Planned)> {
     Some(match name {
         "map" | "filter" => ("operations that take a closure", Planned::Phase(3)),
-        // Phase 4 checks contracts at run time, which may call them.
-        "is_sorted" | "is_permutation_of" | "is_unique" => ("the predicates of §8.1", Planned::Phase(4)),
+        // STD.md declares none of them.
+        "is_sorted" | "is_permutation_of" | "is_unique" => ("the predicates of §8.1", Planned::Unscheduled),
         // `replace` returns a resource it would otherwise discard (REFERENCE §10 rule 5).
         "replace" => ("operations on collections of resources", Planned::Phase(2)),
         "swap" | "sort" => ("collection operations that STD.md doesn't declare", Planned::Unscheduled),

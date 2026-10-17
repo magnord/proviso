@@ -3,11 +3,11 @@
 // What collections still lack is reported as not implemented, and what it would have
 // given isn't reported again (§15.1). `Set` has no literal or constructor yet (OPEN_QUESTIONS
 // Q37), and `Array` comes later in phase 2. Consuming loops wait for moves, the operations
-// that take a closure for effect variables (STD.md), the predicates of §8.1 for contracts,
-// `inout` parameters and `&` arguments for `inout` atomicity, and implementations for
-// generic types such as `List[Int]` for the rest of phase 2, so a method or interface such
-// an implementation may give isn't reported missing (§15.1). STD.md declares
-// no `swap` (§5.3), and `split` is one of the `Text` functions of §12.3 it doesn't declare.
+// that take a closure for effect variables (STD.md), `inout` parameters and `&` arguments
+// for `inout` atomicity, and implementations for generic types such as `List[Int]` for the
+// rest of phase 2, so a method or interface such an implementation may give isn't reported
+// missing (§15.1). STD.md declares no `swap` (§5.3) and none of the predicates of §8.1, and
+// `split` is one of the `Text` functions of §12.3 it doesn't declare.
 fn sets(s: Set[Int]) -> Int {                       // <- E0901
     return s.len()
 }
