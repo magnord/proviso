@@ -278,7 +278,6 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         stmt_start: (0, 0),
         typed: Vec::new(),
         written_keys: Some(Vec::new()),
-        reported_keys: Vec::new(),
     };
     checker.imports();
     checker.adt_names();
@@ -523,9 +522,6 @@ struct Checker<'a> {
     /// and the bounds of the type parameters there. They are checked once every `derives`
     /// and `impl` is known, and `None` after that, when a written type is checked at once.
     written_keys: Option<Vec<WrittenKey>>,
-    /// The key types the statements of this body have reported, by variable, so literals
-    /// that share one report it once.
-    reported_keys: Vec<u32>,
 }
 
 /// The key type of a `Map` type a declaration writes, which is checked once every `derives`
@@ -540,8 +536,6 @@ struct WrittenKey {
 
 /// A check on a type with a variable in it, made once the statement has solved it.
 enum Pending {
-    /// The key type of a map literal, which must implement `Eq` and `Hash` (REFERENCE §4.2).
-    Key { ty: Ty, span: Span },
     /// An integer literal of `magnitude`, negated or not, that must fit its type.
     Int { ty: Ty, magnitude: u128, negative: bool, span: Span },
     /// A float literal that must be finite in its type.
@@ -586,8 +580,7 @@ impl Pending {
     /// The types whose variables the check waits on.
     fn tys(&self) -> &[Ty] {
         match self {
-            Pending::Key { ty, .. }
-            | Pending::Int { ty, .. }
+            Pending::Int { ty, .. }
             | Pending::Float { ty, .. }
             | Pending::Bound { ty, .. }
             | Pending::Neg { ty, .. }
@@ -852,18 +845,6 @@ impl Checker<'_> {
 
     fn run_pending(&mut self, check: Pending) {
         match check {
-            Pending::Key { ty, span } => {
-                // Literals whose keys meet share one key type, which is reported once.
-                if let Ty::Var(v) = ty {
-                    let root = self.vars.root(v);
-                    if self.reported_keys.contains(&root) {
-                        return;
-                    }
-                    if !self.key_bound(&self.vars.zonk(&ty), span) {
-                        self.reported_keys.push(root);
-                    }
-                }
-            }
             Pending::Int { ty, magnitude, negative, span } => {
                 if let Ty::Int(it) = self.vars.zonk(&ty) {
                     self.int_range(it, magnitude, negative, span);
@@ -928,7 +909,6 @@ impl Checker<'_> {
             local.ty = self.vars.zonk(&local.ty);
         }
         self.vars.clear();
-        self.reported_keys.clear();
     }
 
     /// Checks the key types of the `Map` types the declarations write, now that every
@@ -2912,7 +2892,8 @@ impl Checker<'_> {
     fn map(&mut self, e: ExprId, entries: &[(ExprId, ExprId)], expected: Option<&Ty>) -> Ty {
         let span = self.span(e);
         let origin = Origin::Variant { adt: AdtId::MAP, span };
-        // An expected map type has had its key type checked where it was written or built.
+        // An expected map type has had its key type checked where it was written or built, so
+        // literals whose keys meet, which give each other their types, report it once.
         let (mut key, mut value, checked) = match expected {
             Some(Ty::Adt(AdtId::MAP, args)) => (args[0].clone(), args[1].clone(), true),
             Some(Ty::Error) => (self.vars.rejected(), self.vars.rejected(), true),
@@ -2923,15 +2904,12 @@ impl Checker<'_> {
             value = self.element(v, value);
         }
         if !checked {
-            match self.vars.resolve(&key) {
-                ty @ Ty::Var(_) => self.pending.push(Pending::Key { ty, span }),
-                ty if self.vars.has_var(&ty) => {
-                    let (ifaces, callee, param) = (vec![IfaceId::EQ, IfaceId::HASH], "Map".into(), "K".into());
-                    self.pending.push(Pending::Bound { ty, ifaces, callee, param, span });
-                }
-                ty => {
-                    self.key_bound(&ty, span);
-                }
+            let key = self.vars.resolve(&key);
+            if self.vars.has_var(&key) {
+                let (ifaces, callee, param) = (vec![IfaceId::EQ, IfaceId::HASH], "Map".into(), "K".into());
+                self.pending.push(Pending::Bound { ty: key, ifaces, callee, param, span });
+            } else {
+                self.key_bound(&key, span);
             }
         }
         Ty::map(key, value)
