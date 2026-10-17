@@ -488,10 +488,22 @@ enum Pending {
     /// A call of `callee` that can fail with `ty` but has no marker, which is reported with
     /// the error type the statement settles (E0701).
     Unmarked { ty: Ty, callee: Box<str>, span: Span },
-    /// A `try` that propagates `errs` where there is no `fails` to take them (E0702).
-    Try { errs: Vec<Ty>, span: Span },
+    /// A `try` that propagates `errs` where there is no `fails` to take them (E0702). Its
+    /// chain was `rejected` when its value has an error.
+    Try { errs: Vec<Ty>, rejected: bool, span: Span },
+    /// An `attempt` or `else` form whose calls fail with `err`, which must not settle as
+    /// `Never` (E0706, E0707; OPEN_QUESTIONS P5, `fails Never`).
+    CanFail { err: Ty, handler: Handler, span: Span },
     /// The fallback of a `check`, of type `ty`, which must not finish (E0415).
     Leaves { ty: Ty, span: Span },
+}
+
+/// What handles the failure of the calls it marks, other than `try`.
+#[derive(Clone, Copy)]
+enum Handler {
+    Attempt,
+    Else,
+    Example,
 }
 
 impl Pending {
@@ -504,7 +516,8 @@ impl Pending {
             | Pending::Neg { ty, .. }
             | Pending::Arith { ty, .. }
             | Pending::Unmarked { ty, .. }
-            | Pending::Leaves { ty, .. } => std::slice::from_ref(ty),
+            | Pending::Leaves { ty, .. }
+            | Pending::CanFail { err: ty, .. } => std::slice::from_ref(ty),
             Pending::Try { errs, .. } => errs,
         }
     }
@@ -610,7 +623,9 @@ impl Checker<'_> {
     ///
     /// Which error stands for a type argument that nothing gave, so each mistake is reported
     /// once (REFERENCE §15.1; issue #20):
-    /// - One a rejected value was to give (quiet) is that value's error, never E0312.
+    /// - One a rejected value was to give (quiet) is that value's error, never E0312. It is
+    ///   not `Never`, even where a `Never` reached it too, since the value may have been of
+    ///   any type (issue #30).
     /// - The error type of a call without a marker (unmarked) is that call's E0701, unless a
     ///   `try` with no `fails` to take it also needs it (owed). Then it is E0312.
     /// - Any other is E0312.
@@ -624,8 +639,9 @@ impl Checker<'_> {
             let ty = match open.kind {
                 Kind::Int => Ty::INT,
                 Kind::Float => Ty::Float(FloatTy::F64),
+                Kind::Any if open.quiet => Ty::Error,
                 Kind::Any if open.never => Ty::Never,
-                Kind::Any if open.quiet || (open.unmarked && !open.owed) => Ty::Error,
+                Kind::Any if open.unmarked && !open.owed => Ty::Error,
                 Kind::Any => {
                     unknown.push(open.origin);
                     Ty::Error
@@ -720,7 +736,8 @@ impl Checker<'_> {
                 let ty = self.vars.zonk(&ty);
                 self.unmarked(&callee, &ty, span);
             }
-            Pending::Try { errs, span } => self.try_without_fails(errs, span),
+            Pending::Try { errs, rejected, span } => self.try_without_fails(errs, rejected, span),
+            Pending::CanFail { err, handler, span } => self.can_fail(&err, handler, span),
             Pending::Leaves { ty, span } => self.check_leaves(&ty, span),
         }
     }
@@ -2121,7 +2138,13 @@ impl Checker<'_> {
             }
             Expectation::Fails(pat) => {
                 let err = match err {
-                    Some(err) => self.force(&err),
+                    Some(err) => {
+                        let err = self.force(&err);
+                        if ty != Ty::Error {
+                            self.can_fail(&err, Handler::Example, span);
+                        }
+                        err
+                    }
                     None => {
                         if !ty.is_unknown() {
                             let message = "`fails` needs a call that can fail, and this one can't";
@@ -2967,6 +2990,11 @@ impl Checker<'_> {
             None if value_ty == Ty::Error => Some(Ty::Error),
             it => it,
         };
+        if let Some(err) = &it
+            && value_ty != Ty::Error
+        {
+            self.wait_can_fail(err, Handler::Else, span);
+        }
         let unwrapped = match (&it, &value_ty) {
             (Some(_), ty) => ty.clone(),
             (None, Ty::Adt(AdtId::OPTION, args)) => self.vars.resolve(&args[0]),
@@ -4006,6 +4034,11 @@ impl Checker<'_> {
     }
 
     fn fallible_call(&mut self, call: ExprId, callee: &str, err: &Ty, span: Span, chain: bool) {
+        // A call whose error type is `Never`, as `::[Never]` gives it, can't fail, as one that
+        // declares `fails Never` can't (OPEN_QUESTIONS P5).
+        if self.vars.resolve(err) == Ty::Never {
+            return;
+        }
         match self.markers.last_mut() {
             Some(marker) if chain => {
                 marker.errors.push(err.clone());
@@ -4041,10 +4074,10 @@ impl Checker<'_> {
         self.markers.push(Marker { handler: None, errors: Vec::new() });
         self.in_chain = true;
         let ty = self.expr(inner, expected);
-        let mut errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
-        errors.dedup();
+        let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
         // A chain with an error may hold the fallible call that didn't resolve.
-        if errors.is_empty() && ty != Ty::Error {
+        let rejected = ty == Ty::Error;
+        if errors.is_empty() && !rejected {
             self.error(codes::TRY_WITHOUT_FAILURE, span, "`try` marks no call that can fail");
         }
         if self.f.fails.is_none() && !errors.is_empty() {
@@ -4052,12 +4085,14 @@ impl Checker<'_> {
             // settles, and nothing else reports one that nothing gives.
             if errors.iter().any(|err| self.vars.has_var(err)) {
                 errors.iter().for_each(|err| self.vars.owe(err));
-                self.pending.push(Pending::Try { errs: errors, span });
+                self.pending.push(Pending::Try { errs: errors, rejected, span });
             } else {
-                self.try_without_fails(errors, span);
+                self.try_without_fails(errors, rejected, span);
             }
             return ty;
         }
+        // Calls that fail with one type are one mistake (§15.1).
+        let mut reported: Vec<String> = Vec::new();
         for err in errors {
             let err = self.vars.resolve(&err);
             let message = match &self.f.fails {
@@ -4072,7 +4107,10 @@ impl Checker<'_> {
                 ),
             };
             self.vars.poison(&err);
-            self.error(codes::TRY_ERROR_MISMATCH, span, message);
+            if !reported.contains(&message) {
+                self.error(codes::TRY_ERROR_MISMATCH, span, message.clone());
+                reported.push(message);
+            }
         }
         ty
     }
@@ -4080,13 +4118,25 @@ impl Checker<'_> {
     /// Reports a `try` whose calls fail with `errs` where there is no `fails` to take them.
     /// An error type that is an error was reported where it went wrong, as the rule on
     /// [`Checker::settle_vars`] says. One that is `Never` can't happen, so a `try` whose calls
-    /// all fail with `Never` marks no call that can fail (OPEN_QUESTIONS P5).
-    fn try_without_fails(&mut self, errs: Vec<Ty>, span: Span) {
-        let errs: Vec<Ty> = errs.iter().map(|err| self.vars.zonk(err)).filter(|err| *err != Ty::Error).collect();
+    /// all fail with `Never` marks no call that can fail (OPEN_QUESTIONS P5), unless its chain
+    /// was `rejected` or a call's error type has an error, which may have been one that can
+    /// fail (§15.1; issue #30). Calls that fail with one type are one mistake.
+    fn try_without_fails(&mut self, errs: Vec<Ty>, rejected: bool, span: Span) {
+        let mut settled: Vec<Ty> = Vec::new();
+        for err in errs.iter().map(|err| self.vars.zonk(err)) {
+            if !settled.contains(&err) {
+                settled.push(err);
+            }
+        }
+        let unknown = rejected || settled.contains(&Ty::Error);
+        let errs: Vec<Ty> = settled.into_iter().filter(|err| *err != Ty::Error).collect();
         if errs.is_empty() {
             return;
         }
         if errs.iter().all(|err| *err == Ty::Never) {
+            if unknown {
+                return;
+            }
             self.error(codes::TRY_WITHOUT_FAILURE, span, "`try` marks no call that can fail");
             return;
         }
@@ -4121,7 +4171,41 @@ impl Checker<'_> {
                 }
                 Ty::Error
             }
-            Some(err) => Ty::result(ty, err),
+            Some(err) => {
+                if ty != Ty::Error {
+                    self.wait_can_fail(&err, Handler::Attempt, span);
+                }
+                Ty::result(ty, err)
+            }
+        }
+    }
+
+    /// Reports the `attempt` or `else` form at `span` if its calls fail with `Never`, which
+    /// can't happen, once the statement settles `err` (OPEN_QUESTIONS P5, `fails Never`).
+    fn wait_can_fail(&mut self, err: &Ty, handler: Handler, span: Span) {
+        if self.vars.has_open(err) {
+            self.pending.push(Pending::CanFail { err: err.clone(), handler, span });
+        } else {
+            self.can_fail(err, handler, span);
+        }
+    }
+
+    fn can_fail(&mut self, err: &Ty, handler: Handler, span: Span) {
+        if self.vars.zonk(err) != Ty::Never {
+            return;
+        }
+        match handler {
+            Handler::Attempt => {
+                self.error(codes::ATTEMPT_WITHOUT_FAILURE, span, "`attempt` marks no call that can fail");
+            }
+            Handler::Else => {
+                let message = "`else` needs an `Option` or a call that can fail on its left, but this call fails with `Never`, so it can't";
+                self.error(codes::NOTHING_TO_UNWRAP, span, message);
+            }
+            Handler::Example => {
+                let message = "`fails` needs a call that can fail, and this one fails with `Never`, so it can't";
+                self.error(codes::EXAMPLE_CANNOT_FAIL, span, message);
+            }
         }
     }
 
