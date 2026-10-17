@@ -77,6 +77,7 @@ fn tuples() -> Int {
     let t6 = first(a: (1, Some(2)), b: (nope, None)) // <- E0201
     let t7 = first(a: (nope, 1), b: (None, 2))      // <- E0201
     let t8 = (nope, 1) == (None, 1)                 // <- E0201
+    let t9 = first(a: (None, 1), b: (nope, 1))      // <- E0201
     return 0
 }
 
