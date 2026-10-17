@@ -334,6 +334,8 @@ struct Local {
     /// A parameter, or a part of one bound by a pattern, which the function borrows, so
     /// copying it needs `Copy` (REFERENCE §4.8).
     borrowed: bool,
+    /// Bound by a `for` pattern, so nothing can make it mutable.
+    in_loop: bool,
 }
 
 /// A module interface's declaration.
@@ -1373,8 +1375,10 @@ impl Checker<'_> {
                 let fields = &self.p.decls.adt(id).variants[v].fields;
                 let mut state = FnState::new(Ty::Unit, None);
                 state.returns = false;
-                state.locals =
-                    fields.iter().map(|f| Local { ty: f.ty.clone(), mutable: false, borrowed: false }).collect();
+                state.locals = fields
+                    .iter()
+                    .map(|f| Local { ty: f.ty.clone(), mutable: false, borrowed: false, in_loop: false })
+                    .collect();
                 self.f = state;
                 let mut preds = Vec::new();
                 for (i, field) in kept.iter().enumerate() {
@@ -2192,7 +2196,7 @@ impl Checker<'_> {
         // is owned instead, and an `inout` one is rejected in this phase.
         let mut scope = Vec::new();
         if let Some(ty) = &info.receiver {
-            state.locals.push(Local { ty: ty.clone(), mutable: false, borrowed: true });
+            state.locals.push(Local { ty: ty.clone(), mutable: false, borrowed: true, in_loop: false });
             if let Some(sym) = m.interner.lookup("self") {
                 scope.push((sym, LocalId(0)));
             }
@@ -2203,7 +2207,7 @@ impl Checker<'_> {
             // An `inout` parameter may be changed, so a use of it that would change it isn't
             // reported after the mode is (§15.1).
             let mutable = matches!(param.mode, ParamMode::Inout | ParamMode::InoutPartial);
-            state.locals.push(Local { ty: param.ty.clone(), mutable, borrowed });
+            state.locals.push(Local { ty: param.ty.clone(), mutable, borrowed, in_loop: false });
         }
         state.scopes.push(scope);
         self.f = state;
@@ -2396,7 +2400,7 @@ impl Checker<'_> {
     /// Declares a local in the innermost scope. A `borrowed` one is part of a parameter.
     fn declare(&mut self, name: Ident, ty: Ty, mutable: bool, what: &str, borrowed: bool) -> LocalId {
         let id = LocalId(self.f.locals.len() as u32);
-        self.f.locals.push(Local { ty, mutable, borrowed });
+        self.f.locals.push(Local { ty, mutable, borrowed, in_loop: what == "loop variable" });
         if self.m.text(name.sym) == "_" {
             return id;
         }
@@ -2623,12 +2627,8 @@ impl Checker<'_> {
         let span = self.span(target);
         let Some((root, id, ty)) = self.place(target) else { return self.infer(value) };
         if !self.f.locals[id.index()].mutable {
-            let text = self.m.text(root.sym);
-            self.error(
-                codes::IMMUTABLE_ASSIGNMENT,
-                span,
-                format!("`{text}` is a `let` binding or a parameter; declare it with `var` to assign to it"),
-            );
+            let message = self.immutable(root, id, "assign to it");
+            self.error(codes::IMMUTABLE_ASSIGNMENT, span, message);
         }
         self.copying = true;
         let value_ty = self.check(value, &ty);
@@ -2841,6 +2841,8 @@ impl Checker<'_> {
         let span = self.span(e);
         let mut element = match expected {
             Some(Ty::Adt(AdtId::LIST, args)) => args[0].clone(),
+            // An unused value, or one whose context has an error, needs no type (§15.1).
+            Some(Ty::Error) => self.vars.rejected(),
             _ => self.vars.fresh(Kind::Any, Origin::Variant { adt: AdtId::LIST, span }),
         };
         for &x in elements {
@@ -2856,6 +2858,7 @@ impl Checker<'_> {
         let origin = Origin::Variant { adt: AdtId::MAP, span };
         let (mut key, mut value) = match expected {
             Some(Ty::Adt(AdtId::MAP, args)) => (args[0].clone(), args[1].clone()),
+            Some(Ty::Error) => (self.vars.rejected(), self.vars.rejected()),
             _ => (self.vars.fresh(Kind::Any, origin), self.vars.fresh(Kind::Any, origin)),
         };
         for &(k, v) in entries {
@@ -2935,6 +2938,16 @@ impl Checker<'_> {
         None
     }
 
+    /// Why local `id`, called `name`, can't be changed by what `does` (E0305).
+    fn immutable(&self, name: Ident, id: LocalId, does: &str) -> String {
+        let text = self.m.text(name.sym);
+        if self.f.locals[id.index()].in_loop {
+            format!("`{text}` is a loop variable, which can't be changed; copy it into a `var` to {does}")
+        } else {
+            format!("`{text}` is a `let` binding or a parameter; declare it with `var` to {does}")
+        }
+    }
+
     /// Reports the receiver of a method that changes it, such as `push`, unless it is a `var`
     /// or a field or element of one, as an assignment's target is (STD.md, REFERENCE §5.2).
     fn changes(&mut self, receiver: ExprId, method: &str) {
@@ -2946,10 +2959,7 @@ impl Checker<'_> {
                 ExprKind::Index { base, .. } => e = base,
                 ExprKind::Name(name) if let Some(Res::Local(id)) = self.p.res(e) => {
                     if !self.f.locals[id.index()].mutable {
-                        let text = m.text(name.sym);
-                        let message = format!(
-                            "`{text}` is a `let` binding or a parameter; declare it with `var` to call `{method}`, which changes it"
-                        );
+                        let message = self.immutable(name, id, &format!("call `{method}`, which changes it"));
                         self.error(codes::IMMUTABLE_ASSIGNMENT, self.span(receiver), message);
                     }
                     return;
@@ -3287,6 +3297,8 @@ impl Checker<'_> {
             // A mismatch is reported at the element, not again for the whole tuple.
             let ty = match expected_args.as_ref().map(|args| &args[i]) {
                 Some(expected) => self.joined(element, expected),
+                // An unused value, or one whose context has an error, needs no type (§15.1).
+                None if expected == Some(&Ty::Error) => self.expr(element, Some(&Ty::Error)),
                 None => self.infer(element),
             };
             tys.push(ty);
@@ -3351,7 +3363,7 @@ impl Checker<'_> {
         match &it {
             Some(err) => {
                 let id = LocalId(self.f.locals.len() as u32);
-                self.f.locals.push(Local { ty: err.clone(), mutable: false, borrowed: false });
+                self.f.locals.push(Local { ty: err.clone(), mutable: false, borrowed: false, in_loop: false });
                 self.p.it_local.insert(e, id);
                 self.its.push(id);
             }
@@ -3864,6 +3876,15 @@ impl Checker<'_> {
             }
             if let Some(iface) = self.iface_named(receiver_name.sym) {
                 return self.iface_call(e, iface, method, targs, args, span, chain);
+            }
+            // `Set` and `Array` come later, also as the receivers of their functions (Q37).
+            if let Some(planned) = later_type(m.text(receiver_name.sym))
+                && !self.poisoned.contains(&receiver_name.sym)
+            {
+                let what = format!("`{}` types", m.text(receiver_name.sym));
+                self.not_implemented(receiver_name.span, &what, planned);
+                self.rejected_args(args);
+                return Ty::Error;
             }
             // `[]` and `[:]` build collections, which have no associated functions (STD.md).
             if let Some(id) = collection_adt(m.text(receiver_name.sym))

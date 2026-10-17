@@ -1959,6 +1959,7 @@ impl Parser<'_> {
             if self.eat(T::Colon) {
                 let mut entries = vec![(first, self.expr()?)];
                 while self.eat(T::Comma) && !self.at(T::RBracket) {
+                    self.still_open(&open)?;
                     let key = self.expr()?;
                     self.expect(T::Colon, "`:` and the value for this key")?;
                     entries.push((key, self.expr()?));
@@ -1968,6 +1969,7 @@ impl Parser<'_> {
             } else {
                 let mut elements = vec![first];
                 while self.eat(T::Comma) && !self.at(T::RBracket) {
+                    self.still_open(&open)?;
                     elements.push(self.expr()?);
                 }
                 self.close(&open, T::RBracket, "`,` or `]`")?;
@@ -1976,6 +1978,17 @@ impl Parser<'_> {
         };
         let span = open.span.to(self.prev_span());
         Ok(self.alloc(kind, span))
+    }
+
+    /// Reports `open` as never closed when the next token starts a line no deeper than the
+    /// line that opened it, as [`Parser::close`] does, so a trailing comma before a missing
+    /// `]` doesn't make the next statement an element.
+    fn still_open(&mut self, open: &Token) -> PResult<()> {
+        let next = self.peek().span;
+        if self.at(T::Eof) || (self.starts_line(next) && self.indent(next) <= self.indent(open.span)) {
+            return self.unclosed(open);
+        }
+        Ok(())
     }
 
     /// Parses each interpolation of an f-string from its own source span.
@@ -2250,7 +2263,15 @@ impl Parser<'_> {
             }
             T::Keyword(Kw::For) => {
                 self.bump();
-                let pat = self.pattern()?;
+                // A pattern that is one name binds it whatever its case, as in a `let`
+                // (OPEN_QUESTIONS P5).
+                let pat = if self.at(T::Ident) && self.nth(1) == T::Keyword(Kw::In) {
+                    let name = self.ident("a loop variable")?;
+                    let kind = if self.m.text(name.sym) == "_" { PatKind::Wild } else { PatKind::Bind(name) };
+                    self.m.pats.alloc(Pat { kind, span: name.span })
+                } else {
+                    self.pattern()?
+                };
                 self.expect(T::Keyword(Kw::In), "`in`")?;
                 if self.at_kw(Kw::Take) {
                     return self.not_implemented("consuming loops (`for … in take`)", Planned::Phase(2));

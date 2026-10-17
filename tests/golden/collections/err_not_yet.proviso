@@ -14,6 +14,13 @@ fn arrays(a: Array[Int, 3]) -> Int {                // <- E0901
     return a.len()
 }
 
+fn built(xs: List[Int]) -> Int {
+    let s = Set.new()                               // <- E0901
+    let t = Set.from(xs)                            // <- E0901
+    let a = Array.new()                             // <- E0901
+    return s.len() + t.len() + a.len()
+}
+
 fn later(xs: List[Int], t: Text) -> Int {
     for x in take xs {                              // <- E0901
     }
