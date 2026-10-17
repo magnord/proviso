@@ -1,0 +1,123 @@
+// phase: 2.6
+// An empty `[]` or `[:]` takes its type arguments from the values it meets, as `None`
+// does, never from where it is written (OPEN_QUESTIONS P5; issue #10). So do a literal's
+// elements, keys and values, which meet each other. Each group is one program and the
+// rewrites of it: swapped operands, branches and arguments, the empty literal first or
+// last, inline or bound by `let` first, and one more level of nesting. Every rewrite
+// checks, so an integer literal that meets `small` is an `Int8`, and `[]` that meets a
+// `List[Int8]` is one too. A list's own methods and an index leave its element type open,
+// so `[1].get(5) else small` and `[1][0] == small` make `[1]` a `List[Int8]`.
+use std.io { IoError }
+
+fn id[T: Copy](x: T) -> T {
+    return x
+}
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn operands(small: Int8) -> Text {
+    let none: List[Int8] = []
+    let one = [small]
+    let a1 = [] == one
+    let a2 = one == []
+    let a3 = [] == none
+    let a4 = none == []
+    let a5 = [1] == [small]
+    let a6 = [small] == [1]
+    let a7 = [[]] == [[small]]
+    let a8 = [[small]] == [[]]
+    let a9 = ([], small) == ([small], 1)
+    let a10 = ([small], 1) == ([], small)
+    let a11 = [:] == ["k": small]
+    let a12 = ["k": small] == [:]
+    let a13 = [1: []] == [1: [small]]
+    let a14 = [1: [small]] == [1: []]
+    let a15 = [] < one
+    let a16 = one > []
+    return f"{a1} {a2} {a3} {a4} {a5} {a6} {a7} {a8} {a9} {a10} {a11} {a12} {a13} {a14} {a15} {a16}"
+}
+
+fn elements(small: Int8) -> Text {
+    let n1 = [[], [small]]
+    let n2 = [[small], []]
+    let n3 = [None, Some(small)]
+    let n4 = [Some(small), None]
+    let n5 = [1, small]
+    let n6 = [small, 1]
+    let n7 = ["a": [], "b": [small]]
+    let n8 = ["a": [small], "b": []]
+    let n9 = [[[]], [[small]]]
+    let n10 = [[[small]], [[]]]
+    let n11 = [[:], ["k": small]]
+    let n12 = [["k": small], [:]]
+    let n13 = [1: small, 2: 3]
+    let n14 = [1: 3, 2: small]
+    let same = n5 == [small, small] and n6 == n5 and n13 == [1: small, 2: small + 2]
+    return f"{n1} {n2} {n3} {n4} {n5} {n6} {n7} {n8} {n9} {n10} {n11} {n12} {n13} {n14} {same}"
+}
+
+fn branches(c: Bool, small: Int8) -> Text {
+    let b1 = if c { [] } else { [small] }
+    let b2 = if c { [small] } else { [] }
+    let b3 = match c { true => [], false => [small] }
+    let b4 = match c { true => [small], false => [] }
+    let b5 = if c { [:] } else { ["k": small] }
+    let b6 = if c { ["k": small] } else { [:] }
+    let b7 = if c { [[]] } else { [[small]] }
+    let b8 = if c { [[small]] } else { [[]] }
+    let b9 = if c { [1] } else { [small] }
+    let b10 = if c { [small] } else { [1] }
+    return f"{b1} {b2} {b3} {b4} {b5} {b6} {b7} {b8} {b9} {b10}"
+}
+
+fn arguments(small: Int8) -> Text {
+    let g1 = first(a: [], b: [small])
+    let g2 = first(a: [small], b: [])
+    let g3 = id([]) == [small]
+    let g4 = [small] == id([])
+    let g5 = first(a: [:], b: ["k": small])
+    let g6 = first(a: ["k": small], b: [:])
+    let g7 = first(a: [[]], b: [[small]])
+    let g8 = first(a: [[small]], b: [[]])
+    let g9 = first(a: ([], 1), b: ([small], small))
+    let g10 = first(a: ([small], small), b: ([], 1))
+    return f"{g1} {g2} {g3} {g4} {g5} {g6} {g7} {g8} {g9} {g10}"
+}
+
+fn fallbacks(o: Option[List[Int8]], m: Map[Text, List[Int8]], small: Int8) -> Text {
+    let e1 = o else []
+    let e2 = m.get("k") else []
+    let e3 = (o else []) == [1]
+    let e4 = [1] == (o else [])
+    let e5 = [small].get(5) else 1
+    let e6 = [1].get(5) else small
+    let e7 = e5 == e6
+    let e8 = [1][0] == small
+    let e9 = small == [1][0]
+    let e10: Int8 = [1][0]
+    return f"{e1} {e2} {e3} {e4} {e5} {e6} {e7} {e8} {e9} {e10}"
+}
+
+fn places(small: Int8) -> Text {
+    var grid: List[List[Int8]] = []
+    grid.push([])
+    grid.push([1])
+    grid[0] = []
+    grid[0].push(small)
+    var m: Map[Int8, List[Int8]] = [:]
+    m.set(key: 1, value: [])
+    m.set(key: small, value: [small, 1])
+    return f"{grid} {m}"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(operands(1))
+    try sys.stdout.write_line(elements(1))
+    try sys.stdout.write_line(branches(c: true, small: 1))
+    try sys.stdout.write_line(branches(c: false, small: 1))
+    try sys.stdout.write_line(arguments(1))
+    try sys.stdout.write_line(fallbacks(o: None, m: [:], small: 1))
+    try sys.stdout.write_line(places(2))
+}

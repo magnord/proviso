@@ -1,0 +1,5 @@
+collections/refinements.proviso:31:1: example passed
+collections/refinements.proviso:32:1: example failed: it hit a defect
+collections/refinements.proviso:33:1: example passed
+collections/refinements.proviso:34:1: example failed: it hit a defect
+4 examples: 2 passed, 2 failed

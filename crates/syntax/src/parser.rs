@@ -1757,7 +1757,7 @@ impl Parser<'_> {
         let base = self.depth;
         let mut e = self.primary()?;
         loop {
-            if matches!(self.kind(), T::LParen | T::Dot) {
+            if matches!(self.kind(), T::LParen | T::Dot | T::LBracket) {
                 self.deeper()?;
             }
             match self.kind() {
@@ -1789,7 +1789,13 @@ impl Parser<'_> {
                 T::LBracket if matches!(self.m.exprs[e].kind, ExprKind::Int(_) | ExprKind::Float(_)) => {
                     return self.not_implemented("units of measure", Planned::PastV1);
                 }
-                T::LBracket => return self.not_implemented("indexing expressions", Planned::Phase(2)),
+                T::LBracket => {
+                    let open = self.bump();
+                    let index = self.expr()?;
+                    self.close(&open, T::RBracket, "`]`")?;
+                    let span = self.span_of(e).to(self.prev_span());
+                    e = self.alloc(ExprKind::Index { base: e, index }, span);
+                }
                 _ => {
                     self.depth = base;
                     return Ok(e);
@@ -1908,7 +1914,7 @@ impl Parser<'_> {
                 self.close(&open, T::RParen, "`,` or `)`")?;
                 ExprKind::Debug(values)
             }
-            T::LBracket => return self.not_implemented("list and map literals", Planned::Phase(2)),
+            T::LBracket => return self.collection(),
             T::Pipe => return self.not_implemented("closures", Planned::Phase(2)),
             T::Keyword(Kw::Match) => return self.match_expr(),
             T::Keyword(Kw::Scope) => return self.not_implemented("`scope` blocks", Planned::Phase(6)),
@@ -1936,6 +1942,70 @@ impl Parser<'_> {
         };
         let span = start.to(self.prev_span());
         Ok(self.alloc(kind, span))
+    }
+
+    /// `[a, b]`, `["k": v]`, `[]` or `[:]` (REFERENCE §2). The first element says which: a
+    /// map's has a `:` after its key. A trailing comma may follow the last element or entry.
+    fn collection(&mut self) -> PResult<ExprId> {
+        let open = self.bump();
+        let kind = if self.at(T::Colon) && self.nth(1) == T::RBracket {
+            self.bump();
+            self.bump();
+            ExprKind::Map(Vec::new())
+        } else if self.eat(T::RBracket) {
+            ExprKind::List(Vec::new())
+        } else {
+            let first = self.expr()?;
+            if self.eat(T::Colon) {
+                let mut entries = vec![(first, self.expr()?)];
+                while self.eat(T::Comma) && !self.at(T::RBracket) {
+                    self.still_open(&open)?;
+                    let key = self.expr()?;
+                    self.expect(T::Colon, "`:` and the value for this key")?;
+                    entries.push((key, self.expr()?));
+                }
+                self.close(&open, T::RBracket, "`,` or `]`")?;
+                ExprKind::Map(entries)
+            } else {
+                let mut elements = vec![first];
+                while self.eat(T::Comma) && !self.at(T::RBracket) {
+                    self.still_open(&open)?;
+                    elements.push(self.expr()?);
+                }
+                self.close(&open, T::RBracket, "`,` or `]`")?;
+                ExprKind::List(elements)
+            }
+        };
+        let span = open.span.to(self.prev_span());
+        Ok(self.alloc(kind, span))
+    }
+
+    /// Reports `open` as never closed when what follows a comma can only start a statement
+    /// or an item, or close a block, on a line no deeper than the line that opened it, so a
+    /// trailing comma before a missing `]` doesn't make the next statement an element. An
+    /// element may start any line, since the bracket continues the statement (REFERENCE §2).
+    fn still_open(&mut self, open: &Token) -> PResult<()> {
+        let next = self.peek().span;
+        let statement = matches!(
+            self.kind(),
+            T::RBrace
+                | T::Keyword(
+                    Kw::Let
+                        | Kw::Var
+                        | Kw::Return
+                        | Kw::Break
+                        | Kw::Continue
+                        | Kw::Check
+                        | Kw::Assert
+                        | Kw::For
+                        | Kw::While
+                        | Kw::Loop
+                )
+        ) || self.starts_item();
+        if self.at(T::Eof) || (statement && self.starts_line(next) && self.indent(next) <= self.indent(open.span)) {
+            return self.unclosed(open);
+        }
+        Ok(())
     }
 
     /// Parses each interpolation of an f-string from its own source span.
@@ -2210,10 +2280,15 @@ impl Parser<'_> {
             }
             T::Keyword(Kw::For) => {
                 self.bump();
-                if self.at(T::LParen) {
-                    return self.not_implemented("destructuring `for` loops", Planned::Phase(2));
-                }
-                let binding = self.ident("a loop variable")?;
+                // A pattern that is one name binds it whatever its case, as in a `let`
+                // (OPEN_QUESTIONS P5).
+                let pat = if self.at(T::Ident) && self.nth(1) == T::Keyword(Kw::In) {
+                    let name = self.ident("a loop variable")?;
+                    let kind = if self.m.text(name.sym) == "_" { PatKind::Wild } else { PatKind::Bind(name) };
+                    self.m.pats.alloc(Pat { kind, span: name.span })
+                } else {
+                    self.pattern()?
+                };
                 self.expect(T::Keyword(Kw::In), "`in`")?;
                 if self.at_kw(Kw::Take) {
                     return self.not_implemented("consuming loops (`for … in take`)", Planned::Phase(2));
@@ -2221,7 +2296,7 @@ impl Parser<'_> {
                 let iter = self.nested(Self::logical)?;
                 self.no_invariant()?;
                 let body = self.block()?;
-                ExprKind::For { label, binding, iter, body }
+                ExprKind::For { label, pat, iter, body }
             }
             _ => return self.unexpected("`for`, `while` or `loop`"),
         };

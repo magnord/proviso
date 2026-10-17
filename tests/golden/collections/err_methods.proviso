@@ -1,0 +1,81 @@
+// phase: 2.6
+// expect-error: E0106
+// expect-error: E0206
+// expect-error: E0207
+// expect-error: E0208
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0305
+// expect-error: E0309
+// `push`, `pop`, `set` and `remove` take `inout self` (STD.md), so they need a `var` or a
+// part of one, as an assignment does (REFERENCE §5.2), and a `let` or a parameter is
+// E0305. A value that is no variable, such as a literal or a call's result, is E0106.
+// Arguments follow the call rules (H3). `get`, `enumerate` and `contains` need the
+// element to be `Copy` or `Eq`, as their `impl` blocks say. Lists and maps have no
+// associated functions; `[]` and `[:]` build them.
+fn mutating(xs: List[Int], m: Map[Text, Int]) {
+    xs.push(1)                                       // <- E0305
+    let ys = [1]
+    ys.push(2)                                       // <- E0305
+    ys.pop()                                         // <- E0305
+    m.set(key: "b", value: 2)                        // <- E0305
+    m.remove("a")                                    // <- E0305
+    [1].push(2)                                      // <- E0106
+    make().push(3)                                   // <- E0106
+}
+
+fn make() -> List[Int] {
+    return []
+}
+
+fn arguments(xs: List[Int], small: Int8) {
+    var ys = xs
+    ys.push("a")                                     // <- E0301
+    ys.push(item: 1)                                 // <- E0207
+    ys.push()                                        // <- E0208
+    let n = ys.len(1)                                // <- E0208
+    let g = ys.get(small)                            // <- E0301
+    let k = ys.size()                                // <- E0303
+    var m = ["a": 1]
+    m.set("b", 2)                                    // <- E0206
+    var counts = [1: 2]
+    counts.set(value: 2, key: 1)                     // <- E0207
+    let c = m.contains_key(1)                        // <- E0301
+}
+
+fn bounds[T](xs: List[T], x: T, fs: List[Float], ms: Map[Int, T]) {
+    let a = xs.get(0)                                // <- E0309
+    let b = xs.enumerate()                           // <- E0309
+    let c = xs.contains(x)                           // <- E0309
+    let d = fs.contains(1.5)                         // <- E0309
+    let e = ms.get(1)                                // <- E0309
+    let f = xs.len()
+    let g = ms.contains_key(1)
+}
+
+fn associated() {
+    let xs = List.new()                              // <- E0303
+    let m = Map.empty()                              // <- E0303
+}
+
+record Bag {
+    items: List[Int]
+}
+
+fn bag() -> Bag {
+    return Bag(items: [])
+}
+
+fn parts() {
+    bag().items.push(1)                              // <- E0106
+    let b = bag()
+    b.items.push(1)                                  // <- E0305
+    var c = bag()
+    c.items.push(1)
+    c.items[0] = 2
+}
+
+fn copies(xs: List[Int], m: Map[Text, Int]) {
+    let a = xs.with(len: 3)                          // <- E0303
+    let b = m.with()                                 // <- E0303
+}

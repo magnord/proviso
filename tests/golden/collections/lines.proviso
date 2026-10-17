@@ -1,0 +1,52 @@
+// phase: 2.6
+// `Text.lines` (STD.md) gives the lines without their `\n` or `\r\n` endings, and a final
+// line ending doesn't start an empty line. A `\r` without a `\n` after it is no ending.
+// `load` is REFERENCE §17's `load_users` loop, reading from text instead of a `Dir`,
+// which comes in phase 3. It numbers the lines from 1, and the first bad line fails it.
+use std.io { IoError }
+
+record User derives(Eq, Show) {
+    name: Text where not name.is_empty()
+    age: Int where 0 <= age and age < 150
+}
+
+enum LoadError derives(Eq, Show) {
+    MissingComma(line_no: Int)
+    BadAge(line_no: Int)
+}
+
+fn parse_user(line: Text, line_no: Int) -> User fails LoadError {
+    let (name, age_text) = line.split_once(",") else fail LoadError.MissingComma(line_no: line_no)
+    let age = Int.parse(age_text.trim()) else fail LoadError.BadAge(line_no: line_no)
+    return User(name: name.trim(), age: age)
+}
+
+fn load(text: Text) -> List[User] fails LoadError {
+    var users: List[User] = []
+    for (i, line) in text.lines().enumerate() {
+        users.push(try parse_user(line: line, line_no: i + 1))
+    }
+    return users
+}
+
+fn split(t: Text) -> Text {
+    let parts = t.lines()
+    return f"{parts.len()} {parts}"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(split(""))
+    try sys.stdout.write_line(split("a"))
+    try sys.stdout.write_line(split("a\n"))
+    try sys.stdout.write_line(split("a\n\nb"))
+    try sys.stdout.write_line(split("a\n\n"))
+    try sys.stdout.write_line(split("\n"))
+    try sys.stdout.write_line(split("a\u{d}\nb\u{d}\n"))
+    try sys.stdout.write_line(split("\u{d}\n"))
+    try sys.stdout.write_line(split("a\u{d}b"))
+    try sys.stdout.write_line(split("x\u{d}"))
+    let good = attempt load("ada, 36\nbob,7\n")
+    let bad = attempt load("ada, 36\nbob\ncy, 1")
+    try sys.stdout.write_line(f"{good}")
+    try sys.stdout.write_line(f"{bad}")
+}

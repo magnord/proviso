@@ -93,7 +93,7 @@ impl[T: Eq] List[T] {
 }
 ```
 
-`xs[i]` reads element `i` and needs `T: Copy`. An index out of bounds is an `index_out_of_bounds` defect. `xs[i] = v` replaces element `i`, under the same bounds check. If `T` is a resource, `xs[i] = v` is a compile error, because it would discard the old element (§10 rule 5).
+`xs[i]` reads element `i`, which stays in the list, so it is borrowed. Copying it, by binding, returning or storing it, needs `T: Copy`, and a use that only borrows it, such as a method call on it, needs none (REFERENCE §4.8). An index out of bounds is an `index_out_of_bounds` defect. `xs[i] = v` replaces element `i`, under the same bounds check. If `T` is a resource, `xs[i] = v` is a compile error, because it would discard the old element (§10 rule 5).
 
 ### Map and Set
 

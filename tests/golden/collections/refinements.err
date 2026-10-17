@@ -1,0 +1,6 @@
+defect[refinement_failed]: `Short.items` is [0, 1, 2], which breaks its refinement `items.len() < 3`
+  at collections/refinements.proviso:20:9 (refinements.grow+4)
+  called from collections/refinements.proviso:32:9 (refinements)
+defect[refinement_failed]: Span(lo: 1, hi: 0) breaks `Span`'s refinement `lo <= hi`
+  at collections/refinements.proviso:27:5 (refinements.widen+3)
+  called from collections/refinements.proviso:34:9 (refinements)

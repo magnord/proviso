@@ -1,0 +1,64 @@
+// phase: 2.6
+// A map's key type implements `Eq` and `Hash` wherever the type is written (REFERENCE
+// §4.2): in a record's field, a variant's field, a signature or a method's, also when the
+// key type is declared after it, derives them, writes `eq` by hand, or is the type being
+// declared. A map may hold maps whose keys are maps.
+use std.io { IoError }
+
+record Holder {
+    m: Map[Key, Int]
+}
+
+record Key derives(Eq, Hash, Show) {
+    id: Int
+}
+
+record Name derives(Hash) {
+    text: Text
+}
+
+impl Eq for Name {
+    fn eq(self, other: Self) -> Bool {
+        return self.text == other.text
+    }
+}
+
+enum Tree derives(Eq, Hash, Show) {
+    Leaf
+    Fork(kids: Map[Tree, Int])
+}
+
+impl Holder {
+    fn total(self, extra: Map[Key, Int]) -> Int {
+        return self.m.len() + extra.len()
+    }
+}
+
+fn has[K: Eq + Hash](m: Map[K, Int], k: K) -> Bool {
+    return m.contains_key(k)
+}
+
+fn count(m: Map[Name, Int]) -> Int {
+    return m.len()
+}
+
+fn chain(n: Int) -> Tree {
+    var t = Tree.Leaf
+    for i in 0..n {
+        t = Tree.Fork(kids: [t: i])
+    }
+    return t
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let h = Holder(m: [Key(id: 1): 10])
+    let n = count([Name(text: "a"): 1, Name(text: "b"): 2])
+    let a = chain(1000)
+    let b = chain(1000)
+    let c = Tree.Fork(kids: [a: 1])
+    let found = c is Fork(kids) and kids.contains_key(b)
+    let nested = [[[1: 2]: 3]: 4]
+    let got = nested.get([[1: 2]: 3])
+    let generic = has(m: ["a": 1], k: "a")
+    try sys.stdout.write_line(f"{h.total([:])} {n} {a == b} {found} {got} {chain(2)} {generic}")
+}

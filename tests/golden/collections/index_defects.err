@@ -1,0 +1,29 @@
+defect[index_out_of_bounds]: index 3 is out of bounds for a list of length 3
+  at collections/index_defects.proviso:13:12 (index_defects.read+3)
+  called from collections/index_defects.proviso:63:9 (index_defects)
+defect[index_out_of_bounds]: index -1 is out of bounds for a list of length 3
+  at collections/index_defects.proviso:13:12 (index_defects.read+3)
+  called from collections/index_defects.proviso:64:9 (index_defects)
+defect[index_out_of_bounds]: index 3 is out of bounds for a list of length 3
+  at collections/index_defects.proviso:18:5 (index_defects.write+3)
+  called from collections/index_defects.proviso:67:9 (index_defects)
+defect[index_out_of_bounds]: index 2 is out of bounds for a list of length 2
+  at collections/index_defects.proviso:24:5 (index_defects.nested+3)
+  called from collections/index_defects.proviso:69:9 (index_defects)
+[debug collections/index_defects.proviso:29:5] 7
+defect[index_out_of_bounds]: index 2 is out of bounds for a list of length 2
+  at collections/index_defects.proviso:35:5 (index_defects.pushed+3)
+  called from collections/index_defects.proviso:71:9 (index_defects)
+[debug collections/index_defects.proviso:29:5] 0
+defect[index_out_of_bounds]: index 1 is out of bounds for a list of length 1
+  at collections/index_defects.proviso:45:5 (index_defects.deep+3)
+  called from collections/index_defects.proviso:73:9 (index_defects)
+[debug collections/index_defects.proviso:29:5] 0
+[debug collections/index_defects.proviso:29:5] 1
+defect[index_out_of_bounds]: index 1 is out of bounds for a list of length 1
+  at collections/index_defects.proviso:51:5 (index_defects.deep_push+3)
+  called from collections/index_defects.proviso:75:9 (index_defects)
+[debug collections/index_defects.proviso:29:5] 0
+defect[index_out_of_bounds]: index 2 is out of bounds for a list of length 2
+  at collections/index_defects.proviso:57:5 (index_defects.assigned+3)
+  called from collections/index_defects.proviso:77:9 (index_defects)

@@ -1,0 +1,12 @@
+0 []
+1 ["a"]
+1 ["a"]
+3 ["a", "", "b"]
+2 ["a", ""]
+1 [""]
+2 ["a", "b"]
+1 [""]
+1 ["a\u{d}b"]
+1 ["x\u{d}"]
+Ok([User(name: "ada", age: 36), User(name: "bob", age: 7)])
+Err(LoadError.MissingComma(line_no: 2))

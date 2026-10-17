@@ -336,6 +336,11 @@ pub enum ExprKind {
         base: ExprId,
         name: Ident,
     },
+    /// `xs[i]`, which reads element `i` of a list (STD.md).
+    Index {
+        base: ExprId,
+        index: ExprId,
+    },
     Unary {
         op: UnaryOp,
         operand: ExprId,
@@ -370,9 +375,10 @@ pub enum ExprKind {
         label: Option<Ident>,
         body: Block,
     },
+    /// `for pat in iter`, whose pattern matches every element (REFERENCE §6.5).
     For {
         label: Option<Ident>,
-        binding: Ident,
+        pat: PatId,
         iter: ExprId,
         body: Block,
     },
@@ -394,6 +400,10 @@ pub enum ExprKind {
     },
     /// `(a, b)`, with at least two elements.
     Tuple(Vec<ExprId>),
+    /// `[a, b]`, a list literal, or `[]` (REFERENCE §2).
+    List(Vec<ExprId>),
+    /// `["k": v]`, a map literal, or `[:]` with no entries (REFERENCE §2).
+    Map(Vec<(ExprId, ExprId)>),
     /// `value else fallback`, which unwraps an `Option` or handles the failure of the calls
     /// in `value`'s chain (REFERENCE §6.6).
     Else {

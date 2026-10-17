@@ -1,0 +1,102 @@
+// phase: 2.6
+// How collections meet the rest of the language. A map literal that names a key twice keeps
+// its first place and its last value, as `set` would. A key whose type writes `eq` by hand
+// is found by that `eq`, so `Name("ADA")` finds `Name("ada")`, and a list or map can be a
+// key. An element's hand-written `show` writes it inside a list. `Show` and `Eq` dispatch
+// on collections as on any type (REFERENCE §4.9). An assignment runs its value before the
+// indices of its target, and a method that changes its receiver runs the receiver's
+// indices before its arguments (OPEN_QUESTIONS P5). Maps with the same entries in another
+// order are equal and ordered alike, and maps are ordered by key first, then value. A map
+// keeps its order when most of its keys are removed.
+use std.io { IoError }
+
+record Name derives(Hash) {
+    text: Text
+}
+
+impl Eq for Name {
+    fn eq(self, other: Self) -> Bool {
+        return lower(self.text) == lower(other.text)
+    }
+}
+
+impl Show for Name {
+    fn show(self) -> Text {
+        return f"<{self.text}>"
+    }
+}
+
+fn lower(t: Text) -> Text {
+    if t == "ADA" {
+        return "ada"
+    }
+    return t
+}
+
+fn at(i: Int) -> Int {
+    debug(i)
+    return i
+}
+
+fn keys() -> Text {
+    let twice = ["a": 1, "b": 2, "a": 3]
+    var names: Map[Name, Int] = [:]
+    names.set(key: Name(text: "ada"), value: 36)
+    let old = names.set(key: Name(text: "ADA"), value: 37)
+    let found = names.get(Name(text: "ADA"))
+    let lists = [[1, 2]: "one-two", []: "none"]
+    let nested = [["k": 1]: true]
+    let a = lists.get([1, 2])
+    let b = lists.get([])
+    let c = nested.get(["k": 1])
+    let d = nested.get([:])
+    return f"{twice} {twice.len()} {old} {found} {names.len()} {a} {b} {c} {d}"
+}
+
+fn shown() -> Text {
+    let names = [Name(text: "x"), Name(text: "ada")]
+    let s1 = [1, 2].show()
+    let s2 = Show.show(["k": 'v'])
+    let e1 = Eq.eq([1], [1])
+    let e2 = names.contains(Name(text: "ADA"))
+    let e3 = [Name(text: "ADA"): 1] == [Name(text: "ada"): 1]
+    let e4 = [Name(text: "a"): 1] == [Name(text: "b"): 1]
+    return f"{names} {s1} {s2} {e1} {e2} {e3} {e4}"
+}
+
+fn order() -> Text {
+    var xs = [10, 20, 30]
+    xs[at(1)] = at(2) + 100
+    var grid = [[1], [2]]
+    grid[at(0)].push(at(5))
+    return f"{xs} {grid}"
+}
+
+fn maps() -> Text {
+    let a = ["x": 1, "y": 2]
+    let b = ["y": 2, "x": 1]
+    let c = ["x": 2]
+    let d = ["w": 9]
+    return f"{a == b} {a <= b} {a >= b} {c > a} {d < a} {a != c}"
+}
+
+fn emptied() -> Text {
+    var m: Map[Int, Int] = [:]
+    for i in 0..20 {
+        m.set(key: 19 - i, value: i)
+    }
+    for i in 0..15 {
+        m.remove(i + 3)
+    }
+    m.set(key: 7, value: 70)
+    m.set(key: 1, value: 10)
+    return f"{m}"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(keys())
+    try sys.stdout.write_line(shown())
+    try sys.stdout.write_line(order())
+    try sys.stdout.write_line(maps())
+    try sys.stdout.write_line(emptied())
+}
