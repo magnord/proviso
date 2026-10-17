@@ -4,11 +4,14 @@
 // expect-error: E0305
 // expect-error: E0306
 // expect-error: E0309
+// expect-error: E0503
 // `xs[i]` indexes a list with an `Int` (STD.md). Only a list has an index: a map has `get`,
 // text is never indexed by integers (REFERENCE §12.3), and a tuple is taken apart by a
-// pattern. Reading `xs[i]` copies the element, so it needs `T: Copy`. Assigning through an
-// index needs a `var` at the root, as assigning a field does, and only a variable and its
-// fields and elements can be assigned (OPEN_QUESTIONS P5).
+// pattern. Copying `xs[i]` needs `T: Copy`, where it is bound, returned or stored, but a
+// use that only borrows it doesn't, as with a parameter. A pattern that takes an element
+// apart borrows its parts (REFERENCE §4.8, OPEN_QUESTIONS P5). Assigning through an index
+// needs a `var` at the root, as assigning a field does, and only a variable and its fields
+// and elements can be assigned.
 fn indexing(xs: List[Int], m: Map[Text, Int], t: Text, small: Int8, p: (Int, Int)) -> Int {
     let a = xs[small]                                // <- E0301
     let b = xs["0"]                                  // <- E0301
@@ -46,9 +49,44 @@ fn copied[T: Copy](xs: List[T], grid: List[List[T]]) -> T {
     return xs[0]
 }
 
-fn borrowed[T](grid: List[List[T]]) -> Int {
+fn borrowed[T: Show + Eq](grid: List[List[T]], ts: List[(T, Int)], y: T) -> Int {
     let n = grid[0].len()
+    let s = Show.show(grid[0][0])
+    let t = shown(grid[1][0])
+    let u = grid[0][0] == y
+    let v = y == grid[1][0]
+    let w = f"{grid[0][0]}"
+    debug(grid[0][0])
+    let o = grid[0].contains(grid[1][0])
+    let q = Eq.eq(y, grid[0][0])
+    let r = y.eq(grid[0][0])
+    let z = match grid[0][0] {
+        x => x.show()
+    }
+    var k = 0
+    for x in grid[0] {
+        k += 1
+    }
+    let (a, i) = ts[0]
+    let b = a                                        // <- E0503
+    let c = match ts[1] {
+        (e, _) => e                                  // <- E0503
+    }
     let m = grid[0][0]                               // <- E0309
     let row = grid[1]                                // <- E0309
+    let f = Some(grid[0][0])                         // <- E0309
+    let g = (grid[0][0], 1)                          // <- E0309
+    let h = [grid[1][0]]                             // <- E0309
+    let j = if n > 0 { grid[0][0] } else { return 0 } // <- E0309
+    var out: List[T] = []
+    out.push(grid[0][0])                             // <- E0309
     return n
+}
+
+fn returned[T](xs: List[T]) -> T {
+    return xs[0]                                     // <- E0309
+}
+
+fn shown[T: Show](x: T) -> Text {
+    return x.show()
 }

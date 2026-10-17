@@ -265,7 +265,6 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         param_names: Vec::new(),
         copying: false,
         tail_copying: false,
-        index_borrowed: false,
         pattern_borrowed: false,
         pattern_mutable: false,
         pattern_in_loop: false,
@@ -487,9 +486,6 @@ struct Checker<'a> {
     copying: bool,
     /// [`Checker::copying`], handed from an `if` or `match` to the values of its branches.
     tail_copying: bool,
-    /// Set while checking an index whose element is only borrowed: the receiver of a method,
-    /// or the base of a field or another index. It is not copied, so it needs no `Copy`.
-    index_borrowed: bool,
     /// Set while checking a pattern that matches a borrowed value, so its bindings are too.
     pattern_borrowed: bool,
     /// Set while checking the pattern of a `var`, whose bindings are mutable.
@@ -2981,12 +2977,12 @@ impl Checker<'_> {
         }
     }
 
-    /// `xs[i]`, which reads element `i` of a list (STD.md). Reading it copies the element, so
-    /// it needs `T: Copy`, unless the element is only `borrowed`. The element's type need not
-    /// be known yet, so what the element meets may still give it (issue #10).
-    fn index(&mut self, e: ExprId, base: ExprId, index: ExprId, chain: bool, borrowed: bool) -> Ty {
+    /// `xs[i]`, which reads element `i` of a list (STD.md). The element stays in the list, so
+    /// it is borrowed, and only `copying` it needs `T: Copy`, as for a borrowed parameter
+    /// (REFERENCE §4.8, OPEN_QUESTIONS P5). The element's type need not be known yet, so what
+    /// the element meets may still give it (issue #10).
+    fn index(&mut self, e: ExprId, base: ExprId, index: ExprId, chain: bool, copying: bool) -> Ty {
         self.in_chain = chain;
-        self.index_borrowed = matches!(self.m.exprs[base].kind, ExprKind::Index { .. });
         let base_ty = self.infer(base);
         let base_ty = match self.vars.resolve(&base_ty) {
             list @ Ty::Adt(AdtId::LIST, _) => list,
@@ -2994,7 +2990,7 @@ impl Checker<'_> {
         };
         let span = self.span(e);
         let Some(element) = self.indexed(&base_ty, index, span) else { return Ty::Error };
-        if !borrowed {
+        if copying {
             self.needs(element.clone(), IfaceId::COPY, "xs[i]", "T", span);
         }
         element
@@ -3116,7 +3112,9 @@ impl Checker<'_> {
     fn copied(&mut self, e: ExprId, ty: &Ty) {
         // Only a generic function's types mention type parameters, and the borrowed place is
         // the cheap test, so a deep type is walked only where it can matter.
-        if self.f.bounds.is_empty() || !self.borrowed_place(e) {
+        // `xs[i]` reports its own copy, as STD.md has it need `T: Copy`.
+        if self.f.bounds.is_empty() || !self.borrowed_place(e) || matches!(self.m.exprs[e].kind, ExprKind::Index { .. })
+        {
             return;
         }
         let ty = &self.vars.zonk(ty);
@@ -3147,11 +3145,14 @@ impl Checker<'_> {
         }
     }
 
-    /// Whether `e` is a parameter, a part of one bound by a pattern, or a field of either.
+    /// Whether `e` is a parameter, a part of one bound by a pattern, an element of a list, or
+    /// a field of one of those.
     fn borrowed_place(&self, e: ExprId) -> bool {
         match self.m.exprs[e].kind {
             ExprKind::Name(_) => matches!(self.p.res(e), Some(Res::Local(id)) if self.f.locals[id.index()].borrowed),
             ExprKind::Field { base, .. } => matches!(self.p.res(e), Some(Res::Field(_))) && self.borrowed_place(base),
+            // An element stays in its list, so reading it borrows it (OPEN_QUESTIONS P5).
+            ExprKind::Index { .. } => true,
             _ => false,
         }
     }
@@ -3242,7 +3243,6 @@ impl Checker<'_> {
                     return self.unit_variant(e, id, *name, expected);
                 }
                 self.in_chain = chain;
-                self.index_borrowed = matches!(m.exprs[*base].kind, ExprKind::Index { .. });
                 let base_ty = self.infer(*base);
                 let base_ty = self.force(&base_ty);
                 self.field(e, &base_ty, *name)
@@ -3340,10 +3340,7 @@ impl Checker<'_> {
             ExprKind::Tuple(elements) => self.tuple(elements, expected),
             ExprKind::List(elements) => self.list(e, elements, expected),
             ExprKind::Map(entries) => self.map(e, entries, expected),
-            ExprKind::Index { base, index } => {
-                let borrowed = std::mem::replace(&mut self.index_borrowed, false);
-                self.index(e, *base, *index, chain, borrowed)
-            }
+            ExprKind::Index { base, index } => self.index(e, *base, *index, chain, copying),
             ExprKind::Else { value, fallback } => self.else_expr(e, *value, fallback, expected, copying),
             ExprKind::It => match self.its.last() {
                 Some(&id) => {
@@ -3994,7 +3991,6 @@ impl Checker<'_> {
             }
         }
         self.in_chain = chain;
-        self.index_borrowed = matches!(m.exprs[receiver].kind, ExprKind::Index { .. });
         // Which method this is depends on the receiver's type, so it must be known here. A
         // list's or map's own methods don't depend on its type arguments, so what the call
         // meets may still give them (OPEN_QUESTIONS P5; issue #10).

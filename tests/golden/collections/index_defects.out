@@ -1,12 +1,18 @@
-collections/index_defects.proviso:37:1: example passed
-collections/index_defects.proviso:38:1: example passed
-collections/index_defects.proviso:39:1: example failed: it hit a defect
-collections/index_defects.proviso:40:1: example failed: it hit a defect
-collections/index_defects.proviso:41:1: example passed
-collections/index_defects.proviso:42:1: example passed
-collections/index_defects.proviso:43:1: example failed: it hit a defect
-collections/index_defects.proviso:44:1: example passed
-collections/index_defects.proviso:45:1: example failed: it hit a defect
-collections/index_defects.proviso:46:1: example passed
-collections/index_defects.proviso:47:1: example failed: it hit a defect
-11 examples: 6 passed, 5 failed
+collections/index_defects.proviso:61:1: example passed
+collections/index_defects.proviso:62:1: example passed
+collections/index_defects.proviso:63:1: example failed: it hit a defect
+collections/index_defects.proviso:64:1: example failed: it hit a defect
+collections/index_defects.proviso:65:1: example passed
+collections/index_defects.proviso:66:1: example passed
+collections/index_defects.proviso:67:1: example failed: it hit a defect
+collections/index_defects.proviso:68:1: example passed
+collections/index_defects.proviso:69:1: example failed: it hit a defect
+collections/index_defects.proviso:70:1: example passed
+collections/index_defects.proviso:71:1: example failed: it hit a defect
+collections/index_defects.proviso:72:1: example passed
+collections/index_defects.proviso:73:1: example failed: it hit a defect
+collections/index_defects.proviso:74:1: example passed
+collections/index_defects.proviso:75:1: example failed: it hit a defect
+collections/index_defects.proviso:76:1: example passed
+collections/index_defects.proviso:77:1: example failed: it hit a defect
+17 examples: 9 passed, 8 failed

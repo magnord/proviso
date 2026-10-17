@@ -6,6 +6,8 @@
 // first are in bounds. `get` gives `None` instead. A failed assignment changes nothing,
 // since the defect ends the example. A method that changes its receiver checks the
 // receiver's indices before its arguments run, so `at` writes nothing (OPEN_QUESTIONS P5).
+// Each index of a place is checked before the next one runs, as a read checks it, so an
+// index past a bad one runs nothing, at any depth and through a field.
 fn read(i: Int) -> Int {
     let xs = [10, 20, 30]
     return xs[i]
@@ -34,6 +36,28 @@ fn pushed(i: Int) -> List[List[Int]] {
     return grid
 }
 
+record Bag {
+    cube: List[List[List[Int]]]
+}
+
+fn deep(i: Int) -> Int {
+    var bag = Bag(cube: [[[1]], [[2]]])
+    bag.cube[1][i][at(0)] += 5
+    return bag.cube[1][0][0]
+}
+
+fn deep_push(i: Int) -> Int {
+    var cube = [[[[1]]], [[[2]]]]
+    cube[0][i][at(0)].push(at(1))
+    return cube[0][0][0].len()
+}
+
+fn assigned(i: Int) -> Int {
+    var grid = [[1], [2]]
+    grid[i][at(0)] = 5
+    return grid[1][0]
+}
+
 example read(2) == 30
 example read(0) == 10
 example read(3) == 0
@@ -45,3 +69,9 @@ example nested(1) == 4
 example nested(2) == 0
 example pushed(1) == [[1], [2, 7]]
 example pushed(2) == []
+example deep(0) == 7
+example deep(1) == 0
+example deep_push(0) == 2
+example deep_push(1) == 0
+example assigned(1) == 5
+example assigned(2) == 0

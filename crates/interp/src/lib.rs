@@ -646,7 +646,8 @@ impl Interp<'_> {
 
     /// The local that a place, an assignment's target or a changing method's receiver, is
     /// rooted at, and the fields and elements from there to the place. The indices are
-    /// evaluated from the root out.
+    /// evaluated from the root out, and each is checked before the next one runs, as a read
+    /// checks it (OPEN_QUESTIONS P5).
     fn place(&mut self, target: ExprId, frame: &mut Frame) -> Flow<(LocalId, Vec<Step>)> {
         let mut steps = Vec::new();
         let mut e = target;
@@ -666,10 +667,13 @@ impl Interp<'_> {
         };
         let mut path = Vec::with_capacity(steps.len());
         for step in steps.into_iter().rev() {
-            path.push(match step {
-                Ok(i) => Step::Field(i),
-                Err((index, span)) => Step::Index(self.int(index, frame)?.0, span),
-            });
+            match step {
+                Ok(i) => path.push(Step::Field(i)),
+                Err((index, span)) => {
+                    path.push(Step::Index(self.int(index, frame)?.0, span));
+                    at(&frame[root.index()], &path)?;
+                }
+            }
         }
         Ok((root, path))
     }
@@ -1026,10 +1030,9 @@ impl Interp<'_> {
         frame: &mut Frame,
         span: Span,
     ) -> Flow<Value> {
-        let (root, path) = self.place(receiver, frame)?;
         // The receiver's indices are checked before the arguments run, as when a method that
         // doesn't change it reads it.
-        at(&frame[root.index()], &path)?;
+        let (root, path) = self.place(receiver, frame)?;
         let mut values = Vec::with_capacity(args.len());
         for arg in args {
             values.push(self.expr(arg.value, frame)?);
