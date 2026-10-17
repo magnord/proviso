@@ -359,6 +359,10 @@ struct FnState {
     returns: bool,
     /// Set in an example, so diagnostics name it.
     example: bool,
+    /// A `todo` hole or a rejected `fail` is in it, whose `Never` stands for a value of a type
+    /// no one wrote, so `attempt`, `else` and an example aren't reported for an error type
+    /// that settled as `Never`.
+    stand_ins: bool,
     /// The interfaces each of the function's type parameters implements.
     bounds: Vec<Vec<IfaceId>>,
     /// For each type parameter that a parameter of interface type stands for, that
@@ -376,6 +380,7 @@ impl FnState {
             loops: Vec::new(),
             returns: true,
             example: false,
+            stand_ins: false,
             bounds: Vec::new(),
             anonymous: Vec::new(),
         }
@@ -728,9 +733,6 @@ impl Checker<'_> {
         let mut unknown: Vec<Origin> = Vec::new();
         for v in vars {
             let Some(open) = self.vars.open(v).cloned() else { continue };
-            if open.hole && open.never && !open.quiet {
-                self.vars.settled_hole(v);
-            }
             let ty = match open.kind {
                 Kind::Int => Ty::INT,
                 Kind::Float => Ty::Float(FloatTy::F64),
@@ -2994,8 +2996,7 @@ impl Checker<'_> {
                             "`fail` in a `where` clause, which has no function to fail"
                         };
                         self.error(codes::FAIL_WITHOUT_FAILS, span, message);
-                        // It leaves, and gives what it meets no `Never` (§15.1).
-                        return Ty::Error;
+                        self.f.stand_ins = true;
                     }
                 }
                 Ty::Never
@@ -3030,7 +3031,10 @@ impl Checker<'_> {
                 }
             }
             ExprKind::For { label, binding, iter, body } => self.for_loop(e, *label, *binding, *iter, body),
-            ExprKind::Todo(_) if self.opts.incomplete => self.vars.hole(),
+            ExprKind::Todo(_) if self.opts.incomplete => {
+                self.f.stand_ins = true;
+                Ty::Never
+            }
             ExprKind::Todo(_) => {
                 self.error(
                     codes::TODO_REQUIRES_INCOMPLETE,
@@ -4251,8 +4255,6 @@ impl Checker<'_> {
     /// was `rejected` or a call's error type has an error, which may have been one that can
     /// fail (§15.1; issue #30). Calls that fail with one type are one mistake.
     fn try_without_fails(&mut self, errs: Vec<Ty>, rejected: bool, span: Span) {
-        // A `todo` hole may stand for a value of the type a call fails with (Q25).
-        let rejected = rejected || errs.iter().any(|err| self.vars.from_hole(err));
         let mut settled: Vec<Ty> = Vec::new();
         for err in errs.iter().map(|err| self.vars.zonk(err)) {
             if !settled.contains(&err) {
@@ -4322,7 +4324,10 @@ impl Checker<'_> {
     }
 
     fn can_fail(&mut self, err: &Ty, handler: Handler, span: Span) {
-        if self.vars.zonk(err) != Ty::Never || self.vars.from_hole(err) {
+        // A `Never` that a `todo` or a rejected `fail` gave may have stood for the type of an
+        // error, so where one is in the body, an error type that settled as `Never` may not
+        // be one (Q25; §15.1; issue #30).
+        if self.vars.zonk(err) != Ty::Never || self.f.stand_ins {
             return;
         }
         match handler {

@@ -16,7 +16,8 @@
 // also reached is that value's error, so the call can still fail, and a `try` chain with a
 // call that didn't resolve may have held one that fails (REFERENCE §15.1; issue #30). Two
 // calls of one chain that fail with the same type are one E0702. A `fail` without `fails`
-// leaves but gives no `Never`, so it is its own error alone.
+// stands for a value of a type no one wrote, so where one is in a function, `else`,
+// `attempt` and an example's `fails` aren't reported. A `try` there is wrong either way.
 
 record Box {
     n: Int
@@ -85,7 +86,7 @@ fn handled() -> Int {
 fn rejected_fails() -> Int {
     let f1 = rethrow(e: fail "f1") else 0           // <- E0705
     let f2 = attempt rethrow(e: fail "f2")          // <- E0705
-    let f3 = try rethrow(e: fail "f3")              // <- E0705
+    let f3 = try rethrow(e: fail "f3")              // <- E0705, E0703
     return f1
 }
 
