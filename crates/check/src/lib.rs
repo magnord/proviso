@@ -268,6 +268,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         index_borrowed: false,
         pattern_borrowed: false,
         pattern_mutable: false,
+        pattern_in_loop: false,
         let_pattern: false,
         its: Vec::new(),
         option_fallbacks: 0,
@@ -494,6 +495,8 @@ struct Checker<'a> {
     pattern_borrowed: bool,
     /// Set while checking the pattern of a `var`, whose bindings are mutable.
     pattern_mutable: bool,
+    /// Set while checking the pattern of a `for` loop, whose bindings are loop variables.
+    pattern_in_loop: bool,
     /// Set while checking the pattern of a `let`, which must match every value, so a literal
     /// it holds covers only some even where a `match` counts it as `_`.
     let_pattern: bool,
@@ -2633,9 +2636,9 @@ impl Checker<'_> {
             self.p.pat_local.insert(pat, id);
             return;
         }
-        (self.pattern_mutable, self.let_pattern) = (mutable, true);
+        (self.pattern_mutable, self.let_pattern, self.pattern_in_loop) = (mutable, true, in_loop);
         let space = self.pattern(pat, ty);
-        (self.pattern_mutable, self.let_pattern) = (false, false);
+        (self.pattern_mutable, self.let_pattern, self.pattern_in_loop) = (false, false, false);
         if ty.is_unknown() {
             return;
         }
@@ -5039,7 +5042,11 @@ impl Checker<'_> {
         match &m.pats[pat].kind {
             PatKind::Wild => Space::Wild,
             PatKind::Bind(name) => {
-                let (mutable, what) = if self.pattern_mutable { (true, "variable") } else { (false, "binding") };
+                let (mutable, what) = match (self.pattern_mutable, self.pattern_in_loop) {
+                    (true, _) => (true, "variable"),
+                    (false, true) => (false, "loop variable"),
+                    (false, false) => (false, "binding"),
+                };
                 let id = self.declare(*name, ty.clone(), mutable, what, self.pattern_borrowed);
                 self.p.pat_local.insert(pat, id);
                 Space::Wild

@@ -21,6 +21,12 @@ fn unclosed() -> Int {
     return b
 }
 
+fn unclosed_map() -> Int {
+    let a = ["k": 1,                                 // <- E0101
+    let b = 2
+    return b
+}
+
 fn bare(xs: List[Int]) {
     []                                               // <- E0102
     [:]                                              // <- E0102

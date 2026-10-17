@@ -59,7 +59,9 @@ fn shown() -> Text {
     let s2 = Show.show(["k": 'v'])
     let e1 = Eq.eq([1], [1])
     let e2 = names.contains(Name(text: "ADA"))
-    return f"{names} {s1} {s2} {e1} {e2}"
+    let e3 = [Name(text: "ADA"): 1] == [Name(text: "ada"): 1]
+    let e4 = [Name(text: "a"): 1] == [Name(text: "b"): 1]
+    return f"{names} {s1} {s2} {e1} {e2} {e3} {e4}"
 }
 
 fn order() -> Text {
