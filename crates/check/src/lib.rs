@@ -14,6 +14,7 @@ pub mod types;
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use proviso_syntax::arena::SideTable;
 use proviso_syntax::ast::*;
@@ -267,15 +268,22 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         checker.body(id);
     }
     checker.examples();
-    debug_assert!(!checker.p.expr_ty.values().any(holds_var), "an inference variable was left in `expr_ty`");
+    debug_assert!(
+        !checker.p.expr_ty.values().any(|ty| holds_var(ty, &mut HashSet::new())),
+        "an inference variable was left in `expr_ty`"
+    );
     checker.p
 }
 
-/// Whether `ty` has an inference variable in it, which [`Program`] never does.
-fn holds_var(ty: &Ty) -> bool {
+/// Whether `ty` has an inference variable in it, which [`Program`] never does. `seen` holds
+/// the addresses of the argument lists already walked, so a type that shares a part, as
+/// `(t, t)` does, costs each part once.
+fn holds_var(ty: &Ty, seen: &mut HashSet<usize>) -> bool {
     match ty {
         Ty::Var(_) => true,
-        Ty::Adt(_, args) => args.iter().any(holds_var),
+        Ty::Adt(_, args) => {
+            seen.insert(Arc::as_ptr(args) as *const Ty as usize) && args.iter().any(|arg| holds_var(arg, seen))
+        }
         _ => false,
     }
 }
@@ -4318,8 +4326,6 @@ impl Checker<'_> {
         }
     }
 
-    /// Reports the `attempt` or `else` form at `span` if its calls fail with `Never`, which
-    /// can't happen, once the statement settles `err` (OPEN_QUESTIONS P5, `fails Never`).
     /// Whether a `todo` hole met one of `errors`, the error types of the calls a handler
     /// marks, which a chain may have settled before [`Checker::one_error`] joins them, as a
     /// receiver's type is (Q25).
@@ -4327,6 +4333,8 @@ impl Checker<'_> {
         errors.iter().any(|err| self.vars.from_hole(err))
     }
 
+    /// Reports the `attempt` or `else` form at `span` if its calls fail with `Never`, which
+    /// can't happen, once the statement settles `err` (OPEN_QUESTIONS P5, `fails Never`).
     fn wait_can_fail(&mut self, err: &Ty, handler: Handler, span: Span) {
         if self.vars.has_open(err) {
             self.pending.push(Pending::CanFail { err: err.clone(), handler, span });
