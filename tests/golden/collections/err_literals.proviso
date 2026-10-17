@@ -90,6 +90,10 @@ fn written_key(x: Float) -> Map[Float, Int] {      // <- E0309
     return [x: 1]
 }
 
+fn uses_written_key(x: Float) -> Bool {
+    return written_key(x) < written_key(x)
+}
+
 fn qualified(o: Option[Int]) -> Int {
     return match o {
         List.Empty => 1                              // <- E0301
