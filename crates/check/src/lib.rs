@@ -4352,9 +4352,10 @@ impl Checker<'_> {
                 self.branches(&then_ty, &else_ty)
             }
             (Mode::Value(_), None) => {
-                // A block that was never closed may have been followed by an `else`. One that
-                // diverges still gives the `if` no value when the condition is false.
-                if !then_block.unclosed && !then_block.lost {
+                // A block that was never closed may have been followed by an `else`, and one
+                // that lost code may have ended in it. One that diverges, or whose value has an
+                // error, still gives the `if` no value when the condition is false.
+                if !then_block.unclosed && !(then_block.lost && then_ty == Ty::Error) {
                     let span = self.span(e);
                     self.error(codes::TYPE_MISMATCH, span, "an `if` without `else` has no value; add an `else` branch");
                 }
