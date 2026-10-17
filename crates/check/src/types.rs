@@ -149,6 +149,14 @@ impl Ty {
         }
     }
 
+    pub fn list(element: Ty) -> Ty {
+        Ty::applied(AdtId::LIST, vec![element])
+    }
+
+    pub fn map(key: Ty, value: Ty) -> Ty {
+        Ty::applied(AdtId::MAP, vec![key, value])
+    }
+
     pub fn system() -> Ty {
         Ty::adt(AdtId::SYSTEM)
     }

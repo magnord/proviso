@@ -1,13 +1,16 @@
 // phase: 2.6
 // expect-error: E0201
+// expect-error: E0301
 // expect-error: E0302
 // expect-error: E0312
 // An empty literal whose type arguments nothing gives is an error once, whatever the order
 // and spelling of the values that meet it (OPEN_QUESTIONS P5; issue #10). Each line of
 // `unknown` is a rewrite of the others and reports E0312 once, never also for the value it
 // meets. A literal that doesn't fit the type the others give is out of range in any
-// position. An element, key or value with an error makes the literal one, so nothing
-// more is reported about it or what it meets (§15.1).
+// position. A receiver's type must be known where its method is chosen, so a literal
+// there doesn't wait for what its method's result meets, and `[1].get(5) else small` makes
+// `[1]` a `List[Int]` (OPEN_QUESTIONS P5). An element, key or value with an error makes the
+// literal one, so nothing more is reported about it or what it meets (§15.1).
 fn first[T: Copy](a: T, b: T) -> T {
     return a
 }
@@ -37,6 +40,8 @@ fn ranges(small: Int8) {
     let r7 = if true { [300] } else { [small] }      // <- E0302
     let r8 = first(a: [small], b: [300])             // <- E0302
     let r9 = [300: 1, small: 2]                      // <- E0302
+    let r10 = [1].get(5) else small                  // <- E0301
+    let r11 = [small].get(5) else 1
 }
 
 fn rejected() {

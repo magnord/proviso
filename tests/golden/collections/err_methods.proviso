@@ -38,7 +38,8 @@ fn arguments(xs: List[Int], small: Int8) {
     let k = ys.size()                                // <- E0303
     var m = ["a": 1]
     m.set("b", 2)                                    // <- E0206
-    m.set(value: 2, key: "b")                        // <- E0207
+    var counts = [1: 2]
+    counts.set(value: 2, key: 1)                     // <- E0207
     let c = m.contains_key(1)                        // <- E0301
 }
 

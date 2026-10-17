@@ -21,9 +21,13 @@ impl AdtId {
     pub const PARSE_ERROR: AdtId = AdtId(3);
     /// The 2-tuple `(A, B)`. Tuples of other lengths are declared when first used.
     pub const PAIR: AdtId = AdtId(4);
+    /// `List[T]` (STD.md).
+    pub const LIST: AdtId = AdtId(5);
+    /// `Map[K, V]` (STD.md).
+    pub const MAP: AdtId = AdtId(6);
 
     /// How many records and enums are declared before the module's own.
-    const BUILT_IN: usize = 5;
+    const BUILT_IN: usize = 7;
 
     pub fn index(self) -> usize {
         self.0 as usize
@@ -168,6 +172,9 @@ impl VariantIdx {
 pub enum AdtKind {
     Record,
     Enum,
+    /// A prelude collection, `List` or `Map`, whose values the toolchain builds. It has no
+    /// variants, and every one has values, as an empty collection does.
+    Collection,
 }
 
 pub struct AdtDef {
@@ -236,8 +243,20 @@ impl AdtDef {
         def
     }
 
+    /// A prelude collection, which implements what its type arguments do (STD.md).
+    fn collection(name: &str, params: usize) -> AdtDef {
+        let mut def = AdtDef::new(name, AdtKind::Collection);
+        def.params = params;
+        def.derives = vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW, IfaceId::HASH];
+        def
+    }
+
     pub fn is_enum(&self) -> bool {
         self.kind == AdtKind::Enum
+    }
+
+    pub fn is_collection(&self) -> bool {
+        self.kind == AdtKind::Collection
     }
 
     /// The one variant of a record.
@@ -246,9 +265,9 @@ impl AdtDef {
         &self.variants[VariantIdx::RECORD.index()]
     }
 
-    /// A field of a record. An enum has none: its variants do.
+    /// A field of a record. An enum has none: its variants do. Nor has a collection.
     pub fn field(&self, name: &str) -> Option<(FieldIdx, &FieldDef)> {
-        if self.is_enum() {
+        if self.kind != AdtKind::Record {
             return None;
         }
         let i = self.variant().fields.iter().position(|f| &*f.name == name)?;
@@ -268,7 +287,7 @@ impl AdtDef {
     /// and `Some` for one of the prelude's. A tuple has no name.
     pub fn ctor_name(&self, variant: VariantIdx) -> String {
         match self.kind {
-            AdtKind::Record => self.name.to_string(),
+            AdtKind::Record | AdtKind::Collection => self.name.to_string(),
             AdtKind::Enum if self.bare_variants => self.variants[variant.index()].name.to_string(),
             AdtKind::Enum => format!("{}.{}", self.name, self.variants[variant.index()].name),
         }
@@ -368,7 +387,8 @@ impl Default for Decls {
                 IfaceDef { name: name.into(), methods, incomplete: false }
             })
             .collect();
-        let adts = vec![system, option, result, parse_error, AdtDef::tuple(2)];
+        let (list, map) = (AdtDef::collection("List", 1), AdtDef::collection("Map", 2));
+        let adts = vec![system, option, result, parse_error, AdtDef::tuple(2), list, map];
         debug_assert_eq!(adts.len(), AdtId::BUILT_IN);
         let tuples = HashMap::from([(2, AdtId::PAIR)]);
         Decls { adts, ifaces, impls: HashMap::new(), tuples, unknown_tuples: false, unknown: HashSet::new() }
@@ -564,6 +584,10 @@ impl Decls {
         match ty {
             Ty::Cap(_) => false,
             Ty::Param(i) => params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)),
+            // A collection holds values of its type arguments (REFERENCE §5.1).
+            Ty::Adt(id, args) if self.adt(*id).is_collection() => {
+                args.iter().all(|arg| self.copyable(arg, params, seen))
+            }
             Ty::Adt(id, args) => {
                 if args.is_empty() && seen.contains(id) {
                     return true;
@@ -661,6 +685,8 @@ impl Inhabited {
     pub fn has_values(&self, decls: &Decls, ty: &Ty) -> bool {
         match ty {
             Ty::Never => false,
+            // An empty collection is a value whatever its type arguments.
+            Ty::Adt(id, _) if decls.adt(*id).is_collection() => true,
             Ty::Adt(id, args) if !args.is_empty() => {
                 let def = decls.adt(*id);
                 (0..def.variants.len()).any(|v| {
@@ -761,6 +787,7 @@ impl Graph {
     fn requirement(&mut self, decls: &Decls, ty: &Ty) -> Requirement {
         match ty {
             Ty::Never => Requirement::Unmet,
+            Ty::Adt(id, _) if decls.adt(*id).is_collection() => Requirement::Met,
             Ty::Adt(id, args) if !args.is_empty() => {
                 let def = decls.adt(*id);
                 let variants = (0..def.variants.len())
