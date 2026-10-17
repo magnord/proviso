@@ -399,6 +399,16 @@ enum Mode<'t> {
     Tail(&'t Ty),
 }
 
+/// Whether code always leaves (REFERENCE §6.6; OPEN_QUESTIONS P5, `check`). It `Waits` on an open variable that the
+/// expression around it still gives, such as the error type of `it` in a fallback, and
+/// leaves if that settles as `Never` (OPEN_QUESTIONS P5; issue #30).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Flow {
+    Leaves,
+    Finishes,
+    Waits(u32),
+}
+
 /// The fields of `System` that phase 3 adds (REFERENCE §9.1).
 const LATER_SYSTEM_FIELDS: &[&str] = &["fs", "net", "clock", "random", "env", "stdin", "stderr", "process"];
 
@@ -488,10 +498,30 @@ enum Pending {
     /// A call of `callee` that can fail with `ty` but has no marker, which is reported with
     /// the error type the statement settles (E0701).
     Unmarked { ty: Ty, callee: Box<str>, span: Span },
-    /// A `try` that propagates `errs` where there is no `fails` to take them (E0702).
-    Try { errs: Vec<Ty>, span: Span },
-    /// The fallback of a `check`, of type `ty`, which must not finish (E0415).
-    Leaves { ty: Ty, span: Span },
+    /// A `try` that propagates `errs` where there is no `fails` to take them (E0702). Its
+    /// chain was `rejected` when its value has an error.
+    Try { errs: Vec<Ty>, rejected: bool, span: Span },
+    /// An `attempt` or `else` form whose calls fail with `err`, which must not settle as
+    /// `Never` (E0706, E0707; OPEN_QUESTIONS P5, `fails Never`). An example's error type is
+    /// settled where it is checked.
+    CanFail { err: Ty, handler: Handler, span: Span },
+    /// Code that leaves if `ty` does, which must not finish: the fallback of a `check`
+    /// (E0415), or a block that ends without the value it is `expected` to give (E0301).
+    Leaves { ty: Ty, must: Must },
+}
+
+/// Code that must not finish, and what reports it if it can.
+enum Must {
+    Check(Span),
+    Value { expected: Ty, span: Span },
+}
+
+/// What handles the failure of the calls it marks, other than `try`.
+#[derive(Clone, Copy)]
+enum Handler {
+    Attempt,
+    Else,
+    Example,
 }
 
 impl Pending {
@@ -504,7 +534,8 @@ impl Pending {
             | Pending::Neg { ty, .. }
             | Pending::Arith { ty, .. }
             | Pending::Unmarked { ty, .. }
-            | Pending::Leaves { ty, .. } => std::slice::from_ref(ty),
+            | Pending::Leaves { ty, .. }
+            | Pending::CanFail { err: ty, .. } => std::slice::from_ref(ty),
             Pending::Try { errs, .. } => errs,
         }
     }
@@ -546,7 +577,7 @@ impl Checker<'_> {
     /// Settles the open variables made since `vars`, and runs the checks queued since
     /// `pending`, which wait on them. An integer literal's variable becomes `Int`, a float
     /// literal's `Float` (REFERENCE §2), and one that only `Never` reached `Never` (OPEN_QUESTIONS P5). Any other
-    /// is a type argument that nothing gave, which is reported once (E0312).
+    /// is a type argument that nothing gave, which [`Checker::settle_vars`] reports once.
     ///
     /// A variable that an older one was bound to a type with, such as a `None` met with `it`
     /// in a fallback's statement, belongs to the expression around the statement, which
@@ -576,9 +607,10 @@ impl Checker<'_> {
     }
 
     /// Reports the fallback of a `check`, of type `ty`, if it can finish (E0415). An error
-    /// counts as leaving, since it was reported where it went wrong.
+    /// counts as leaving, since it was reported where it went wrong. A value built from
+    /// parts, such as `Some(it)`, finishes whatever its parts are (issue #30).
     fn check_leaves(&mut self, ty: &Ty, span: Span) {
-        if !diverges_ty(&self.vars.zonk(ty)) {
+        if self.flow(ty) != Flow::Leaves {
             self.error(
                 codes::CHECK_FALLS_THROUGH,
                 span,
@@ -591,8 +623,7 @@ impl Checker<'_> {
     /// would, so a type argument that only `Never` gave is `Never` when it is asked whether
     /// the statement can finish. Those the expression around the statement may still give
     /// stay open, such as the error type of `it`, which the `let` around a fallback settles
-    /// (OPEN_QUESTIONS P5). A statement whose type has one counts as one that can finish
-    /// (issue #30).
+    /// (OPEN_QUESTIONS P5). A statement whose type is one waits for it (issue #30).
     fn settle_own(&mut self, ty: &Ty) -> Ty {
         if !self.vars.has_var(ty) {
             return ty.clone();
@@ -606,11 +637,88 @@ impl Checker<'_> {
         self.vars.zonk(ty)
     }
 
+    /// Whether code of type `ty` leaves. An error counts as leaving, since it was reported
+    /// where it went wrong, and a variable that is still open waits.
+    fn flow(&self, ty: &Ty) -> Flow {
+        match self.vars.resolve(ty) {
+            Ty::Never | Ty::Error => Flow::Leaves,
+            Ty::Var(v) => Flow::Waits(self.vars.root(v)),
+            _ => Flow::Finishes,
+        }
+    }
+
+    /// `flow` with the variable it waits on as it is now.
+    fn now(&self, flow: Flow) -> Flow {
+        match flow {
+            Flow::Waits(v) => self.flow(&Ty::Var(v)),
+            flow => flow,
+        }
+    }
+
+    /// The flow of `a` followed by `b`, which leaves if either does. Code that waits on two
+    /// variables counts as finishing, which at worst reports a block that leaves.
+    fn then(&self, a: Flow, b: Flow) -> Flow {
+        match (self.now(a), self.now(b)) {
+            (Flow::Leaves, _) | (_, Flow::Leaves) => Flow::Leaves,
+            (Flow::Finishes, flow) | (flow, Flow::Finishes) => flow,
+            (Flow::Waits(a), Flow::Waits(b)) if a == b => Flow::Waits(a),
+            _ => Flow::Finishes,
+        }
+    }
+
+    /// The type of branches of types `a` and `b` whose values are unused, which leave only
+    /// if both do. Only `Never` counts as leaving here, not an error.
+    fn branches(&self, a: &Ty, b: &Ty) -> Ty {
+        let flow = |ty: &Ty| match self.vars.resolve(ty) {
+            Ty::Never => Flow::Leaves,
+            Ty::Var(v) => Flow::Waits(self.vars.root(v)),
+            _ => Flow::Finishes,
+        };
+        match (flow(a), flow(b)) {
+            (Flow::Leaves, Flow::Leaves) => Ty::Never,
+            (Flow::Leaves, Flow::Waits(v)) | (Flow::Waits(v), Flow::Leaves) => Ty::Var(v),
+            (Flow::Waits(x), Flow::Waits(y)) if x == y => Ty::Var(x),
+            _ => Ty::Unit,
+        }
+    }
+
+    /// The statements of a block, checked in order.
+    fn stmts(&mut self, stmts: &[StmtId]) -> Flow {
+        let mut flow = Flow::Finishes;
+        for &s in stmts {
+            let next = self.stmt(s);
+            flow = self.then(flow, next);
+        }
+        self.now(flow)
+    }
+
+    /// Whether a value of type `expected` may be `()`: it is `Unit`, an error, or a variable
+    /// that isn't a literal's.
+    fn takes_unit(&self, expected: &Ty) -> bool {
+        match self.vars.resolve(expected) {
+            Ty::Unit | Ty::Error => true,
+            Ty::Var(v) => self.vars.open(v).is_some_and(|open| open.kind == Kind::Any),
+            _ => false,
+        }
+    }
+
+    /// Reports a block that ends without the value of type `expected` it must give.
+    fn ends_without_value(&mut self, expected: &Ty, span: Span) {
+        self.error(
+            codes::TYPE_MISMATCH,
+            span,
+            format!("expected a value of type `{}`, but this block ends without one", self.show(expected)),
+        );
+    }
+
     /// Settles `vars` as their defaults, or as errors where nothing gave them a type.
     ///
     /// Which error stands for a type argument that nothing gave, so each mistake is reported
     /// once (REFERENCE §15.1; issue #20):
-    /// - One a rejected value was to give (quiet) is that value's error, never E0312.
+    /// - One a rejected value was to give (quiet) is that value's error, never E0312. It is
+    ///   not `Never`, even where a `Never` reached it too, since the value may have been of
+    ///   any type (issue #30).
+    /// - One a `todo` hole met is `Never`, as the hole is (Q25).
     /// - The error type of a call without a marker (unmarked) is that call's E0701, unless a
     ///   `try` with no `fails` to take it also needs it (owed). Then it is E0312.
     /// - Any other is E0312.
@@ -621,11 +729,15 @@ impl Checker<'_> {
         let mut unknown: Vec<Origin> = Vec::new();
         for v in vars {
             let Some(open) = self.vars.open(v).cloned() else { continue };
+            if open.hole && !open.quiet {
+                self.vars.settled_hole(v);
+            }
             let ty = match open.kind {
                 Kind::Int => Ty::INT,
                 Kind::Float => Ty::Float(FloatTy::F64),
-                Kind::Any if open.never => Ty::Never,
-                Kind::Any if open.quiet || (open.unmarked && !open.owed) => Ty::Error,
+                Kind::Any if open.quiet => Ty::Error,
+                Kind::Any if open.never || open.hole => Ty::Never,
+                Kind::Any if open.unmarked && !open.owed => Ty::Error,
                 Kind::Any => {
                     unknown.push(open.origin);
                     Ty::Error
@@ -720,8 +832,14 @@ impl Checker<'_> {
                 let ty = self.vars.zonk(&ty);
                 self.unmarked(&callee, &ty, span);
             }
-            Pending::Try { errs, span } => self.try_without_fails(errs, span),
-            Pending::Leaves { ty, span } => self.check_leaves(&ty, span),
+            Pending::Try { errs, rejected, span } => self.try_without_fails(errs, rejected, span),
+            Pending::CanFail { err, handler, span } => self.can_fail(&err, handler, span),
+            Pending::Leaves { ty, must: Must::Check(span) } => self.check_leaves(&ty, span),
+            Pending::Leaves { ty, must: Must::Value { expected, span } } => {
+                if self.flow(&ty) != Flow::Leaves {
+                    self.ends_without_value(&expected, span);
+                }
+            }
         }
     }
 
@@ -2089,12 +2207,13 @@ impl Checker<'_> {
         let ty = self.expr(decl.call, None);
         let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
         let span = self.span(decl.call);
+        let hole = self.met_hole(&errors);
         let err = self.one_error(errors, span, "example", "an example expects one error type");
         match &decl.expect {
             Expectation::Equals(value) => {
                 // A call that was rejected has nothing to compare with (§15.1).
                 if ty == Ty::Error {
-                    self.infer(*value);
+                    self.rejected_value(*value);
                     return;
                 }
                 // As in `operands`, the call gives the value what it knows of its type, and the
@@ -2121,7 +2240,13 @@ impl Checker<'_> {
             }
             Expectation::Fails(pat) => {
                 let err = match err {
-                    Some(err) => self.force(&err),
+                    Some(err) => {
+                        let forced = self.force(&err);
+                        if ty != Ty::Error && !hole {
+                            self.can_fail(&err, Handler::Example, span);
+                        }
+                        forced
+                    }
                     None => {
                         if !ty.is_unknown() {
                             let message = "`fails` needs a call that can fail, and this one can't";
@@ -2172,14 +2297,11 @@ impl Checker<'_> {
         let m = self.m;
         let ret = self.f.ret.clone();
         self.f.scopes.push(Vec::new());
-        let diverges = if ret == Ty::Unit {
-            body.stmts.iter().fold(false, |diverges, &s| self.stmt(s) | diverges)
-        } else {
-            self.tail_stmts(body, &ret)
-        };
+        // A body's own statements wait on no variable, since nothing is around them.
+        let flow = if ret == Ty::Unit { self.stmts(&body.stmts) } else { self.tail_stmts(body, &ret) };
         self.f.scopes.pop();
         // A body that needed parse recovery has unknown control flow.
-        if ret != Ty::Unit && ret != Ty::Error && !diverges && !decl.recovered {
+        if ret != Ty::Unit && ret != Ty::Error && flow != Flow::Leaves && !decl.recovered {
             let name = m.text(decl.name.sym);
             self.error(
                 codes::MISSING_RETURN,
@@ -2191,10 +2313,10 @@ impl Checker<'_> {
 
     /// Checks the statements of a body that returns `ret`, or of a branch that ends one. A
     /// final value there is a missing `return`, not an unused value. Returns whether the
-    /// statements always diverge, counting such a value as a return.
-    fn tail_stmts(&mut self, block: &Block, ret: &Ty) -> bool {
+    /// statements always leave, counting such a value as a return.
+    fn tail_stmts(&mut self, block: &Block, ret: &Ty) -> Flow {
         let m = self.m;
-        let mut diverges = false;
+        let mut flow = Flow::Finishes;
         let count = block.stmts.len();
         for (i, &s) in block.stmts.iter().enumerate() {
             if i + 1 == count
@@ -2208,17 +2330,23 @@ impl Checker<'_> {
                         span,
                         "function bodies have no implicit final value; write `return` before it",
                     );
-                    return true;
+                    return Flow::Leaves;
                 }
-                match m.exprs[e].kind {
-                    ExprKind::If { .. } => return diverges | diverges_ty(&self.if_expr(e, Mode::Tail(ret))),
-                    ExprKind::Match { .. } => return diverges | diverges_ty(&self.match_expr(e, Mode::Tail(ret))),
-                    _ => {}
-                }
+                let last = match m.exprs[e].kind {
+                    ExprKind::If { .. } => self.if_expr(e, Mode::Tail(ret)),
+                    ExprKind::Match { .. } => self.match_expr(e, Mode::Tail(ret)),
+                    _ => {
+                        let next = self.stmt(s);
+                        return self.then(flow, next);
+                    }
+                };
+                let last = self.flow(&last);
+                return self.then(flow, last);
             }
-            diverges |= self.stmt(s);
+            let next = self.stmt(s);
+            flow = self.then(flow, next);
         }
-        diverges
+        self.now(flow)
     }
 
     /// Declares a local in the innermost scope. A `borrowed` one is part of a parameter.
@@ -2268,18 +2396,18 @@ impl Checker<'_> {
 
     // ---- statements ----
 
-    /// Checks a statement and returns whether it always diverges. What it leaves open is
+    /// Checks a statement and returns whether it always leaves. What it leaves open is
     /// solved at its end, since nothing after it can give it (OPEN_QUESTIONS P5).
-    fn stmt(&mut self, s: StmtId) -> bool {
+    fn stmt(&mut self, s: StmtId) -> Flow {
         let (vars, pending, bound) = (self.vars.count(), self.pending.len(), self.vars.bound());
         let outer = std::mem::replace(&mut self.stmt_start, (vars, bound));
-        let diverges = self.stmt_kind(s);
+        let flow = self.stmt_kind(s);
         self.stmt_start = outer;
         self.solve(vars, pending, bound);
-        diverges
+        self.now(flow)
     }
 
-    fn stmt_kind(&mut self, s: StmtId) -> bool {
+    fn stmt_kind(&mut self, s: StmtId) -> Flow {
         let m = self.m;
         let stmt = &m.stmts[s];
         match &stmt.kind {
@@ -2305,7 +2433,7 @@ impl Checker<'_> {
                 self.pattern_borrowed = destructures && self.borrowed_value(*init);
                 self.let_pattern(*pat, &ty, *mutable);
                 self.pattern_borrowed = false;
-                diverges_ty(&init_ty)
+                self.flow(&init_ty)
             }
             StmtKind::Check { cond, fallback } => {
                 // The fallback runs when the condition is false, so the bindings of its `is`
@@ -2324,23 +2452,27 @@ impl Checker<'_> {
                 // What the `let` around a fallback still gives, such as the error type of
                 // `it`, is waited for (OPEN_QUESTIONS P5).
                 if self.vars.has_open(&ty) {
-                    self.pending.push(Pending::Leaves { ty, span });
+                    self.pending.push(Pending::Leaves { ty, must: Must::Check(span) });
                 } else {
                     self.check_leaves(&ty, span);
                 }
                 if let Some(scope) = self.f.scopes.last_mut() {
                     scope.extend(bindings);
                 }
-                false
+                Flow::Finishes
             }
-            StmtKind::Assign { target, op, value } => diverges_ty(&self.assign(*target, *op, *value)),
+            StmtKind::Assign { target, op, value } => {
+                let ty = self.assign(*target, *op, *value);
+                self.flow(&ty)
+            }
             StmtKind::Expr(e) => {
                 let ty = self.expr_stmt(*e);
-                diverges_ty(&self.settle_own(&ty))
+                let ty = self.settle_own(&ty);
+                self.flow(&ty)
             }
             StmtKind::Return(value) if !self.f.returns => {
                 if let Some(value) = value {
-                    self.infer(*value);
+                    self.rejected_value(*value);
                 }
                 self.error(
                     codes::MISPLACED_RETURN,
@@ -2351,7 +2483,7 @@ impl Checker<'_> {
                         "`return` outside a function body; a `where` clause is an expression"
                     },
                 );
-                true
+                Flow::Leaves
             }
             StmtKind::Return(value) => {
                 let ret = self.f.ret.clone();
@@ -2366,17 +2498,20 @@ impl Checker<'_> {
                     }
                     None => {}
                 }
-                true
+                Flow::Leaves
             }
             StmtKind::Break(label) => {
                 self.jump(s, *label, true);
-                true
+                Flow::Leaves
             }
             StmtKind::Continue(label) => {
                 self.jump(s, *label, false);
-                true
+                Flow::Leaves
             }
-            StmtKind::Assert(cond) => diverges_ty(&self.check(*cond, &Ty::Bool)),
+            StmtKind::Assert(cond) => {
+                let ty = self.check(*cond, &Ty::Bool);
+                self.flow(&ty)
+            }
         }
     }
 
@@ -2536,29 +2671,33 @@ impl Checker<'_> {
         self.p.jump_target.insert(s, target);
     }
 
-    /// Checks a block whose value is unused. Returns `Never` if it always diverges. With
-    /// `tail`, the block ends a function that returns that type.
+    /// Checks a block whose value is unused. Returns `Never` if it always diverges, and the
+    /// variable it waits on if it may (see [`Flow`]). With `tail`, the block ends a function
+    /// that returns that type.
     fn block_stmt(&mut self, block: &Block, tail: Option<&Ty>) -> Ty {
         self.f.scopes.push(Vec::new());
-        let diverges = match tail {
+        let flow = match tail {
             Some(ret) => self.tail_stmts(block, ret),
-            None => block.stmts.iter().fold(false, |diverges, &s| self.stmt(s) | diverges),
+            None => self.stmts(&block.stmts),
         };
         self.f.scopes.pop();
-        match () {
-            _ if diverges => Ty::Never,
+        match flow {
+            Flow::Leaves => Ty::Never,
             // How it ends may be in the code that is missing.
             _ if block.unclosed || block.lost => Ty::Error,
-            _ => Ty::Unit,
+            Flow::Waits(v) => Ty::Var(v),
+            Flow::Finishes => Ty::Unit,
         }
     }
 
     /// Checks a block used for its value: the final expression, if there is one, which is
-    /// copied when `copying` says so.
+    /// copied when `copying` says so. A block without one that waits on a variable (see
+    /// [`Flow`]) is `Never` for now, and is reported once the variable settles if it can
+    /// finish.
     fn block_value(&mut self, block: &Block, expected: Option<&Ty>, copying: bool) -> Ty {
         let m = self.m;
         self.f.scopes.push(Vec::new());
-        let mut diverges = false;
+        let mut flow = Flow::Finishes;
         let mut value = None;
         let count = block.stmts.len();
         // The last statement of a block that is never closed, or lost one, may not be its end,
@@ -2573,7 +2712,7 @@ impl Checker<'_> {
                 // statement §6.2 makes it, as in a fallback that only sometimes leaves.
                 if expected == Some(&Ty::Unit) && self.lacks_final_else(e) {
                     let ty = self.expr_stmt(e);
-                    diverges |= diverges_ty(&ty);
+                    flow = self.then(flow, self.flow(&ty));
                     value = Some(Ty::Unit);
                     continue;
                 }
@@ -2582,14 +2721,20 @@ impl Checker<'_> {
                     Some(expected) => self.joined(e, expected),
                     None => self.infer(e),
                 };
-                diverges |= diverges_ty(&ty);
+                // A value with an error stays one, so the branches it meets know it was
+                // rejected (§15.1).
+                if ty == Ty::Never {
+                    flow = Flow::Leaves;
+                }
                 value = Some(ty);
                 continue;
             }
-            diverges |= self.stmt(s);
+            let next = self.stmt(s);
+            flow = self.then(flow, next);
         }
         self.f.scopes.pop();
-        if diverges {
+        let flow = self.now(flow);
+        if flow == Flow::Leaves {
             return Ty::Never;
         }
         // Its value may have come from the code that is missing.
@@ -2600,12 +2745,18 @@ impl Checker<'_> {
         // expected it (issue #10).
         match (value, expected) {
             (Some(ty), _) => ty,
+            // Whether it leaves waits for the variable, so it gives no type for now, and is
+            // reported then if it can finish (issue #30).
+            (None, Some(expected))
+                if let Flow::Waits(v) = flow
+                    && !self.takes_unit(expected) =>
+            {
+                let must = Must::Value { expected: expected.clone(), span: block.span.end() };
+                self.pending.push(Pending::Leaves { ty: Ty::Var(v), must });
+                Ty::Never
+            }
             (None, Some(expected)) if !self.vars.subsume(expected, &Ty::Unit) => {
-                self.error(
-                    codes::TYPE_MISMATCH,
-                    block.span.end(),
-                    format!("expected a value of type `{}`, but this block ends without one", self.show(expected)),
-                );
+                self.ends_without_value(expected, block.span.end());
                 Ty::Error
             }
             (None, _) => Ty::Unit,
@@ -2616,6 +2767,21 @@ impl Checker<'_> {
 
     fn infer(&mut self, e: ExprId) -> Ty {
         self.expr(e, None)
+    }
+
+    /// Infers the type of `e`, a part of an expression that was rejected, which was the one
+    /// to give the type arguments `e` leaves open, so they are not reported again (§15.1).
+    fn rejected_value(&mut self, e: ExprId) -> Ty {
+        let ty = self.infer(e);
+        self.vars.quiet(&ty);
+        ty
+    }
+
+    /// [`Checker::rejected_value`] for each argument of a rejected call.
+    fn rejected_args(&mut self, args: &[Arg]) {
+        for arg in args {
+            self.rejected_value(arg.value);
+        }
     }
 
     /// Checks `e` against `expected`, reports a mismatch, and returns the actual type.
@@ -2821,7 +2987,7 @@ impl Checker<'_> {
                         self.check(*value, &err);
                     }
                     None => {
-                        self.infer(*value);
+                        self.rejected_value(*value);
                         let message = if self.f.returns {
                             "`fail` needs a `fails` clause, and this function declares none"
                         } else if self.f.example {
@@ -2864,7 +3030,13 @@ impl Checker<'_> {
                 }
             }
             ExprKind::For { label, binding, iter, body } => self.for_loop(e, *label, *binding, *iter, body),
-            ExprKind::Todo(_) if self.opts.incomplete => Ty::Never,
+            // What the hole meets may be given its type by the code that fills it (Q25).
+            ExprKind::Todo(_) if self.opts.incomplete => {
+                if let Some(expected) = expected {
+                    self.vars.hole(expected);
+                }
+                Ty::Never
+            }
             ExprKind::Todo(_) => {
                 self.error(
                     codes::TODO_REQUIRES_INCOMPLETE,
@@ -2920,7 +3092,20 @@ impl Checker<'_> {
             };
             tys.push(ty);
         }
+        // An element with an error gives the tuple a part that a later value may still give a
+        // type, so a tuple that meets another is not reported again. It gives the others no
+        // type, so what they leave open is still reported (§15.1; issue #30).
+        let tys = tys.into_iter().map(|ty| if ty == Ty::Error { self.vars.rejected() } else { ty }).collect();
         self.p.decls.tuple_ty(tys)
+    }
+
+    /// Marks the type arguments that `tys` leave open as a rejected value's when one of them
+    /// is an error: the branches of an `if` or `match`, one of which may have given them
+    /// (§15.1).
+    fn rejected_parts(&mut self, tys: &[Ty]) {
+        if tys.contains(&Ty::Error) {
+            tys.iter().for_each(|ty| self.vars.quiet(ty));
+        }
     }
 
     /// `value else fallback` (REFERENCE §6.6). It marks the fallible calls of `value`'s chain,
@@ -2935,11 +3120,18 @@ impl Checker<'_> {
         let value_ty = self.expr(value, None);
         let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
         let span = self.span(e);
+        let hole = self.met_hole(&errors);
         let it = match self.one_error(errors, span, "`else`", "`it` has one type") {
             // It may have been a call that can fail, so `it` is not reported again (§15.1).
             None if value_ty == Ty::Error => Some(Ty::Error),
             it => it,
         };
+        if let Some(err) = &it
+            && value_ty != Ty::Error
+            && !hole
+        {
+            self.wait_can_fail(err, Handler::Else, span);
+        }
         let unwrapped = match (&it, &value_ty) {
             (Some(_), ty) => ty.clone(),
             (None, Ty::Adt(AdtId::OPTION, args)) => self.vars.resolve(&args[0]),
@@ -3260,9 +3452,7 @@ impl Checker<'_> {
             && let Some(id) = bare_variant(m.text(name.sym))
         {
             if self.poisoned.contains(&name.sym) {
-                for arg in args {
-                    self.infer(arg.value);
-                }
+                self.rejected_args(args);
                 return Ty::Error;
             }
             return self.construct_variant(callee, id, name, args, span, expected);
@@ -3274,9 +3464,7 @@ impl Checker<'_> {
                 let text = m.text(name.sym);
                 let message = format!("`{text}` is an enum; build one of its variants, as in `{text}.Variant(…)`");
                 self.error(codes::UNKNOWN_NAME, name.span, message);
-                for arg in args {
-                    self.infer(arg.value);
-                }
+                self.rejected_args(args);
                 return Ty::Error;
             }
             return self.construct(callee, id, args, span);
@@ -3301,9 +3489,7 @@ impl Checker<'_> {
             }
             _ => self.not_implemented(callee_span, "calls of function values", Planned::Phase(2)),
         }
-        for arg in args {
-            self.infer(arg.value);
-        }
+        self.rejected_args(args);
         Ty::Error
     }
 
@@ -3346,9 +3532,7 @@ impl Checker<'_> {
         let m = self.m;
         let info = &self.p.fns[f];
         if info.rejected {
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return Ty::Error;
         }
         let name = m.text(info.name);
@@ -3384,9 +3568,7 @@ impl Checker<'_> {
                     }
                 };
                 self.error(codes::TYPE_ARGUMENT_COUNT, at, message);
-                for arg in args {
-                    self.infer(arg.value);
-                }
+                self.rejected_args(args);
                 return Ty::Error;
             } else {
                 for (slot, ty) in tvars.iter_mut().zip(tys) {
@@ -3494,9 +3676,7 @@ impl Checker<'_> {
             }
             // A rejected declaration may have had the name.
             if cap || self.poisoned.contains(&receiver_name.sym) {
-                for arg in args {
-                    self.infer(arg.value);
-                }
+                self.rejected_args(args);
                 return Ty::Error;
             }
         }
@@ -3523,9 +3703,7 @@ impl Checker<'_> {
             && let Some((which, planned)) = planned
         {
             self.not_implemented(method.span, &format!("`Text` methods {which}, such as `{name}`,"), planned);
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return Ty::Error;
         }
         if let Some((builtin, params, ret, fails)) = builtin_method(&receiver_ty, name) {
@@ -3546,9 +3724,7 @@ impl Checker<'_> {
                 self.dispatch_call(e, iface, j, &receiver_ty, method, targs, args, span, chain, false)
             }
             None => {
-                for arg in args {
-                    self.infer(arg.value);
-                }
+                self.rejected_args(args);
                 Ty::Error
             }
         }
@@ -3591,9 +3767,7 @@ impl Checker<'_> {
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);
             }
         }
-        for arg in args {
-            self.infer(arg.value);
-        }
+        self.rejected_args(args);
         Ty::Error
     }
 
@@ -3717,9 +3891,7 @@ impl Checker<'_> {
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);
             }
         }
-        for arg in args {
-            self.infer(arg.value);
-        }
+        self.rejected_args(args);
         Ty::Error
     }
 
@@ -3769,9 +3941,7 @@ impl Checker<'_> {
                 let message = format!("`{iface_text}.{name}` takes its receiver first, as in `{iface_text}.{name}(x)`");
                 self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
             }
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return Ty::Error;
         };
         if let Some(label) = first.label {
@@ -3784,9 +3954,7 @@ impl Checker<'_> {
             let message = format!("`{}` does not implement `{iface_text}`", self.show(&receiver_ty));
             let at = self.span(first.value);
             self.error(codes::MISSING_IMPLEMENTATION, at, message);
-            for arg in rest {
-                self.infer(arg.value);
-            }
+            self.rejected_args(rest);
             return Ty::Error;
         }
         self.dispatch_call(e, iface, j, &receiver_ty, method, targs, rest, span, chain, true)
@@ -3912,7 +4080,7 @@ impl Checker<'_> {
                     self.check(arg.value, &fields[i].1);
                 }
                 None => {
-                    self.infer(arg.value);
+                    self.rejected_value(arg.value);
                 }
             }
         }
@@ -3949,9 +4117,7 @@ impl Checker<'_> {
                 span,
                 format!("`{callee}` takes {n} {noun}, but {given} {verb} given"),
             );
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return false;
         }
         // One label problem is reported per call, with the labels the call needs.
@@ -4005,6 +4171,11 @@ impl Checker<'_> {
     }
 
     fn fallible_call(&mut self, call: ExprId, callee: &str, err: &Ty, span: Span, chain: bool) {
+        // A call whose error type is `Never`, as `::[Never]` gives it, can't fail, as one that
+        // declares `fails Never` can't (OPEN_QUESTIONS P5).
+        if self.vars.resolve(err) == Ty::Never {
+            return;
+        }
         match self.markers.last_mut() {
             Some(marker) if chain => {
                 marker.errors.push(err.clone());
@@ -4040,10 +4211,10 @@ impl Checker<'_> {
         self.markers.push(Marker { handler: None, errors: Vec::new() });
         self.in_chain = true;
         let ty = self.expr(inner, expected);
-        let mut errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
-        errors.dedup();
+        let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
         // A chain with an error may hold the fallible call that didn't resolve.
-        if errors.is_empty() && ty != Ty::Error {
+        let rejected = ty == Ty::Error;
+        if errors.is_empty() && !rejected {
             self.error(codes::TRY_WITHOUT_FAILURE, span, "`try` marks no call that can fail");
         }
         if self.f.fails.is_none() && !errors.is_empty() {
@@ -4051,12 +4222,14 @@ impl Checker<'_> {
             // settles, and nothing else reports one that nothing gives.
             if errors.iter().any(|err| self.vars.has_var(err)) {
                 errors.iter().for_each(|err| self.vars.owe(err));
-                self.pending.push(Pending::Try { errs: errors, span });
+                self.pending.push(Pending::Try { errs: errors, rejected, span });
             } else {
-                self.try_without_fails(errors, span);
+                self.try_without_fails(errors, rejected, span);
             }
             return ty;
         }
+        // Calls that fail with one type are one mistake (§15.1).
+        let mut reported: Vec<String> = Vec::new();
         for err in errors {
             let err = self.vars.resolve(&err);
             let message = match &self.f.fails {
@@ -4071,7 +4244,10 @@ impl Checker<'_> {
                 ),
             };
             self.vars.poison(&err);
-            self.error(codes::TRY_ERROR_MISMATCH, span, message);
+            if !reported.contains(&message) {
+                self.error(codes::TRY_ERROR_MISMATCH, span, message.clone());
+                reported.push(message);
+            }
         }
         ty
     }
@@ -4079,13 +4255,25 @@ impl Checker<'_> {
     /// Reports a `try` whose calls fail with `errs` where there is no `fails` to take them.
     /// An error type that is an error was reported where it went wrong, as the rule on
     /// [`Checker::settle_vars`] says. One that is `Never` can't happen, so a `try` whose calls
-    /// all fail with `Never` marks no call that can fail (OPEN_QUESTIONS P5).
-    fn try_without_fails(&mut self, errs: Vec<Ty>, span: Span) {
-        let errs: Vec<Ty> = errs.iter().map(|err| self.vars.zonk(err)).filter(|err| *err != Ty::Error).collect();
+    /// all fail with `Never` marks no call that can fail (OPEN_QUESTIONS P5), unless its chain
+    /// was `rejected` or a call's error type has an error, which may have been one that can
+    /// fail (§15.1; issue #30). Calls that fail with one type are one mistake.
+    fn try_without_fails(&mut self, errs: Vec<Ty>, rejected: bool, span: Span) {
+        let mut settled: Vec<Ty> = Vec::new();
+        for err in errs.iter().map(|err| self.vars.zonk(err)) {
+            if !settled.contains(&err) {
+                settled.push(err);
+            }
+        }
+        let unknown = rejected || settled.contains(&Ty::Error);
+        let errs: Vec<Ty> = settled.into_iter().filter(|err| *err != Ty::Error).collect();
         if errs.is_empty() {
             return;
         }
         if errs.iter().all(|err| *err == Ty::Never) {
+            if unknown {
+                return;
+            }
             self.error(codes::TRY_WITHOUT_FAILURE, span, "`try` marks no call that can fail");
             return;
         }
@@ -4112,6 +4300,7 @@ impl Checker<'_> {
         self.in_chain = true;
         let ty = self.expr(inner, value_expected.as_ref());
         let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
+        let hole = self.met_hole(&errors);
         match self.one_error(errors, span, "`attempt`", "its `Result` has one error type") {
             // A chain with an error may hold the fallible call that didn't resolve.
             None => {
@@ -4120,7 +4309,50 @@ impl Checker<'_> {
                 }
                 Ty::Error
             }
-            Some(err) => Ty::result(ty, err),
+            Some(err) => {
+                if ty != Ty::Error && !hole {
+                    self.wait_can_fail(&err, Handler::Attempt, span);
+                }
+                Ty::result(ty, err)
+            }
+        }
+    }
+
+    /// Reports the `attempt` or `else` form at `span` if its calls fail with `Never`, which
+    /// can't happen, once the statement settles `err` (OPEN_QUESTIONS P5, `fails Never`).
+    /// Whether a `todo` hole met one of `errors`, the error types of the calls a handler
+    /// marks, which a chain may have settled before [`Checker::one_error`] joins them, as a
+    /// receiver's type is (Q25).
+    fn met_hole(&self, errors: &[Ty]) -> bool {
+        errors.iter().any(|err| self.vars.from_hole(err))
+    }
+
+    fn wait_can_fail(&mut self, err: &Ty, handler: Handler, span: Span) {
+        if self.vars.has_open(err) {
+            self.pending.push(Pending::CanFail { err: err.clone(), handler, span });
+        } else {
+            self.can_fail(err, handler, span);
+        }
+    }
+
+    fn can_fail(&mut self, err: &Ty, handler: Handler, span: Span) {
+        // A `todo` hole that met the error type may be filled with a value of another type
+        // (Q25; issue #30).
+        if self.vars.zonk(err) != Ty::Never || self.vars.from_hole(err) {
+            return;
+        }
+        match handler {
+            Handler::Attempt => {
+                self.error(codes::ATTEMPT_WITHOUT_FAILURE, span, "`attempt` marks no call that can fail");
+            }
+            Handler::Else => {
+                let message = "`else` needs an `Option` or a call that can fail on its left, but this call fails with `Never`, so it can't";
+                self.error(codes::NOTHING_TO_UNWRAP, span, message);
+            }
+            Handler::Example => {
+                let message = "`fails` needs a call that can fail, and this one fails with `Never`, so it can't";
+                self.error(codes::EXAMPLE_CANNOT_FAIL, span, message);
+            }
         }
     }
 
@@ -4156,12 +4388,13 @@ impl Checker<'_> {
                     Some(ElseBranch::If(nested)) => self.if_expr(*nested, mode),
                     None => Ty::Unit,
                 };
-                if then_ty == Ty::Never && else_ty == Ty::Never { Ty::Never } else { Ty::Unit }
+                self.branches(&then_ty, &else_ty)
             }
             (Mode::Value(_), None) => {
-                // A block that was never closed may have been followed by an `else`. One that
-                // diverges still gives the `if` no value when the condition is false.
-                if then_ty != Ty::Error && !then_block.unclosed {
+                // A block that was never closed may have been followed by an `else`, and one
+                // that lost code may have ended in it. One that diverges, or whose value has an
+                // error, still gives the `if` no value when the condition is false.
+                if !then_block.unclosed && !(then_block.lost && then_ty == Ty::Error) {
                     let span = self.span(e);
                     self.error(codes::TYPE_MISMATCH, span, "an `if` without `else` has no value; add an `else` branch");
                 }
@@ -4184,6 +4417,7 @@ impl Checker<'_> {
                     ElseBranch::Block(block) => self.tail(block),
                     ElseBranch::If(nested) => Some(*nested),
                 };
+                self.rejected_parts(&[then_ty.clone(), else_ty.clone()]);
                 if self.borrowed_tail(self.tail(then_block)) || self.borrowed_tail(else_tail) {
                     self.borrowed_values.insert(e);
                 }
@@ -4347,9 +4581,7 @@ impl Checker<'_> {
         let Some((v, variant)) = def.variant_named(text) else {
             let message = format!("`{}` has no variant `{text}`", def.name);
             self.error(codes::UNKNOWN_MEMBER, name.span, message);
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return Ty::Error;
         };
         let ctor = def.ctor_name(v);
@@ -4357,17 +4589,13 @@ impl Checker<'_> {
         let params: Vec<(Box<str>, Ty)> = variant.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
         let targs = self.variant_args(id, expected, span);
         if rejected {
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return self.variant_type(id, targs, expected, span, true);
         }
         if fieldless {
             let message = format!("`{ctor}` has no fields, so it is written without parentheses");
             self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return self.variant_type(id, targs, expected, span, true);
         }
         self.p.res.insert(e, Res::Ctor(id, v));
@@ -4408,6 +4636,8 @@ impl Checker<'_> {
             _ => None,
         };
         let mut diverges = true;
+        let mut leaves = Ty::Never;
+        let mut tys = Vec::new();
         for arm in arms {
             // An arm's bindings scope over its guard and body.
             self.f.scopes.push(Vec::new());
@@ -4435,7 +4665,12 @@ impl Checker<'_> {
                 }
             };
             diverges &= ty == Ty::Never;
+            leaves = self.branches(&leaves, &ty);
+            tys.push(ty);
             self.f.scopes.pop();
+        }
+        if matches!(mode, Mode::Value(_)) {
+            self.rejected_parts(&tys);
         }
         // An arm that failed to parse may have covered what seems to be missing.
         if *complete && !scrutinee_ty.is_unknown() {
@@ -4461,7 +4696,7 @@ impl Checker<'_> {
         }
         let ty = match mode {
             _ if diverges => Ty::Never,
-            Mode::Stmt | Mode::Tail(_) => Ty::Unit,
+            Mode::Stmt | Mode::Tail(_) => leaves,
             Mode::Value(_) if !complete => Ty::Error,
             Mode::Value(_) => expected.unwrap_or(Ty::Error),
         };
@@ -4814,7 +5049,7 @@ impl Checker<'_> {
                 }
             }
             _ => {
-                self.infer(iter);
+                self.rejected_value(iter);
                 let span = self.span(iter);
                 self.not_implemented(span, "`for` loops over collections", Planned::Phase(2));
                 Ty::Error
@@ -4839,8 +5074,8 @@ fn mentions_targ(ty: &Ty, targs: &[Ty]) -> bool {
     }
 }
 
-/// Whether a statement or block of this type may never finish. An error counts, because the
-/// code it stands for might diverge, and reporting a missing `return` would depend on it.
+/// Whether a value of this type may never be produced. An error counts, because the code it
+/// stands for might diverge.
 fn diverges_ty(ty: &Ty) -> bool {
     matches!(ty, Ty::Never | Ty::Error)
 }

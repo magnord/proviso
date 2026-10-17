@@ -1,0 +1,188 @@
+// phase: 2.5
+// expect-error: E0201
+// expect-error: E0301
+// expect-error: E0312
+// expect-error: E0415
+// expect-error: E0707
+// A statement whose value has the type of `it` leaves if the error type the `let` around
+// the fallback settles is `Never`, so whether the block around it finishes waits for that
+// type, as a `check` does (OPEN_QUESTIONS P5; issue #30). Only `Never` reaching the type
+// leaves the call nothing to fail with, which is E0707 alone. A type nothing gives is E0312
+// alone. A later statement that gives `it` a type makes the block finish, which is the
+// block's own error, also where the block is a branch whose value a `let` needs. A value
+// built around `it`, such as `Some(it)`, finishes whatever `it` is. A `let` fixes its
+// value's type, so one that only `Never` gives settles the type of `it` as `Never`.
+
+fn opened[E: Copy]() -> Int fails E {
+    return 1
+}
+
+fn second[T: Copy](a: T, b: T) -> T {
+    return b
+}
+
+fn zero[T: Copy](x: T) -> Int {
+    return 0
+}
+
+fn values(c: Bool) -> Int fails Text {
+    let a1 = opened() else {                        // <- E0707
+        second(a: fail "a1", b: it)
+        let z = 1
+    }
+    let a2 = opened() else {                        // <- E0312
+        second(a: it, b: it)
+        let z = 1
+    }
+    let a3 = opened() else {
+        second(a: it, b: it)
+        let t = zero(second(a: it, b: "a3"))
+    }                                               // <- E0301
+    let a4 = opened() else {
+        let t = zero(second(a: it, b: "a4"))
+        second(a: it, b: it)
+        let z = 1
+    }                                               // <- E0301
+    let a5 = opened() else {                        // <- E0707
+        if c {
+            second(a: fail "a5", b: it)
+        } else {
+            second(a: it, b: it)
+        }
+        let z = 1
+    }
+    let a6 = opened() else {                        // <- E0312
+        if c {
+            second(a: it, b: it)
+        } else {
+            fail "a6"
+        }
+        let z = 1
+    }
+    let a7 = opened() else {
+        if c {
+            second(a: it, b: it)
+        }
+        let t = zero(second(a: it, b: "a7"))
+    }                                               // <- E0301
+    let a8 = opened() else {
+        if c {
+            second(a: it, b: it)
+        } else {
+            let t = zero(second(a: it, b: "a8"))
+        }
+        fail "a8"
+    }
+    let a9 = opened() else {                        // <- E0312
+        match c {
+            true => second(a: it, b: it)
+            false => fail "a9"
+        }
+        let z = 1
+    }
+    let a10 = opened() else {
+        match c {
+            true => second(a: it, b: it)
+            false => zero(it)
+        }
+        let t = zero(second(a: it, b: "a10"))
+    }                                               // <- E0301
+    let a11 = opened() else {                       // <- E0707
+        if c {
+            second(a: fail "a11", b: it)
+        } else {
+            let z = 1
+        }
+        let y = 2
+    }                                               // <- E0301
+    let a12 = opened() else {                       // <- E0707
+        let q = second(a: fail "a12", b: it)
+        let t = zero(second(a: it, b: "a12"))
+        fail "a12b"
+    }
+    let a13 = opened() else {                       // <- E0707
+        let p = (nope, second(a: fail "a13", b: it)) // <- E0201
+        fail "a13b"
+    }
+    return a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13
+}
+
+fn branch_values(c: Bool) -> Int fails Text {
+    let v1 = opened() else {
+        let x: Int = if c {
+            second(a: it, b: it)
+            let z = 1
+        } else {                                    // <- E0301
+            5
+        }
+        let t = zero(second(a: it, b: "v1"))
+        fail "v1"
+    }
+    let v2 = opened() else {                        // <- E0707
+        let x: Int = if c {
+            second(a: it, b: it)
+            let z = 1
+        } else {
+            5
+        }
+        let t = zero(second(a: fail "v2", b: it))
+        fail "v2b"
+    }
+    let v3 = opened() else {                        // <- E0312
+        let x: Int = if c {
+            second(a: it, b: it)
+            let z = 1
+        } else {
+            5
+        }
+        fail "v3"
+    }
+    let v4 = opened() else {                        // <- E0707
+        let x = if c {
+            5
+        } else {
+            second(a: fail "v4", b: it)
+            let z = 1
+        }
+        fail "v4b"
+    }
+    let v5 = opened() else {                        // <- E0707
+        let x = match c {
+            false => 5
+            true => {
+                second(a: fail "v5", b: it)
+                let z = 1
+            }
+        }
+        fail "v5b"
+    }
+    return v1 + v2 + v3 + v4 + v5
+}
+
+fn checks(c: Bool) -> Int fails Text {
+    let k1 = opened() else {                        // <- E0707
+        check c else { second(a: fail "k1", b: it) }
+        fail "k1b"
+    }
+    let k2 = opened() else {                        // <- E0312
+        check c else { second(a: it, b: it) }
+        fail "k2"
+    }
+    let k3 = opened() else {
+        check c else { second(a: it, b: it) }       // <- E0415
+        zero(second(a: it, b: "k3"))
+    }
+    let k4 = opened() else {                        // <- E0312
+        check c else Some(it)                       // <- E0415
+        fail "k4"
+    }
+    let k5 = opened() else {                        // <- E0312
+        check c else (it, 1)                        // <- E0415
+        fail "k5"
+    }
+    let k6 = opened() else {
+        check c else Some(it)                       // <- E0415
+        zero(second(a: it, b: "k6"))
+    }
+    return k1 + k2 + k3 + k4 + k5 + k6
+}

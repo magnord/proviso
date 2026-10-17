@@ -1,0 +1,96 @@
+// phase: 2.5
+// flags: --incomplete
+// expect-error: E0703
+// expect-error: E0706
+// expect-error: E0707
+// expect-error: E0708
+// A `todo` hole stands for a value of any type, so an error type it meets may be one a call
+// fails with. `else`, `attempt` and an example's `fails` are not reported as marking a call
+// that can't fail there (Q25; OPEN_QUESTIONS P5, `fails Never`; issue #30). A `let` fixes
+// its value's type, so a binding that holds a hole is `Never`, and a call it gives its error
+// type can't fail. A hole may be the `Option` an `else` unwraps. A `try` without `fails` is
+// wrong whatever fills the hole, and a call the hole doesn't meet is still checked. A type
+// argument the hole meets is `Never`, as the hole is, unless something gives it a type, in
+// either argument order. A chain whose receiver needs its type settled early, as `.show()`
+// does, keeps what the hole met.
+
+fn rethrow[E: Copy](e: E) -> Int fails E {
+    fail e
+}
+
+fn stop() -> Never {
+    loop {
+    }
+}
+
+fn holes(c: Bool) -> Int {
+    let h1 = rethrow(e: todo) else 0
+    let h2 = attempt rethrow(e: todo)
+    let h3 = rethrow(e: todo)
+    let h4 = todo
+    let h5 = rethrow(e: h4) else 0                  // <- E0707
+    let h6 = todo else 0
+    return h1 + h3 + h5 + h6
+}
+
+fn holes_try() -> Int {
+    let t1 = try rethrow(e: todo)                   // <- E0703
+    return t1
+}
+
+fn no_holes() -> Int {
+    let n1 = rethrow(e: stop()) else 0              // <- E0707
+    return n1
+}
+
+fn opened[E: Copy]() -> Int fails E {
+    return 1
+}
+
+fn second[T: Copy](a: T, b: T) -> T {
+    return b
+}
+
+fn zero[T: Copy](x: T) -> Int {
+    return 0
+}
+
+fn mixed() -> Int {
+    let m1 = rethrow(e: stop()) else 0              // <- E0707
+    let m2 = rethrow(e: todo) else 0
+    let m3 = rethrow(e: stop()) else 0              // <- E0707
+    let m4 = opened() else {
+        let q = zero(second(a: todo, b: it))
+        0
+    }
+    let m5 = opened() else {
+        let q = zero(second(a: todo, b: Some(second(a: it, b: stop()))))
+        0
+    }
+    let m6 = opened() else {
+        let q = zero(second(a: Some(second(a: it, b: stop())), b: todo))
+        0
+    }
+    let m7 = wrap(o: todo) else 0
+    return m1 + m2 + m3 + m4 + m5 + m6 + m7
+}
+
+fn wrap[E: Copy](o: Option[E]) -> Int fails E {
+    return 1
+}
+
+fn wrapped[E: Copy](e: E) -> Option[E] fails E {
+    return None
+}
+
+fn chained() -> Int {
+    let w1 = attempt wrapped(e: todo).show()
+    let w2 = wrapped(e: todo).show() else "w2"
+    let w3 = attempt wrapped(e: stop()).show()      // <- E0706
+    let w4 = wrapped(e: stop()).show() else "w4"    // <- E0707
+    return 0
+}
+
+example rethrow(e: todo) fails _
+example wrapped(e: todo).show() fails _
+example wrapped(e: stop()).show() fails _           // <- E0708

@@ -1,0 +1,95 @@
+// phase: 2.5
+// expect-error: E0201
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0701
+// expect-error: E0702
+// expect-error: E0703
+// expect-error: E0705
+// expect-error: E0706
+// expect-error: E0707
+// expect-error: E0708
+// An error type that only `Never` gives is `Never`, so the call can't fail, whether `::[…]`
+// gives it or the arguments do (OPEN_QUESTIONS P5, `fails Never`). Marking it with `try`
+// is E0703, also where the function has a `fails` of its own, with `attempt` E0706, with
+// `else` E0707, and an example of its failure is E0708. An error type that a rejected value
+// also reached is that value's error, so the call can still fail, and a `try` chain with a
+// call that didn't resolve may have held one that fails (REFERENCE §15.1; issue #30). Two
+// calls of one chain that fail with the same type are one E0702. A `fail` leaves, also
+// where nothing declares `fails`, so its `Never` gives an error type as any `Never` does,
+// and the mistakes it shares a line with are their own.
+
+record Box {
+    n: Int
+}
+
+fn boxof[E: Copy](e: E) -> Box fails E {
+    return Box(n: 1)
+}
+
+impl Box {
+    fn pick[E: Copy](self, e: E) -> Int fails E {
+        return self.n
+    }
+}
+
+fn stop() -> Never {
+    loop {
+    }
+}
+
+fn rethrow[E: Copy](e: E) -> Int fails E {
+    fail e
+}
+
+fn two[E: Copy](a: E, b: Option[E]) -> Int fails E {
+    return 1
+}
+
+fn rejected() -> Int {
+    let a1 = try two(a: stop(), b: 5)               // <- E0301
+    let a2 = two(a: stop(), b: 5)                   // <- E0701, E0301
+    let a3 = try boxof(e: stop()).pick(e: nosuch)   // <- E0201
+    let a4 = try boxof(e: stop()).missing()         // <- E0303
+    let a5 = try boxof(e: nosuch).pick(e: stop())   // <- E0201
+    return 0
+}
+
+fn same_errors() -> Int {
+    let b1 = try boxof(e: 5).pick(e: 6)             // <- E0702
+    return 0
+}
+
+fn same_declared() -> Int fails Text {
+    let b2 = try boxof(e: 5).pick(e: 6)             // <- E0702
+    return 0
+}
+
+fn declared() -> Int fails Text {
+    let c1 = try rethrow::[Never](e: stop())        // <- E0703
+    let c2 = try boxof::[Never](e: stop()).pick(e: "c2")
+    let c3 = try rethrow(e: stop())
+    return 0
+}
+
+fn handled() -> Int {
+    let d1 = attempt rethrow(e: stop())             // <- E0706
+    let d2 = rethrow(e: stop()) else 0              // <- E0707
+    let d3 = attempt rethrow::[Never](e: stop())    // <- E0706
+    let d4 = rethrow::[Never](e: stop()) else 0     // <- E0707
+    let d5: Result[Int, Text] = attempt rethrow(e: stop())
+    let d6 = rethrow(e: stop()) else it
+    let d7 = rethrow::[Never](e: stop())
+    return 0
+}
+
+fn rejected_fails() -> Int {
+    let f1 = rethrow(e: fail "f1") else 0           // <- E0705, E0707
+    let f2 = attempt rethrow(e: fail "f2")          // <- E0705, E0706
+    let f3 = try rethrow(e: fail "f3")              // <- E0705, E0703
+    return f1
+}
+
+example rethrow(e: fail "f4") fails _              // <- E0705, E0708
+example rethrow(e: stop()) fails _                  // <- E0708
+example rethrow::[Never](e: stop()) fails _         // <- E0708

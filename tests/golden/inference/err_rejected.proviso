@@ -1,0 +1,103 @@
+// phase: 2.5
+// expect-error: E0201
+// expect-error: E0208
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0317
+// expect-error: E0312
+// expect-error: E0705
+// expect-error: E0307
+// A rejected expression was the one to give the type arguments its parts leave open, so
+// each line is that expression's error alone, never also E0312 (REFERENCE §15.1; issue
+// #30). The rejected expression is a call with the wrong number of arguments or type
+// arguments, of an unknown function, method, field or variant, a branch or match arm, a
+// `fail` without `fails`, or a call of a rejected function. The open part comes before it or
+// after it, in a direct argument or deeper. A separate mistake beside it, such as an `if`
+// without `else`, is still reported. A tuple's element gives the others no type, so what
+// they leave open is still E0312, unless the tuple meets a value that would give it. A
+// `fail` gives no type either, so a `fail` without `fails` hides no E0312.
+
+record Span {
+    lo: Int
+}
+
+fn one[T: Copy](x: Option[T]) -> Int {
+    return 0
+}
+
+fn both[T: Copy](x: T) -> T fails T {
+    return x
+}
+
+fn calls(x: Int, s: Span) -> Int {
+    let a1 = one(None, 2)                           // <- E0208
+    let a2 = one()                                  // <- E0208
+    let a3 = nope(None)                             // <- E0201
+    let a4 = nope(Some(None))                       // <- E0201
+    let a5 = Option.Nope(None)                      // <- E0303
+    let a6 = None(None)                             // <- E0208
+    let a7 = Some(None, 1)                          // <- E0208
+    let a8 = one::[Int, Int](None)                  // <- E0317
+    let a9 = s.missing(None)                        // <- E0303
+    let a10 = Span.missing(None)                    // <- E0303
+    let a11 = Span(lo: 1, hi: None)                 // <- E0208
+    let a12 = s.with(hi: None)                      // <- E0303
+    return 0
+}
+
+fn branches(c: Bool) -> Int {
+    let b1 = if c { nosuch } else { try both(x: None) } // <- E0201
+    let b2 = if c { try both(x: None) } else { nosuch } // <- E0201
+    let b3 = if c { nope } else { None }            // <- E0201
+    let b4 = if c { None } else { nope }            // <- E0201
+    let b5 = if c { nope } else if c { None } else { Some(None) } // <- E0201
+    let b6 = match c {
+        true => nope                                // <- E0201
+        false => None
+    }
+    let b7 = match c {
+        true => None
+        false => nope                               // <- E0201
+    }
+    let b8 = if c { (1, None) } else { "s" }        // <- E0301
+    let b9 = if c { nope }                          // <- E0301, E0201
+    return 0
+}
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn tuples() -> Int {
+    let t1 = (nope, None)                           // <- E0201, E0312
+    let t2 = (None, nope)                           // <- E0312, E0201
+    let t3 = (Some(None), 1, nope)                  // <- E0312, E0201
+    let t4 = first(a: (nope, None), b: (1, Some(2))) // <- E0201
+    let t5 = (nope, None) == (1, Some(2))           // <- E0201
+    let t6 = first(a: (1, Some(2)), b: (nope, None)) // <- E0201
+    let t7 = first(a: (nope, 1), b: (None, 2))      // <- E0201
+    let t8 = (nope, 1) == (None, 1)                 // <- E0201
+    let t9 = first(a: (None, 1), b: (nope, 1))      // <- E0201
+    return 0
+}
+
+fn bad(x: Nosuch) -> Int {                          // <- E0307
+    return 0
+}
+
+fn others(c: Bool) -> Int {
+    let o1 = bad(None)
+    let o2 = bad(Some(None), 1)                     // <- E0208
+    if c {
+        fail None                                   // <- E0705
+    }
+    return 0
+}
+
+fn failing(c: Bool) -> Int {
+    let f1 = if c { fail "f1" } else { None }       // <- E0705, E0312
+    let f2 = first(a: fail "f2", b: None)           // <- E0705, E0312
+    return 0
+}
+
+example nosuch(None) == Some(None)                  // <- E0201
