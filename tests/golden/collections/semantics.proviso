@@ -54,11 +54,11 @@ fn keys() -> Text {
 }
 
 fn shown() -> Text {
-    let names = [Name(text: "x"), Name(text: "y")]
+    let names = [Name(text: "x"), Name(text: "ada")]
     let s1 = [1, 2].show()
     let s2 = Show.show(["k": 'v'])
     let e1 = Eq.eq([1], [1])
-    let e2 = names.contains(Name(text: "x"))
+    let e2 = names.contains(Name(text: "ADA"))
     return f"{names} {s1} {s2} {e1} {e2}"
 }
 
