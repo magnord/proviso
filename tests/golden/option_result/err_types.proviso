@@ -16,11 +16,11 @@
 // takes its type from them (REFERENCE §2). `Option` and `Result` implement `Eq`, `Show`
 // and `Ord` only when their type arguments do, so `Option[Float]` has no `==` (§12.2,
 // STD.md). A mistake is reported once (§15.1).
-// An unqualified `Some` is always `Option`'s (§3). The first branch of an `if` gives the
-// others their type, as for literals, unless its type has a `Never` argument, since `Never`
+// An unqualified `Some` is always `Option`'s (§3). The branches of an `if` give each other
+// their type, in any order, as for literals, and a `Never` argument gives way, since `Never`
 // is a subtype of every type (§9.2). A field widens a `Never` that the expected type gives,
-// also inside a type argument. A variant with fields gives its own type, qualified or not,
-// so it goes first in `==` (P5).
+// also inside a type argument. The operands of `==` give each other their types in either
+// order (P5).
 enum Maybe {
     Some(n: Int)
     Nothing
@@ -42,7 +42,7 @@ fn branches(c: Bool, o: Option[Int]) -> Option[Int] fails Text {
         None => Some(2)
     }
     let d = if c { Some(1) } else { None }
-    let e = if c { None } else { Some(1) }          // <- E0312
+    let e = if c { None } else { Some(1) }
     let g = if c { Some(fail "g") } else { 3 }      // <- E0301
     let h: Option[Never] = Some(1)                  // <- E0301
     let i = None == Some(1)

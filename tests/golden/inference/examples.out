@@ -1,0 +1,10 @@
+inference/examples.proviso:23:1: example passed
+inference/examples.proviso:24:1: example passed
+inference/examples.proviso:25:1: example passed
+inference/examples.proviso:26:1: example passed
+inference/examples.proviso:27:1: example passed
+inference/examples.proviso:28:1: example passed
+inference/examples.proviso:29:1: example passed
+inference/examples.proviso:30:1: example passed
+inference/examples.proviso:31:1: example failed: expected `Some(5)`, found `None`
+9 examples: 8 passed, 1 failed

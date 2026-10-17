@@ -1,0 +1,109 @@
+// phase: 2.5
+// The operands of a comparison give each other their type arguments and literal types,
+// whatever their order and spelling (REFERENCE §2; OPEN_QUESTIONS P5; issue #10). Each
+// group is one program and its rewrites: swapped operands, a qualified or bare
+// constructor, a value bound by `let` first, one more level of nesting, and the same value
+// inside a tuple. Every rewrite checks, so a literal that meets `small` is an `Int8`, and
+// each prints the same result. A `Never` gives way to the other operand, in either order
+// and at any depth, so `failing` checks, and fails at its first comparison.
+use std.io { IoError }
+
+record Box {
+    n: Int8
+}
+
+impl Box {
+    fn none[T](self) -> Option[T] {
+        return None
+    }
+}
+
+fn id[T: Copy](x: T) -> T {
+    return x
+}
+
+fn nothing[T]() -> Option[T] {
+    return None
+}
+
+fn variants() -> Text {
+    let a1 = None == Some(1)
+    let a2 = Some(1) == None
+    let a3 = Option.None == Option.Some(1)
+    let a4 = Option.Some(1) == Option.None
+    let p = Some(1)
+    let a5 = None == p
+    let a6 = p == None
+    let a7 = Some(None) == Some(Some(1))
+    let a8 = Some(Some(1)) == Some(None)
+    let a9 = (None, 1) == (Some(1), 1)
+    let a10 = (Some(1), 1) == (None, 1)
+    return f"{a1} {a2} {a3} {a4} {a5} {a6} {a7} {a8} {a9} {a10}"
+}
+
+fn literals(c: Bool, small: Int8) -> Text {
+    let b1 = small == 1
+    let b2 = 1 == small
+    let b3 = (if c { 1 } else { 2 }) == small
+    let b4 = small == (if c { 1 } else { 2 })
+    let b5 = (match c { true => 1, false => 2 }) == small
+    let b6 = small == (match c { true => 1, false => 2 })
+    let b7 = Some(if c { 1 } else { 2 }) == Some(small)
+    let b8 = Some(small) == Some(if c { 1 } else { 2 })
+    let b9 = (if c { 1 } else { 2 }, None) == (small, Some(small))
+    let b10 = (small, Some(small)) == (if c { 1 } else { 2 }, None)
+    let b11 = (1 + 1) == small
+    let b12 = small == (1 + 1)
+    return f"{b1} {b2} {b3} {b4} {b5} {b6} {b7} {b8} {b9} {b10} {b11} {b12}"
+}
+
+fn tuples(small: Int8) -> Text {
+    let t1 = (small, None) == (1, Some(2))
+    let t2 = (1, Some(2)) == (small, None)
+    let t3 = ((small, None), 1) == ((1, Some(2)), 1)
+    let t4 = ((1, Some(2)), 1) == ((small, None), 1)
+    let t5 = Some((small, None)) == Some((1, Some(2)))
+    let t6 = Some((1, Some(2))) == Some((small, None))
+    return f"{t1} {t2} {t3} {t4} {t5} {t6}"
+}
+
+fn generic_calls(small: Int8, bx: Box) -> Text {
+    let g1 = nothing() == Some(small)
+    let g2 = Some(small) == nothing()
+    let g3 = id(None) == Some(small)
+    let g4 = Some(small) == id(None)
+    let g5 = id(1) == small
+    let g6 = small == id(1)
+    let g7 = bx.none() == Some(small)
+    let g8 = Some(small) == bx.none()
+    let g9 = id(bx).none() == Some(small)
+    let g10 = Some(small) == id(bx).none()
+    let g11 = id(id(1)) == small
+    let g12 = small == id(id(1))
+    return f"{g1} {g2} {g3} {g4} {g5} {g6} {g7} {g8} {g9} {g10} {g11} {g12}"
+}
+
+fn failing() -> Bool fails Text {
+    let n1 = Some(fail "x") == Some(1)
+    let n2 = Some(1) == Some(fail "y")
+    return n1 or n2
+}
+
+fn nevers(nn: Option[Option[Never]]) -> Text {
+    let n3 = nn == Some(Some(1))
+    let n4 = Some(Some(1)) == nn
+    let n5 = (nn, 1) == (Some(Some(1)), 1)
+    let n6 = (Some(Some(1)), 1) == (nn, 1)
+    return f"{n3} {n4} {n5} {n6}"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let small: Int8 = 2
+    try sys.stdout.write_line(variants())
+    try sys.stdout.write_line(literals(c: true, small: small))
+    try sys.stdout.write_line(literals(c: false, small: small))
+    try sys.stdout.write_line(tuples(small))
+    try sys.stdout.write_line(generic_calls(small: 1, bx: Box(n: 1)))
+    try sys.stdout.write_line(nevers(Some(None)))
+    try sys.stdout.write_line(f"{attempt failing()}")
+}

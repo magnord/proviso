@@ -1,0 +1,55 @@
+// phase: 2.5
+// expect-error: E0302
+// expect-error: E0306
+// expect-error: E0309
+// A check on a type that a later value gives waits until the statement settles it, so it
+// is made in either order (OPEN_QUESTIONS P5; issue #10). A constraint on a type argument
+// (E0309), unary `-` on an integer that turns out unsigned (E0306), and a float literal
+// that turns out too large (E0302) are each reported once, in each order. A type that
+// misses several bounds is one E0309, and one that misses only a later bound is one too.
+
+fn need_eq[T: Eq](a: T, b: T) -> Bool {
+    return true
+}
+
+record Point derives(Eq) {
+    x: Int
+}
+
+fn keyed[T: Eq + Ord + Hash](a: T) -> Int {
+    return 0
+}
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn id[T: Copy](x: T) -> T {
+    return x
+}
+
+fn bounds() -> Bool {
+    let a1 = need_eq(a: None, b: Some(1.5))         // <- E0309
+    let a2 = need_eq(a: Some(1.5), b: None)         // <- E0309
+    let a3 = need_eq(a: 1, b: 2)
+    let a4 = keyed(a: Some(1.5))                    // <- E0309
+    let a5 = keyed(a: (1.5, 1))                     // <- E0309
+    let a6 = keyed(a: 1.5)                          // <- E0309
+    let a7 = keyed(a: Some(1))
+    let a8 = keyed(a: Some(Point(x: 1)))            // <- E0309
+    return a1 or a2 or a3
+}
+
+fn negation(u: UInt8) -> UInt8 {
+    let b1 = first(a: -id(1), b: u)                 // <- E0306
+    let b2 = first(a: u, b: -id(1))                 // <- E0306
+    let b3 = first(a: -id(1), b: 2)
+    return b1 + b2
+}
+
+fn floats(f: Float32) -> Float32 {
+    let d1 = first(a: 1.0e40, b: f)                 // <- E0302
+    let d2 = first(a: f, b: 1.0e40)                 // <- E0302
+    let d3 = first(a: 1.0e40, b: 2.0)
+    return d1 + d2
+}

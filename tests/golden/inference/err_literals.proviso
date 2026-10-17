@@ -1,0 +1,70 @@
+// phase: 2.5
+// expect-error: E0301
+// expect-error: E0302
+// A literal takes the type of whatever it meets, in any order and at any depth (REFERENCE
+// §2; OPEN_QUESTIONS P5; issue #10). So a literal such as `300` that meets `small` doesn't
+// fit `Int8` (E0302) in each rewrite. Where it meets `small` only through a branch, a call
+// or a nesting, reading it as an `Int` first would report E0301 instead.
+// A literal that meets a type of another kind is E0301 in each order, and a value that
+// doesn't fit isn't also reported for the type arguments it leaves open (§15.1).
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn id[T: Copy](x: T) -> T {
+    return x
+}
+
+fn operands(c: Bool, small: Int8) -> Bool {
+    let a1 = small == 300                           // <- E0302
+    let a2 = 300 == small                           // <- E0302
+    let a3 = (if c { 1 } else { 300 }) == small     // <- E0302
+    let a4 = small == (if c { 1 } else { 300 })     // <- E0302
+    let a5 = Some(300) == Some(small)               // <- E0302
+    let a6 = Some(small) == Some(300)               // <- E0302
+    let a7 = (300, None) == (small, Some(1))        // <- E0302
+    let a8 = (small, Some(1)) == (300, None)        // <- E0302
+    let a9 = id(300) == small                       // <- E0302
+    let a10 = small == id(id(300))                  // <- E0302
+    let a11 = (100 + 200) == small                  // <- E0302
+    return a1 or a2 or a3 or a4 or a5 or a6 or a7 or a8 or a9 or a10 or a11
+}
+
+fn arguments(c: Bool, small: Int8) -> Int8 {
+    let b1 = first(a: 300, b: small)                // <- E0302
+    let b2 = first(a: small, b: 300)                // <- E0302
+    let b3 = first(a: if c { 300 } else { 1 }, b: small) // <- E0302
+    let b4 = first(a: Some(300), b: Some(small))    // <- E0302
+    let b5 = first(a: (None, 300), b: (Some(1), small)) // <- E0302
+    let b6 = first(a: -200, b: small)               // <- E0302
+    let b7 = first(a: small, b: -200)               // <- E0302
+    let b8 = first(a: -128, b: small)
+    return b1 + b2 + b3
+}
+
+fn branches(c: Bool, small: Int8) -> Int8 {
+    let d1 = if c { 300 } else { small }            // <- E0302
+    let d2 = if c { small } else { 300 }            // <- E0302
+    let d3 = if c { Some(300) } else { Some(small) } // <- E0302
+    let d4 = match c {
+        true => 300                                 // <- E0302
+        false => small
+    }
+    return d1 + d2 + d4
+}
+
+fn kinds(c: Bool, f: Float) -> Bool {
+    let e1 = f == 1                                 // <- E0301
+    let e2 = 1 == f                                 // <- E0301
+    let e3 = first(a: 1, b: 1.5)                    // <- E0301
+    let e4 = first(a: 1.5, b: 1)                    // <- E0301
+    let e5 = Some(1) == Some("x")                   // <- E0301
+    let e6 = Some("x") == Some(1)                   // <- E0301
+    let e7 = if c { 1 } else { "x" }                // <- E0301
+    let e8 = if c { "x" } else { 1 }                // <- E0301
+    let e9: Int = (1, None)                         // <- E0301
+    let e10 = (1, None) == "x"                      // <- E0301
+    let e11 = "x" == (None, 1)                      // <- E0301
+    return e1 or e2
+}

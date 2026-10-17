@@ -1,0 +1,73 @@
+// phase: 2.5
+// An `else` form joins its left side's unwrapped type with its fallback's, and its
+// expected type reaches the call on the left however the callee is spelled (OPEN_QUESTIONS
+// P5; issue #10). Each group is one value and its rewrites: a function, a method on a
+// local, a method on a receiver only checking shows the type of, an operand on either
+// side, and a fallback that gives the type instead of the expected type. Every rewrite
+// checks, and passing it on shows that each is an `Int8`.
+use std.io { IoError }
+
+record Box {
+    n: Int8
+}
+
+impl Box {
+    fn conv[T: Copy](self, x: T) -> T fails Text {
+        return x
+    }
+
+    fn maybe[T: Copy](self, x: T) -> Option[T] {
+        return Some(x)
+    }
+}
+
+fn conv[T: Copy](x: T) -> T fails Text {
+    return x
+}
+
+fn maybe[T: Copy](x: T) -> Option[T] {
+    return Some(x)
+}
+
+fn id[T: Copy](x: T) -> T {
+    return x
+}
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn int8(x: Int8) -> Int8 {
+    return x
+}
+
+fn expected(bx: Box) -> Int8 {
+    let a1: Int8 = conv(100) else 0
+    let a2: Int8 = bx.conv(100) else 0
+    let a3: Int8 = id(bx).conv(100) else 0
+    let a4: Int8 = maybe(100) else 0
+    let a5: Int8 = bx.maybe(100) else 0
+    let a6: Int8 = id(bx).maybe(100) else 0
+    return a1 / 100 + a2 / 100 + a3 / 100 + a4 / 100 + a5 / 100 + a6 / 100
+}
+
+fn joined(bx: Box, small: Int8) -> Text {
+    let b1 = (conv(1) else 0) == small
+    let b2 = small == (conv(1) else 0)
+    let b3 = (id(bx).maybe(1) else 0) == small
+    let b4 = small == (id(bx).maybe(1) else 0)
+    let b5 = first(a: conv(1) else 0, b: small)
+    let b6 = first(a: small, b: maybe(1) else 0)
+    let b10 = first(a: small, b: conv(1) else 0)
+    let b11 = first(a: maybe(1) else 0, b: small)
+    let b7 = conv(1) else small
+    let b8 = maybe(1) else small
+    let b9 = id(bx).conv(1) else small
+    return f"{b1} {b2} {b3} {b4} {int8(b5) + int8(b6) + int8(b7) + int8(b8) + int8(b9) + int8(b10) + int8(b11)}"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let bx = Box(n: 3)
+    try sys.stdout.write_line(f"{expected(bx)}")
+    try sys.stdout.write_line(joined(bx: bx, small: 1))
+}

@@ -1,0 +1,106 @@
+// phase: 2.5
+// expect-error: E0301
+// expect-error: E0701
+// expect-error: E0302
+// One mistake is one error (REFERENCE §15.1). Each line mixes a value whose type argument
+// is open with a value of another type, which is one E0301, in each order. The rejected
+// value was the one to give the type argument, so it is not also E0312. A later value may
+// still give it, and a later mistake is still reported. An unmarked call whose error type
+// only a marker could give is one E0701, which leaves the type unsaid. A missing marker
+// doesn't decide the error type, so a separate mistake with it is still reported.
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn second[T: Copy](a: T, b: T) -> T {
+    return b
+}
+
+fn nothing[T]() -> Option[T] {
+    return None
+}
+
+fn three[T: Copy](a: T, b: T, c: T) -> T {
+    return a
+}
+
+fn opt_or[T: Copy](o: Option[T], d: T) -> T {
+    return d
+}
+
+fn never_fails[E]() -> Int fails E {
+    return 1
+}
+
+fn both[T: Copy](x: T) -> T fails T {
+    return x
+}
+
+fn pass[E: Copy]() -> Int fails E {
+    return 1
+}
+
+fn rethrow[E: Copy](e: E) -> Int fails E {
+    fail e
+}
+
+fn int8(x: Int8) -> Int {
+    return 0
+}
+
+fn arguments() {
+    let a1 = first(a: None, b: "s")                 // <- E0301
+    let a2 = first(a: "s", b: None)                 // <- E0301
+    let a3 = first(a: nothing(), b: 3)              // <- E0301
+    let a4 = first(a: Some(None), b: Some(3))       // <- E0301
+    let a5 = first(a: Ok(1), b: 2)                  // <- E0301
+    let a6 = first(a: (None, 1), b: (2, 1))         // <- E0301
+    let a7 = first(a: Option.None, b: "s")          // <- E0301
+    let a8 = three(a: None, b: "s", c: Some("t"))   // <- E0301
+    let a10 = three(a: None, b: "s", c: Some("t"))  // <- E0301
+    let a11: Option[Int] = a10                      // <- E0301
+    let a12 = three(a: Some(None), b: 5, c: Some(Some("t"))) // <- E0301
+    let a9 = three(
+        a: None,
+        b: "s",                                     // <- E0301
+        c: 5                                        // <- E0301
+    )
+}
+
+fn branches(c: Bool) {
+    let b1 = if c { None } else { "s" }             // <- E0301
+    let b2 = if c { "s" } else { None }             // <- E0301
+    let b4 = opt_or(o: if c {
+        1                                           // <- E0301
+    } else {
+        2                                           // <- E0301
+    }, d: 5)
+    let b3 = match c {
+        true => Err("e")
+        false => 4                                  // <- E0301
+    }
+}
+
+fn unmarked() -> Int {
+    let u1 = never_fails()                          // <- E0701
+    let u2 = never_fails::[Text]() + 1              // <- E0701
+    return u1 + u2
+}
+
+fn unmarked_values(small: Int8) -> Int8 {
+    let v1: Int8 = both(x: 300)                     // <- E0701, E0302
+    let v2 = both(x: 300) + small                   // <- E0701, E0302
+    let v3 = small + both(x: 300)                   // <- E0701, E0302
+    return v1 + v2 + v3
+}
+
+fn unmarked_it(small: Int8) -> Int {
+    let r = pass() else {
+        let t = rethrow(e: it)                      // <- E0701
+        let u = int8(second(a: it, b: small))
+        let v: Text = it                            // <- E0301
+        0
+    }
+    return r
+}

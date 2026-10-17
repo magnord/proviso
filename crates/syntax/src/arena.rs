@@ -114,4 +114,9 @@ impl<T, V> SideTable<T, V> {
     pub fn get(&self, id: Id<T>) -> Option<&V> {
         self.values.get(id.index()).and_then(Option::as_ref)
     }
+
+    /// Every value in the table, in id order.
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.values.iter().flatten()
+    }
 }

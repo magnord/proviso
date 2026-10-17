@@ -1,0 +1,36 @@
+// phase: 2.5
+// A type parameter used only in `fails` comes from where the failure goes: the expected
+// `Result` of an `attempt`, an operand it is compared with, or the error type of the
+// function a `try` propagates to (OPEN_QUESTIONS P5; issues #10 and #20).
+use std.io { IoError }
+
+fn never_fails[E]() -> Int fails E {
+    return 1
+}
+
+fn tried() -> Int fails Text {
+    return try never_fails()
+}
+
+fn attempted() -> Result[Int, Text] {
+    return attempt never_fails()
+}
+
+fn compared() -> Bool {
+    let a = (attempt never_fails()) == Err("x")
+    let b = Err("x") == attempt never_fails()
+    let c = Ok(1) == attempt never_fails::[Text]()
+    return a or b or c
+}
+
+fn handled() -> Int {
+    let r: Result[Int, Text] = attempt never_fails()
+    return match r {
+        Ok(n) => n
+        Err(_) => 0
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{attempt tried()} {attempted()} {compared()} {handled()}")
+}
