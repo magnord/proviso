@@ -21,7 +21,8 @@
 // its receiver's type, so a call's error type joins what its handler knows when it marks the
 // call. That is the chain's first fallible call, the function's `fails` under `try`, or the
 // `Result` an `attempt` is expected to be. A value that gives it after the chain comes too
-// late, as `== Err(…)` and `else it` do (P5, `fails Never`; issue #37). A call that was
+// late, as `== Err(…)` after it and `else it` do, though `Err(…) ==` before it gives the
+// `Result` the `attempt` is expected to be (P5, `fails Never`; issue #37). A call that was
 // rejected doesn't keep a `try` from checking its other calls against the function's `fails`,
 // or keep a handler's chain from reporting its own mistakes.
 
@@ -135,6 +136,7 @@ fn chained_handled() -> Int {
     let k6 = attempt wrapped(e: stop()).show()      // <- E0706
     let k7 = attempt wrapped(e: stop()).show() == Err("k7") // <- E0706
     let k8 = wrapped(e: stop()).show() else it      // <- E0707
+    let k9 = Err("k9") == attempt wrapped(e: stop()).show()
     return 0
 }
 
