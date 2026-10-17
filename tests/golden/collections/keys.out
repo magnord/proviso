@@ -1,1 +1,1 @@
-1 2 true true Some(4) Tree.Fork(kids: [Tree.Fork(kids: [Tree.Leaf: 0]): 1])
+1 2 true true Some(4) Tree.Fork(kids: [Tree.Fork(kids: [Tree.Leaf: 0]): 1]) true
