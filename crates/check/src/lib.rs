@@ -4191,15 +4191,24 @@ impl Checker<'_> {
             Some(marker) if chain => {
                 // A later part of the chain may need its type settled, as a receiver does,
                 // which would settle an error type that only `Never` or a hole has reached as
-                // `Never`. So it joins what the handler knows now: the error type of the
-                // chain's first call, or else the handler's own (OPEN_QUESTIONS P5).
-                let known = marker.errors.first().or(marker.target.as_ref()).cloned();
+                // `Never`. So it joins what the handler knows now, as the handler will. A `try`
+                // knows its function's `fails`, and the others the error type of the chain's
+                // first call, or else the one an `attempt` is expected to have (OPEN_QUESTIONS
+                // P5).
+                let known = match marker.handler {
+                    None => marker.target.clone(),
+                    Some(_) => marker.errors.first().or(marker.target.as_ref()).cloned(),
+                };
                 marker.errors.push(err.clone());
                 if let Some(handler) = marker.handler {
                     self.p.handler_of.insert(call, handler);
                 }
-                // A mismatch is reported once the handler joins them all.
-                if let Some(known) = known {
+                // A mismatch is reported once the handler joins them all, and an error, which
+                // would poison the other side, is left to the handler too (§15.1).
+                if let Some(known) = known
+                    && self.vars.resolve(&known) != Ty::Error
+                    && self.vars.resolve(err) != Ty::Error
+                {
                     let _ = self.vars.subsume(&known, err) && self.vars.subsume(err, &known);
                 }
             }

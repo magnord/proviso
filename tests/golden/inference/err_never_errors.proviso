@@ -21,7 +21,9 @@
 // its receiver's type, so a call's error type joins what its handler knows when it marks the
 // call. That is the chain's first fallible call, the function's `fails` under `try`, or the
 // `Result` an `attempt` is expected to be. A value that gives it after the chain comes too
-// late, as `== Err(…)` and `else it` do (P5, `fails Never`; issue #37).
+// late, as `== Err(…)` and `else it` do (P5, `fails Never`; issue #37). A call that was
+// rejected doesn't keep a `try` from checking its other calls against the function's `fails`,
+// or keep a handler's chain from reporting its own mistakes.
 
 record Box {
     n: Int
@@ -64,6 +66,19 @@ fn rejected() -> Int {
     let a3 = try boxof(e: stop()).pick(e: nosuch)   // <- E0201
     let a4 = try boxof(e: stop()).missing()         // <- E0303
     let a5 = try boxof(e: nosuch).pick(e: stop())   // <- E0201
+    let a6 = try boxof(e: nosuch).pick(e: 6)        // <- E0201, E0702
+    return 0
+}
+
+fn rejected_declared() -> Int fails Text {
+    let a7 = try boxof(e: nosuch).pick(e: 7)        // <- E0201, E0702
+    let a8 = try boxof(e: 8).pick(e: nosuch)        // <- E0702, E0201
+    return 0
+}
+
+fn rejected_handled() -> Int {
+    let a9 = attempt boxof(e: nosuch).wrap(e: 9).missing() // <- E0201, E0303
+    let b1 = boxof(e: nosuch).wrap(e: 1).missing() else 0  // <- E0201, E0303
     return 0
 }
 
@@ -124,6 +139,7 @@ fn chained_handled() -> Int {
 }
 
 example boxof(e: "x").wrap(e: stop()).show() fails _
+example boxof(e: nosuch).wrap(e: 2).missing() fails _ // <- E0201, E0303
 example rethrow(e: fail "f4") fails _              // <- E0705, E0708
 example rethrow(e: stop()) fails _                  // <- E0708
 example rethrow::[Never](e: stop()) fails _         // <- E0708
