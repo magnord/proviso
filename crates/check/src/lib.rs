@@ -2094,7 +2094,7 @@ impl Checker<'_> {
             Expectation::Equals(value) => {
                 // A call that was rejected has nothing to compare with (§15.1).
                 if ty == Ty::Error {
-                    self.infer(*value);
+                    self.rejected_value(*value);
                     return;
                 }
                 // As in `operands`, the call gives the value what it knows of its type, and the
@@ -2340,7 +2340,7 @@ impl Checker<'_> {
             }
             StmtKind::Return(value) if !self.f.returns => {
                 if let Some(value) = value {
-                    self.infer(*value);
+                    self.rejected_value(*value);
                 }
                 self.error(
                     codes::MISPLACED_RETURN,
@@ -2582,7 +2582,9 @@ impl Checker<'_> {
                     Some(expected) => self.joined(e, expected),
                     None => self.infer(e),
                 };
-                diverges |= diverges_ty(&ty);
+                // A value with an error stays one, so the branches it meets know it was
+                // rejected (§15.1).
+                diverges |= ty == Ty::Never;
                 value = Some(ty);
                 continue;
             }
@@ -2616,6 +2618,21 @@ impl Checker<'_> {
 
     fn infer(&mut self, e: ExprId) -> Ty {
         self.expr(e, None)
+    }
+
+    /// Infers the type of `e`, a part of an expression that was rejected, which was the one
+    /// to give the type arguments `e` leaves open, so they are not reported again (§15.1).
+    fn rejected_value(&mut self, e: ExprId) -> Ty {
+        let ty = self.infer(e);
+        self.vars.quiet(&ty);
+        ty
+    }
+
+    /// [`Checker::rejected_value`] for each argument of a rejected call.
+    fn rejected_args(&mut self, args: &[Arg]) {
+        for arg in args {
+            self.rejected_value(arg.value);
+        }
     }
 
     /// Checks `e` against `expected`, reports a mismatch, and returns the actual type.
@@ -2821,7 +2838,7 @@ impl Checker<'_> {
                         self.check(*value, &err);
                     }
                     None => {
-                        self.infer(*value);
+                        self.rejected_value(*value);
                         let message = if self.f.returns {
                             "`fail` needs a `fails` clause, and this function declares none"
                         } else if self.f.example {
@@ -2920,7 +2937,17 @@ impl Checker<'_> {
             };
             tys.push(ty);
         }
+        // A tuple with an error is one, which was the one to give the others' type arguments.
+        self.rejected_parts(&tys);
         self.p.decls.tuple_ty(tys)
+    }
+
+    /// Marks the type arguments that `tys` leave open as a rejected value's when one of them
+    /// is an error: the parts of a tuple, or the branches of an `if` or `match` (§15.1).
+    fn rejected_parts(&mut self, tys: &[Ty]) {
+        if tys.contains(&Ty::Error) {
+            tys.iter().for_each(|ty| self.vars.quiet(ty));
+        }
     }
 
     /// `value else fallback` (REFERENCE §6.6). It marks the fallible calls of `value`'s chain,
@@ -3260,9 +3287,7 @@ impl Checker<'_> {
             && let Some(id) = bare_variant(m.text(name.sym))
         {
             if self.poisoned.contains(&name.sym) {
-                for arg in args {
-                    self.infer(arg.value);
-                }
+                self.rejected_args(args);
                 return Ty::Error;
             }
             return self.construct_variant(callee, id, name, args, span, expected);
@@ -3274,9 +3299,7 @@ impl Checker<'_> {
                 let text = m.text(name.sym);
                 let message = format!("`{text}` is an enum; build one of its variants, as in `{text}.Variant(…)`");
                 self.error(codes::UNKNOWN_NAME, name.span, message);
-                for arg in args {
-                    self.infer(arg.value);
-                }
+                self.rejected_args(args);
                 return Ty::Error;
             }
             return self.construct(callee, id, args, span);
@@ -3301,9 +3324,7 @@ impl Checker<'_> {
             }
             _ => self.not_implemented(callee_span, "calls of function values", Planned::Phase(2)),
         }
-        for arg in args {
-            self.infer(arg.value);
-        }
+        self.rejected_args(args);
         Ty::Error
     }
 
@@ -3346,9 +3367,7 @@ impl Checker<'_> {
         let m = self.m;
         let info = &self.p.fns[f];
         if info.rejected {
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return Ty::Error;
         }
         let name = m.text(info.name);
@@ -3384,9 +3403,7 @@ impl Checker<'_> {
                     }
                 };
                 self.error(codes::TYPE_ARGUMENT_COUNT, at, message);
-                for arg in args {
-                    self.infer(arg.value);
-                }
+                self.rejected_args(args);
                 return Ty::Error;
             } else {
                 for (slot, ty) in tvars.iter_mut().zip(tys) {
@@ -3494,9 +3511,7 @@ impl Checker<'_> {
             }
             // A rejected declaration may have had the name.
             if cap || self.poisoned.contains(&receiver_name.sym) {
-                for arg in args {
-                    self.infer(arg.value);
-                }
+                self.rejected_args(args);
                 return Ty::Error;
             }
         }
@@ -3523,9 +3538,7 @@ impl Checker<'_> {
             && let Some((which, planned)) = planned
         {
             self.not_implemented(method.span, &format!("`Text` methods {which}, such as `{name}`,"), planned);
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return Ty::Error;
         }
         if let Some((builtin, params, ret, fails)) = builtin_method(&receiver_ty, name) {
@@ -3546,9 +3559,7 @@ impl Checker<'_> {
                 self.dispatch_call(e, iface, j, &receiver_ty, method, targs, args, span, chain, false)
             }
             None => {
-                for arg in args {
-                    self.infer(arg.value);
-                }
+                self.rejected_args(args);
                 Ty::Error
             }
         }
@@ -3591,9 +3602,7 @@ impl Checker<'_> {
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);
             }
         }
-        for arg in args {
-            self.infer(arg.value);
-        }
+        self.rejected_args(args);
         Ty::Error
     }
 
@@ -3717,9 +3726,7 @@ impl Checker<'_> {
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);
             }
         }
-        for arg in args {
-            self.infer(arg.value);
-        }
+        self.rejected_args(args);
         Ty::Error
     }
 
@@ -3769,9 +3776,7 @@ impl Checker<'_> {
                 let message = format!("`{iface_text}.{name}` takes its receiver first, as in `{iface_text}.{name}(x)`");
                 self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
             }
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return Ty::Error;
         };
         if let Some(label) = first.label {
@@ -3784,9 +3789,7 @@ impl Checker<'_> {
             let message = format!("`{}` does not implement `{iface_text}`", self.show(&receiver_ty));
             let at = self.span(first.value);
             self.error(codes::MISSING_IMPLEMENTATION, at, message);
-            for arg in rest {
-                self.infer(arg.value);
-            }
+            self.rejected_args(rest);
             return Ty::Error;
         }
         self.dispatch_call(e, iface, j, &receiver_ty, method, targs, rest, span, chain, true)
@@ -3912,7 +3915,7 @@ impl Checker<'_> {
                     self.check(arg.value, &fields[i].1);
                 }
                 None => {
-                    self.infer(arg.value);
+                    self.rejected_value(arg.value);
                 }
             }
         }
@@ -3949,9 +3952,7 @@ impl Checker<'_> {
                 span,
                 format!("`{callee}` takes {n} {noun}, but {given} {verb} given"),
             );
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return false;
         }
         // One label problem is reported per call, with the labels the call needs.
@@ -4184,6 +4185,7 @@ impl Checker<'_> {
                     ElseBranch::Block(block) => self.tail(block),
                     ElseBranch::If(nested) => Some(*nested),
                 };
+                self.rejected_parts(&[then_ty.clone(), else_ty.clone()]);
                 if self.borrowed_tail(self.tail(then_block)) || self.borrowed_tail(else_tail) {
                     self.borrowed_values.insert(e);
                 }
@@ -4347,9 +4349,7 @@ impl Checker<'_> {
         let Some((v, variant)) = def.variant_named(text) else {
             let message = format!("`{}` has no variant `{text}`", def.name);
             self.error(codes::UNKNOWN_MEMBER, name.span, message);
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return Ty::Error;
         };
         let ctor = def.ctor_name(v);
@@ -4357,17 +4357,13 @@ impl Checker<'_> {
         let params: Vec<(Box<str>, Ty)> = variant.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
         let targs = self.variant_args(id, expected, span);
         if rejected {
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return self.variant_type(id, targs, expected, span, true);
         }
         if fieldless {
             let message = format!("`{ctor}` has no fields, so it is written without parentheses");
             self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
-            for arg in args {
-                self.infer(arg.value);
-            }
+            self.rejected_args(args);
             return self.variant_type(id, targs, expected, span, true);
         }
         self.p.res.insert(e, Res::Ctor(id, v));
@@ -4408,6 +4404,7 @@ impl Checker<'_> {
             _ => None,
         };
         let mut diverges = true;
+        let mut tys = Vec::new();
         for arm in arms {
             // An arm's bindings scope over its guard and body.
             self.f.scopes.push(Vec::new());
@@ -4435,7 +4432,11 @@ impl Checker<'_> {
                 }
             };
             diverges &= ty == Ty::Never;
+            tys.push(ty);
             self.f.scopes.pop();
+        }
+        if matches!(mode, Mode::Value(_)) {
+            self.rejected_parts(&tys);
         }
         // An arm that failed to parse may have covered what seems to be missing.
         if *complete && !scrutinee_ty.is_unknown() {
@@ -4814,7 +4815,7 @@ impl Checker<'_> {
                 }
             }
             _ => {
-                self.infer(iter);
+                self.rejected_value(iter);
                 let span = self.span(iter);
                 self.not_implemented(span, "`for` loops over collections", Planned::Phase(2));
                 Ty::Error
