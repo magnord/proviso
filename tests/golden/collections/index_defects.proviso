@@ -1,0 +1,33 @@
+// phase: 2.6
+// run: test
+// expect-exit: 70
+// An index outside the list is an `index_out_of_bounds` defect, for a read and for an
+// assignment, at 0's other side and at the length (STD.md). The last element and the
+// first are in bounds. `get` gives `None` instead. A failed assignment changes nothing,
+// since the defect ends the example.
+fn read(i: Int) -> Int {
+    let xs = [10, 20, 30]
+    return xs[i]
+}
+
+fn write(i: Int) -> List[Int] {
+    var xs = [10, 20, 30]
+    xs[i] = 0
+    return xs
+}
+
+fn nested(i: Int) -> Int {
+    var grid = [[1], [2, 3]]
+    grid[1][i] += 1
+    return grid[1][i]
+}
+
+example read(2) == 30
+example read(0) == 10
+example read(3) == 0
+example read(-1) == 0
+example write(0) == [0, 20, 30]
+example write(2) == [10, 20, 0]
+example write(3) == []
+example nested(1) == 4
+example nested(2) == 0

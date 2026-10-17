@@ -1,0 +1,55 @@
+// phase: 2.6
+// expect-error: E0201
+// expect-error: E0302
+// expect-error: E0312
+// An empty literal whose type arguments nothing gives is an error once, whatever the order
+// and spelling of the values that meet it (OPEN_QUESTIONS P5; issue #10). Each line of
+// `unknown` is a rewrite of the others and reports E0312 once, never also for the value it
+// meets. A literal that doesn't fit the type the others give is out of range in any
+// position. An element, key or value with an error makes the literal one, so nothing
+// more is reported about it or what it meets (§15.1).
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn unknown(c: Bool) {
+    let a1 = [] == []                                // <- E0312
+    let a2 = [[]] == [[]]                            // <- E0312
+    let a3 = [:] == [:]                              // <- E0312
+    let a4 = if c { [] } else { [] }                 // <- E0312
+    let a5 = first(a: [], b: [])                     // <- E0312
+    let a6 = [[], []]                                // <- E0312
+    let a7 = ([], 1) == ([], 2)                      // <- E0312
+    let a8 = Some([]) == None                        // <- E0312
+    let a9 = None == Some([])                        // <- E0312
+    let a10 = [None]                                 // <- E0312
+    let a11 = [[None]]                               // <- E0312
+    let a12 = ["k": []]                              // <- E0312
+}
+
+fn ranges(small: Int8) {
+    let r1 = [300, small]                            // <- E0302
+    let r2 = [small, 300]                            // <- E0302
+    let r3 = [[300], [small]]                        // <- E0302
+    let r4 = [[small], [300]]                        // <- E0302
+    let r5 = [300] == [small]                        // <- E0302
+    let r6 = [small] == [300]                        // <- E0302
+    let r7 = if true { [300] } else { [small] }      // <- E0302
+    let r8 = first(a: [small], b: [300])             // <- E0302
+    let r9 = [300: 1, small: 2]                      // <- E0302
+}
+
+fn rejected() {
+    let x1 = [nope]                                  // <- E0201
+    let x2 = [1, nope]                               // <- E0201
+    let x3 = [nope] == []                            // <- E0201
+    let x4 = [] == [nope]                            // <- E0201
+    let x5 = ["k": nope]                             // <- E0201
+    let x6 = [nope: 1]                               // <- E0201
+    let x7 = nope[0]                                 // <- E0201
+    let x8 = [1][nope]                               // <- E0201
+    let x9 = [[], [nope]]                            // <- E0201
+    let x10 = [[nope], []]                           // <- E0201
+    let x11 = if true { [] } else { [nope] }         // <- E0201
+    let x12 = first(a: [], b: [nope])                // <- E0201
+}

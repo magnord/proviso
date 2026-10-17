@@ -1,0 +1,150 @@
+// phase: 2.6
+// Lists (REFERENCE §4.2, STD.md): literals, reading and assigning through an index, the
+// methods of STD.md, `for` with a pattern, and `Show`, `Eq` and `Ord`. A list is a value,
+// so a copy keeps what it had when the original changes later (§5.1), and a loop goes
+// over the list as it was when the loop started (OPEN_QUESTIONS P5). `pop` takes the last
+// element, and `get` gives `None` for an index outside the list, also below 0. `Show`
+// writes the literal form with its elements quoted, as a tuple's (STD.md). Lists are
+// ordered element by element from the left, so a prefix comes first.
+use std.io { IoError }
+
+record Point derives(Eq, Show) {
+    x: Int
+    y: Int
+}
+
+record Bag {
+    items: List[Text]
+}
+
+fn basics() -> Text {
+    var xs: List[Int] = []
+    let empty = xs.is_empty()
+    xs.push(3)
+    xs.push(1)
+    xs.push(value: 2)
+    return f"{empty} {xs.is_empty()} {xs.len()} {xs} {xs[0]} {xs[2]}"
+}
+
+fn copies() -> Text {
+    var xs = [1, 2, 3]
+    let ys = xs
+    xs[0] = 10
+    xs.push(4)
+    var zs = ys
+    zs[2] += 5
+    return f"{xs} {ys} {zs}"
+}
+
+fn reading() -> Text {
+    var xs = ["a", "b"]
+    let last = xs.pop()
+    let rest = xs.pop()
+    let gone = xs.pop()
+    let ys = [5, 6, 7]
+    let a = ys.get(0)
+    let b = ys.get(index: 2)
+    let c = ys.get(3)
+    let d = ys.get(-1)
+    return f"{last} {rest} {gone} {xs.len()} {a} {b} {c} {d} {ys.contains(6)} {ys.contains(8)}"
+}
+
+fn loops() -> Text {
+    let names = ["ada", "bob", "cy"]
+    var out = ""
+    for (i, name) in names.enumerate() {
+        out = f"{out}{i}={name};"
+    }
+    var total = 0
+    for n in [10, 20, 30] {
+        if n == 20 {
+            continue
+        }
+        total += n
+    }
+    return f"{out} {total} {names.enumerate()}"
+}
+
+fn snapshot() -> Text {
+    var xs = [1, 2]
+    for x in xs {
+        xs.push(x * 10)
+    }
+    return f"{xs}"
+}
+
+fn nested() -> Text {
+    var grid = [[1, 2], [3]]
+    grid[1].push(4)
+    grid[0][1] = 9
+    var points = [Point(x: 1, y: 2)]
+    points[0].x = 5
+    points.push(Point(x: 0, y: 0))
+    return f"{grid} {points} {grid[1][1]}"
+}
+
+fn fields() -> Text {
+    var bag = Bag(items: [])
+    bag.items.push("x")
+    bag.items.push("y")
+    bag.items[0] = "z"
+    return f"{bag.items} {bag.items.len()}"
+}
+
+fn comparing() -> Text {
+    let a = [1, 2]
+    let b = [1, 2, 0]
+    let c = [2]
+    return f"{a == [1, 2]} {a == b} {a != c} {a < b} {b < c} {c > a} {[] < a} {a <= a}"
+}
+
+fn shown() -> Text {
+    let words = ["a\"b", "c"]
+    let chars = ['x', '\n']
+    let pairs = [(1, "one")]
+    let opts = [Some(1), None]
+    let empty: List[Int] = []
+    debug(words, chars, empty, [[1], []])
+    return f"{words} {chars} {pairs} {opts} {empty}"
+}
+
+fn first_or[T: Copy](xs: List[T], fallback: T) -> T {
+    return xs.get(0) else fallback
+}
+
+fn count[T](xs: List[T]) -> Int {
+    var n = 0
+    for x in xs {
+        n += 1
+    }
+    return n
+}
+
+fn twice[T: Copy](x: T) -> List[T] {
+    var out: List[T] = []
+    out.push(x)
+    out.push(x)
+    return out
+}
+
+fn generic() -> Text {
+    let a = first_or(xs: [7, 8], fallback: 0)
+    let b = first_or(xs: [], fallback: 4)
+    let c = count(xs: ["a", "b"])
+    let d = twice('q')
+    let e = [5].get(9) else 6
+    return f"{a} {b} {c} {d} {e}"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(basics())
+    try sys.stdout.write_line(copies())
+    try sys.stdout.write_line(reading())
+    try sys.stdout.write_line(loops())
+    try sys.stdout.write_line(snapshot())
+    try sys.stdout.write_line(nested())
+    try sys.stdout.write_line(fields())
+    try sys.stdout.write_line(comparing())
+    try sys.stdout.write_line(shown())
+    try sys.stdout.write_line(generic())
+}

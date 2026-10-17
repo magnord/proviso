@@ -1,0 +1,40 @@
+// phase: 2.6
+// expect-error: E0201
+// expect-error: E0301
+// expect-error: E0305
+// expect-error: E0306
+// expect-error: E0312
+// expect-error: E0318
+// `for` goes over a range, a list or a map's entries (REFERENCE §6.5), and over nothing
+// else. Its pattern must match every element, as a `let` pattern does (OPEN_QUESTIONS
+// P5), so a variant or a literal in it is E0318, and a tuple pattern needs a tuple of its
+// length. A collection that nothing gives a type is E0312, and one with an error reports
+// nothing more, in the loop or its body.
+fn loops(xs: List[Int], m: Map[Text, Int], o: Option[Int], t: Text) {
+    for x in 5 {                                     // <- E0306
+    }
+    for c in t {                                     // <- E0306
+    }
+    for v in o {                                     // <- E0306
+    }
+    for (a, b) in xs {                               // <- E0301
+    }
+    for (k, v) in m {
+        let n: Int = v
+        let s: Text = k
+    }
+    for (k, v, w) in m {                             // <- E0301
+    }
+    for Some(v) in [Some(1)] {                       // <- E0318
+    }
+    for (i, 0) in xs.enumerate() {                   // <- E0318
+    }
+    for x in nope {                                  // <- E0201
+        let y = x + 1
+    }
+    for x in [] {                                    // <- E0312
+    }
+    for x in xs {
+        x = 2                                        // <- E0305
+    }
+}

@@ -1,0 +1,58 @@
+// phase: 2.6
+// expect-error: E0301
+// expect-error: E0302
+// expect-error: E0307
+// expect-error: E0309
+// expect-error: E0312
+// `List` takes one type argument and `Map` two (REFERENCE §4.2). A literal's elements are
+// joined, as the operands of `==` are, so they must have one type, and an integer literal
+// among them takes the type of the others, in either order (OPEN_QUESTIONS P5). A map
+// needs keys that implement `Eq` and `Hash`. A written type is checked where it is written,
+// and a literal once its key type is known, so a map's methods don't check it again. An
+// empty literal that nothing gives a type is an error once, as `None` is. A `let`
+// without a type fixes its value's type there, so a later use doesn't give it.
+fn types(
+    a: List,                                         // <- E0307
+    b: Map[Int],                                     // <- E0307
+    c: List[Int, Int],                               // <- E0307
+    d: Map[Float, Int],                              // <- E0309
+) {
+}
+
+fn elements(small: Int8) {
+    let a = [1, "two"]                               // <- E0301
+    let b: List[Int8] = [1, 300]                     // <- E0302
+    let c = [small, 300]                             // <- E0302
+    let d = [300, small]                             // <- E0302
+    let e = []                                       // <- E0312
+    let f = [:]                                      // <- E0312
+    let g = [[]]                                     // <- E0312
+    let h: List[Text] = ["a": 1]                     // <- E0301
+    let i = ["k": 1, "j": "v"]                       // <- E0301
+    let j = [1.5: 1]                                 // <- E0309
+    let k: Map[Float, Int] = [:]                     // <- E0309
+    let l = [[1], ["x"]]                             // <- E0301
+    let m: Map[Text, Int8] = ["a": 1, "b": 300]      // <- E0302
+}
+
+fn later_use() -> Int {
+    var xs = []                                      // <- E0312
+    xs.push(1)
+    return xs.len()
+}
+
+fn keys[K: Copy](k: K) -> Int {
+    let m = [k: 1]                                   // <- E0309
+    return m.len()
+}
+
+fn unbounded[K](m: Map[K, Int]) -> Int {           // <- E0309
+    return m.len()
+}
+
+fn bounded[K: Eq + Hash](m: Map[K, Int], k: K) -> Bool {
+    return m.contains_key(k)
+}
+
+fn nested_keys(m: Map[List[Float], Int], n: Map[Option[Int], List[Map[Text, Int]]]) {   // <- E0309
+}

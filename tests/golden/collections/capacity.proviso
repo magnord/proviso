@@ -1,0 +1,91 @@
+// phase: 2.6
+// Collections hold as much as memory allows. A loop pushes a million elements, and each
+// `push` on a list that nothing else shares changes it in place, so building it doesn't
+// copy it each time. Popping half of them, and setting and removing the keys of a map of
+// 100,000 entries, are as cheap. A value nested a million deep through lists, or 100,000
+// deep through maps, is built, compared, shown and dropped without native stack per level
+// (OPEN_QUESTIONS P5). Each second comparison differs only in the deepest value.
+use std.io { IoError }
+
+enum Tree derives(Eq, Show) {
+    Leaf(n: Int)
+    Node(kids: List[Tree])
+}
+
+enum Branches derives(Eq, Show) {
+    Tip(n: Int)
+    Fork(kids: Map[Int, Branches])
+}
+
+fn big_list() -> Text {
+    var xs: List[Int] = []
+    for i in 0..1_000_000 {
+        xs.push(i)
+    }
+    var total = 0
+    for x in xs {
+        total += x
+    }
+    var popped = 0
+    while popped < 500_000 {
+        xs.pop()
+        popped += 1
+    }
+    xs[0] = 7
+    let after = xs.get(500_000)
+    return f"{xs.len()} {total} {xs[0]} {xs[499_999]} {after}"
+}
+
+fn big_map() -> Text {
+    var m: Map[Int, Int] = [:]
+    for i in 0..100_000 {
+        m.set(key: i, value: i * 2)
+    }
+    var found = 0
+    for i in 0..100_000 {
+        if m.contains_key(i * 2) {
+            found += 1
+        }
+    }
+    var i = 0
+    while i < 100_000 {
+        m.remove(i)
+        i += 2
+    }
+    var sum = 0
+    for (k, v) in m {
+        sum += v
+    }
+    let one = m.get(1)
+    let two = m.get(2)
+    return f"{m.len()} {found} {one} {two} {sum}"
+}
+
+fn tree(n: Int, last: Int) -> Tree {
+    var t = Tree.Leaf(n: last)
+    for i in 0..n {
+        t = Tree.Node(kids: [t])
+    }
+    return t
+}
+
+fn branches(n: Int, last: Int) -> Branches {
+    var b = Branches.Tip(n: last)
+    for i in 0..n {
+        b = Branches.Fork(kids: [i: b])
+    }
+    return b
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(big_list())
+    try sys.stdout.write_line(big_map())
+    let a = tree(n: 1_000_000, last: 0)
+    let b = tree(n: 1_000_000, last: 0)
+    let c = tree(n: 1_000_000, last: -1)
+    try sys.stdout.write_line(f"{a == b} {a == c} {a.show().byte_len()}")
+    let d = branches(n: 100_000, last: 0)
+    let e = branches(n: 100_000, last: 0)
+    let f = branches(n: 100_000, last: -1)
+    try sys.stdout.write_line(f"{d == e} {d == f} {d.show().byte_len()}")
+}

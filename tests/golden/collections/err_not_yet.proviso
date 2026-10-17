@@ -1,0 +1,36 @@
+// phase: 2.6
+// expect-error: E0901
+// What collections still lack is reported as not implemented, and what it would have
+// given isn't reported again (§15.1). `Set` has no literal or constructor yet (OPEN_QUESTIONS
+// §G), and STD.md doesn't declare `Array`. Consuming loops wait for moves, the operations
+// that take a closure for effect variables (STD.md), the predicates of §8.1 for the
+// verifier, and `inout` parameters and `&` arguments for `inout` atomicity. `split` is one
+// of the `Text` functions of §12.3 that STD.md doesn't declare.
+fn sets(s: Set[Int]) -> Int {                       // <- E0901
+    return s.len()
+}
+
+fn arrays(a: Array[Int, 3]) -> Int {                // <- E0901
+    return a.len()
+}
+
+fn later(xs: List[Int], t: Text) -> Int {
+    for x in take xs {                              // <- E0901
+    }
+    let doubled = xs.map(f: 2)                      // <- E0901
+    let kept = xs.filter(f: 1)                      // <- E0901
+    let sorted = xs.is_sorted()                     // <- E0901
+    var ys = xs
+    ys.swap(i: 0, j: 1)                             // <- E0901
+    let parts = t.split(",")                        // <- E0901
+    return doubled.len() + kept.len() + parts.len()
+}
+
+fn bump(counts: inout Map[Text, Int]) {             // <- E0901
+    counts.set(key: "a", value: 1)
+}
+
+fn caller() {
+    var c: Map[Text, Int] = [:]
+    bump(counts: &c)                                // <- E0901
+}

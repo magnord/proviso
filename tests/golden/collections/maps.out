@@ -1,0 +1,5 @@
+true None Some(36) ["ada": 37, "bob": 5] 2 false Some(37) None true false
+["b": 20, "c": 3, "a": 10] Some(1) None b20;c3;a10;
+true false true true true true true
+[1: ["a"], 2: []] ["a"] [(0, 0): 'a', (1, 2): 'b'] Some('b') [:]
+["a": 2, "b": 1]

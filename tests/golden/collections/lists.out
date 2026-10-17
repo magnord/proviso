@@ -1,0 +1,10 @@
+true false 3 [3, 1, 2] 3 2
+[10, 2, 3, 4] [1, 2, 3] [1, 2, 8]
+Some("b") Some("a") None 0 Some(5) Some(7) None None true false
+0=ada;1=bob;2=cy; 40 [(0, "ada"), (1, "bob"), (2, "cy")]
+[1, 2, 10, 20]
+[[1, 9], [3, 4]] [Point(x: 5, y: 2), Point(x: 0, y: 0)] 4
+["z", "y"] 2
+true false true true true true true true
+["a\"b", "c"] ['x', '\n'] [(1, "one")] [Some(1), None] []
+7 4 2 ['q', 'q'] 6

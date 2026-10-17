@@ -1,0 +1,10 @@
+collections/index_defects.proviso:25:1: example passed
+collections/index_defects.proviso:26:1: example passed
+collections/index_defects.proviso:27:1: example failed: it hit a defect
+collections/index_defects.proviso:28:1: example failed: it hit a defect
+collections/index_defects.proviso:29:1: example passed
+collections/index_defects.proviso:30:1: example passed
+collections/index_defects.proviso:31:1: example failed: it hit a defect
+collections/index_defects.proviso:32:1: example passed
+collections/index_defects.proviso:33:1: example failed: it hit a defect
+9 examples: 5 passed, 4 failed

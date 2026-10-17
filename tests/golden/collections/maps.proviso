@@ -1,0 +1,78 @@
+// phase: 2.6
+// Maps (REFERENCE §4.2, STD.md). `set` returns the value it replaces, and a key it sets
+// again keeps its place, since a map iterates in insertion order. A key removed and set
+// again goes last. `for` goes over the entries as `(k, v)` (§6.5). `Show` writes the
+// literal form in insertion order, and `[:]` when empty. Two maps are equal when they map
+// the same keys to equal values, in any order, and they are ordered by their entries
+// sorted by key (OPEN_QUESTIONS P5). REFERENCE §1's `bump` counts words.
+use std.io { IoError }
+
+fn basics() -> Text {
+    var ages: Map[Text, Int] = [:]
+    let before = ages.is_empty()
+    let first = ages.set(key: "ada", value: 36)
+    let again = ages.set(key: "ada", value: 37)
+    ages.set(key: "bob", value: 5)
+    let ada = ages.get("ada")
+    let cy = ages.get(key: "cy")
+    let has_bob = ages.contains_key("bob")
+    let has_cy = ages.contains_key("cy")
+    return f"{before} {first} {again} {ages} {ages.len()} {ages.is_empty()} {ada} {cy} {has_bob} {has_cy}"
+}
+
+fn order() -> Text {
+    var m = ["b": 2, "a": 1, "c": 3]
+    m.set(key: "b", value: 20)
+    let removed = m.remove("a")
+    let missing = m.remove(key: "zz")
+    m.set(key: "a", value: 10)
+    var keys = ""
+    for (k, v) in m {
+        keys = f"{keys}{k}{v};"
+    }
+    return f"{m} {removed} {missing} {keys}"
+}
+
+fn comparing() -> Text {
+    let a = ["x": 1, "y": 2]
+    let b = ["y": 2, "x": 1]
+    let c = ["x": 1, "y": 3]
+    let d = ["x": 1]
+    return f"{a == b} {a == c} {a != d} {a < c} {d < a} {b <= a} {c > b}"
+}
+
+fn nested() -> Text {
+    var groups: Map[Int, List[Text]] = [:]
+    groups.set(key: 1, value: ["a"])
+    groups.set(key: 2, value: [])
+    let one = groups.get(1) else []
+    let pos: Map[(Int, Int), Char] = [(0, 0): 'a', (1, 2): 'b']
+    let at = pos.get((1, 2))
+    let none: Map[Int, Int] = [:]
+    debug(pos, none, ["k": "v"])
+    return f"{groups} {one} {pos} {at} {none}"
+}
+
+fn bump(counts: Map[Text, Int], key: Text) -> Map[Text, Int] {
+    var out = counts
+    let n = out.get(key) else 0
+    out.set(key: key, value: n + 1)
+    return out
+}
+
+fn tally(words: List[Text]) -> Map[Text, Int] {
+    var counts: Map[Text, Int] = [:]
+    for w in words {
+        counts = bump(counts: counts, key: w)
+    }
+    return counts
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(basics())
+    try sys.stdout.write_line(order())
+    try sys.stdout.write_line(comparing())
+    try sys.stdout.write_line(nested())
+    let counted = tally(["a", "b", "a"])
+    try sys.stdout.write_line(f"{counted}")
+}

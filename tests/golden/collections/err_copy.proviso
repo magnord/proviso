@@ -1,0 +1,44 @@
+// phase: 2.6
+// expect-error: E0503
+// A literal stores its elements and `push` and `set` take theirs (STD.md), so each copies
+// a borrowed value, which needs `Copy` when its type has a type parameter (REFERENCE
+// §4.8). A loop borrows the elements it binds, so copying one needs `Copy` too, while
+// passing it on doesn't. Moves come with kinds later in phase 2.
+fn copies[T](x: T, xs: List[T]) -> List[T] {
+    let a = [x]                                      // <- E0503
+    var b: List[T] = []
+    b.push(x)                                        // <- E0503
+    let c = xs                                       // <- E0503
+    for y in xs {
+        let z = y                                    // <- E0503
+        let n = count(y)
+    }
+    for (i, w) in pairs(xs) {
+        let v = w                                    // <- E0503
+    }
+    let d = [xs]                                     // <- E0503
+    return xs                                        // <- E0503
+}
+
+fn values[T](x: T) -> Map[Int, T] {
+    var m: Map[Int, T] = [:]
+    m.set(key: 1, value: x)                          // <- E0503
+    return [2: x]                                    // <- E0503
+}
+
+fn count[T](x: T) -> Int {
+    return 1
+}
+
+fn pairs[T](xs: List[T]) -> List[(Int, T)] {
+    return []
+}
+
+fn fine[T: Copy](x: T, xs: List[T]) -> List[T] {
+    var out = [x]
+    out.push(x)
+    for y in xs {
+        out.push(y)
+    }
+    return out
+}
