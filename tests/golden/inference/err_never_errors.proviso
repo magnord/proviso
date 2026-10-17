@@ -17,7 +17,11 @@
 // call that didn't resolve may have held one that fails (REFERENCE §15.1; issue #30). Two
 // calls of one chain that fail with the same type are one E0702. A `fail` leaves, also
 // where nothing declares `fails`, so its `Never` gives an error type as any `Never` does,
-// and the mistakes it shares a line with are their own.
+// and the mistakes it shares a line with are their own. A method on a call's result settles
+// its receiver's type, so a call's error type joins what its handler knows when it marks the
+// call. That is the chain's first fallible call, the function's `fails` under `try`, or the
+// `Result` an `attempt` is expected to be. A value that gives it after the chain comes too
+// late, as `== Err(…)` and `else it` do (P5, `fails Never`; issue #37).
 
 record Box {
     n: Int
@@ -31,6 +35,14 @@ impl Box {
     fn pick[E: Copy](self, e: E) -> Int fails E {
         return self.n
     }
+
+    fn wrap[E: Copy](self, e: E) -> Option[E] fails E {
+        return None
+    }
+}
+
+fn wrapped[E: Copy](e: E) -> Option[E] fails E {
+    return None
 }
 
 fn stop() -> Never {
@@ -90,6 +102,28 @@ fn rejected_fails() -> Int {
     return f1
 }
 
+fn chained() -> Int fails Text {
+    let g1 = try wrapped(e: stop()).show()
+    let g2 = try boxof(e: "g2").wrap(e: stop()).show()
+    let g3 = try boxof(e: stop()).wrap(e: stop()).show()
+    let g4 = try boxof(e: "g4").wrap(e: stop()).show().byte_len()
+    let g5 = try wrapped::[Never](e: stop()).show() // <- E0703
+    return 0
+}
+
+fn chained_handled() -> Int {
+    let k1 = attempt boxof(e: "k1").wrap(e: stop()).show()
+    let k2 = attempt boxof(e: stop()).wrap(e: "k2").show()
+    let k3 = boxof(e: "k3").wrap(e: stop()).show() else "k3"
+    let k4: Result[Text, Text] = attempt wrapped(e: stop()).show()
+    let k5: Result[Int, Text] = attempt boxof(e: stop()).wrap(e: stop()).show().byte_len()
+    let k6 = attempt wrapped(e: stop()).show()      // <- E0706
+    let k7 = attempt wrapped(e: stop()).show() == Err("k7") // <- E0706
+    let k8 = wrapped(e: stop()).show() else it      // <- E0707
+    return 0
+}
+
+example boxof(e: "x").wrap(e: stop()).show() fails _
 example rethrow(e: fail "f4") fails _              // <- E0705, E0708
 example rethrow(e: stop()) fails _                  // <- E0708
 example rethrow::[Never](e: stop()) fails _         // <- E0708

@@ -12,7 +12,8 @@
 // wrong whatever fills the hole, and a call the hole doesn't meet is still checked. A type
 // argument the hole meets is `Never`, as the hole is, unless something gives it a type, in
 // either argument order. A chain whose receiver needs its type settled early, as `.show()`
-// does, keeps what the hole met.
+// does, keeps what the hole met, and the error type the hole met joins another call of the chain,
+// a `try`'s `fails` or an `attempt`'s expected `Result` (P5, `fails Never`).
 
 fn rethrow[E: Copy](e: E) -> Int fails E {
     fail e
@@ -83,6 +84,29 @@ fn wrapped[E: Copy](e: E) -> Option[E] fails E {
     return None
 }
 
+record Box {
+    n: Int
+}
+
+fn boxof[E: Copy](e: E) -> Box fails E {
+    return Box(n: 1)
+}
+
+impl Box {
+    fn wrap[E: Copy](self, e: E) -> Option[E] fails E {
+        return None
+    }
+}
+
+fn chained_joined() -> Int fails Text {
+    let j1 = try wrapped(e: todo).show()
+    let j2 = try boxof(e: "j2").wrap(e: todo).show()
+    let j3 = attempt boxof(e: "j3").wrap(e: todo).show()
+    let j4 = boxof(e: "j4").wrap(e: todo).show() else "j4"
+    let j5: Result[Text, Text] = attempt wrapped(e: todo).show()
+    return 0
+}
+
 fn chained() -> Int {
     let w1 = attempt wrapped(e: todo).show()
     let w2 = wrapped(e: todo).show() else "w2"
@@ -93,4 +117,5 @@ fn chained() -> Int {
 
 example rethrow(e: todo) fails _
 example wrapped(e: todo).show() fails _
+example boxof(e: "x").wrap(e: todo).show() fails _
 example wrapped(e: stop()).show() fails _           // <- E0708
