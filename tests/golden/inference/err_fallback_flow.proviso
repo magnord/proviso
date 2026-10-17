@@ -1,0 +1,102 @@
+// phase: 2.5
+// expect-error: E0301
+// expect-error: E0312
+// expect-error: E0415
+// expect-error: E0707
+// A statement whose value is `it` leaves if the error type the `let` around the fallback
+// settles is `Never`, so whether the block around it finishes waits for that type, as a
+// `check` does (OPEN_QUESTIONS P5; issue #30). Only `Never` reaching the type leaves the
+// call nothing to fail with, which is E0707 alone. A type nothing gives is E0312 alone. A
+// later statement that gives `it` a type makes the block finish, which is the block's own
+// error. A value built around `it`, such as `Some(it)`, finishes whatever `it` is.
+
+fn opened[E: Copy]() -> Int fails E {
+    return 1
+}
+
+fn second[T: Copy](a: T, b: T) -> T {
+    return b
+}
+
+fn zero[T: Copy](x: T) -> Int {
+    return 0
+}
+
+fn values(c: Bool) -> Int fails Text {
+    let a1 = opened() else {                        // <- E0707
+        second(a: fail "a1", b: it)
+        let z = 1
+    }
+    let a2 = opened() else {                        // <- E0312
+        second(a: it, b: it)
+        let z = 1
+    }
+    let a3 = opened() else {
+        second(a: it, b: it)
+        let t = zero(second(a: it, b: "a3"))
+    }                                               // <- E0301
+    let a4 = opened() else {
+        let t = zero(second(a: it, b: "a4"))
+        second(a: it, b: it)
+        let z = 1
+    }                                               // <- E0301
+    let a5 = opened() else {                        // <- E0707
+        if c {
+            second(a: fail "a5", b: it)
+        } else {
+            second(a: it, b: it)
+        }
+        let z = 1
+    }
+    let a6 = opened() else {                        // <- E0312
+        if c {
+            second(a: it, b: it)
+        } else {
+            fail "a6"
+        }
+        let z = 1
+    }
+    let a7 = opened() else {
+        if c {
+            second(a: it, b: it)
+        }
+        let t = zero(second(a: it, b: "a7"))
+    }                                               // <- E0301
+    let a8 = opened() else {
+        if c {
+            second(a: it, b: it)
+        } else {
+            let t = zero(second(a: it, b: "a8"))
+        }
+        fail "a8"
+    }
+    return a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8
+}
+
+fn checks(c: Bool) -> Int fails Text {
+    let k1 = opened() else {                        // <- E0707
+        check c else { second(a: fail "k1", b: it) }
+        fail "k1b"
+    }
+    let k2 = opened() else {                        // <- E0312
+        check c else { second(a: it, b: it) }
+        fail "k2"
+    }
+    let k3 = opened() else {
+        check c else { second(a: it, b: it) }       // <- E0415
+        zero(second(a: it, b: "k3"))
+    }
+    let k4 = opened() else {                        // <- E0312
+        check c else Some(it)                       // <- E0415
+        fail "k4"
+    }
+    let k5 = opened() else {                        // <- E0312
+        check c else (it, 1)                        // <- E0415
+        fail "k5"
+    }
+    let k6 = opened() else {
+        check c else Some(it)                       // <- E0415
+        zero(second(a: it, b: "k6"))
+    }
+    return k1 + k2 + k3 + k4 + k5 + k6
+}

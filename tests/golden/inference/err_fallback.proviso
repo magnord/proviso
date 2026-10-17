@@ -4,14 +4,15 @@
 // expect-error: E0309
 // expect-error: E0312
 // expect-error: E0415
+// expect-error: E0707
 // `it` in a fallback's statement has the type of the call's error, which the `let` around
 // the fallback settles. A check that a statement queues on that type waits for it, so it is
 // made once the type is known (OPEN_QUESTIONS P5; issue #10). Each check is tested with
 // the type settled after the statement and before it, and one fallback deeper. `else match
 // it` settles `it` at the scrutinee, so it has no such statement. A `check` whose fallback
 // meets `it` waits for the type too. In `checks` the fallback finishes where the tail gives
-// `it` a type, leaves where only `Never` reaches it, and is no second error where nothing
-// gives it.
+// `it` a type, and is no second error where nothing gives it. Where only `Never` reaches
+// it, the fallback leaves, and the call has nothing to fail with (E0707, issue #30).
 
 fn pass[E: Copy](e: E) -> Int fails E {
     fail e
@@ -113,7 +114,7 @@ fn checks(c: Bool, small: Int8) -> Int fails Text {
         check c else { second(a: fail "k3", b: it) } // <- E0415
         zero(second(a: it, b: Some(small)))
     }
-    let k4 = opened() else {
+    let k4 = opened() else {                        // <- E0707
         check c else second(a: fail "k4", b: it)
         fail "k4b"
     }
