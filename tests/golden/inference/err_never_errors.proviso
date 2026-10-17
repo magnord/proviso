@@ -19,8 +19,8 @@
 // where nothing declares `fails`, so its `Never` gives an error type as any `Never` does,
 // and the mistakes it shares a line with are their own. A method on a call's result settles
 // its receiver's type, so a call's error type joins what its handler knows when it marks the
-// call. That is the chain's first fallible call, the function's `fails` under `try`, or the
-// `Result` an `attempt` is expected to be. A value that gives it after the chain comes too
+// call. Under `try` that is the function's `fails`. Under the other handlers it is the chain's
+// first fallible call, or else the `Result` an `attempt` is expected to be. A value that gives it after the chain comes too
 // late, as `== Err(…)` after it and `else it` do, though `Err(…) ==` before it gives the
 // `Result` the `attempt` is expected to be (P5, `fails Never`; issue #37). A call that was
 // rejected doesn't keep a `try` from checking its other calls against the function's `fails`,

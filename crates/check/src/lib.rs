@@ -4203,8 +4203,9 @@ impl Checker<'_> {
                 if let Some(handler) = marker.handler {
                     self.p.handler_of.insert(call, handler);
                 }
-                // A mismatch is reported once the handler joins them all, and an error, which
-                // would poison the other side, is left to the handler too (§15.1).
+                // A mismatch is reported once the handler joins them all. An error isn't
+                // joined, since it would poison the other side and hide that side's own
+                // mistakes (§15.1).
                 if let Some(known) = known
                     && self.vars.resolve(&known) != Ty::Error
                     && self.vars.resolve(err) != Ty::Error

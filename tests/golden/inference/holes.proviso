@@ -12,8 +12,8 @@
 // wrong whatever fills the hole, and a call the hole doesn't meet is still checked. A type
 // argument the hole meets is `Never`, as the hole is, unless something gives it a type, in
 // either argument order. A chain whose receiver needs its type settled early, as `.show()`
-// does, keeps what the hole met, and the error type the hole met joins another call of the chain,
-// a `try`'s `fails` or an `attempt`'s expected `Result` (P5, `fails Never`).
+// does, keeps what the hole met, and the error type the hole met joins a `try`'s `fails`, and under
+// the other handlers another call of the chain or an `attempt`'s expected `Result` (P5, `fails Never`).
 
 fn rethrow[E: Copy](e: E) -> Int fails E {
     fail e
