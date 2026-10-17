@@ -70,7 +70,21 @@ fn values(c: Bool) -> Int fails Text {
         }
         fail "a8"
     }
-    return a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8
+    let a9 = opened() else {                        // <- E0312
+        match c {
+            true => second(a: it, b: it)
+            false => fail "a9"
+        }
+        let z = 1
+    }
+    let a10 = opened() else {
+        match c {
+            true => second(a: it, b: it)
+            false => zero(it)
+        }
+        let t = zero(second(a: it, b: "a10"))
+    }                                               // <- E0301
+    return a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10
 }
 
 fn checks(c: Bool) -> Int fails Text {

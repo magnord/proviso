@@ -53,12 +53,18 @@ fn branches(c: Bool) -> Int {
         false => nope                               // <- E0201
     }
     let b8 = if c { (1, None) } else { "s" }        // <- E0301
+    let b9 = if c { nope }                          // <- E0301, E0201
     return 0
+}
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
 }
 
 fn tuples() -> Int {
     let t1 = (nope, None)                           // <- E0201
     let t2 = (None, nope)                           // <- E0201
     let t3 = (Some(None), 1, nope)                  // <- E0201
+    let t4 = first(a: (nope, None), b: (1, Some(2))) // <- E0201
     return 0
 }
