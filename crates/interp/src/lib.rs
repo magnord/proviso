@@ -1589,8 +1589,8 @@ fn equal_with<E>(a: &Value, b: &Value, decls: &Decls, hand_written: &mut HandWri
 
 /// A hash of a map's key that agrees with `==`: equal keys hash alike (STD.md). A record or
 /// enum with a hand-written `eq` hashes as its type alone, since its `eq` may call any two of
-/// its values equal, and a map as the sum of its entries' hashes, since `==` ignores their
-/// order. Like [`equal`], it keeps the parts still to hash in a list of its own.
+/// its values equal, and a map by its keys. Like [`equal`], it keeps the parts still to hash
+/// in a list of its own.
 fn hash_value(value: &Value, decls: &Decls) -> u64 {
     let mut hasher = DefaultHasher::new();
     let mut parts = vec![value];
@@ -1615,10 +1615,13 @@ fn hash_value(value: &Value, decls: &Decls) -> u64 {
                 list.items.len().hash(&mut hasher);
                 parts.extend(list.items.iter().rev());
             }
+            // Equal maps have the same keys, so their keys' hashes, summed since `==` ignores
+            // their order, agree with `==`. Leaving out the values keeps a map whose values
+            // nest deeply from taking native stack per level.
             Value::Map(map) => {
-                let entries =
-                    map.iter().map(|(k, v)| hash_value(k, decls).wrapping_mul(31).wrapping_add(hash_value(v, decls)));
-                entries.fold(0u64, u64::wrapping_add).hash(&mut hasher);
+                map.len().hash(&mut hasher);
+                let keys = map.entries.iter().flatten().map(|(hash, _, _)| *hash);
+                keys.fold(0u64, u64::wrapping_add).hash(&mut hasher);
             }
         }
     }
@@ -1873,5 +1876,52 @@ mod tests {
         // Each node writes `IntList.Cons(head: `, `, tail: ` and `)` around its head: 28
         // characters, 488,890 digits in all, and 11 for `IntList.Nil`.
         assert_eq!(result.unwrap().join().unwrap(), (true, false, 3_288_901, true));
+    }
+
+    /// Lists and maps nested through a recursive enum, as `Node(kids: [t])` and
+    /// `Fork(kids: [0: t])` nest them, are also dropped, compared, ordered, hashed and written
+    /// without native stack per level.
+    #[test]
+    fn deep_collections_need_no_native_stack() {
+        let mut decls = Decls::default();
+        let tree = decls.push(AdtDef::enumeration("Tree"));
+        let def = decls.adt_mut(tree);
+        def.variants.push(VariantDef::new("Leaf", vec![field("n", Ty::INT)]));
+        def.variants.push(VariantDef::new("Node", vec![field("kids", Ty::list(Ty::adt(tree)))]));
+        let leaf = move |n: i128| {
+            Value::Adt(Adt { def: tree, variant: VariantIdx::new(0), fields: Arc::new([Value::Int(n, IntTy::I64)]) })
+        };
+        let node =
+            move |kids: Value| Value::Adt(Adt { def: tree, variant: VariantIdx::new(1), fields: Arc::new([kids]) });
+        let build = move |n: usize, last: i128, map: bool| {
+            let mut value = leaf(last);
+            for _ in 0..n {
+                let kids = if map {
+                    let mut kids = MapValue::default();
+                    let key = Value::Int(0, IntTy::I64);
+                    kids.insert(hash_value(&key, &Decls::default()), key, value);
+                    Value::Map(Arc::new(kids))
+                } else {
+                    Value::List(Arc::new(ListValue { items: vec![value] }))
+                };
+                value = node(kids);
+            }
+            value
+        };
+        let small = std::thread::Builder::new().stack_size(64 * 1024);
+        let result = small.spawn(move || {
+            let mut out = Vec::new();
+            for map in [false, true] {
+                let (a, b, c) = (build(100_000, 0, map), build(100_000, 0, map), build(100_000, 1, map));
+                let ordered = order(&a, &c) == Some(Ordering::Less);
+                let hashed = hash_value(&a, &decls) == hash_value(&b, &decls);
+                out.push((equal(&a, &b, &decls), equal(&a, &c, &decls), ordered, hashed, show(&a, &decls).len()));
+            }
+            out
+        });
+        // `Tree.Node(kids: [` and `])` are 19 characters a level, and `Tree.Leaf(n: 0)` 15.
+        // A map's level writes `0: ` too.
+        let expected = vec![(true, false, true, true, 1_900_015), (true, false, true, true, 2_200_015)];
+        assert_eq!(result.unwrap().join().unwrap(), expected);
     }
 }

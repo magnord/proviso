@@ -56,3 +56,24 @@ fn bounded[K: Eq + Hash](m: Map[K, Int], k: K) -> Bool {
 
 fn nested_keys(m: Map[List[Float], Int], n: Map[Option[Int], List[Map[Text, Int]]]) {   // <- E0309
 }
+
+record Keyed {
+    m: Map[Float, Int]                               // <- E0309
+}
+
+fn uses_keyed() -> Int {
+    let k = Keyed(m: [:])
+    return k.m.len()
+}
+
+fn patterns(xs: List[Int], m: Map[Int, Int]) -> Int {
+    let a = xs is Some(x)                            // <- E0301
+    let b = match m {
+        None => 1                                    // <- E0301
+        _ => 2
+    }
+    let c = match xs {
+        ys => ys.len()
+    }
+    return c
+}

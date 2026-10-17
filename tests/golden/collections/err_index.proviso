@@ -45,3 +45,10 @@ fn copied[T: Copy](xs: List[T], grid: List[List[T]]) -> T {
     let x = row[0]
     return xs[0]
 }
+
+fn borrowed[T](grid: List[List[T]]) -> Int {
+    let n = grid[0].len()
+    let m = grid[0][0]                               // <- E0309
+    let row = grid[1]                                // <- E0309
+    return n
+}

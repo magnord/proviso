@@ -57,3 +57,20 @@ fn associated() {
     let xs = List.new()                              // <- E0303
     let m = Map.empty()                              // <- E0303
 }
+
+record Bag {
+    items: List[Int]
+}
+
+fn bag() -> Bag {
+    return Bag(items: [])
+}
+
+fn parts() {
+    bag().items.push(1)                              // <- E0106
+    let b = bag()
+    b.items.push(1)                                  // <- E0305
+    var c = bag()
+    c.items.push(1)
+    c.items[0] = 2
+}

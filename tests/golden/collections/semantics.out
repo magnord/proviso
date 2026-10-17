@@ -1,0 +1,5 @@
+["a": 3, "b": 2] 2 Some(36) Some(37) 1 Some("one-two") Some("none") Some(true) None
+[<x>, <y>] [1, 2] ["k": 'v'] true true
+[10, 102, 30] [[1, 5], [2]]
+true true true true true true
+[19: 0, 18: 1, 2: 17, 1: 10, 0: 19, 7: 70]

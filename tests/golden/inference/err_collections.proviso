@@ -9,7 +9,8 @@
 // meets. A literal that doesn't fit the type the others give is out of range in any
 // position. A receiver's type must be known where its method is chosen, so a literal
 // there doesn't wait for what its method's result meets, and `[1].get(5) else small` makes
-// `[1]` a `List[Int]` (OPEN_QUESTIONS P5). An element, key or value with an error makes the
+// `[1]` a `List[Int]` (OPEN_QUESTIONS P5). An element of type `Never` gives way to the
+// others, and gives `Never` when alone (P5). An element, key or value with an error makes the
 // literal one, so nothing more is reported about it or what it meets (§15.1).
 fn first[T: Copy](a: T, b: T) -> T {
     return a
@@ -42,6 +43,9 @@ fn ranges(small: Int8) {
     let r9 = [300: 1, small: 2]                      // <- E0302
     let r10 = [1].get(5) else small                  // <- E0301
     let r11 = [small].get(5) else 1
+    let r12 = [unreachable]
+    let r13 = [unreachable, small]
+    let r14: List[Int8] = [unreachable, 1]
 }
 
 fn rejected() {

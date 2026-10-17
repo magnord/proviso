@@ -1,0 +1,34 @@
+// phase: 2.6
+// run: test
+// expect-exit: 70
+// A record whose refinement reads a list is checked when the list changes through it, by
+// assigning an element or by a method that changes its receiver, as an assignment to a
+// field is (OPEN_QUESTIONS P3, P5). A refinement that breaks is a `refinement_failed` defect
+// at the change. A record held in a list is checked when it is changed through its element.
+record Short {
+    items: List[Int] where items.len() < 3
+}
+
+record Span derives(Eq, Show) {
+    lo: Int
+    hi: Int
+} where lo <= hi
+
+fn grow(n: Int) -> Int {
+    var s = Short(items: [])
+    for i in 0..n {
+        s.items.push(i)
+    }
+    return s.items.len()
+}
+
+fn widen(hi: Int) -> List[Span] {
+    var spans = [Span(lo: 1, hi: 2)]
+    spans[0].hi = hi
+    return spans
+}
+
+example grow(2) == 2
+example grow(3) == 3
+example widen(5) == [Span(lo: 1, hi: 5)]
+example widen(0) == []
