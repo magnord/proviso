@@ -8,7 +8,8 @@
 // `check` does (OPEN_QUESTIONS P5; issue #30). Only `Never` reaching the type leaves the
 // call nothing to fail with, which is E0707 alone. A type nothing gives is E0312 alone. A
 // later statement that gives `it` a type makes the block finish, which is the block's own
-// error. A value built around `it`, such as `Some(it)`, finishes whatever `it` is.
+// error, also where the block is a branch whose value a `let` needs. A value built around
+// `it`, such as `Some(it)`, finishes whatever `it` is.
 
 fn opened[E: Copy]() -> Int fails E {
     return 1
@@ -84,7 +85,48 @@ fn values(c: Bool) -> Int fails Text {
         }
         let t = zero(second(a: it, b: "a10"))
     }                                               // <- E0301
-    return a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10
+    let a11 = opened() else {                       // <- E0707
+        if c {
+            second(a: fail "a11", b: it)
+        } else {
+            let z = 1
+        }
+        let y = 2
+    }                                               // <- E0301
+    return a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11
+}
+
+fn branch_values(c: Bool) -> Int fails Text {
+    let v1 = opened() else {
+        let x: Int = if c {
+            second(a: it, b: it)
+            let z = 1
+        } else {                                    // <- E0301
+            5
+        }
+        let t = zero(second(a: it, b: "v1"))
+        fail "v1"
+    }
+    let v2 = opened() else {                        // <- E0707
+        let x: Int = if c {
+            second(a: it, b: it)
+            let z = 1
+        } else {
+            5
+        }
+        let t = zero(second(a: fail "v2", b: it))
+        fail "v2b"
+    }
+    let v3 = opened() else {                        // <- E0312
+        let x: Int = if c {
+            second(a: it, b: it)
+            let z = 1
+        } else {
+            5
+        }
+        fail "v3"
+    }
+    return v1 + v2 + v3
 }
 
 fn checks(c: Bool) -> Int fails Text {
