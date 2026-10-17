@@ -7,8 +7,9 @@
 // A rejected expression was the one to give the type arguments its parts leave open, so
 // each line is that expression's error alone, never also E0312 (REFERENCE §15.1; issue
 // #30). The rejected expression is a call with the wrong number of arguments or type
-// arguments, of an unknown function, method or variant, a branch or match arm, or a tuple
-// element. The open part comes before it or after it, in a direct argument or deeper.
+// arguments, of an unknown function, method, field or variant, a branch or match arm, or a
+// tuple element. The open part comes before it or after it, in a direct argument or deeper.
+// A separate mistake beside it, such as an `if` without `else`, is still reported.
 
 record Span {
     lo: Int

@@ -3,13 +3,13 @@
 // expect-error: E0312
 // expect-error: E0415
 // expect-error: E0707
-// A statement whose value is `it` leaves if the error type the `let` around the fallback
-// settles is `Never`, so whether the block around it finishes waits for that type, as a
-// `check` does (OPEN_QUESTIONS P5; issue #30). Only `Never` reaching the type leaves the
-// call nothing to fail with, which is E0707 alone. A type nothing gives is E0312 alone. A
-// later statement that gives `it` a type makes the block finish, which is the block's own
-// error, also where the block is a branch whose value a `let` needs. A value built around
-// `it`, such as `Some(it)`, finishes whatever `it` is.
+// A statement whose value has the type of `it` leaves if the error type the `let` around
+// the fallback settles is `Never`, so whether the block around it finishes waits for that
+// type, as a `check` does (OPEN_QUESTIONS P5; issue #30). Only `Never` reaching the type
+// leaves the call nothing to fail with, which is E0707 alone. A type nothing gives is E0312
+// alone. A later statement that gives `it` a type makes the block finish, which is the
+// block's own error, also where the block is a branch whose value a `let` needs. A value
+// built around `it`, such as `Some(it)`, finishes whatever `it` is.
 
 fn opened[E: Copy]() -> Int fails E {
     return 1

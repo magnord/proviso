@@ -399,7 +399,7 @@ enum Mode<'t> {
     Tail(&'t Ty),
 }
 
-/// Whether code always leaves (REFERENCE §6.2). It `Waits` on an open variable that the
+/// Whether code always leaves (REFERENCE §6.6; OPEN_QUESTIONS P5, `check`). It `Waits` on an open variable that the
 /// expression around it still gives, such as the error type of `it` in a fallback, and
 /// leaves if that settles as `Never` (OPEN_QUESTIONS P5; issue #30).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -502,7 +502,8 @@ enum Pending {
     /// chain was `rejected` when its value has an error.
     Try { errs: Vec<Ty>, rejected: bool, span: Span },
     /// An `attempt` or `else` form whose calls fail with `err`, which must not settle as
-    /// `Never` (E0706, E0707; OPEN_QUESTIONS P5, `fails Never`).
+    /// `Never` (E0706, E0707; OPEN_QUESTIONS P5, `fails Never`). An example's error type is
+    /// settled where it is checked.
     CanFail { err: Ty, handler: Handler, span: Span },
     /// Code that leaves if `ty` does, which must not finish: the fallback of a `check`
     /// (E0415), or a block that ends without the value it is `expected` to give (E0301).
@@ -576,7 +577,7 @@ impl Checker<'_> {
     /// Settles the open variables made since `vars`, and runs the checks queued since
     /// `pending`, which wait on them. An integer literal's variable becomes `Int`, a float
     /// literal's `Float` (REFERENCE §2), and one that only `Never` reached `Never` (OPEN_QUESTIONS P5). Any other
-    /// is a type argument that nothing gave, which is reported once (E0312).
+    /// is a type argument that nothing gave, which [`Checker::settle_vars`] reports once.
     ///
     /// A variable that an older one was bound to a type with, such as a `None` met with `it`
     /// in a fallback's statement, belongs to the expression around the statement, which
@@ -2297,7 +2298,7 @@ impl Checker<'_> {
 
     /// Checks the statements of a body that returns `ret`, or of a branch that ends one. A
     /// final value there is a missing `return`, not an unused value. Returns whether the
-    /// statements always diverge, counting such a value as a return.
+    /// statements always leave, counting such a value as a return.
     fn tail_stmts(&mut self, block: &Block, ret: &Ty) -> Flow {
         let m = self.m;
         let mut flow = Flow::Finishes;
@@ -2380,7 +2381,7 @@ impl Checker<'_> {
 
     // ---- statements ----
 
-    /// Checks a statement and returns whether it always diverges. What it leaves open is
+    /// Checks a statement and returns whether it always leaves. What it leaves open is
     /// solved at its end, since nothing after it can give it (OPEN_QUESTIONS P5).
     fn stmt(&mut self, s: StmtId) -> Flow {
         let (vars, pending, bound) = (self.vars.count(), self.pending.len(), self.vars.bound());
@@ -2675,7 +2676,9 @@ impl Checker<'_> {
     }
 
     /// Checks a block used for its value: the final expression, if there is one, which is
-    /// copied when `copying` says so.
+    /// copied when `copying` says so. A block without one that waits on a variable (see
+    /// [`Flow`]) is `Never` for now, and is reported once the variable settles if it can
+    /// finish.
     fn block_value(&mut self, block: &Block, expected: Option<&Ty>, copying: bool) -> Ty {
         let m = self.m;
         self.f.scopes.push(Vec::new());
@@ -5035,8 +5038,8 @@ fn mentions_targ(ty: &Ty, targs: &[Ty]) -> bool {
     }
 }
 
-/// Whether a statement or block of this type may never finish. An error counts, because the
-/// code it stands for might diverge, and reporting a missing `return` would depend on it.
+/// Whether a value of this type may never be produced. An error counts, because the code it
+/// stands for might diverge.
 fn diverges_ty(ty: &Ty) -> bool {
     matches!(ty, Ty::Never | Ty::Error)
 }
