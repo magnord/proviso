@@ -9,7 +9,8 @@
 // leaves the call nothing to fail with, which is E0707 alone. A type nothing gives is E0312
 // alone. A later statement that gives `it` a type makes the block finish, which is the
 // block's own error, also where the block is a branch whose value a `let` needs. A value
-// built around `it`, such as `Some(it)`, finishes whatever `it` is.
+// built around `it`, such as `Some(it)`, finishes whatever `it` is. A `let` fixes its
+// value's type, so one that only `Never` gives settles the type of `it` as `Never`.
 
 fn opened[E: Copy]() -> Int fails E {
     return 1
@@ -93,7 +94,12 @@ fn values(c: Bool) -> Int fails Text {
         }
         let y = 2
     }                                               // <- E0301
-    return a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11
+    let a12 = opened() else {                       // <- E0707
+        let q = second(a: fail "a12", b: it)
+        let t = zero(second(a: it, b: "a12"))
+        fail "a12b"
+    }
+    return a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12
 }
 
 fn branch_values(c: Bool) -> Int fails Text {
