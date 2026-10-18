@@ -13,9 +13,9 @@
 // So `.show()` on an `Option[E]` whose `E` settles as a type without `Show` is
 // E0303, as it is when the type is known first. A receiver that is the error type itself
 // needs its head, so it joins the chain's other error types and what the handler knows
-// first. Where those disagree, the handler reports that alone (d1 to d4, m1 to m7). A
-// value that gives it only after the chain still comes too late (k1, issue
-// #NN). Each line gets the error-type verdict of its rewrite without the method or with its
+// first. Where those disagree, the line gets one error rather than two (d1 to d4, m1 to
+// m7). A value that gives it only after the chain still comes too late (k1, issue #NN).
+// Each line gets the error-type verdict of its rewrite without the method or with its
 // operands swapped. Whether the receiver has the method is a check of its own, so a line
 // such as b2 is E0303 where its rewrite without the method checks. `err_receiver_holes`
 // repeats the main families with `todo` as the source.

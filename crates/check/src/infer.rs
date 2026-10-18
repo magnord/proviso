@@ -7,7 +7,7 @@
 //! P5; issue #10). Each statement then solves what it leaves open.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
@@ -55,7 +55,8 @@ pub struct Open {
     /// may stand for another type (Q25; issue #30).
     pub hole: bool,
     /// It is in the error type of a call that an enclosing `try`, `attempt`, `else` form or
-    /// example marks, which the handler joins, so a later receiver leaves it open.
+    /// example marks, which the handler joins, so a later receiver leaves it open inside its
+    /// type arguments.
     pub handled: bool,
     pub origin: Origin,
 }
@@ -250,10 +251,13 @@ impl Vars {
 
     /// `ty` with every bound variable replaced, at any depth. Parts without one are shared.
     pub fn zonk(&self, ty: &Ty) -> Ty {
-        self.zonk_part(ty).unwrap_or_else(|| ty.clone())
+        self.zonk_part(ty, &mut HashMap::new()).unwrap_or_else(|| ty.clone())
     }
 
-    fn zonk_part(&self, ty: &Ty) -> Option<Ty> {
+    /// [`Vars::zonk`], or `None` where nothing changes. A type argument list in `seen`, by
+    /// address, was zonked already, so a type that repeats a part with an open variable in
+    /// it, which no variable keeps as ground, costs its distinct parts.
+    fn zonk_part(&self, ty: &Ty, seen: &mut HashMap<usize, Option<Ty>>) -> Option<Ty> {
         match ty {
             Ty::Var(v) => match &self.states[*v as usize] {
                 State::Open(_) => None,
@@ -261,7 +265,7 @@ impl Vars {
                     if let Some(ty) = self.ground_of(*v) {
                         return Some(ty);
                     }
-                    let ty = self.zonk(next);
+                    let ty = self.zonk_part(next, seen).unwrap_or_else(|| next.clone());
                     if !self.has_var(&ty) {
                         self.keep_ground(*v, ty.clone());
                     }
@@ -269,12 +273,20 @@ impl Vars {
                 }
             },
             Ty::Adt(id, args) if self.has_var(ty) => {
-                let parts: Vec<Option<Ty>> = args.iter().map(|arg| self.zonk_part(arg)).collect();
-                if parts.iter().all(Option::is_none) {
-                    return None;
+                let key = Arc::as_ptr(args) as *const Ty as usize;
+                if let Some(done) = seen.get(&key) {
+                    return done.clone();
                 }
-                let args = parts.into_iter().zip(args.iter()).map(|(part, arg)| part.unwrap_or_else(|| arg.clone()));
-                Some(Ty::applied(*id, args.collect()))
+                let parts: Vec<Option<Ty>> = args.iter().map(|arg| self.zonk_part(arg, seen)).collect();
+                let done = if parts.iter().all(Option::is_none) {
+                    None
+                } else {
+                    let args =
+                        parts.into_iter().zip(args.iter()).map(|(part, arg)| part.unwrap_or_else(|| arg.clone()));
+                    Some(Ty::applied(*id, args.collect()))
+                };
+                seen.insert(key, done.clone());
+                done
             }
             _ => None,
         }
@@ -284,14 +296,26 @@ impl Vars {
     /// read as `Never`, which implements every interface as a type argument. A method found on
     /// it may need checking again once they settle.
     pub fn as_never(&self, ty: &Ty) -> Ty {
+        self.as_never_part(ty, &mut HashMap::new())
+    }
+
+    /// [`Vars::as_never`], which reads each shared type argument list once, by address.
+    fn as_never_part(&self, ty: &Ty, seen: &mut HashMap<usize, Ty>) -> Ty {
         match self.resolve(ty) {
             Ty::Var(v) => match self.open(v).map(|open| open.kind) {
                 Some(Kind::Int) => Ty::INT,
                 Some(Kind::Float) => Ty::Float(FloatTy::F64),
                 _ => Ty::Never,
             },
-            Ty::Adt(id, args) if self.has_var(ty) => {
-                Ty::applied(id, args.iter().map(|arg| self.as_never(arg)).collect())
+            ty @ Ty::Adt(..) if !self.has_var(&ty) => ty,
+            Ty::Adt(id, args) => {
+                let key = Arc::as_ptr(&args) as *const Ty as usize;
+                if let Some(ty) = seen.get(&key) {
+                    return ty.clone();
+                }
+                let ty = Ty::applied(id, args.iter().map(|arg| self.as_never_part(arg, seen)).collect());
+                seen.insert(key, ty.clone());
+                ty
             }
             ty => ty,
         }
@@ -315,12 +339,12 @@ impl Vars {
 
     /// The open variables in `ty`, by their roots, each once and in order.
     pub fn open_in(&self, ty: &Ty, found: &mut Vec<u32>) {
-        self.open_part(ty, found);
+        self.open_part(ty, found, &mut HashMap::new());
     }
 
     /// [`Vars::open_in`], which also says whether it found any, so a bound variable with none
-    /// in it is kept as ground.
-    fn open_part(&self, ty: &Ty, found: &mut Vec<u32>) -> bool {
+    /// in it is kept as ground. A type argument list in `seen`, by address, was walked already.
+    fn open_part(&self, ty: &Ty, found: &mut Vec<u32>, seen: &mut HashMap<usize, bool>) -> bool {
         if !self.has_var(ty) {
             return false;
         }
@@ -336,7 +360,7 @@ impl Vars {
                     if self.ground_of(*v).is_some() {
                         return false;
                     }
-                    let open = self.open_part(next, found);
+                    let open = self.open_part(next, found, seen);
                     if !open {
                         self.keep_ground(*v, self.zonk(next));
                     }
@@ -344,11 +368,16 @@ impl Vars {
                 }
             },
             Ty::Adt(_, args) => {
+                let key = Arc::as_ptr(args) as *const Ty as usize;
+                if let Some(&open) = seen.get(&key) {
+                    return open;
+                }
                 // Every part is walked, also after one has an open variable, to find them all.
                 let mut open = false;
                 for arg in args.iter() {
-                    open |= self.open_part(arg, found);
+                    open |= self.open_part(arg, found, seen);
                 }
+                seen.insert(key, open);
                 open
             }
             _ => false,
@@ -419,12 +448,11 @@ impl Vars {
         self.open(v).is_some_and(|open| open.handled)
     }
 
-    /// Marks every open variable in `ty` as one a handler joins, or no longer. It visits a
-    /// variable once per place it appears rather than collecting each once, so a wide type
-    /// costs its size.
+    /// Marks every open variable in `ty` as one a handler joins, or no longer. It walks each
+    /// shared part once, so a wide or deeply shared type costs its distinct parts.
     pub fn set_handled(&mut self, ty: &Ty, on: bool) {
         let mut found = Vec::new();
-        self.each_open(ty, &mut found);
+        self.each_open(ty, &mut found, &mut (HashSet::new(), HashSet::new()));
         for v in found {
             if let State::Open(open) = &mut self.states[v as usize] {
                 open.handled = on;
@@ -432,8 +460,9 @@ impl Vars {
         }
     }
 
-    /// The open variables in `ty`, by their roots, as many times as they appear.
-    fn each_open(&self, ty: &Ty, found: &mut Vec<u32>) {
+    /// The open variables in `ty`, by their roots, maybe more than once. A bound variable or
+    /// a type argument list in `seen`, by number or by address, was walked already.
+    fn each_open(&self, ty: &Ty, found: &mut Vec<u32>, seen: &mut (HashSet<u32>, HashSet<usize>)) {
         if !self.has_var(ty) {
             return;
         }
@@ -441,12 +470,14 @@ impl Vars {
             Ty::Var(v) => match &self.states[*v as usize] {
                 State::Open(_) => found.push(*v),
                 State::Bound(next) => {
-                    if self.ground_of(*v).is_none() {
-                        self.each_open(next, found);
+                    if self.ground_of(*v).is_none() && seen.0.insert(*v) {
+                        self.each_open(next, found, seen);
                     }
                 }
             },
-            Ty::Adt(_, args) => args.iter().for_each(|arg| self.each_open(arg, found)),
+            Ty::Adt(_, args) if seen.1.insert(Arc::as_ptr(args) as *const Ty as usize) => {
+                args.iter().for_each(|arg| self.each_open(arg, found, seen));
+            }
             _ => {}
         }
     }

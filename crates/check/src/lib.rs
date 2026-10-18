@@ -431,6 +431,9 @@ struct Marker {
     /// The error type the handler gives its calls before its chain is checked: the function's
     /// `fails` under `try`, or the error type of the `Result` an `attempt` is expected to be.
     target: Option<Ty>,
+    /// The error types of the handlers that ended inside this one, whose variables stay
+    /// marked as handled until it ends too, so each is walked once (see `pop_marker`).
+    ended: Vec<Ty>,
 }
 
 /// Whether an `if` is used for its value, as a statement, or as the last statement of a
@@ -716,16 +719,21 @@ impl Checker<'_> {
         self.vars.handled(v)
     }
 
-    /// Leaves the innermost handler, whose error types the enclosing ones no longer leave
-    /// open unless one of them marks them too.
+    /// Leaves the innermost handler and returns its calls' error types. Their variables stay
+    /// marked as handled while an enclosing handler is open, which at worst leaves one open in
+    /// a receiver whose method is checked again once it settles. The outermost handler clears
+    /// them all, so each error type is walked once to mark it and once to clear it.
     fn pop_marker(&mut self) -> Vec<Ty> {
-        let Some(marker) = self.markers.pop() else { return Vec::new() };
-        for err in &marker.errors {
-            self.vars.set_handled(err, false);
-        }
-        for outer in &self.markers {
-            for err in &outer.errors {
-                self.vars.set_handled(err, true);
+        let Some(mut marker) = self.markers.pop() else { return Vec::new() };
+        match self.markers.last_mut() {
+            Some(outer) => {
+                outer.ended.extend(marker.errors.iter().cloned());
+                outer.ended.append(&mut marker.ended);
+            }
+            None => {
+                for err in marker.errors.iter().chain(&marker.ended) {
+                    self.vars.set_handled(err, false);
+                }
             }
         }
         marker.errors
@@ -738,9 +746,9 @@ impl Checker<'_> {
     /// their join with an `attempt`'s expected `Result`, so those come first. `v` takes the
     /// first that gives it a type.
     ///
-    /// Returns false, and leaves `v` open, where the types `v` would join disagree, since
-    /// either may have been the one meant to give it. The handler reports that mismatch
-    /// (§15.1). At the receiver's `head`, a `try` whose `fails` disagrees with another call,
+    /// Under a handler other than `try`, returns false, and leaves `v` open, where the types
+    /// `v` would join disagree, since either may have been the one meant to give it. The
+    /// handler reports that mismatch (§15.1). At the receiver's `head`, a `try` whose `fails` disagrees with another call,
     /// or with a rejected one, reports that call alone, so there `v` is an error, which it
     /// doesn't report again. Elsewhere at the head a rejected call's error type poisons `v`,
     /// since it may have given its type. Inside the receiver's type arguments `v` only joins
@@ -792,7 +800,8 @@ impl Checker<'_> {
         let ty = self.vars.zonk(ty);
         match ty {
             Ty::Var(v) if self.vars.open(v).is_some_and(|open| open.kind != Kind::Any) => Some(Ty::Var(v)),
-            ty if !self.vars.has_open(&ty) => Some(ty),
+            // A zonked type's variables are open, and `has_var` remembers its answer per part.
+            ty if !self.vars.has_var(&ty) => Some(ty),
             _ => None,
         }
     }
@@ -2467,7 +2476,7 @@ impl Checker<'_> {
     /// Checks one example. `call == v` reads its operands as `==` does, so either may give
     /// the other its type (OPEN_QUESTIONS P5; issue #10).
     fn example(&mut self, decl: &ExampleDecl) {
-        self.markers.push(Marker { handler: Some(decl.call), errors: Vec::new(), target: None });
+        self.markers.push(Marker { handler: Some(decl.call), errors: Vec::new(), target: None, ended: Vec::new() });
         self.in_chain = true;
         let ty = self.expr(decl.call, None);
         let errors = self.pop_marker();
@@ -3568,7 +3577,7 @@ impl Checker<'_> {
     /// and the fallback's are joined, so either may give the other its type arguments and
     /// literal types, and so may the type the form is expected to have (issue #10).
     fn else_expr(&mut self, e: ExprId, value: ExprId, fallback: &Fallback, expected: Option<&Ty>, copying: bool) -> Ty {
-        self.markers.push(Marker { handler: Some(e), errors: Vec::new(), target: None });
+        self.markers.push(Marker { handler: Some(e), errors: Vec::new(), target: None, ended: Vec::new() });
         self.in_chain = true;
         self.copying = copying;
         let value_ty = self.expr(value, None);
@@ -4205,7 +4214,7 @@ impl Checker<'_> {
             return sig.ret;
         }
         let found = self.vars.as_never(&receiver_ty);
-        let callee = self.resolve_method(&found, method);
+        let callee = self.resolve_method(&found, &receiver_ty, method);
         if let Some(Callee::Iface(iface, _)) = callee
             && found != receiver_ty
         {
@@ -4270,7 +4279,9 @@ impl Checker<'_> {
     /// The method `x.name(…)` calls on a value of type `ty`: one of the type's own, or one of
     /// an interface it implements, which must be the only one (REFERENCE §3). Reports a
     /// call that resolves to none or to several.
-    fn resolve_method(&mut self, ty: &Ty, method: Ident) -> Option<Callee> {
+    /// A message writes the type as `shown`, the receiver's own type, where `ty` reads its
+    /// open error types as `Never` (see [`Checker::force_receiver`]).
+    fn resolve_method(&mut self, ty: &Ty, shown: &Ty, method: Ident) -> Option<Callee> {
         let m = self.m;
         let name = m.text(method.sym);
         if *ty == Ty::Error {
@@ -4308,7 +4319,7 @@ impl Checker<'_> {
         match found.as_slice() {
             [] => {
                 if !unknown {
-                    let message = format!("`{}` has no method `{name}`", self.show(ty));
+                    let message = format!("`{}` has no method `{name}`", self.show(shown));
                     self.error(codes::UNKNOWN_MEMBER, method.span, message);
                 }
                 None
@@ -4316,7 +4327,7 @@ impl Checker<'_> {
             [Callee::Fn(f)] if self.p.fns[*f].receiver.is_none() => {
                 let message = format!(
                     "`{name}` is an associated function, so it is called on the type, as in `{}.{name}(…)`",
-                    self.show(ty)
+                    self.show(shown)
                 );
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);
                 None
@@ -4336,7 +4347,7 @@ impl Checker<'_> {
                     .collect();
                 let message = format!(
                     "`{}` has more than one method `{name}`, from {}; call one as `{}.{name}(…)` (§3)",
-                    self.show(ty),
+                    self.show(shown),
                     owners.join(" and "),
                     owners[0].trim_matches('`')
                 );
@@ -4708,7 +4719,7 @@ impl Checker<'_> {
 
     fn try_expr(&mut self, inner: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
         let target = self.f.fails.clone().filter(|own| *own != Ty::Error);
-        self.markers.push(Marker { handler: None, errors: Vec::new(), target });
+        self.markers.push(Marker { handler: None, errors: Vec::new(), target, ended: Vec::new() });
         self.in_chain = true;
         let ty = self.expr(inner, expected);
         let errors = self.pop_marker();
@@ -4796,7 +4807,7 @@ impl Checker<'_> {
             Some(Ty::Adt(AdtId::RESULT, args)) => (Some(args[0].clone()), Some(args[1].clone())),
             _ => (None, None),
         };
-        self.markers.push(Marker { handler: Some(e), errors: Vec::new(), target });
+        self.markers.push(Marker { handler: Some(e), errors: Vec::new(), target, ended: Vec::new() });
         self.in_chain = true;
         let ty = self.expr(inner, value_expected.as_ref());
         let errors = self.pop_marker();
