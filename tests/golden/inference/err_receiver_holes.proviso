@@ -1,0 +1,88 @@
+// phase: 2.5
+// flags: --incomplete
+// expect-error: E0303
+// `err_receiver_open` with `todo` as the source of the error type. A hole met the error
+// type, so `attempt`, `else` and an example's `fails` are not reported for it (Q25), and
+// what gives it a type after the chain still decides whether the receiver has the method
+// (OPEN_QUESTIONS P5, `fails Never`; issue #37).
+
+record Box {
+    n: Int
+}
+
+record Bare derives(Eq) {
+    n: Int
+}
+
+fn boxof[E: Copy](e: E) -> Box fails E {
+    return Box(n: 1)
+}
+
+impl Box {
+    fn wrap[E: Copy](self, e: E) -> Option[E] fails E {
+        return None
+    }
+
+    fn give[E: Copy](self, e: E) -> E fails E {
+        return e
+    }
+}
+
+fn wrapped[E: Copy](e: E) -> Option[E] fails E {
+    return None
+}
+
+fn nested[E: Copy](e: E) -> Option[Option[E]] fails E {
+    return None
+}
+
+fn text_of(t: Text) -> Text {
+    return t
+}
+
+fn hold(b: Bare) -> Text {
+    return "held"
+}
+
+fn after() -> Int {
+    let a1 = attempt wrapped(e: todo) == Err("a1")
+    let a2 = attempt wrapped(e: todo).show() == Err("a2")
+    let a3 = Err("a3") == attempt wrapped(e: todo).show()
+    let a4 = attempt nested(e: todo).show() == Err("a4")
+    let a5 = attempt boxof(e: todo).wrap(e: todo).show().byte_len() == Err("a5")
+    return 0
+}
+
+fn without_show() -> Int {
+    let b1 = attempt wrapped(e: todo) == Err(Bare(n: 1))
+    let b2 = attempt wrapped(e: todo).show() == Err(Bare(n: 2))    // <- E0303
+    let b3 = Err(Bare(n: 3)) == attempt wrapped(e: todo).show()    // <- E0303
+    let b4 = attempt boxof(e: Bare(n: 4)).wrap(e: todo).show()     // <- E0303
+    return 0
+}
+
+fn fallbacks() -> Int {
+    let c1 = wrapped(e: todo) else Some(text_of(t: it))
+    let c2 = wrapped(e: todo).show() else text_of(t: it)
+    let c3 = wrapped(e: todo).show() else it
+    let c4 = wrapped(e: todo).show() else {                        // <- E0303
+        let k = hold(b: it)
+        "c4"
+    }
+    return 0
+}
+
+fn tried() -> Int fails Bare {
+    let t1 = try wrapped(e: todo)
+    let t2 = try wrapped(e: todo).show()                           // <- E0303
+    return 0
+}
+
+fn heads() -> Int {
+    let h1 = attempt boxof(e: "h1").give(e: todo).byte_len()
+    let h2 = Err("h2") == attempt boxof(e: todo).give(e: todo).byte_len()
+    return 0
+}
+
+example boxof(e: "x").wrap(e: todo).show() fails _
+example boxof(e: Bare(n: 1)).wrap(e: todo).show() fails _         // <- E0303

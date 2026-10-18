@@ -550,6 +550,9 @@ enum Pending {
     /// A type argument of a call of `callee` that must implement each of `ifaces`, which the
     /// callee's parameter `param` is constrained by. The first it misses is reported.
     Bound { ty: Ty, ifaces: Vec<IfaceId>, callee: Box<str>, param: Box<str>, span: Span },
+    /// A call of method `name` of `iface` on a receiver of type `ty`, found while a handler's
+    /// error types in it were open, which must implement `iface` once they settle (E0303).
+    Method { ty: Ty, iface: IfaceId, name: Box<str>, span: Span },
     /// The operand of unary `-`, which must be a signed integer or a float.
     Neg { ty: Ty, span: Span },
     /// The operands of arithmetic operator `op`.
@@ -590,6 +593,7 @@ impl Pending {
             Pending::Int { ty, .. }
             | Pending::Float { ty, .. }
             | Pending::Bound { ty, .. }
+            | Pending::Method { ty, .. }
             | Pending::Neg { ty, .. }
             | Pending::Arith { ty, .. }
             | Pending::Unmarked { ty, .. }
@@ -663,6 +667,66 @@ impl Checker<'_> {
         self.vars.open_in(ty, &mut open);
         self.settle_vars(open);
         self.vars.zonk(ty)
+    }
+
+    /// Settles the type of a receiver, or of the base of a field or index, in a handler's
+    /// chain, as far as finding its member needs (OPEN_QUESTIONS P5, `fails Never`; issue #37).
+    ///
+    /// Invariant: an open variable in the error type of a call that a `try`, `attempt`, `else`
+    /// or example marks is settled by its handler's join, or by the statement around it, and
+    /// never by a later part of the chain. Only `Never` or a `todo` hole may have reached it
+    /// yet, and a value after the chain, such as `== Err("x")` or the `it` of a fallback, may
+    /// still give it its type. So:
+    /// - Inside the receiver's type arguments it stays open. The caller finds the method on
+    ///   [`Vars::as_never`] of the type, where it implements every interface, as the `Never`
+    ///   the variable would have settled as does. An interface method found that way is
+    ///   checked again once the variable settles ([`Pending::Method`]).
+    /// - At the receiver's head, finding the member needs the type itself. So the variable
+    ///   joins what its handler knows now: the `Result` an `attempt` is expected to be or a
+    ///   `try`'s `fails`, and the error types of the chain's other calls, which the handler
+    ///   joins with it, as a `try` with a `fails` does through that `fails`. Then it settles.
+    ///   A value after the chain is too late for it.
+    ///
+    /// Every other open variable settles as [`Checker::force`] settles it.
+    fn force_receiver(&mut self, ty: &Ty) -> Ty {
+        if !self.vars.has_var(ty) {
+            return ty.clone();
+        }
+        if let Ty::Var(v) = self.vars.resolve(ty) {
+            self.join_known(v);
+        }
+        let mut marked = Vec::new();
+        for marker in &self.markers {
+            for err in &marker.errors {
+                self.vars.open_in(err, &mut marked);
+            }
+        }
+        let mut open = Vec::new();
+        self.vars.open_in(ty, &mut open);
+        if let Ty::Var(v) = self.vars.resolve(ty) {
+            marked.retain(|&m| m != self.vars.root(v));
+        }
+        open.retain(|v| !marked.contains(v));
+        self.settle_vars(open);
+        self.vars.zonk(ty)
+    }
+
+    /// Joins open variable `v`, if it is in the error type of a call a handler marks, with
+    /// what that handler knows now (see [`Checker::force_receiver`]). A mismatch is reported
+    /// once the handler joins them all. A rejected call's error type poisons it, since that
+    /// call may have given it its type (§15.1).
+    fn join_known(&mut self, v: u32) {
+        let v = self.vars.root(v);
+        let holds = |vars: &Vars, err: &Ty| matches!(vars.resolve(err), Ty::Var(w) if vars.root(w) == v);
+        let Some(marker) = self.markers.iter().rev().find(|m| m.errors.iter().any(|err| holds(&self.vars, err))) else {
+            return;
+        };
+        let known: Vec<Ty> =
+            marker.target.iter().chain(&marker.errors).filter(|err| !holds(&self.vars, err)).cloned().collect();
+        let err = Ty::Var(v);
+        for known in known {
+            let _ = self.vars.subsume(&known, &err) && self.vars.subsume(&err, &known);
+        }
     }
 
     /// Reports the fallback of a `check`, of type `ty`, if it can finish (E0415). An error
@@ -881,6 +945,13 @@ impl Checker<'_> {
                         self.iface_name(iface)
                     );
                     self.error(codes::MISSING_IMPLEMENTATION, span, message);
+                }
+            }
+            Pending::Method { ty, iface, name, span } => {
+                let ty = self.vars.zonk(&ty);
+                if !ty.is_unknown() && !self.implements(&ty, iface) && !self.unknown_interfaces(&ty) {
+                    let message = format!("`{}` has no method `{name}`", self.show(&ty));
+                    self.error(codes::UNKNOWN_MEMBER, span, message);
                 }
             }
             Pending::Neg { ty, span } => {
@@ -2997,7 +3068,7 @@ impl Checker<'_> {
         let base_ty = self.infer(base);
         let base_ty = match self.vars.resolve(&base_ty) {
             list @ Ty::Adt(AdtId::LIST, _) => list,
-            _ => self.force(&base_ty),
+            _ => self.force_receiver(&base_ty),
         };
         let span = self.span(e);
         let Some(element) = self.indexed(&base_ty, index, span) else { return Ty::Error };
@@ -3255,7 +3326,7 @@ impl Checker<'_> {
                 }
                 self.in_chain = chain;
                 let base_ty = self.infer(*base);
-                let base_ty = self.force(&base_ty);
+                let base_ty = self.force_receiver(&base_ty);
                 self.field(e, &base_ty, *name)
             }
             ExprKind::Unary { op: UnaryOp::Not, operand } => {
@@ -4004,12 +4075,13 @@ impl Checker<'_> {
         self.in_chain = chain;
         // Which method this is depends on the receiver's type, so it must be known here. A
         // list's or map's own methods don't depend on its type arguments, so what the call
-        // meets may still give them (OPEN_QUESTIONS P5; issue #10).
+        // meets may still give them (OPEN_QUESTIONS P5; issue #10). Nor do the others depend
+        // on a handler's error types in them, which its join settles (issue #37).
         let receiver_ty = self.infer(receiver);
         let open = self.vars.resolve(&receiver_ty);
         let receiver_ty = match open {
             Ty::Adt(AdtId::LIST | AdtId::MAP, _) if builtin_method(&open, name).is_some() => open,
-            _ => self.force(&receiver_ty),
+            _ => self.force_receiver(&receiver_ty),
         };
         if let (Ty::Adt(id, _), "with") = (&receiver_ty, name)
             && self.p.decls.adt(*id).kind == AdtKind::Record
@@ -4050,7 +4122,14 @@ impl Checker<'_> {
             }
             return sig.ret;
         }
-        match self.resolve_method(&receiver_ty, method) {
+        let found = self.vars.as_never(&receiver_ty);
+        let callee = self.resolve_method(&found, method);
+        if let Some(Callee::Iface(iface, _)) = callee
+            && found != receiver_ty
+        {
+            self.pending.push(Pending::Method { ty: receiver_ty.clone(), iface, name: name.into(), span: method.span });
+        }
+        match callee {
             Some(Callee::Fn(f)) => {
                 self.p.res.insert(e, Res::Fn(f));
                 self.fn_call(e, f, targs, args, span, chain, expected)
@@ -4513,28 +4592,11 @@ impl Checker<'_> {
         }
         match self.markers.last_mut() {
             Some(marker) if chain => {
-                // A later part of the chain may need its type settled, as a receiver does,
-                // which would settle an error type that only `Never` or a hole has reached as
-                // `Never`. So it joins what the handler knows now, as the handler will. A `try`
-                // knows its function's `fails`, and the others the error type of the chain's
-                // first call, or else the one an `attempt` is expected to have (OPEN_QUESTIONS
-                // P5).
-                let known = match marker.handler {
-                    None => marker.target.clone(),
-                    Some(_) => marker.errors.first().or(marker.target.as_ref()).cloned(),
-                };
+                // Its handler joins the error type, which a later part of the chain leaves
+                // open (see `force_receiver`).
                 marker.errors.push(err.clone());
                 if let Some(handler) = marker.handler {
                     self.p.handler_of.insert(call, handler);
-                }
-                // A mismatch is reported once the handler joins them all. An error isn't
-                // joined, since it would poison the other side and hide that side's own
-                // mistakes (§15.1).
-                if let Some(known) = known
-                    && self.vars.resolve(&known) != Ty::Error
-                    && self.vars.resolve(err) != Ty::Error
-                {
-                    let _ = self.vars.subsume(&known, err) && self.vars.subsume(err, &known);
                 }
             }
             _ => {

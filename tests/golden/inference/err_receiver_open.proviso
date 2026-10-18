@@ -1,0 +1,151 @@
+// phase: 2.5
+// expect-error: E0201
+// expect-error: E0303
+// expect-error: E0702
+// A method call needs only its receiver's head to find the method. The error types its
+// handler joins stay open inside the receiver's type arguments until the handler joins
+// them, so a value that gives the error type after the chain, before it, or in an
+// `else` fallback gives the same verdict as the chain without the method, and the same in
+// either operand order (OPEN_QUESTIONS P5, `fails Never`; issue #37). The method is found
+// as if those error types were `Never`, and an interface method is checked again once they
+// settle. So `.show()` on an `Option[E]` whose `E` settles as a type without `Show` is
+// E0303, as it is when the type is known first. A receiver that is the error type itself
+// needs its head, so it joins the chain's other error types and what the handler knows
+// first, and a value that gives it only after the chain still comes too late (k1).
+// Each line's verdict is the one its rewrite without the method, or with its operands
+// swapped, gets. `err_receiver_holes` holds the same lines with `todo` as the source.
+
+record Box {
+    n: Int
+}
+
+record Bare derives(Eq) {
+    n: Int
+}
+
+fn boxof[E: Copy](e: E) -> Box fails E {
+    return Box(n: 1)
+}
+
+impl Box {
+    fn wrap[E: Copy](self, e: E) -> Option[E] fails E {
+        return None
+    }
+
+    fn give[E: Copy](self, e: E) -> E fails E {
+        return e
+    }
+}
+
+fn wrapped[E: Copy](e: E) -> Option[E] fails E {
+    return None
+}
+
+fn nested[E: Copy](e: E) -> Option[Option[E]] fails E {
+    return None
+}
+
+fn give2[E: Copy](e: E) -> E fails E {
+    return e
+}
+
+fn stop() -> Never {
+    loop {
+    }
+}
+
+fn text_of(t: Text) -> Text {
+    return t
+}
+
+fn hold(b: Bare) -> Text {
+    return "kept"
+}
+
+fn after() -> Int {
+    let a1 = attempt wrapped(e: stop()) == Err("a1")
+    let a2 = attempt wrapped(e: stop()).show() == Err("a2")
+    let a3 = Err("a3") == attempt wrapped(e: stop()).show()
+    let a4 = attempt nested(e: stop()).show() == Err("a4")
+    let a5 = Err("a5") == attempt nested(e: stop()).show()
+    let a6 = attempt boxof(e: stop()).wrap(e: stop()).show() == Err("a6")
+    let a7 = attempt boxof(e: stop()).wrap(e: stop()).show().byte_len() == Err("a7")
+    let a8 = Err("a8") == attempt boxof(e: stop()).wrap(e: stop()).show().byte_len()
+    return 0
+}
+
+fn without_show() -> Int {
+    let b1 = attempt wrapped(e: stop()) == Err(Bare(n: 1))
+    let b2 = attempt wrapped(e: stop()).show() == Err(Bare(n: 2))  // <- E0303
+    let b3 = Err(Bare(n: 3)) == attempt wrapped(e: stop()).show()  // <- E0303
+    let b4 = attempt nested(e: stop()).show() == Err(Bare(n: 4))   // <- E0303
+    let b5 = attempt boxof(e: Bare(n: 5)).wrap(e: stop())
+    let b6 = attempt boxof(e: Bare(n: 6)).wrap(e: stop()).show()   // <- E0303
+    let b7 = attempt boxof(e: stop()).wrap(e: Bare(n: 7)).show()   // <- E0303
+    return 0
+}
+
+fn fallbacks() -> Int {
+    let c1 = wrapped(e: stop()) else Some(text_of(t: it))
+    let c2 = wrapped(e: stop()).show() else text_of(t: it)
+    let c3 = nested(e: stop()).show() else text_of(t: it)
+    let c4 = wrapped(e: stop()).show() else it
+    let c5 = boxof(e: stop()).wrap(e: stop()).show() else it
+    let c6 = wrapped(e: stop()) else {
+        let k = hold(b: it)
+        None
+    }
+    let c7 = wrapped(e: stop()).show() else {                      // <- E0303
+        let k = hold(b: it)
+        "c7"
+    }
+    return 0
+}
+
+fn tried() -> Int fails Text {
+    let t1 = try wrapped(e: stop())
+    let t2 = try wrapped(e: stop()).show()
+    let t3 = try nested(e: stop()).show()
+    let t4 = try boxof(e: stop()).wrap(e: stop()).show().byte_len()
+    return 0
+}
+
+fn tried_bare() -> Int fails Bare {
+    let t5 = try wrapped(e: stop())
+    let t6 = try wrapped(e: stop()).show()                         // <- E0303
+    return 0
+}
+
+fn tried_nowhere() -> Int {
+    let n1 = try boxof(e: "n1").give(e: stop())                    // <- E0702
+    let n2 = try boxof(e: "n2").give(e: stop()).byte_len()         // <- E0702
+    return 0
+}
+
+fn heads() -> Int {
+    let h1 = attempt boxof(e: "h1").give(e: stop()).byte_len()
+    let h2 = Err("h2") == attempt give2(e: stop()).byte_len()
+    let h3 = boxof(e: "h3").give(e: stop()).byte_len() else 0
+    return 0
+}
+
+fn heads_late() -> Int {
+    let k1 = attempt give2(e: stop()).byte_len() == Err("k1")      // <- E0303
+    return 0
+}
+
+fn rejected() -> Int {
+    let r1 = attempt boxof(e: nosuch).give(e: stop())              // <- E0201
+    let r2 = attempt boxof(e: nosuch).give(e: stop()).byte_len()   // <- E0201
+    let r3 = boxof(e: nosuch).give(e: stop()).byte_len() else 0    // <- E0201
+    let r4 = attempt wrapped(e: stop()).show() == Err(nosuch)      // <- E0201
+    let r5 = attempt wrapped(e: stop()) == Err(nosuch)             // <- E0201
+    return 0
+}
+
+example boxof(e: "x").wrap(e: stop()) fails _
+example boxof(e: "x").wrap(e: stop()).show() fails _
+example boxof(e: "x").give(e: stop()).byte_len() fails _
+example boxof(e: Bare(n: 1)).wrap(e: stop()) fails _
+example boxof(e: Bare(n: 1)).wrap(e: stop()).show() fails _       // <- E0303
+example boxof(e: nosuch).give(e: stop()).byte_len() fails _        // <- E0201
