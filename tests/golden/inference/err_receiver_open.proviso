@@ -19,7 +19,8 @@
 // A receiver after its handler has ended forces its type, as it does outside any chain,
 // also inside an enclosing handler (e1, e2; issue #41), unless the enclosing handler
 // joins it too, as where an inner `attempt` is expected to fail with an outer call's error
-// type (s2, s3). Each line gets the error-type verdict of its rewrite without the method or
+// type (s2, s3). The same holds for an error type inside a call's error type, as in
+// `fails Option[E]` (o1 to o9). Each line gets the error-type verdict of its rewrite without the method or
 // with its operands swapped. Whether the receiver has the method is a check of its own, so
 // a line such as b2 is E0303 where its rewrite without the method checks.
 // `err_receiver_holes` repeats the main families with `todo` as the source.
@@ -52,6 +53,18 @@ impl Box {
     fn again[E: Copy](self, e: E) -> Box fails E {
         return self
     }
+
+    fn give_opt[E: Copy](self, e: E) -> E fails Option[E] {
+        return e
+    }
+}
+
+fn give_opt[E: Copy](e: E) -> E fails Option[E] {
+    return e
+}
+
+fn wrap_opt[E: Copy](e: E) -> Option[E] fails Option[E] {
+    return None
 }
 
 fn wrapped[E: Copy](e: E) -> Option[E] fails E {
@@ -215,6 +228,24 @@ fn shared() -> Int {
 fn ended() -> Int {
     let e1 = (attempt wrapped(e: stop())).eq(other: Err("e1"))                // <- E0706, E0301
     let e2 = pick(x: (attempt wrapped(e: stop())).eq(other: Err("e2")), y: true) else false // <- E0706, E0301
+    return 0
+}
+
+fn inside_tried() -> Int fails Option[Text] {
+    let o1 = try give_opt(e: stop())
+    let o2 = try give_opt(e: stop()).byte_len()
+    let o3 = try wrap_opt(e: stop()).show()
+    return 0
+}
+
+fn inside() -> Int {
+    let o4 = attempt boxof(e: Some("o4")).give_opt(e: stop())
+    let o5 = attempt boxof(e: Some("o5")).give_opt(e: stop()).byte_len()
+    let o6: Result[Int, Option[Text]] = attempt give_opt(e: stop()).byte_len()
+    let o7 = attempt wrap_opt(e: stop()) == Err(Some("o7"))
+    let o8 = attempt wrap_opt(e: stop()).show() == Err(Some("o8"))
+    let o9 = Err(Some("o9")) == attempt wrap_opt(e: stop()).show()
+    let p3 = attempt boxof(e: Some(Bare(n: 3))).give_opt(e: stop()).show()   // <- E0303
     return 0
 }
 

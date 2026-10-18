@@ -729,7 +729,7 @@ impl Checker<'_> {
         marker.errors
     }
 
-    /// Joins open variable `v`, if it is the error type of a call a handler marks, with what
+    /// Joins open variable `v`, if it is in the error type of a call a handler marks, with what
     /// that handler knows now (see [`Checker::force_receiver`]), in the order the handler
     /// compares them. A `try` compares each call's error type with its function's `fails`, so
     /// that comes first. The other handlers join the chain's error types and then compare
@@ -746,10 +746,13 @@ impl Checker<'_> {
     /// gives is still reported.
     fn join_known(&mut self, v: u32, head: bool) -> bool {
         let v = self.vars.root(v);
-        let holds = |vars: &Vars, err: &Ty| matches!(vars.resolve(err), Ty::Var(w) if vars.root(w) == v);
+        let holds = |vars: &Vars, err: &Ty| vars.mentions(v, err);
         let Some(marker) = self.markers.iter().rev().find(|m| m.errors.iter().any(|err| holds(&self.vars, err))) else {
             return true;
         };
+        // The error type that holds `v`, at its top or inside it as in `fails Option[E]`, is
+        // what the handler joins, so that is what joins here.
+        let Some(own) = marker.errors.iter().find(|err| holds(&self.vars, err)).cloned() else { return true };
         let errors: Vec<Ty> = marker.errors.iter().filter(|err| !holds(&self.vars, err)).cloned().collect();
         let (handler, target) = (marker.handler, marker.target.clone());
         // The error types the calls already have, or a literal's, which the handler joins.
@@ -762,7 +765,7 @@ impl Checker<'_> {
                     self.vars.poison(&err);
                 }
             } else {
-                let _ = self.vars.subsume(&target, &err) && self.vars.subsume(&err, &target);
+                let _ = self.vars.subsume(&target, &own) && self.vars.subsume(&own, &target);
             }
             return true;
         }
@@ -780,7 +783,7 @@ impl Checker<'_> {
             if !matches!(self.vars.resolve(&err), Ty::Var(_)) {
                 break;
             }
-            let _ = self.vars.subsume(known, &err) && self.vars.subsume(&err, known);
+            let _ = self.vars.subsume(known, &own) && self.vars.subsume(&own, known);
         }
         true
     }

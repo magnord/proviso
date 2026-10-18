@@ -466,6 +466,14 @@ impl Vars {
         }
     }
 
+    /// Whether open variable `v`'s class occurs in `ty`, walking each shared part once.
+    pub fn mentions(&self, v: u32, ty: &Ty) -> bool {
+        let mut found = Vec::new();
+        self.each_open(ty, &mut found, &mut (HashSet::new(), HashSet::new()));
+        let v = self.root(v);
+        found.contains(&v)
+    }
+
     /// The open variables in `ty`, by their roots, maybe more than once. A bound variable or
     /// a type argument list in `seen`, by number or by address, was walked already.
     fn each_open(&self, ty: &Ty, found: &mut Vec<u32>, seen: &mut (HashSet<u32>, HashSet<usize>)) {
