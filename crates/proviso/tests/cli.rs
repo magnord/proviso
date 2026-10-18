@@ -95,12 +95,14 @@ fn unknown_type_arguments_show_as_underscores() {
 fn a_chain_receiver_names_its_open_error_types() {
     let file = source(
         "receiver.proviso",
-        "record Plain {\n    n: Int\n}\n\nrecord Box {\n    n: Int\n}\n\nfn boxof[E: Copy](e: E) -> Box fails E {\n    return Box(n: 1)\n}\n\nimpl Box {\n    fn wrap[E: Copy](self, e: E) -> Option[E] fails E {\n        return None\n    }\n}\n\nfn stop() -> Never {\n    loop {\n    }\n}\n\nfn f() -> Int {\n    let a = attempt boxof(e: nosuch).wrap(e: 9).missing()\n    let b = attempt boxof(e: nosuch).wrap(e: 1.5).missing()\n    let c = attempt boxof(e: stop()).wrap(e: stop()).show() == Err(Plain(n: 1))\n    return 0\n}\n",
+        "record Plain {\n    n: Int\n}\n\nrecord Box {\n    n: Int\n}\n\nfn boxof[E: Copy](e: E) -> Box fails E {\n    return Box(n: 1)\n}\n\nimpl Box {\n    fn wrap[E: Copy](self, e: E) -> Option[E] fails E {\n        return None\n    }\n}\n\nfn stop() -> Never {\n    loop {\n    }\n}\n\nfn f() -> Int {\n    let a = attempt boxof(e: nosuch).wrap(e: 9).missing()\n    let b = attempt boxof(e: nosuch).wrap(e: 1.5).missing()\n    let c = attempt boxof(e: stop()).wrap(e: stop()).show() == Err(Plain(n: 1))\n    return 0\n}\n\nfn g() -> Int fails Text {\n    let d = try boxof(e: stop()).wrap(e: stop()).nosuch()\n    return 0\n}\n",
     );
     let errors = stderr(&run(&["check"], &file));
     assert!(errors.contains("`Option[Int]` has no method `missing`"), "{errors}");
     assert!(errors.contains("`Option[Float]` has no method `missing`"), "{errors}");
     assert!(errors.contains("`Option[Plain]` has no method `show`"), "{errors}");
+    // What the handler knows already gives the type a message names.
+    assert!(errors.contains("`Option[Text]` has no method `nosuch`"), "{errors}");
     assert!(!errors.contains("Never"), "{errors}");
 }
 
