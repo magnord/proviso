@@ -17,7 +17,7 @@
 //! them may not overlap, and a unique value lent to the call by one argument may not move in
 //! a later one (E0505; OPEN_QUESTIONS P5).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use proviso_syntax::ast::*;
 use proviso_syntax::diag::{Code, Diagnostics, Planned, codes};
@@ -52,6 +52,10 @@ pub(crate) fn check(
         errors: Vec::new(),
         later: Vec::new(),
         lent: Vec::new(),
+        handled: HashMap::new(),
+        loop_cache: HashMap::new(),
+        touched: Vec::new(),
+        reach: usize::MAX,
         moves_out: HashSet::new(),
         arms_out: HashSet::new(),
         guarded: Vec::new(),
@@ -79,28 +83,30 @@ pub(crate) fn check(
 /// A local, or a field of one, by the index of each field on the way.
 type Path = Vec<u32>;
 
-/// A place that may have moved, where it moved, and how diagnostics write it.
-#[derive(Clone)]
-struct Moved {
-    local: LocalId,
-    path: Path,
-    desc: String,
-}
-
-/// What may have moved at a point of the body that is reached.
+/// What may have moved at a point of the body that is reached: each place, by its local's
+/// index and its path, with how diagnostics write it.
 #[derive(Clone, Default)]
 struct State {
-    moved: Vec<Moved>,
+    moved: BTreeMap<(u32, Path), String>,
 }
 
 impl State {
-    fn has(&self, local: LocalId, path: &[u32]) -> bool {
-        self.moved.iter().any(|m| m.local == local && m.path == path)
+    /// The places of `local` that may have moved, with how diagnostics write each.
+    fn of(&self, local: LocalId) -> impl Iterator<Item = (&Path, &String)> {
+        self.moved.range((local.0, Vec::new())..).take_while(move |((l, _), _)| *l == local.0).map(|((_, p), d)| (p, d))
+    }
+
+    /// Forgets the places of `local` whose paths `keep` rejects.
+    fn forget(&mut self, local: LocalId, keep: impl Fn(&Path) -> bool) {
+        let gone: Vec<Path> = self.of(local).filter(|(p, _)| !keep(p)).map(|(p, _)| p.clone()).collect();
+        for path in gone {
+            self.moved.remove(&(local.0, path));
+        }
     }
 
     /// Whether every place `other` holds is in this one too.
     fn covers(&self, other: &State) -> bool {
-        other.moved.iter().all(|m| self.has(m.local, &m.path))
+        other.moved.keys().all(|key| self.moved.contains_key(key))
     }
 }
 
@@ -108,10 +114,8 @@ impl State {
 fn join(a: Option<State>, b: Option<State>) -> Option<State> {
     match (a, b) {
         (Some(mut a), Some(b)) => {
-            for m in b.moved {
-                if !a.has(m.local, &m.path) {
-                    a.moved.push(m);
-                }
+            for (key, desc) in b.moved {
+                a.moved.entry(key).or_insert(desc);
             }
             Some(a)
         }
@@ -182,6 +186,16 @@ struct CallAccess {
     local: LocalId,
     steps: Vec<Step>,
     expr: ExprId,
+    /// Whether a `match` arm's guard is what the place is lent to, not a call.
+    guard: bool,
+}
+
+/// What a loop reached when it was last walked: what may have moved at its head and where it
+/// ends, and the locals it touched.
+struct LoopWalk {
+    head: State,
+    exit: Option<State>,
+    touched: HashSet<LocalId>,
 }
 
 struct LoopFrame {
@@ -206,6 +220,16 @@ struct Walk<'a> {
     later: Vec<Span>,
     /// What the calls whose arguments are being walked lend, innermost call last.
     lent: Vec<CallAccess>,
+    /// What may have moved where a call that never returns fails to the `else` form or
+    /// `attempt` that handles it, by that handler.
+    handled: HashMap<ExprId, Option<State>>,
+    /// What each loop reached when it was last walked.
+    loop_cache: HashMap<ExprId, LoopWalk>,
+    /// The locals each loop being walked has touched, innermost last.
+    touched: Vec<HashSet<LocalId>>,
+    /// The outermost loop frame a jump has targeted, or a failure handler has been handed
+    /// a state, since the innermost loop being walked began. `0` stands for the handler.
+    reach: usize,
     moves_out: HashSet<ExprId>,
     arms_out: HashSet<PatId>,
     /// The locals an arm's pattern binds, while its guard is walked.
@@ -216,6 +240,13 @@ impl Walk<'_> {
     fn report(&mut self, code: Code, span: Span, message: String) {
         if self.reported.insert((code.id, span)) {
             self.errors.push((code, span, message));
+        }
+    }
+
+    /// Notes that the loops being walked touch `local`.
+    fn touch(&mut self, local: LocalId) {
+        if let Some(top) = self.touched.last_mut() {
+            top.insert(local);
         }
     }
 
@@ -345,17 +376,16 @@ impl Walk<'_> {
 
     /// Reports a use of `local`'s `path` that may have moved, or a part of which may have.
     fn use_place(&mut self, e: ExprId, local: LocalId, path: &[u32]) {
+        self.touch(local);
         let Some(state) = &self.state else { return };
-        let Some(moved) =
-            state.moved.iter().find(|m| m.local == local && (is_prefix(&m.path, path) || is_prefix(path, &m.path)))
-        else {
+        let Some((moved, desc)) = state.of(local).find(|(m, _)| is_prefix(m, path) || is_prefix(path, m)) else {
             return;
         };
         let here = self.describe(e);
-        let message = if moved.path.len() > path.len() {
-            format!("`{}` may have moved already, so `{here}` can't be used whole here (§5.1)", moved.desc)
-        } else if moved.path.len() < path.len() {
-            format!("`{}` may have moved already, so `{here}` can't be used here (§5.1)", moved.desc)
+        let message = if moved.len() > path.len() {
+            format!("`{desc}` may have moved already, so `{here}` can't be used whole here (§5.1)")
+        } else if moved.len() < path.len() {
+            format!("`{desc}` may have moved already, so `{here}` can't be used here (§5.1)")
         } else {
             format!("`{here}` may have moved already, so it can't be used here; assign it a new value first (§5.1)")
         };
@@ -374,24 +404,32 @@ impl Walk<'_> {
         }
         if self.guarded.contains(&local) {
             let message = format!(
-                "`{desc}` is bound by this arm's pattern, and a guard can only look at it, since the arm may still not be chosen; move it in the arm's body (OPEN_QUESTIONS P5)"
+                "`{desc}` is bound by this arm's pattern and lent to its guard, which can only look at it, since the arm may still not be chosen; move it in the arm's body (OPEN_QUESTIONS P5)"
             );
             self.report(codes::LENT_VALUE_MOVED, self.span(e), message);
             return;
         }
         let steps: Vec<Step> = path.iter().map(|&i| Step::Field(i)).collect();
-        if self.lent.iter().any(|l| l.local == local && overlap(&l.steps, &steps) != Overlap::No) {
-            let message =
-                format!("`{desc}` is lent to this call by an earlier argument, so it can't also move into it (§5.3)");
-            self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
+        if let Some(lender) = self.lent.iter().find(|l| l.local == local && overlap(&l.steps, &steps) != Overlap::No) {
+            if lender.guard {
+                let message = format!(
+                    "`{desc}` is lent to this arm's guard, which can only look at it, since the arm may still not be chosen; move it in the arm's body (OPEN_QUESTIONS P5)"
+                );
+                self.report(codes::LENT_VALUE_MOVED, self.span(e), message);
+            } else {
+                let message = format!(
+                    "`{desc}` is lent to this call by an earlier argument, so it can't also move into it (§5.3)"
+                );
+                self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
+            }
             return;
         }
         let Some(state) = &mut self.state else { return };
-        if state.moved.iter().any(|m| m.local == local && is_prefix(&m.path, &path)) {
+        if state.of(local).any(|(m, _)| is_prefix(m, &path)) {
             return;
         }
-        state.moved.retain(|m| !(m.local == local && is_prefix(&path, &m.path)));
-        state.moved.push(Moved { local, path: path.clone(), desc });
+        state.forget(local, |m| !is_prefix(&path, m));
+        state.moved.insert((local.0, path.clone()), desc);
         if self.place(e).is_some_and(|named| named == (local, path.clone())) && self.unrefined(local, &path) {
             self.moves_out.insert(e);
         }
@@ -400,20 +438,22 @@ impl Walk<'_> {
     /// Gives `local`'s `path` a new value, which makes it and its parts usable again. A part
     /// of a value that may have moved can't be assigned.
     fn assign_place(&mut self, e: ExprId, local: LocalId, path: &[u32]) {
+        self.touch(local);
         let Some(state) = &self.state else { return };
-        if state.moved.iter().any(|m| m.local == local && m.path.len() < path.len() && is_prefix(&m.path, path)) {
+        if state.of(local).any(|(m, _)| m.len() < path.len() && is_prefix(m, path)) {
             self.use_place(e, local, path);
             return;
         }
         if let Some(state) = &mut self.state {
-            state.moved.retain(|m| !(m.local == local && is_prefix(path, &m.path)));
+            state.forget(local, |m| !is_prefix(path, m));
         }
     }
 
     /// A new value for `local`, as a pattern binds it on each turn of a loop.
     fn bind(&mut self, local: LocalId) {
+        self.touch(local);
         if let Some(state) = &mut self.state {
-            state.moved.retain(|m| m.local != local);
+            state.forget(local, |_| false);
         }
     }
 
@@ -451,9 +491,11 @@ impl Walk<'_> {
                 let is_break = matches!(m.stmts[s].kind, StmtKind::Break(_));
                 let state = self.state.take();
                 let target = self.p.jump_target.get(s).copied();
-                if let Some(frame) = self.loops.iter_mut().rev().find(|f| Some(f.expr) == target) {
+                if let Some(i) = self.loops.iter().rposition(|f| Some(f.expr) == target) {
+                    let frame = &mut self.loops[i];
                     let slot = if is_break { &mut frame.breaks } else { &mut frame.continues };
                     *slot = join(slot.take(), state);
+                    self.reach = self.reach.min(i + 1);
                 }
             }
             StmtKind::Check { cond, fallback } => {
@@ -509,6 +551,13 @@ impl Walk<'_> {
     fn expr(&mut self, e: ExprId) {
         self.expr_kind(e);
         if *self.p.ty(e) == Ty::Never {
+            // A call that never returns may still fail to the handler that goes on after it.
+            if let Some(&handler) = self.p.handler_of.get(e) {
+                let pending = self.handled.remove(&handler).flatten();
+                let state = join(pending, self.state.take());
+                self.handled.insert(handler, state);
+                self.reach = 0;
+            }
             self.state = None;
         }
     }
@@ -573,7 +622,12 @@ impl Walk<'_> {
                 self.expr(*lhs);
                 self.expr(*rhs);
             }
-            ExprKind::Try(inner) | ExprKind::Attempt(inner) | ExprKind::Fail(inner) => self.expr(*inner),
+            ExprKind::Try(inner) | ExprKind::Fail(inner) => self.expr(*inner),
+            ExprKind::Attempt(inner) => {
+                self.expr(*inner);
+                let failed = self.handled.remove(&e).flatten();
+                self.state = join(self.state.take(), failed);
+            }
             ExprKind::If { cond, then_block, else_branch } => {
                 self.condition(*cond);
                 let after = self.state.clone();
@@ -628,29 +682,35 @@ impl Walk<'_> {
                 let mut after = None;
                 for arm in arms {
                     self.state = tried.clone();
+                    if let Some(guard) = arm.guard {
+                        // The guard runs before the pattern moves anything, with the
+                        // scrutinee and what the pattern binds lent to it. A guard that fails
+                        // hands the next arm what it moved.
+                        self.bind_all(arm.pat);
+                        let (outer, lent) = (self.guarded.len(), self.lent.len());
+                        let mut locals = Vec::new();
+                        self.pattern_locals(arm.pat, &mut locals);
+                        self.guarded.extend(locals);
+                        if let Some((local, steps)) = self.access_path(*scrutinee)
+                            && self.moves(self.p.ty(*scrutinee))
+                        {
+                            self.lent.push(CallAccess {
+                                access: Access::Lent,
+                                local,
+                                steps,
+                                expr: *scrutinee,
+                                guard: true,
+                            });
+                        }
+                        self.condition(guard);
+                        self.guarded.truncate(outer);
+                        self.lent.truncate(lent);
+                        tried = join(tried, self.state.clone());
+                    }
                     self.matched(*scrutinee, arm.pat);
                     // The scrutinee leaves its local only once this arm is chosen.
                     if self.moves_out.remove(scrutinee) {
                         self.arms_out.insert(arm.pat);
-                    }
-                    if let Some(guard) = arm.guard {
-                        // A guard that fails hands the next arm what it moved, but not what
-                        // the pattern did.
-                        let bound = self.state.clone();
-                        let outer = self.guarded.len();
-                        let mut locals = Vec::new();
-                        self.pattern_locals(arm.pat, &mut locals);
-                        self.guarded.extend(locals);
-                        self.condition(guard);
-                        self.guarded.truncate(outer);
-                        if let (Some(tried), Some(now)) = (&mut tried, &self.state) {
-                            for m in &now.moved {
-                                let new = !bound.as_ref().is_some_and(|b| b.has(m.local, &m.path));
-                                if new && !tried.has(m.local, &m.path) {
-                                    tried.moved.push(m.clone());
-                                }
-                            }
-                        }
                     }
                     self.block(&arm.body);
                     after = join(after, self.state.take());
@@ -664,6 +724,8 @@ impl Walk<'_> {
             ExprKind::Else { value, fallback } => {
                 self.expr(*value);
                 let after = self.state.clone();
+                let failed = self.handled.remove(&e).flatten();
+                self.state = join(self.state.take(), failed);
                 self.fallback(fallback);
                 self.state = join(after, self.state.take());
             }
@@ -686,9 +748,38 @@ impl Walk<'_> {
     /// A loop whose turn `turn` walks, returning what may have moved where the loop ends
     /// without a `break`. The turn is walked until what may have moved at the loop's head
     /// stops growing.
+    ///
+    /// A loop inside another is walked on each of the outer loop's turns, with an entry that
+    /// only grows. So it starts from the head it reached last time, and when the entry gained
+    /// only places of locals the loop never touches, the walk would change nothing but carry
+    /// them through, so it is skipped. That keeps nested loops from costing time exponential
+    /// in their depth.
     fn looped(&mut self, e: ExprId, turn: impl Fn(&mut Self) -> Option<State>) {
         let entry = self.state.clone();
-        let mut head = entry.clone();
+        if let (Some(entry), Some(last)) = (&entry, self.loop_cache.get(&e)) {
+            let gained: Vec<_> = entry.moved.iter().filter(|(key, _)| !last.head.moved.contains_key(key)).collect();
+            if gained.iter().all(|((local, _), _)| !last.touched.contains(&LocalId(*local))) {
+                let mut exit = last.exit.clone();
+                if let Some(exit) = &mut exit {
+                    for (key, desc) in gained {
+                        exit.moved.entry(key.clone()).or_insert_with(|| desc.clone());
+                    }
+                }
+                let touched = last.touched.clone();
+                if let Some(top) = self.touched.last_mut() {
+                    top.extend(touched);
+                }
+                self.state = exit;
+                return;
+            }
+        }
+        let mut head = match (&entry, self.loop_cache.get(&e)) {
+            (Some(_), Some(last)) => join(entry.clone(), Some(last.head.clone())),
+            _ => entry.clone(),
+        };
+        let depth = self.loops.len();
+        let outer_reach = std::mem::replace(&mut self.reach, usize::MAX);
+        self.touched.push(HashSet::new());
         loop {
             self.state = head.clone();
             self.loops.push(LoopFrame { expr: e, breaks: None, continues: None });
@@ -702,7 +793,21 @@ impl Walk<'_> {
                 (_, None) => false,
             };
             if !grew {
-                self.state = join(exit, frame.breaks);
+                let exit = join(exit, frame.breaks);
+                let touched = self.touched.pop().expect("the loop's set was pushed");
+                // A walk that handed a state to something outside the loop can't be skipped.
+                if let Some(head) = head
+                    && self.reach > depth
+                {
+                    self.loop_cache.insert(e, LoopWalk { head, exit: exit.clone(), touched: touched.clone() });
+                } else {
+                    self.loop_cache.remove(&e);
+                }
+                if let Some(top) = self.touched.last_mut() {
+                    top.extend(touched);
+                }
+                self.reach = self.reach.min(outer_reach);
+                self.state = exit;
                 return;
             }
             head = next;
@@ -875,7 +980,7 @@ impl Walk<'_> {
             };
             self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
         }
-        let access = CallAccess { access, local, steps, expr: e };
+        let access = CallAccess { access, local, steps, expr: e, guard: false };
         if access.access == Access::Lent {
             self.lent.push(access.clone());
         }

@@ -5,7 +5,8 @@
 // element of a list, tuple or map, a consuming loop, or the bindings of a pattern (§6.4).
 // A value moved in one branch, in both, or in a loop body that may run again is moved
 // after it, so is one moved in an `else` fallback or on the right of `and`. A guard that
-// moves a value and fails leaves it moved for every later arm. A target's or an `&`
+// moves a value and fails leaves it moved for every later arm. A call that never returns
+// still fails to the `else` or `attempt` that handles it, which goes on with what it moved. A target's or an `&`
 // argument's indices run before its variable is reached, so an index that moves the variable
 // leaves nothing to reach, and one that moves a later argument leaves nothing to pass. Moving a field
 // moves only that field, so the record can't be used whole after it, one level down too.
@@ -312,6 +313,37 @@ fn by_index_of_argument() {
     set_at(x: &xs[consume(pool)], pool: pool)       // <- E0501
 }
 
+enum Oops {
+    Bad
+}
+
+fn never_returns(pool: take Pool[Int]) -> Never fails Oops {
+    fail Oops.Bad
+}
+
+fn stop() -> Never fails Oops {
+    fail Oops.Bad
+}
+
+fn by_never_else() -> Int {
+    let a = fresh()
+    let n = never_returns(a) else 5
+    return a.len() + n                              // <- E0501
+}
+
+fn by_never_attempt() -> Int {
+    let a = fresh()
+    let r = attempt never_returns(a)
+    return a.len()                                  // <- E0501
+}
+
+fn after_never_attempt() -> Int {
+    let a = fresh()
+    let r = attempt stop()
+    let n = consume(a)
+    return consume(a) + n                           // <- E0501
+}
+
 fn in_fallback(o: take Option[Int]) -> Int {
     let a = fresh()
     let n = o else consume(a)
@@ -376,6 +408,33 @@ fn nested_loops() -> Int {
         }
     }
     return total
+}
+
+fn moved_after_inner_loop() -> Int {
+    let a = fresh()
+    var total = 0
+    for i in 0..2 {
+        for j in 0..2 {
+            total += a.len()                        // <- E0501
+        }
+        let b = a                                   // <- E0501
+    }
+    return total
+}
+
+fn break_out_of_inner_loop(c: Bool) -> Int {
+    let a = fresh()
+    let d = fresh()
+    outer: while c {
+        inner: while c {
+            let b = a
+            break outer
+        }
+        if c {
+            let e = d                               // <- E0501
+        }
+    }
+    return a.len()                                  // <- E0501
 }
 
 fn nested_branches(b: Bool, c: Bool) -> Int {

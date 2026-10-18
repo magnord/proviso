@@ -10,8 +10,8 @@
 // instead, so it may be. In generic code a borrowed value whose type parameter lacks `Copy`
 // is copied in the same places, which needs `Copy` (§4.8), and so is an `inout` one. A
 // consuming loop goes over a list or a map, and a range has nothing to consume (§6.5). A
-// guard may look at what its arm's pattern binds but not move it, since the arm may still
-// not be chosen.
+// guard may look at what its arm's pattern binds, and at the scrutinee, but not move either,
+// since the arm may still not be chosen.
 use std.pool { Pool }
 
 record Holder {
@@ -166,6 +166,28 @@ fn guard_moves_tuple_part(pair: take (Pool[Int], Int)) -> Int {
         (p, n) if consume(p) > n => 1               // <- E0504
         (_, n) => n
     }
+}
+
+fn size(s: Slot) -> Int {
+    return 1
+}
+
+fn guard_looks_at_scrutinee(s: take Slot) -> Int {
+    return match s {
+        Full(pool) if size(s) > 0 => consume(pool)
+        _ => 0
+    }
+}
+
+fn guard_moves_scrutinee(s: take Slot) -> Int {
+    return match s {
+        Empty if eat_slot(s) > 0 => 1               // <- E0504
+        _ => 0
+    }
+}
+
+fn eat_slot(s: take Slot) -> Int {
+    return 0
 }
 
 fn guard_looks_at_binding(s: take Slot) -> Int {
