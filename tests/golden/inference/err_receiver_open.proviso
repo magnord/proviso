@@ -3,6 +3,7 @@
 // expect-error: E0301
 // expect-error: E0303
 // expect-error: E0702
+// expect-error: E0706
 // A method call needs only its receiver's head to find the method. The error types its
 // handler joins stay open inside the receiver's type arguments until the handler joins
 // them, so a value that gives the error type after the chain, before it, or in an
@@ -15,9 +16,11 @@
 // needs its head, so it joins the chain's other error types and what the handler knows
 // first. Where those disagree, the line gets one error rather than two (d1 to d4, m1 to
 // m7). A value that gives it only after the chain still comes too late (k1, issue #NN).
-// Each line gets the error-type verdict of its rewrite without the method or with its
-// operands swapped. Whether the receiver has the method is a check of its own, so a line
-// such as b2 is E0303 where its rewrite without the method checks. `err_receiver_holes`
+// A receiver after its handler has ended forces its type, as it does outside any chain,
+// also inside an enclosing handler (e1, e2; issue #NN). Each line gets the error-type
+// verdict of its rewrite without the method or with its operands swapped. Whether the
+// receiver has the method is a check of its own, so a line such as b2 is E0303 where its
+// rewrite without the method checks. `err_receiver_holes`
 // repeats the main families with `todo` as the source.
 
 record Box {
@@ -190,6 +193,16 @@ fn disagreeing(small: Int8) -> Int {
 fn rejected_int() -> Int fails Int {
     let p1 = try boxof(e: nosuch).give(e: stop())                  // <- E0201
     let p2 = try boxof(e: nosuch).give(e: stop()).byte_len()       // <- E0201
+    return 0
+}
+
+fn pick[T: Copy](x: T, y: T) -> T fails Text {
+    return x
+}
+
+fn ended() -> Int {
+    let e1 = (attempt wrapped(e: stop())).eq(other: Err("e1"))                // <- E0706, E0301
+    let e2 = pick(x: (attempt wrapped(e: stop())).eq(other: Err("e2")), y: true) else false // <- E0706, E0301
     return 0
 }
 
