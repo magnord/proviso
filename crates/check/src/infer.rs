@@ -56,8 +56,9 @@ pub struct Open {
     pub hole: bool,
     /// It is in the error type of a call that an enclosing `try`, `attempt`, `else` form or
     /// example marks, which the handler joins, so a later receiver leaves it open inside its
-    /// type arguments.
-    pub handled: bool,
+    /// type arguments. It holds how many handlers enclose the outermost one that marks it, so
+    /// an inner handler that ends doesn't clear what an outer one still joins.
+    pub handled: Option<u32>,
     pub origin: Origin,
 }
 
@@ -192,7 +193,7 @@ impl Vars {
             unmarked: false,
             owed: false,
             hole: false,
-            handled: false,
+            handled: None,
             origin,
         }));
         Ty::Var(self.count() - 1)
@@ -207,7 +208,7 @@ impl Vars {
             unmarked: false,
             owed: false,
             hole: false,
-            handled: false,
+            handled: None,
             origin: Origin::Defaulted,
         }));
         Ty::Var(self.count() - 1)
@@ -445,17 +446,22 @@ impl Vars {
 
     /// Whether open variable `v` is in the error type of a call a handler marks.
     pub fn handled(&self, v: u32) -> bool {
-        self.open(v).is_some_and(|open| open.handled)
+        self.open(v).is_some_and(|open| open.handled.is_some())
     }
 
-    /// Marks every open variable in `ty` as one a handler joins, or no longer. It walks each
-    /// shared part once, so a wide or deeply shared type costs its distinct parts.
-    pub fn set_handled(&mut self, ty: &Ty, on: bool) {
+    /// Marks every open variable in `ty` as one that the handler at `depth` joins, or, with
+    /// `on` false, no longer one that it or a handler inside it joins. It walks each shared
+    /// part once, so a wide or deeply shared type costs its distinct parts.
+    pub fn set_handled(&mut self, ty: &Ty, depth: u32, on: bool) {
         let mut found = Vec::new();
         self.each_open(ty, &mut found, &mut (HashSet::new(), HashSet::new()));
         for v in found {
             if let State::Open(open) = &mut self.states[v as usize] {
-                open.handled = on;
+                open.handled = match open.handled {
+                    _ if !on => open.handled.filter(|&d| d < depth),
+                    Some(d) => Some(d.min(depth)),
+                    None => Some(depth),
+                };
             }
         }
     }
@@ -565,7 +571,7 @@ impl Vars {
         let unmarked = kept.unmarked || other.unmarked;
         let owed = kept.owed || other.owed;
         let hole = kept.hole || other.hole;
-        let handled = kept.handled || other.handled;
+        let handled = kept.handled.into_iter().chain(other.handled).min();
         // An error about the class names the value that first left it open.
         let origin = if matches!(kept.origin, Origin::Defaulted) { other.origin } else { kept.origin };
         self.states[keep as usize] = State::Open(Open { kind, never, quiet, unmarked, owed, hole, handled, origin });
@@ -595,15 +601,15 @@ impl Vars {
 
     /// A variable that a rejected value was to give, that a `todo` hole met, or that a
     /// handler joins, bound to `ty`, passes that on to what `ty` leaves open.
-    fn bind_marks(&mut self, (quiet, hole, handled): (bool, bool, bool), ty: &Ty) {
+    fn bind_marks(&mut self, (quiet, hole, handled): (bool, bool, Option<u32>), ty: &Ty) {
         if quiet {
             self.quiet(ty);
         }
         if hole {
             self.hole(ty);
         }
-        if handled {
-            self.set_handled(ty, true);
+        if let Some(depth) = handled {
+            self.set_handled(ty, depth, true);
         }
     }
 

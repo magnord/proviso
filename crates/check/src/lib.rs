@@ -717,13 +717,14 @@ impl Checker<'_> {
     }
 
     /// Leaves the innermost handler and returns its calls' error types, whose variables are no
-    /// longer marked as handled. An enclosing handler's calls are marked after their arguments,
-    /// so they don't share an open variable with a handler that ended inside them, and each
-    /// error type is walked once to mark it and once to clear it.
+    /// longer marked as handled unless an enclosing handler marks them too. That happens where
+    /// an inner `attempt` is expected to fail with an outer call's error type. Each error type
+    /// is walked once to mark it and once to clear it.
     fn pop_marker(&mut self) -> Vec<Ty> {
         let Some(marker) = self.markers.pop() else { return Vec::new() };
+        let depth = self.markers.len() as u32;
         for err in &marker.errors {
-            self.vars.set_handled(err, false);
+            self.vars.set_handled(err, depth, false);
         }
         marker.errors
     }
@@ -4673,12 +4674,13 @@ impl Checker<'_> {
         if self.vars.resolve(err) == Ty::Never {
             return;
         }
+        let depth = self.markers.len().saturating_sub(1) as u32;
         match self.markers.last_mut() {
             Some(marker) if chain => {
                 // Its handler joins the error type. A later receiver leaves it open inside its
                 // type arguments (see `force_receiver`).
                 marker.errors.push(err.clone());
-                self.vars.set_handled(err, true);
+                self.vars.set_handled(err, depth, true);
                 if let Some(handler) = marker.handler {
                     self.p.handler_of.insert(call, handler);
                 }
