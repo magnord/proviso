@@ -15,9 +15,9 @@
 // (§5.3). The access begins once the other arguments are evaluated and lasts for the call,
 // so the other arguments may read the variable, but two `&` arguments of one call may not
 // overlap, however deep. Two fields are disjoint, and so are two elements whose indices are
-// different literals. Before the verifier, nothing shows that two other indices differ, even
-// where a fact would (OPEN_QUESTIONS P5). A unique value lent to a call by one argument
-// can't move into it through a later one.
+// different literals. Two elements whose indices are the same literal or variable overlap.
+// Other indices need a fact, which ownership/err_not_yet covers. A unique value lent to a
+// call by one argument can't move into it through a later one.
 use std.pool { Pool, Handle }
 
 record Pt {
@@ -98,7 +98,13 @@ fn overlaps(i: Int, j: Int) {
     both(a: &p.x, b: &p.x)                          // <- E0505
     both(a: &xs[0], b: &xs[1])
     both(a: &xs[0], b: &xs[0])                      // <- E0505
-    both(a: &xs[i], b: &xs[j])                      // <- E0505
+    both(a: &xs[i], b: &xs[i])                      // <- E0505
+    var rows = [Pt(x: 1, y: 2), Pt(x: 3, y: 4)]
+    both(a: &rows[i].x, b: &rows[j].y)
+    both(a: &rows[i].x, b: &rows[i].x)              // <- E0505
+    var grid = [[1, 2], [3, 4]]
+    both(a: &grid[i][0], b: &grid[i][1])
+    both(a: &grid[0][j], b: &grid[1][i])
     first_inout(a: &a, b: a)
     first_inout(a: &p.x, b: p.y)
     first_inout(a: &p.x, b: look(p.x))

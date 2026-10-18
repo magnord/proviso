@@ -14,7 +14,8 @@
 // a type. `get`, `duplicate` and copying `pool[h]` need `T: Copy`, while borrowing it
 // doesn't. A pool's element can't be changed through `pool[h]`, whose index is a
 // `Handle[T]`. `Pool.new()` builds a pool and only a pool builds handles, so neither type
-// has a constructor. A pool implements no interface, and a handle only `Eq` and `Hash`.
+// has a constructor. A pool implements no interface other than `Index`, and a handle is
+// `Copy` and implements `Eq` and `Hash`.
 // `insert` and `remove` take `inout self`, so they need a variable.
 use std.pool { Pool, Handle, Slot }                 // <- E0205
 

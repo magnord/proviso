@@ -120,14 +120,14 @@ pub mod codes {
         MISPLACED_JUMP = "E0105", "misplaced_jump",
             "`break` or `continue` outside a loop, or naming a label no enclosing loop has.";
         INVALID_ASSIGNMENT_TARGET = "E0106", "invalid_assignment_target",
-            "Only variables and their fields and elements can be assigned, or changed by a method such as `push` (REFERENCE §5.2).";
+            "An assignment to something that isn't a variable or one of its fields or elements, or a method that changes its receiver, such as `push`, or an `&` argument, on something that isn't one (REFERENCE §5.2).";
         TODO_REQUIRES_INCOMPLETE = "E0107", "todo_requires_incomplete",
             "`todo` holes are accepted only with `--incomplete` (REFERENCE §15.2, Q25).";
         MISPLACED_RETURN = "E0108", "misplaced_return",
             "`return` outside a function body, such as in a `where` clause.";
 
         UNKNOWN_NAME = "E0201", "unknown_name",
-            "A name that does not resolve to any local, function or import, or a variant used without its enum (REFERENCE §4.5).";
+            "A name that resolves to no local, function or import, a variant used without its enum (REFERENCE §4.5), a type that has no constructor, such as `Pool(…)` or an enum, or an `it` outside the fallback of an `else` form on a call that can fail (Q33).";
         DUPLICATE_ITEM = "E0202", "duplicate_item",
             "A module may hold at most one item per name, and a name may be imported once (REFERENCE §3).";
         SHADOWING = "E0203", "shadowing",
@@ -160,15 +160,15 @@ pub mod codes {
         MISSING_RETURN = "E0304", "missing_return",
             "Every path of a non-Unit function ends with an explicit `return` (REFERENCE §2).";
         IMMUTABLE_ASSIGNMENT = "E0305", "immutable_assignment",
-            "Assignment to a `let` binding, a parameter or a loop variable, or a call of a method that changes it, such as `push`.";
+            "An assignment to a `let` binding, a parameter or a loop variable, or to a part of one, or a method that changes its receiver, such as `push`, or an `&` argument, on one (REFERENCE §5.2).";
         UNSUPPORTED_OPERATOR = "E0306", "unsupported_operator",
-            "An operator, interpolation, index, or literal or range pattern that the type does not support.";
+            "An operator or interpolation that the operand's type doesn't support, a literal or range pattern that the matched type doesn't support, such as a `Float` literal (REFERENCE §12.2), an index on anything but a list or a pool, or a change to a pool's element through `pool[h]` (STD.md).";
         UNKNOWN_TYPE = "E0307", "unknown_type",
             "A type or interface name that does not resolve to one, or a type with the wrong number of type arguments.";
         INVALID_MAIN = "E0308", "invalid_main",
             "A program needs `pub fn main(sys: keep System)`, optionally with `fails E` (REFERENCE §7.4).";
         MISSING_IMPLEMENTATION = "E0309", "missing_implementation",
-            "A type does not implement an interface it needs, such as a field's type in a `derives` list, a type argument that a constraint of its parameter names, or a map's key type without `Eq` and `Hash` (REFERENCE §4.2, §4.4, §4.8, §4.9).";
+            "A type doesn't implement an interface it needs, such as a field's type in a `derives` list, a type argument that a constraint of its parameter names, a map's key type without `Eq` and `Hash`, or an element that `xs[i]`, `pool[h]`, `get`, `enumerate`, `duplicate` or `contains` copies or compares (REFERENCE §4.2, §4.4, §4.8, §4.9). A unique type isn't `Copy` (REFERENCE §5.1).";
         NOT_DERIVABLE = "E0310", "not_derivable",
             "A `derives` list names a prelude interface that can't be derived, such as `Copy` or `Add` (REFERENCE §4.4).";
         NON_EXHAUSTIVE_MATCH = "E0311", "non_exhaustive_match",
@@ -199,13 +199,13 @@ pub mod codes {
         CHECK_FALLS_THROUGH = "E0415", "check_falls_through",
             "The `else` of a `check` must not finish, so it has type `Never`, as `fail` and a block that returns, breaks or continues do (REFERENCE §8.4).";
         USE_AFTER_MOVE = "E0501", "use_after_move",
-            "A unique or resource value is used after it moved (REFERENCE §5.1).";
+            "A unique or resource value, or an owned value of a type parameter without `Copy`, is used after it moved, also on a path where it may have moved, as after a branch or in a loop (REFERENCE §4.8, §5.1).";
         LENT_RESOURCE_CONSUMED = "E0502", "lent_resource_consumed",
             "A borrowed or `inout` resource cannot be passed to `take` or used by a `take self` method (REFERENCE §10).";
         NOT_COPYABLE = "E0503", "not_copyable",
-            "A borrowed or `inout` value of a type parameter without `Copy`, or of a type built from one, is copied: bound to a new name, assigned, stored in a value, returned or failed with (REFERENCE §4.8).";
+            "A borrowed or `inout` value of a type parameter without `Copy`, or of a type built from one such as `Option[T]`, is copied: bound to a new name, assigned, stored in a value, returned or failed with, passed to `take`, or consumed by `for … in take` (REFERENCE §4.8).";
         LENT_VALUE_MOVED = "E0504", "lent_value_moved",
-            "A borrowed or `inout` value of a unique type, or a part of one, is moved: bound, assigned, returned, stored, passed to `take`, consumed by `for … in take`, or by a `take self` method or `with` (REFERENCE §5.1, §5.2).";
+            "A borrowed or `inout` value of a unique type, or a part of one, is moved: bound to a new name, assigned, returned, stored in a value, passed to `take`, consumed by `for … in take`, or by a `take self` method or `with` (REFERENCE §5.1, §5.2). What an arm's pattern binds is lent to the arm's guard, so moving it there is the same mistake (OPEN_QUESTIONS P5).";
         OVERLAPPING_ACCESS = "E0505", "overlapping_access",
             "Two accesses to one variable overlap in a call while one of them is `inout`, such as `swap(a: &x, b: &x)`, or a value lent to a call is moved in it (REFERENCE §5.3).";
         INOUT_MARKER_MISMATCH = "E0506", "inout_marker_mismatch",

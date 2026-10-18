@@ -4130,7 +4130,11 @@ impl Checker<'_> {
             return Ty::Error;
         }
         if let (Ty::Adt(AdtId::POOL, _), "update") = (&receiver_ty, name) {
-            self.not_implemented(method.span, "`Pool.update`, whose `change` is a closure,", Planned::Phase(3));
+            self.not_implemented(
+                method.span,
+                "calls of `Pool.update`, whose `change` is a closure,",
+                Planned::Phase(2),
+            );
             self.rejected_args(args);
             return Ty::Error;
         }

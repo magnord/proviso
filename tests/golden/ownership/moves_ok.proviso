@@ -1,10 +1,11 @@
 // phase: 2.7
 // A value that moved may be used again once it is assigned a new value. A move on a path
 // that then leaves by `return` or a diverging fallback moves nothing for the code after it,
-// and one followed by `break` moves nothing for the loop's next turn (REFERENCE §5.1). A binding declared in a loop body is a new value on
-// each turn. Moving a field leaves the record's other fields usable, and assigning the
-// field makes the record whole again. Copyable values, handles among them, are copied, so
-// they never move, and neither does a value of a type parameter with `Copy` (§4.8).
+// and one followed by `break` moves nothing for the loop's next turn (REFERENCE §5.1). A
+// binding declared in a loop body is a new value on each turn. Moving a field leaves the
+// record's other fields usable, and assigning the field makes the record whole again.
+// Copyable values, handles among them, are copied, so they never move, and neither does a
+// value of a type parameter with `Copy` (§4.8).
 // Borrowing a value, as a method's receiver or a borrowed argument, doesn't move it, and a
 // `_` inside a pattern moves nothing (§6.4). A loop that doesn't consume its list goes over
 // a snapshot, so its body may still change the list.

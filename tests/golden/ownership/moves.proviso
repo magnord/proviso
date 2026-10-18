@@ -4,11 +4,10 @@
 // a record or a variant, into an element of a list, tuple or map, into a `take` parameter,
 // through a consuming loop, and into the bindings of a pattern (§6.4). Moving a field leaves
 // the rest of the record usable, and `with` on a record that holds a unique value consumes
-// it (§4.4). A
-// consuming loop owns each element, so it can move it on (§6.5). A `var` that moved holds a
-// new value once assigned. A `unique record` moves, and so does a value of a type parameter
-// without `Copy`. An arm's pattern moves the scrutinee only once its guard holds, so the
-// next arm may still use it.
+// it (§4.4). A consuming loop owns each element, so it can move it on (§6.5). A `var` that
+// moved holds a new value once assigned. A `unique record` moves, and so does a value of a
+// type parameter without `Copy`. An arm's pattern moves the scrutinee only once its guard
+// holds, so the next arm may still use it.
 use std.io { IoError }
 use std.pool { Pool }
 

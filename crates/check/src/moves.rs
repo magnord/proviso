@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 
 use proviso_syntax::ast::*;
-use proviso_syntax::diag::{Code, Diagnostics, codes};
+use proviso_syntax::diag::{Code, Diagnostics, Planned, codes};
 use proviso_syntax::source::Span;
 
 use crate::decls::{AdtId, IfaceId};
@@ -50,14 +50,22 @@ pub(crate) fn check(
         loops: Vec::new(),
         reported: HashSet::new(),
         errors: Vec::new(),
+        later: Vec::new(),
         moves_out: HashSet::new(),
         arms_out: HashSet::new(),
         guarded: Vec::new(),
     };
     walk.block(body);
-    let (errors, moves_out, arms_out) = (walk.errors, walk.moves_out, walk.arms_out);
+    let (errors, later, moves_out, arms_out) = (walk.errors, walk.later, walk.moves_out, walk.arms_out);
     for (code, span, message) in errors {
         diags.error(code, span, message);
+    }
+    for span in later {
+        diags.not_implemented(
+            span,
+            "`&` accesses to two elements whose indices only a fact can tell apart (§5.3)",
+            Planned::Phase(5),
+        );
     }
     for e in moves_out {
         p.moves_out.insert(e, ());
@@ -115,22 +123,46 @@ fn is_prefix(short: &[u32], long: &[u32]) -> bool {
     short.len() <= long.len() && long[..short.len()] == *short
 }
 
-/// A step of an access path: a field, or an element, whose index is known when it is a
-/// literal.
+/// A step of an access path: a field, or an element by its index.
 #[derive(Clone, Copy, PartialEq)]
 enum Step {
     Field(u32),
-    Element(Option<u128>),
+    Element(Index),
 }
 
-/// Whether two access paths of one local may reach the same memory: one is a prefix of the
-/// other, where elements differ only when both indices are literals that differ.
-fn overlap(a: &[Step], b: &[Step]) -> bool {
-    a.iter().zip(b).all(|pair| match pair {
-        (Step::Element(Some(x)), Step::Element(Some(y))) => x == y,
-        (Step::Element(_), Step::Element(_)) => true,
-        (x, y) => x == y,
-    })
+/// An element's index, as far as two can be told apart without facts.
+#[derive(Clone, Copy, PartialEq)]
+enum Index {
+    Literal(u128),
+    Local(LocalId),
+    Other,
+}
+
+/// Whether two access paths of one local reach the same memory.
+#[derive(PartialEq)]
+enum Overlap {
+    No,
+    Yes,
+    /// Only a fact about two indices, such as `i != j`, can tell (§5.3).
+    Unknown,
+}
+
+/// Whether two access paths of one local reach the same memory: one is a prefix of the
+/// other. Two elements are the same when their indices are the same literal or variable,
+/// and differ when they are different literals.
+fn overlap(a: &[Step], b: &[Step]) -> Overlap {
+    let mut unknown = false;
+    for pair in a.iter().zip(b) {
+        match pair {
+            (Step::Element(Index::Literal(x)), Step::Element(Index::Literal(y))) if x != y => return Overlap::No,
+            (Step::Element(Index::Literal(_)), Step::Element(Index::Literal(_))) => {}
+            (Step::Element(Index::Local(x)), Step::Element(Index::Local(y))) if x == y => {}
+            (Step::Element(_), Step::Element(_)) => unknown = true,
+            (x, y) if x != y => return Overlap::No,
+            _ => {}
+        }
+    }
+    if unknown { Overlap::Unknown } else { Overlap::Yes }
 }
 
 /// How an argument or receiver of a call reaches a place for the length of the call.
@@ -170,6 +202,8 @@ struct Walk<'a> {
     /// A loop's body is walked more than once, so each mistake is reported once.
     reported: HashSet<(&'static str, Span)>,
     errors: Vec<(Code, Span, String)>,
+    /// Accesses whose disjointness needs the verifier.
+    later: Vec<Span>,
     moves_out: HashSet<ExprId>,
     arms_out: HashSet<PatId>,
     /// The locals an arm's pattern binds, while its guard is walked.
@@ -248,11 +282,15 @@ impl Walk<'_> {
             },
             ExprKind::Index { base, index } => {
                 let (id, mut steps) = self.access_path(base)?;
-                let literal = match self.m.exprs[index].kind {
-                    ExprKind::Int(value) => Some(value),
-                    _ => None,
+                let index = match self.m.exprs[index].kind {
+                    ExprKind::Int(value) => Index::Literal(value),
+                    ExprKind::Name(_) => match self.p.res(index) {
+                        Some(Res::Local(id)) => Index::Local(id),
+                        _ => Index::Other,
+                    },
+                    _ => Index::Other,
                 };
-                steps.push(Step::Element(literal));
+                steps.push(Step::Element(index));
                 Some((id, steps))
             }
             _ => None,
@@ -753,18 +791,24 @@ impl Walk<'_> {
         if matches!(access, Access::Lent | Access::Move) && !self.moves(self.p.ty(e)) {
             return;
         }
-        let conflict = accesses.iter().find(|other| {
-            other.local == local
-                && overlap(&other.steps, &steps)
+        let conflict = accesses.iter().find_map(|other| {
+            let overlap = if other.local == local { overlap(&other.steps, &steps) } else { Overlap::No };
+            let conflicts = overlap != Overlap::No
                 && matches!(
                     (other.access, access),
                     (Access::Inout, Access::Inout)
                         | (Access::Inout, Access::Lent)
                         | (Access::Lent, Access::Inout)
                         | (Access::Lent, Access::Move)
-                )
+                );
+            conflicts.then_some((other, overlap))
         });
-        if let Some(other) = conflict {
+        if let Some((_, Overlap::Unknown)) = conflict {
+            let span = self.span(e);
+            if self.reported.insert((codes::NOT_IMPLEMENTED.id, span)) {
+                self.later.push(span);
+            }
+        } else if let Some((other, _)) = conflict {
             let (here, there) = (self.describe(e), self.describe(other.expr));
             let message = match (other.access, access) {
                 (Access::Lent, Access::Move) => {
@@ -772,9 +816,6 @@ impl Walk<'_> {
                         "`{here}` is lent to this call by an earlier argument, so it can't also move into it (§5.3)"
                     )
                 }
-                _ if other.steps.iter().chain(&steps).any(|s| *s == Step::Element(None)) => format!(
-                    "`{here}` may overlap `{there}`, which this call also reaches while one of them is `inout`; two elements are known to differ only when their indices are different literals (§5.3; OPEN_QUESTIONS P5)"
-                ),
                 _ if here == there => {
                     format!("this call reaches `{here}` twice while one of the accesses is `inout` (§5.3)")
                 }
