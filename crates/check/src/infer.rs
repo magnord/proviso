@@ -54,6 +54,9 @@ pub struct Open {
     /// `Never`, as the hole is, unless something gives it a type, and a `Never` it settles as
     /// may stand for another type (Q25; issue #30).
     pub hole: bool,
+    /// It is in the error type of a call that an enclosing `try`, `attempt`, `else` form or
+    /// example marks, which the handler joins, so a later receiver leaves it open.
+    pub handled: bool,
     pub origin: Origin,
 }
 
@@ -188,6 +191,7 @@ impl Vars {
             unmarked: false,
             owed: false,
             hole: false,
+            handled: false,
             origin,
         }));
         Ty::Var(self.count() - 1)
@@ -202,6 +206,7 @@ impl Vars {
             unmarked: false,
             owed: false,
             hole: false,
+            handled: false,
             origin: Origin::Defaulted,
         }));
         Ty::Var(self.count() - 1)
@@ -409,6 +414,43 @@ impl Vars {
         false
     }
 
+    /// Whether open variable `v` is in the error type of a call a handler marks.
+    pub fn handled(&self, v: u32) -> bool {
+        self.open(v).is_some_and(|open| open.handled)
+    }
+
+    /// Marks every open variable in `ty` as one a handler joins, or no longer. It visits a
+    /// variable once per place it appears rather than collecting each once, so a wide type
+    /// costs its size.
+    pub fn set_handled(&mut self, ty: &Ty, on: bool) {
+        let mut found = Vec::new();
+        self.each_open(ty, &mut found);
+        for v in found {
+            if let State::Open(open) = &mut self.states[v as usize] {
+                open.handled = on;
+            }
+        }
+    }
+
+    /// The open variables in `ty`, by their roots, as many times as they appear.
+    fn each_open(&self, ty: &Ty, found: &mut Vec<u32>) {
+        if !self.has_var(ty) {
+            return;
+        }
+        match ty {
+            Ty::Var(v) => match &self.states[*v as usize] {
+                State::Open(_) => found.push(*v),
+                State::Bound(next) => {
+                    if self.ground_of(*v).is_none() {
+                        self.each_open(next, found);
+                    }
+                }
+            },
+            Ty::Adt(_, args) => args.iter().for_each(|arg| self.each_open(arg, found)),
+            _ => {}
+        }
+    }
+
     /// Marks every open variable in `ty` as one a `try` with no `fails` to take it needs.
     pub fn owe(&mut self, ty: &Ty) {
         self.mark(ty, |open| open.owed = true);
@@ -492,9 +534,10 @@ impl Vars {
         let unmarked = kept.unmarked || other.unmarked;
         let owed = kept.owed || other.owed;
         let hole = kept.hole || other.hole;
+        let handled = kept.handled || other.handled;
         // An error about the class names the value that first left it open.
         let origin = if matches!(kept.origin, Origin::Defaulted) { other.origin } else { kept.origin };
-        self.states[keep as usize] = State::Open(Open { kind, never, quiet, unmarked, owed, hole, origin });
+        self.states[keep as usize] = State::Open(Open { kind, never, quiet, unmarked, owed, hole, handled, origin });
         self.states[gone as usize] = State::Bound(Ty::Var(keep));
         self.trail.push(gone);
         true
@@ -509,7 +552,7 @@ impl Vars {
             open.never = true;
             return true;
         }
-        let (kind, marks) = (open.kind, (open.quiet, open.hole));
+        let (kind, marks) = (open.kind, (open.quiet, open.hole, open.handled));
         if !Self::fits(kind, ty) || self.occurs(v, ty) {
             return false;
         }
@@ -519,14 +562,17 @@ impl Vars {
         true
     }
 
-    /// A variable that a rejected value was to give, or that a `todo` hole met, bound to
-    /// `ty`, passes that on to what `ty` leaves open.
-    fn bind_marks(&mut self, (quiet, hole): (bool, bool), ty: &Ty) {
+    /// A variable that a rejected value was to give, that a `todo` hole met, or that a
+    /// handler joins, bound to `ty`, passes that on to what `ty` leaves open.
+    fn bind_marks(&mut self, (quiet, hole, handled): (bool, bool, bool), ty: &Ty) {
         if quiet {
             self.quiet(ty);
         }
         if hole {
             self.hole(ty);
+        }
+        if handled {
+            self.set_handled(ty, true);
         }
     }
 
@@ -534,7 +580,7 @@ impl Vars {
     fn exact(&mut self, v: u32, ty: &Ty) -> bool {
         let v = self.root(v);
         let State::Open(open) = &self.states[v as usize] else { unreachable!("roots are open") };
-        let marks = (open.quiet, open.hole);
+        let marks = (open.quiet, open.hole, open.handled);
         if !Self::fits(open.kind, ty) || self.occurs(v, ty) {
             return false;
         }

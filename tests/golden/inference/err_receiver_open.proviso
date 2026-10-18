@@ -13,7 +13,8 @@
 // So `.show()` on an `Option[E]` whose `E` settles as a type without `Show` is
 // E0303, as it is when the type is known first. A receiver that is the error type itself
 // needs its head, so it joins the chain's other error types and what the handler knows
-// first, and a value that gives it only after the chain still comes too late (k1, issue
+// first. Where those disagree, the handler reports that alone (d1 to d4, m1 to m7). A
+// value that gives it only after the chain still comes too late (k1, issue
 // #NN). Each line gets the error-type verdict of its rewrite without the method or with its
 // operands swapped. Whether the receiver has the method is a check of its own, so a line
 // such as b2 is E0303 where its rewrite without the method checks. `err_receiver_holes`
@@ -42,6 +43,10 @@ impl Box {
 
     fn give[E: Copy](self, e: E) -> E fails E {
         return e
+    }
+
+    fn again[E: Copy](self, e: E) -> Box fails E {
+        return self
     }
 }
 
@@ -173,6 +178,21 @@ fn mismatched_bare() -> Int fails Bare {
     return 0
 }
 
+fn disagreeing(small: Int8) -> Int {
+    let d1 = attempt boxof(e: 1).again(e: "d1").give(e: stop())                // <- E0301
+    let d2 = attempt boxof(e: 2).again(e: "d2").give(e: stop()).byte_len()     // <- E0301
+    let d3 = boxof(e: 3).again(e: "d3").give(e: stop()).byte_len() else 0      // <- E0301
+    let d4: Result[Int, Text] = attempt boxof(e: 4).again(e: "d4").give(e: stop()).byte_len() // <- E0301
+    let d5 = attempt boxof(e: 5).again(e: small).give(e: stop()).byte_len()    // <- E0303
+    return 0
+}
+
+fn rejected_int() -> Int fails Int {
+    let p1 = try boxof(e: nosuch).give(e: stop())                  // <- E0201
+    let p2 = try boxof(e: nosuch).give(e: stop()).byte_len()       // <- E0201
+    return 0
+}
+
 fn rejected() -> Int {
     let r1 = attempt boxof(e: nosuch).give(e: stop())              // <- E0201
     let r2 = attempt boxof(e: nosuch).give(e: stop()).byte_len()   // <- E0201
@@ -188,3 +208,4 @@ example boxof(e: "x").give(e: stop()).byte_len() fails _
 example boxof(e: Bare(n: 1)).wrap(e: stop()) fails _
 example boxof(e: Bare(n: 1)).wrap(e: stop()).show() fails _       // <- E0303
 example boxof(e: nosuch).give(e: stop()).byte_len() fails _        // <- E0201
+example boxof(e: 1).again(e: "x").give(e: stop()).byte_len() fails _ // <- E0301

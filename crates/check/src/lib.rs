@@ -677,79 +677,137 @@ impl Checker<'_> {
     /// by its handler's join or by the statement around it, never by that receiver. Only
     /// `Never` or a `todo` hole may have reached it yet, and a value after the chain, such as
     /// `== Err("x")` or the `it` of a fallback, may still give it its type. So:
-    /// - Inside the receiver's type arguments it stays open. The caller finds the method on
-    ///   [`Vars::as_never`] of the type, where it implements every interface, as the `Never`
-    ///   the variable would have settled as does. An interface method found that way is
-    ///   checked again once the variable settles ([`Pending::Method`]).
+    /// - Each such variable in the receiver first joins what its handler knows now (see
+    ///   [`Checker::join_known`]), which the handler would join it with anyway. One that is
+    ///   still open stays open. The caller finds the method on [`Vars::as_never`] of the
+    ///   type, where it implements every interface, as the `Never` it would have settled as
+    ///   does. An interface method found that way is checked again once it settles
+    ///   ([`Pending::Method`]).
     /// - The one exception is a variable at the receiver's head, since finding the member
-    ///   needs the type itself. It first joins what its handler knows now, which is a `try`'s
-    ///   `fails` or the `Result` an `attempt` is expected to be, and the error types of the
-    ///   chain's other calls (see [`Checker::join_known`]). Then it settles, and a value after
-    ///   the chain is too late for it.
+    ///   needs the type itself. After the join it settles, and a value after the chain is too
+    ///   late for it. Where what the handler knows disagrees, the handler reports that, and
+    ///   the receiver is an error, so its member isn't reported too (§15.1).
     ///
     /// Every other open variable settles as [`Checker::force`] settles it.
     fn force_receiver(&mut self, ty: &Ty) -> Ty {
         if !self.vars.has_var(ty) {
             return ty.clone();
         }
-        if let Ty::Var(v) = self.vars.resolve(ty) {
-            self.join_known(v);
-        }
-        let mut marked = Vec::new();
-        for marker in &self.markers {
-            for err in &marker.errors {
-                self.vars.open_in(err, &mut marked);
+        let head = match self.vars.resolve(ty) {
+            Ty::Var(v) => Some(self.vars.root(v)),
+            _ => None,
+        };
+        let mut open = Vec::new();
+        self.vars.open_in(ty, &mut open);
+        for &v in &open {
+            if self.marked(v) && !self.join_known(v, head == Some(v)) && head == Some(v) {
+                return Ty::Error;
             }
         }
         let mut open = Vec::new();
         self.vars.open_in(ty, &mut open);
-        if let Ty::Var(v) = self.vars.resolve(ty) {
-            marked.retain(|&m| m != self.vars.root(v));
-        }
-        open.retain(|v| !marked.contains(v));
+        open.retain(|&v| head == Some(v) || !self.marked(v));
         self.settle_vars(open);
         self.vars.zonk(ty)
     }
 
-    /// Joins open variable `v`, if it is in the error type of a call a handler marks, with
-    /// what that handler knows now (see [`Checker::force_receiver`]), in the order the handler
+    /// Whether open variable `v` is in the error type of a call a handler marks.
+    fn marked(&self, v: u32) -> bool {
+        self.vars.handled(v)
+    }
+
+    /// Leaves the innermost handler, whose error types the enclosing ones no longer leave
+    /// open unless one of them marks them too.
+    fn pop_marker(&mut self) -> Vec<Ty> {
+        let Some(marker) = self.markers.pop() else { return Vec::new() };
+        for err in &marker.errors {
+            self.vars.set_handled(err, false);
+        }
+        for outer in &self.markers {
+            for err in &outer.errors {
+                self.vars.set_handled(err, true);
+            }
+        }
+        marker.errors
+    }
+
+    /// Joins open variable `v`, if it is the error type of a call a handler marks, with what
+    /// that handler knows now (see [`Checker::force_receiver`]), in the order the handler
     /// compares them. A `try` compares each call's error type with its function's `fails`, so
     /// that comes first. The other handlers join the chain's error types and then compare
-    /// their join with an `attempt`'s expected `Result`, so those come first. Each takes the
-    /// first that gives `v` a type. So a mismatch is the one the handler reports, and not
-    /// also a member the receiver lacks (§15.1). A `try` whose `fails` already disagrees with
-    /// another call reports that call, so `v`, which either may have been meant to give,
-    /// is an error, which the `try` doesn't report again. A rejected call's error type
-    /// poisons `v` too, since that call may have given it its type.
-    fn join_known(&mut self, v: u32) {
+    /// their join with an `attempt`'s expected `Result`, so those come first. `v` takes the
+    /// first that gives it a type.
+    ///
+    /// Returns false, and leaves `v` open, where the types `v` would join disagree, since
+    /// either may have been the one meant to give it. The handler reports that mismatch
+    /// (§15.1). At the receiver's `head`, a `try` whose `fails` disagrees with another call,
+    /// or with a rejected one, reports that call alone, so there `v` is an error, which it
+    /// doesn't report again. Elsewhere at the head a rejected call's error type poisons `v`,
+    /// since it may have given its type. Inside the receiver's type arguments `v` only joins
+    /// a type all of them agree on, so a member no type argument gives is still reported.
+    fn join_known(&mut self, v: u32, head: bool) -> bool {
         let v = self.vars.root(v);
         let holds = |vars: &Vars, err: &Ty| matches!(vars.resolve(err), Ty::Var(w) if vars.root(w) == v);
         let Some(marker) = self.markers.iter().rev().find(|m| m.errors.iter().any(|err| holds(&self.vars, err))) else {
-            return;
+            return true;
         };
-        let errors = marker.errors.iter().filter(|err| !holds(&self.vars, err)).cloned();
+        let errors: Vec<Ty> = marker.errors.iter().filter(|err| !holds(&self.vars, err)).cloned().collect();
         let (handler, target) = (marker.handler, marker.target.clone());
+        // The error types the calls already have, or a literal's, which the handler joins.
+        let closed: Vec<Ty> = errors.iter().filter_map(|err| self.known(err)).filter(|err| *err != Ty::Never).collect();
+        let err = Ty::Var(v);
         if let (None, Some(target)) = (handler, &target) {
             let target = self.vars.zonk(target);
-            let disagrees = errors
-                .clone()
-                .map(|err| self.vars.zonk(&err))
-                .any(|err| err != Ty::Error && err != Ty::Never && err != target && !self.vars.has_open(&err));
-            if disagrees {
-                self.vars.poison(&Ty::Var(v));
-                return;
+            if closed.iter().any(|known| !self.agree(known, &target)) {
+                if head {
+                    self.vars.poison(&err);
+                }
+            } else {
+                let _ = self.vars.subsume(&target, &err) && self.vars.subsume(&err, &target);
             }
+            return true;
         }
-        let known: Vec<Ty> = match handler {
-            None => target.into_iter().chain(errors).collect(),
-            Some(_) => errors.chain(target).collect(),
-        };
-        let err = Ty::Var(v);
+        if closed.contains(&Ty::Error) {
+            if head {
+                self.vars.poison(&err);
+            }
+            return true;
+        }
+        if closed.iter().any(|known| !self.agree(known, &closed[0])) {
+            return false;
+        }
+        let known: Vec<Ty> = errors.into_iter().chain(target).collect();
         for known in &known {
             if !matches!(self.vars.resolve(&err), Ty::Var(_)) {
                 break;
             }
             let _ = self.vars.subsume(known, &err) && self.vars.subsume(&err, known);
+        }
+        true
+    }
+
+    /// `ty` where nothing more can change what it joins with: a type without open variables,
+    /// or an open literal variable, which joins only a number type of its kind.
+    fn known(&self, ty: &Ty) -> Option<Ty> {
+        let ty = self.vars.zonk(ty);
+        match ty {
+            Ty::Var(v) if self.vars.open(v).is_some_and(|open| open.kind != Kind::Any) => Some(Ty::Var(v)),
+            ty if !self.vars.has_open(&ty) => Some(ty),
+            _ => None,
+        }
+    }
+
+    /// Whether types `a` and `b`, which [`Checker::known`] gave, join.
+    fn agree(&self, a: &Ty, b: &Ty) -> bool {
+        let kind = |ty: &Ty| match ty {
+            Ty::Var(v) => self.vars.open(*v).map(|open| open.kind),
+            Ty::Int(_) => Some(Kind::Int),
+            Ty::Float(_) => Some(Kind::Float),
+            _ => None,
+        };
+        match (a, b) {
+            (Ty::Var(_), _) | (_, Ty::Var(_)) => kind(a).is_some() && kind(a) == kind(b),
+            _ => a == b,
         }
     }
 
@@ -2412,7 +2470,7 @@ impl Checker<'_> {
         self.markers.push(Marker { handler: Some(decl.call), errors: Vec::new(), target: None });
         self.in_chain = true;
         let ty = self.expr(decl.call, None);
-        let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
+        let errors = self.pop_marker();
         let span = self.span(decl.call);
         let hole = self.met_hole(&errors);
         let err = self.one_error(errors, span, "example", "an example expects one error type");
@@ -3514,7 +3572,7 @@ impl Checker<'_> {
         self.in_chain = true;
         self.copying = copying;
         let value_ty = self.expr(value, None);
-        let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
+        let errors = self.pop_marker();
         let span = self.span(e);
         let hole = self.met_hole(&errors);
         let it = match self.one_error(errors, span, "`else`", "`it` has one type") {
@@ -4619,6 +4677,7 @@ impl Checker<'_> {
                 // Its handler joins the error type. A later receiver leaves it open inside its
                 // type arguments (see `force_receiver`).
                 marker.errors.push(err.clone());
+                self.vars.set_handled(err, true);
                 if let Some(handler) = marker.handler {
                     self.p.handler_of.insert(call, handler);
                 }
@@ -4652,7 +4711,7 @@ impl Checker<'_> {
         self.markers.push(Marker { handler: None, errors: Vec::new(), target });
         self.in_chain = true;
         let ty = self.expr(inner, expected);
-        let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
+        let errors = self.pop_marker();
         // A chain with an error may hold the fallible call that didn't resolve.
         let rejected = ty == Ty::Error;
         if errors.is_empty() && !rejected {
@@ -4740,7 +4799,7 @@ impl Checker<'_> {
         self.markers.push(Marker { handler: Some(e), errors: Vec::new(), target });
         self.in_chain = true;
         let ty = self.expr(inner, value_expected.as_ref());
-        let errors = self.markers.pop().map(|m| m.errors).unwrap_or_default();
+        let errors = self.pop_marker();
         let hole = self.met_hole(&errors);
         match self.one_error(errors, span, "`attempt`", "its `Result` has one error type") {
             // A chain with an error may hold the fallible call that didn't resolve.
