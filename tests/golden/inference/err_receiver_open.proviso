@@ -8,7 +8,8 @@
 // `else` fallback gives the same verdict as the chain without the method, and the same in
 // either operand order (OPEN_QUESTIONS P5, `fails Never`; issue #37). The method is found
 // as if those error types were `Never`, and an interface method is checked again once they
-// settle. So `.show()` on an `Option[E]` whose `E` settles as a type without `Show` is
+// settle, also where the method's own argument gives them, as `.eq(other: Some(…))` does.
+// So `.show()` on an `Option[E]` whose `E` settles as a type without `Show` is
 // E0303, as it is when the type is known first. A receiver that is the error type itself
 // needs its head, so it joins the chain's other error types and what the handler knows
 // first, and a value that gives it only after the chain still comes too late (k1).
@@ -20,6 +21,10 @@ record Box {
 }
 
 record Bare derives(Eq) {
+    n: Int
+}
+
+record Plain {
     n: Int
 }
 
@@ -71,6 +76,15 @@ fn after() -> Int {
     let a6 = attempt boxof(e: stop()).wrap(e: stop()).show() == Err("a6")
     let a7 = attempt boxof(e: stop()).wrap(e: stop()).show().byte_len() == Err("a7")
     let a8 = Err("a8") == attempt boxof(e: stop()).wrap(e: stop()).show().byte_len()
+    let a9 = attempt wrapped(e: stop()).eq(other: Some("a9"))
+    return 0
+}
+
+fn literals(small: Int8) -> Int {
+    let l1 = attempt boxof(e: small).wrap(e: 1).show()
+    let l2 = attempt wrapped(e: 2).show() == Err(small)
+    let l3 = Err(small) == attempt wrapped(e: 3).show()
+    let l4 = attempt wrapped(e: 4) == Err(small)
     return 0
 }
 
@@ -82,6 +96,7 @@ fn without_show() -> Int {
     let b5 = attempt boxof(e: Bare(n: 5)).wrap(e: stop())
     let b6 = attempt boxof(e: Bare(n: 6)).wrap(e: stop()).show()   // <- E0303
     let b7 = attempt boxof(e: stop()).wrap(e: Bare(n: 7)).show()   // <- E0303
+    let b8 = attempt wrapped(e: stop()).eq(other: Some(Plain(n: 8))) // <- E0303
     return 0
 }
 
@@ -126,6 +141,8 @@ fn heads() -> Int {
     let h1 = attempt boxof(e: "h1").give(e: stop()).byte_len()
     let h2 = Err("h2") == attempt give2(e: stop()).byte_len()
     let h3 = boxof(e: "h3").give(e: stop()).byte_len() else 0
+    let h4 = attempt boxof(e: Box(n: 4)).give(e: stop()).n
+    let h5 = attempt boxof(e: [5]).give(e: stop())[0]
     return 0
 }
 

@@ -275,11 +275,16 @@ impl Vars {
         }
     }
 
-    /// `ty` zonked, with each open variable read as `Never`, which implements every interface
-    /// as a type argument. A method found on it may need checking again once they settle.
+    /// `ty` zonked, with an open literal variable as its default and any other open variable
+    /// read as `Never`, which implements every interface as a type argument. A method found on
+    /// it may need checking again once they settle.
     pub fn as_never(&self, ty: &Ty) -> Ty {
         match self.resolve(ty) {
-            Ty::Var(_) => Ty::Never,
+            Ty::Var(v) => match self.open(v).map(|open| open.kind) {
+                Some(Kind::Int) => Ty::INT,
+                Some(Kind::Float) => Ty::Float(FloatTy::F64),
+                _ => Ty::Never,
+            },
             Ty::Adt(id, args) if self.has_var(ty) => {
                 Ty::applied(id, args.iter().map(|arg| self.as_never(arg)).collect())
             }
