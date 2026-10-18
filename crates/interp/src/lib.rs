@@ -862,6 +862,26 @@ impl Interp<'_> {
         Ok((root, path))
     }
 
+    /// Takes the value of the local or field `e` names out of its place, which nothing reads
+    /// again before it is assigned (REFERENCE §5.1), so what it holds isn't copied.
+    fn take_out(&self, e: ExprId, frame: &mut Frame) -> Option<Value> {
+        let mut path = Vec::new();
+        let mut at = e;
+        let root = loop {
+            match (&self.m.exprs[at].kind, self.p.res(at)) {
+                (ExprKind::Name(_) | ExprKind::It, Some(Res::Local(id))) => break id,
+                (ExprKind::Field { base, .. }, Some(Res::Field(i))) => {
+                    path.push(Step::Field(i));
+                    at = *base;
+                }
+                _ => return None,
+            }
+        };
+        path.reverse();
+        let place = slot(&mut frame[root.index()], &path).ok()?;
+        Some(std::mem::replace(place, Value::Unit))
+    }
+
     fn jump_target(&self, s: StmtId) -> ExprId {
         *self.p.jump_target.get(s).expect("jumps are resolved")
     }
@@ -918,8 +938,8 @@ impl Interp<'_> {
             ExprKind::Name(_) => match self.p.res(e) {
                 // A value that moves leaves its local, which nothing reads again before it is
                 // assigned (REFERENCE §5.1), so a pool or list that moves isn't copied.
-                Some(Res::Local(id)) if self.p.moves_out.get(e).is_some() => {
-                    std::mem::replace(&mut frame[id.index()], Value::Unit)
+                Some(Res::Local(_)) if self.p.moves_out.get(e).is_some() => {
+                    self.take_out(e, frame).expect("a moved name is a local")
                 }
                 Some(Res::Local(id)) => frame[id.index()].clone(),
                 Some(Res::Ctor(def, variant)) => Value::Adt(Adt { def, variant, fields: Arc::from([]) }),
@@ -1020,6 +1040,12 @@ impl Interp<'_> {
             ExprKind::Field { base, .. } => {
                 if let Some(Res::Ctor(def, variant)) = self.p.res(e) {
                     return Ok(Value::Adt(Adt { def, variant, fields: Arc::from([]) }));
+                }
+                // A field that moves leaves its record, as a local's value does.
+                if self.p.moves_out.get(e).is_some()
+                    && let Some(value) = self.take_out(e, frame)
+                {
+                    return Ok(value);
                 }
                 let Some(Res::Field(i)) = self.p.res(e) else { unreachable!("fields are resolved") };
                 let Value::Adt(adt) = self.expr(*base, frame)? else { unreachable!("fields are read from records") };
@@ -1142,10 +1168,7 @@ impl Interp<'_> {
                     }
                     // An arm whose pattern moves the scrutinee takes it out of its local once
                     // the arm is chosen, so what the pattern bound isn't copied.
-                    if self.p.arms_out.get(arm.pat).is_some()
-                        && let Some(Res::Local(id)) = self.p.res(*scrutinee)
-                    {
-                        frame[id.index()] = Value::Unit;
+                    if self.p.arms_out.get(arm.pat).is_some() && self.take_out(*scrutinee, frame).is_some() {
                         drop(value);
                     }
                     return self.block(&arm.body, frame);

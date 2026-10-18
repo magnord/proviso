@@ -7,7 +7,8 @@
 // it (§4.4). A consuming loop owns each element, so it can move it on (§6.5). A `var` that
 // moved holds a new value once assigned. A `unique record` moves, and so does a value of a
 // type parameter without `Copy`. An arm's pattern moves the scrutinee only once its guard
-// holds, so the next arm may still use it.
+// holds, so the next arm may still use it. A record whose predicate reads a moved field
+// can still have its other fields assigned.
 use std.io { IoError }
 use std.pool { Pool }
 
@@ -136,6 +137,19 @@ fn renamed() -> Text {
     return f"{other.name} {other.pool.len()}"
 }
 
+record Guarded {
+    pool: Pool[Text]
+    n: Int
+} where n >= 0 and pool.len() >= 0
+
+fn refined_field() -> Text {
+    var g = Guarded(pool: filled("r"), n: 1)
+    let p = g.pool
+    g.n = 2
+    g.pool = p
+    return f"{g.pool.len()} {g.n}"
+}
+
 fn guards() -> Text {
     let slot = Slot.Full(pool: filled("g"))
     let n = match slot {
@@ -164,4 +178,5 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(renamed())
     try sys.stdout.write_line(tokens())
     try sys.stdout.write_line(guards())
+    try sys.stdout.write_line(refined_field())
 }

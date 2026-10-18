@@ -4,7 +4,7 @@
 // copies none of it, and neither does passing a list as `inout` to a function that can't
 // fail, so a loop of such calls stays linear (OPEN_QUESTIONS P5). A consuming loop owns
 // each element it takes, and a `match` arm owns what its pattern moves out of the
-// scrutinee.
+// scrutinee. A field that moves out of its record and back is never copied either.
 use std.io { IoError }
 use std.pool { Pool, Handle }
 
@@ -80,10 +80,38 @@ fn matched(n: Int) -> Int {
     }
 }
 
+record Shelf {
+    pool: Pool[Int]
+    slot: Option[Pool[Int]]
+}
+
+fn field_moves(n: Int) -> Int {
+    var shelf = Shelf(pool: Pool.new(), slot: Some(Pool.new()))
+    for i in 0..n {
+        var p = shelf.pool
+        p.insert(i)
+        shelf.pool = p
+        shelf.slot = match shelf.slot {
+            Some(q) => {
+                var mine = q
+                mine.insert(i)
+                Some(mine)
+            }
+            None => None
+        }
+    }
+    let rest = match shelf.slot {
+        Some(q) => q.len()
+        None => 0
+    }
+    return shelf.pool.len() + rest
+}
+
 pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(f"{inserts(1_000_000)}")
     try sys.stdout.write_line(f"{inout_calls(300_000)}")
     try sys.stdout.write_line(f"{moves(300_000)}")
     try sys.stdout.write_line(f"{consumed(100_000)}")
     try sys.stdout.write_line(f"{matched(300_000)}")
+    try sys.stdout.write_line(f"{field_moves(300_000)}")
 }

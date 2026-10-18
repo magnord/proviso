@@ -51,6 +51,7 @@ pub(crate) fn check(
         reported: HashSet::new(),
         errors: Vec::new(),
         later: Vec::new(),
+        lent: Vec::new(),
         moves_out: HashSet::new(),
         arms_out: HashSet::new(),
         guarded: Vec::new(),
@@ -170,13 +171,12 @@ fn overlap(a: &[Step], b: &[Step]) -> Overlap {
 enum Access {
     /// `&x`, or an `inout self` receiver.
     Inout,
-    /// A borrowed argument or receiver of a unique type.
+    /// A borrowed argument or receiver of a unique type, which nothing in the call's later
+    /// arguments may move, at any depth.
     Lent,
-    /// An argument of a unique type that moves into the call. A receiver that moves has
-    /// moved before any `&` argument reaches it, which is a use after move instead.
-    Move,
 }
 
+#[derive(Clone)]
 struct CallAccess {
     access: Access,
     local: LocalId,
@@ -204,6 +204,8 @@ struct Walk<'a> {
     errors: Vec<(Code, Span, String)>,
     /// Accesses whose disjointness needs the verifier.
     later: Vec<Span>,
+    /// What the calls whose arguments are being walked lend, innermost call last.
+    lent: Vec<CallAccess>,
     moves_out: HashSet<ExprId>,
     arms_out: HashSet<PatId>,
     /// The locals an arm's pattern binds, while its guard is walked.
@@ -322,6 +324,23 @@ impl Walk<'_> {
         desc
     }
 
+    /// Whether no record that holds `local`'s `path` has a predicate. A predicate reads the
+    /// whole record when another of its fields is assigned (REFERENCE §9), so a field that
+    /// moves out of one is copied instead of taken out.
+    fn unrefined(&self, local: LocalId, path: &[u32]) -> bool {
+        let mut ty = self.locals[local.index()].ty.clone();
+        for &i in path {
+            let Ty::Adt(id, args) = &ty else { return false };
+            let Some(variant) = self.p.decls.adt(*id).variants.first() else { return false };
+            let Some(field) = variant.fields.get(i as usize) else { return false };
+            if !variant.preds.is_empty() {
+                return false;
+            }
+            ty = field.ty.subst(args);
+        }
+        true
+    }
+
     // ---- places ----
 
     /// Reports a use of `local`'s `path` that may have moved, or a part of which may have.
@@ -360,15 +379,22 @@ impl Walk<'_> {
             self.report(codes::LENT_VALUE_MOVED, self.span(e), message);
             return;
         }
+        let steps: Vec<Step> = path.iter().map(|&i| Step::Field(i)).collect();
+        if self.lent.iter().any(|l| l.local == local && overlap(&l.steps, &steps) != Overlap::No) {
+            let message =
+                format!("`{desc}` is lent to this call by an earlier argument, so it can't also move into it (§5.3)");
+            self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
+            return;
+        }
         let Some(state) = &mut self.state else { return };
         if state.moved.iter().any(|m| m.local == local && is_prefix(&m.path, &path)) {
             return;
         }
         state.moved.retain(|m| !(m.local == local && is_prefix(&path, &m.path)));
-        if path.is_empty() {
+        state.moved.push(Moved { local, path: path.clone(), desc });
+        if self.place(e).is_some_and(|named| named == (local, path.clone())) && self.unrefined(local, &path) {
             self.moves_out.insert(e);
         }
-        state.moved.push(Moved { local, path, desc });
     }
 
     /// Gives `local`'s `path` a new value, which makes it and its parts usable again. A part
@@ -441,11 +467,33 @@ impl Walk<'_> {
     }
 
     /// An assignment's target that isn't a place, such as `xs[i].n`, which uses the
-    /// variable it changes.
+    /// variable it changes once the target's indices are evaluated.
     fn target(&mut self, target: ExprId) {
-        match self.m.exprs[target].kind {
-            ExprKind::Field { base, .. } => self.target(base),
-            _ => self.expr(target),
+        self.indices(target);
+        self.root(target);
+    }
+
+    /// The indices of the place `e`, innermost first, which are evaluated before the place
+    /// is reached (OPEN_QUESTIONS P5).
+    fn indices(&mut self, e: ExprId) {
+        match self.m.exprs[e].kind {
+            ExprKind::Field { base, .. } => self.indices(base),
+            ExprKind::Index { base, index } => {
+                self.indices(base);
+                self.expr(index);
+            }
+            _ => {}
+        }
+    }
+
+    /// Reaching the place `e`, whose indices [`Walk::indices`] walked, uses its variable.
+    fn root(&mut self, e: ExprId) {
+        if self.place(e).is_some() {
+            return self.expr(e);
+        }
+        match self.m.exprs[e].kind {
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => self.root(base),
+            _ => self.expr(e),
         }
     }
 
@@ -752,43 +800,54 @@ impl Walk<'_> {
 
     // ---- calls ----
 
-    /// The arguments of a call, and its receiver with the mode it takes `self` in. An `&`
-    /// argument and an `inout self` receiver are reached once the other arguments are
-    /// evaluated (§5.3), and no two accesses of the call may conflict.
+    /// The arguments of a call, and its receiver with the mode it takes `self` in. The
+    /// indices of an `&` argument and an `inout self` receiver are evaluated in order with
+    /// the other arguments, but the place is reached once they all are (§5.3), and no two
+    /// accesses of the call may conflict.
     fn call(&mut self, receiver: Option<(ExprId, ParamMode)>, args: &[Arg]) {
         let mut accesses: Vec<CallAccess> = Vec::new();
+        let outer = self.lent.len();
         let late = matches!(receiver, Some((_, ParamMode::Inout)));
-        if let Some((receiver, _)) = receiver
-            && !late
-        {
-            self.expr(receiver);
-            // A `take self` receiver, and that of `with` on a unique record, move.
-            if !self.consumed.contains(&receiver) {
-                self.note(&mut accesses, receiver, Access::Lent);
+        match receiver {
+            Some((receiver, _)) if late => self.indices(receiver),
+            Some((receiver, _)) => {
+                self.expr(receiver);
+                // A `take self` receiver, and that of `with` on a unique record, move.
+                if !self.consumed.contains(&receiver) {
+                    self.note(&mut accesses, receiver, Access::Lent);
+                }
+            }
+            None => {}
+        }
+        for arg in args {
+            if arg.inout {
+                self.indices(arg.value);
+                continue;
+            }
+            self.expr(arg.value);
+            // An argument that moves was checked against what the call lends as it moved.
+            if !self.consumed.contains(&arg.value) {
+                self.note(&mut accesses, arg.value, Access::Lent);
             }
         }
-        for arg in args.iter().filter(|arg| !arg.inout) {
-            self.expr(arg.value);
-            let access = if self.consumed.contains(&arg.value) { Access::Move } else { Access::Lent };
-            self.note(&mut accesses, arg.value, access);
-        }
         for arg in args.iter().filter(|arg| arg.inout) {
-            self.expr(arg.value);
+            self.root(arg.value);
             self.note(&mut accesses, arg.value, Access::Inout);
         }
         if let Some((receiver, _)) = receiver
             && late
         {
-            self.expr(receiver);
+            self.root(receiver);
             self.note(&mut accesses, receiver, Access::Inout);
         }
+        self.lent.truncate(outer);
     }
 
     /// Records the access `e` makes for its call, and reports one it conflicts with. A lent
     /// or moved value matters only when its type is unique.
     fn note(&mut self, accesses: &mut Vec<CallAccess>, e: ExprId, access: Access) {
         let Some((local, steps)) = self.access_path(e) else { return };
-        if matches!(access, Access::Lent | Access::Move) && !self.moves(self.p.ty(e)) {
+        if access == Access::Lent && !self.moves(self.p.ty(e)) {
             return;
         }
         let conflict = accesses.iter().find_map(|other| {
@@ -796,10 +855,7 @@ impl Walk<'_> {
             let conflicts = overlap != Overlap::No
                 && matches!(
                     (other.access, access),
-                    (Access::Inout, Access::Inout)
-                        | (Access::Inout, Access::Lent)
-                        | (Access::Lent, Access::Inout)
-                        | (Access::Lent, Access::Move)
+                    (Access::Inout, Access::Inout) | (Access::Inout, Access::Lent) | (Access::Lent, Access::Inout)
                 );
             conflicts.then_some((other, overlap))
         });
@@ -810,21 +866,19 @@ impl Walk<'_> {
             }
         } else if let Some((other, _)) = conflict {
             let (here, there) = (self.describe(e), self.describe(other.expr));
-            let message = match (other.access, access) {
-                (Access::Lent, Access::Move) => {
-                    format!(
-                        "`{here}` is lent to this call by an earlier argument, so it can't also move into it (§5.3)"
-                    )
-                }
-                _ if here == there => {
-                    format!("this call reaches `{here}` twice while one of the accesses is `inout` (§5.3)")
-                }
-                _ => format!(
+            let message = if here == there {
+                format!("this call reaches `{here}` twice while one of the accesses is `inout` (§5.3)")
+            } else {
+                format!(
                     "`{here}` overlaps `{there}`, which this call also reaches while one of them is `inout`, so the call would have two accesses to one variable (§5.3)"
-                ),
+                )
             };
             self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
         }
-        accesses.push(CallAccess { access, local, steps, expr: e });
+        let access = CallAccess { access, local, steps, expr: e };
+        if access.access == Access::Lent {
+            self.lent.push(access.clone());
+        }
+        accesses.push(access);
     }
 }

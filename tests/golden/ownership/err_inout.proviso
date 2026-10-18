@@ -17,7 +17,8 @@
 // overlap, however deep. Two fields are disjoint, and so are two elements whose indices are
 // different literals. Two elements whose indices are the same literal or variable overlap.
 // Other indices need a fact, which ownership/err_not_yet covers. A unique value lent to a
-// call by one argument can't move into it through a later one.
+// call by one argument can't move into it through a later one, at any depth, in a branch or
+// a nested call. It is lent only for the call.
 use std.pool { Pool, Handle }
 
 record Pt {
@@ -117,4 +118,46 @@ fn overlaps(i: Int, j: Int) {
 fn lent_then_moved() {
     let pool: Pool[Int] = Pool.new()
     lend_then_take(a: pool, b: pool)                // <- E0505
+}
+
+fn consume(pool: take Pool[Int]) -> Int {
+    return pool.len()
+}
+
+fn lend_and_count(a: Pool[Int], n: Int) -> Int {
+    return a.len() + n
+}
+
+record Bin {
+    pool: Pool[Int]
+}
+
+fn lent_then_moved_deeper(c: Bool) -> Int {
+    let p: Pool[Int] = Pool.new()
+    let q: Pool[Int] = Pool.new()
+    let bin = Bin(pool: Pool.new())
+    let a = lend_and_count(a: p, n: consume(p))     // <- E0505
+    let b = lend_and_count(a: q, n: if c { consume(q) } else { 0 }) // <- E0505
+    let d = lend_and_count(a: bin.pool, n: consume(bin.pool)) // <- E0505
+    return a + b + d
+}
+
+fn handle_of(pool: take Pool[Int]) -> Handle[Int] {
+    var mine = pool
+    return mine.insert(0)
+}
+
+fn lent_receiver_then_moved() -> Int {
+    let p: Pool[Int] = Pool.new()
+    let n = p.get(handle_of(p)) else 0              // <- E0505
+    return n
+}
+
+fn lent_then_moved_later() -> Int {
+    let p: Pool[Int] = Pool.new()
+    let q: Pool[Int] = Pool.new()
+    let a = lend_and_count(a: p, n: 1)
+    let b = consume(p)
+    let c = lend_and_count(a: Pool.new(), n: consume(q))
+    return a + b + c
 }

@@ -5,7 +5,9 @@
 // element of a list, tuple or map, a consuming loop, or the bindings of a pattern (§6.4).
 // A value moved in one branch, in both, or in a loop body that may run again is moved
 // after it, so is one moved in an `else` fallback or on the right of `and`. A guard that
-// moves a value and fails leaves it moved for every later arm. Moving a field
+// moves a value and fails leaves it moved for every later arm. A target's or an `&`
+// argument's indices run before its variable is reached, so an index that moves the variable
+// leaves nothing to reach, and one that moves a later argument leaves nothing to pass. Moving a field
 // moves only that field, so the record can't be used whole after it, one level down too.
 // A pool is unique (§5.5), and so is a record that holds one, even through an `Option`, a
 // `unique record`, and an owned value of a type parameter without `Copy` (§4.8). `with` on
@@ -19,6 +21,11 @@ unique record Token {
 
 record Holder {
     pool: Pool[Int]
+    n: Int
+}
+
+record Shelf {
+    pools: List[Pool[Int]]
     n: Int
 }
 
@@ -252,6 +259,57 @@ fn by_failed_guard(k: Int) -> Int {
         1 if k > 0 => 2
         _ => a.len()                                // <- E0501
     }
+}
+
+fn size_of(pools: take List[Pool[Int]]) -> Int {
+    return pools.len() - 1
+}
+
+fn size_of_grid(grid: take List[List[Pool[Int]]]) -> Int {
+    return 0
+}
+
+fn shelf_size(h: take Shelf) -> Int {
+    return 0
+}
+
+fn put(x: inout Pool[Int], n: Int) {
+    x.insert(n)
+}
+
+fn set_at(x: inout Int, pool: Pool[Int]) {
+    x = pool.len()
+}
+
+fn by_own_index() {
+    var ps = [fresh()]
+    ps[size_of(ps)] = fresh()                       // <- E0501
+}
+
+fn by_own_index_receiver() {
+    var ps = [fresh()]
+    ps[size_of(ps)].insert(1)                       // <- E0501
+}
+
+fn by_own_index_argument() {
+    var ps = [fresh()]
+    put(x: &ps[size_of(ps)], n: 1)                  // <- E0501
+}
+
+fn by_own_index_field() {
+    var h = Shelf(pools: [fresh()], n: 0)
+    h.pools[shelf_size(h)] = fresh()                // <- E0501
+}
+
+fn by_own_inner_index() {
+    var grid = [[fresh()]]
+    grid[0][size_of_grid(grid)] = fresh()           // <- E0501
+}
+
+fn by_index_of_argument() {
+    var xs = [1, 2]
+    let pool = fresh()
+    set_at(x: &xs[consume(pool)], pool: pool)       // <- E0501
 }
 
 fn in_fallback(o: take Option[Int]) -> Int {

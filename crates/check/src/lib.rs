@@ -220,11 +220,12 @@ pub struct Program {
     /// The local that holds `it` in the fallback of each `else` form on a call that can
     /// fail. An `else` form without one unwraps an `Option`.
     pub it_local: SideTable<Expr, LocalId>,
-    /// The names whose values move out of their locals, which nothing reads again before
-    /// it is assigned (REFERENCE §5.1), so the interpreter may take the value out.
+    /// The locals and fields whose values move out of their places, which nothing reads
+    /// again before they are assigned (REFERENCE §5.1), so the interpreter may take the
+    /// value out.
     pub moves_out: SideTable<Expr, ()>,
-    /// The `match` arms whose patterns move the whole local their scrutinee names, which
-    /// leaves it when the arm is chosen.
+    /// The `match` arms whose patterns move the whole local or field their scrutinee names,
+    /// which leaves its place when the arm is chosen.
     pub arms_out: SideTable<Pat, ()>,
     /// The module's examples, in declaration order.
     pub examples: Vec<ExampleInfo>,
