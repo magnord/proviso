@@ -9,7 +9,9 @@
 // consume its collection binds, and for a branch's value. A copyable value is copied
 // instead, so it may be. In generic code a borrowed value whose type parameter lacks `Copy`
 // is copied in the same places, which needs `Copy` (§4.8), and so is an `inout` one. A
-// consuming loop goes over a list or a map, and a range has nothing to consume (§6.5).
+// consuming loop goes over a list or a map, and a range has nothing to consume (§6.5). A
+// guard may look at what its arm's pattern binds but not move it, since the arm may still
+// not be chosen.
 use std.pool { Pool }
 
 record Holder {
@@ -150,4 +152,35 @@ fn generic_loop[T](xs: List[T]) -> Int {
 
 fn generic_inout[T](x: inout T) -> T {
     return x                                        // <- E0503
+}
+
+fn guard_moves_binding(s: take Slot) -> Int {
+    return match s {
+        Full(pool) if consume(pool) > 0 => 1        // <- E0504
+        _ => 0
+    }
+}
+
+fn guard_moves_tuple_part(pair: take (Pool[Int], Int)) -> Int {
+    return match pair {
+        (p, n) if consume(p) > n => 1               // <- E0504
+        (_, n) => n
+    }
+}
+
+fn guard_looks_at_binding(s: take Slot) -> Int {
+    return match s {
+        Full(pool) if pool.len() > 0 => consume(pool)
+        _ => 0
+    }
+}
+
+fn guard_nested(s: take Slot, k: Int) -> Int {
+    return match s {
+        Full(pool) if match k {
+            0 if k > 1 => true
+            _ => consume(pool) > 0                  // <- E0504
+        } => 1
+        _ => 0
+    }
 }

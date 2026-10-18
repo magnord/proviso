@@ -3,7 +3,8 @@
 // reads and removes of one pool change it in place. Moving a pool to a new name and back
 // copies none of it, and neither does passing a list as `inout` to a function that can't
 // fail, so a loop of such calls stays linear (OPEN_QUESTIONS P5). A consuming loop owns
-// each element it takes.
+// each element it takes, and a `match` arm owns what its pattern moves out of the
+// scrutinee.
 use std.io { IoError }
 use std.pool { Pool, Handle }
 
@@ -61,9 +62,28 @@ fn consumed(n: Int) -> Int {
     return total
 }
 
+fn matched(n: Int) -> Int {
+    var slot: Option[Pool[Int]] = Some(Pool.new())
+    for i in 0..n {
+        slot = match slot {
+            Some(p) if i >= 0 => {
+                var mine = p
+                mine.insert(i)
+                Some(mine)
+            }
+            _ => None
+        }
+    }
+    return match slot {
+        Some(p) => p.len()
+        None => 0
+    }
+}
+
 pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(f"{inserts(1_000_000)}")
     try sys.stdout.write_line(f"{inout_calls(300_000)}")
     try sys.stdout.write_line(f"{moves(300_000)}")
     try sys.stdout.write_line(f"{consumed(100_000)}")
+    try sys.stdout.write_line(f"{matched(300_000)}")
 }

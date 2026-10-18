@@ -223,6 +223,9 @@ pub struct Program {
     /// The names whose values move out of their locals, which nothing reads again before
     /// it is assigned (REFERENCE §5.1), so the interpreter may take the value out.
     pub moves_out: SideTable<Expr, ()>,
+    /// The `match` arms whose patterns move the whole local their scrutinee names, which
+    /// leaves it when the arm is chosen.
+    pub arms_out: SideTable<Pat, ()>,
     /// The module's examples, in declaration order.
     pub examples: Vec<ExampleInfo>,
 }

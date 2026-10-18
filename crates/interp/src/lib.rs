@@ -1140,6 +1140,14 @@ impl Interp<'_> {
                     {
                         continue;
                     }
+                    // An arm whose pattern moves the scrutinee takes it out of its local once
+                    // the arm is chosen, so what the pattern bound isn't copied.
+                    if self.p.arms_out.get(arm.pat).is_some()
+                        && let Some(Res::Local(id)) = self.p.res(*scrutinee)
+                    {
+                        frame[id.index()] = Value::Unit;
+                        drop(value);
+                    }
                     return self.block(&arm.body, frame);
                 }
                 // The checker leaves integer exhaustiveness to run time (OPEN_QUESTIONS P5).

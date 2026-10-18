@@ -4,7 +4,8 @@
 // new name, `let _`, an assignment, a `take` parameter, a field of a record or variant, an
 // element of a list, tuple or map, a consuming loop, or the bindings of a pattern (§6.4).
 // A value moved in one branch, in both, or in a loop body that may run again is moved
-// after it, so is one moved in an `else` fallback or on the right of `and`. Moving a field
+// after it, so is one moved in an `else` fallback or on the right of `and`. A guard that
+// moves a value and fails leaves it moved for every later arm. Moving a field
 // moves only that field, so the record can't be used whole after it, one level down too.
 // A pool is unique (§5.5), and so is a record that holds one, even through an `Option`, a
 // `unique record`, and an owned value of a type parameter without `Copy` (§4.8). `with` on
@@ -242,6 +243,15 @@ fn one_arm(k: Int) -> Int {
         _ => {}
     }
     return a.len()                                  // <- E0501
+}
+
+fn by_failed_guard(k: Int) -> Int {
+    let a = fresh()
+    return match k {
+        0 if consume(a) > 5 => 1
+        1 if k > 0 => 2
+        _ => a.len()                                // <- E0501
+    }
 }
 
 fn in_fallback(o: take Option[Int]) -> Int {

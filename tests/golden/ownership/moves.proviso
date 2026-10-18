@@ -7,7 +7,8 @@
 // it (§4.4). A
 // consuming loop owns each element, so it can move it on (§6.5). A `var` that moved holds a
 // new value once assigned. A `unique record` moves, and so does a value of a type parameter
-// without `Copy`.
+// without `Copy`. An arm's pattern moves the scrutinee only once its guard holds, so the
+// next arm may still use it.
 use std.io { IoError }
 use std.pool { Pool }
 
@@ -136,6 +137,15 @@ fn renamed() -> Text {
     return f"{other.name} {other.pool.len()}"
 }
 
+fn guards() -> Text {
+    let slot = Slot.Full(pool: filled("g"))
+    let n = match slot {
+        Full(p) if p.len() > 5 => p.len()
+        _ => if slot is Full(q) { q.len() + 10 } else { 0 }
+    }
+    return f"{n}"
+}
+
 fn tokens() -> Text {
     let t = Token(id: 1)
     let u = t
@@ -154,4 +164,5 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(loops())
     try sys.stdout.write_line(renamed())
     try sys.stdout.write_line(tokens())
+    try sys.stdout.write_line(guards())
 }

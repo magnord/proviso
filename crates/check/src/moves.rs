@@ -8,7 +8,9 @@
 //! of whose fields may have, is a use after move (E0501). Branches join what they moved, and
 //! a loop's body is walked until what may have moved at its head stops growing, so a move
 //! in one turn reaches the uses of the next. A lent place, a borrowed or `inout` parameter
-//! or a part of one, never moves (E0504).
+//! or a part of one, never moves (E0504), and neither does what an arm's pattern binds while
+//! its guard runs. A guard that fails hands the later arms what it moved, but not what the
+//! pattern did, since the scrutinee leaves only once an arm is chosen.
 //!
 //! Within one call, an `&` argument and an `inout self` receiver begin their access once the
 //! other arguments are evaluated, as in Swift (SE-0176), and keep it for the call. Two of
@@ -27,7 +29,8 @@ use crate::{Local, LocalId, Program, Res};
 
 /// Checks the moves and accesses of `body`, whose locals are `locals` and whose type
 /// parameters implement `bounds`, given the expressions the checker found `consumed`.
-/// Records each expression that moves a whole local in [`Program::moves_out`].
+/// Records each expression that moves a whole local in [`Program::moves_out`], and each
+/// `match` arm whose pattern does in [`Program::arms_out`].
 pub(crate) fn check(
     m: &Module,
     p: &mut Program,
@@ -48,14 +51,19 @@ pub(crate) fn check(
         reported: HashSet::new(),
         errors: Vec::new(),
         moves_out: HashSet::new(),
+        arms_out: HashSet::new(),
+        guarded: Vec::new(),
     };
     walk.block(body);
-    let (errors, moves_out) = (walk.errors, walk.moves_out);
+    let (errors, moves_out, arms_out) = (walk.errors, walk.moves_out, walk.arms_out);
     for (code, span, message) in errors {
         diags.error(code, span, message);
     }
     for e in moves_out {
         p.moves_out.insert(e, ());
+    }
+    for pat in arms_out {
+        p.arms_out.insert(pat, ());
     }
 }
 
@@ -163,6 +171,9 @@ struct Walk<'a> {
     reported: HashSet<(&'static str, Span)>,
     errors: Vec<(Code, Span, String)>,
     moves_out: HashSet<ExprId>,
+    arms_out: HashSet<PatId>,
+    /// The locals an arm's pattern binds, while its guard is walked.
+    guarded: Vec<LocalId>,
 }
 
 impl Walk<'_> {
@@ -300,6 +311,13 @@ impl Walk<'_> {
         if self.locals[local.index()].borrowed {
             let message = format!(
                 "`{desc}` is lent here, not owned, so it can't move; only an owned value, such as a `take` parameter, can (§5.2)"
+            );
+            self.report(codes::LENT_VALUE_MOVED, self.span(e), message);
+            return;
+        }
+        if self.guarded.contains(&local) {
+            let message = format!(
+                "`{desc}` is bound by this arm's pattern, and a guard can only look at it, since the arm may still not be chosen; move it in the arm's body (OPEN_QUESTIONS P5)"
             );
             self.report(codes::LENT_VALUE_MOVED, self.span(e), message);
             return;
@@ -518,13 +536,35 @@ impl Walk<'_> {
             }
             ExprKind::Match { scrutinee, arms, .. } => {
                 self.expr(*scrutinee);
-                let before = self.state.clone();
+                // What may have moved when an arm is tried: what moved before the `match`,
+                // and what the guards of the arms before it moved.
+                let mut tried = self.state.clone();
                 let mut after = None;
                 for arm in arms {
-                    self.state = before.clone();
+                    self.state = tried.clone();
                     self.matched(*scrutinee, arm.pat);
+                    // The scrutinee leaves its local only once this arm is chosen.
+                    if self.moves_out.remove(scrutinee) {
+                        self.arms_out.insert(arm.pat);
+                    }
                     if let Some(guard) = arm.guard {
-                        self.expr(guard);
+                        // A guard that fails hands the next arm what it moved, but not what
+                        // the pattern did.
+                        let bound = self.state.clone();
+                        let outer = self.guarded.len();
+                        let mut locals = Vec::new();
+                        self.pattern_locals(arm.pat, &mut locals);
+                        self.guarded.extend(locals);
+                        self.condition(guard);
+                        self.guarded.truncate(outer);
+                        if let (Some(tried), Some(now)) = (&mut tried, &self.state) {
+                            for m in &now.moved {
+                                let new = !bound.as_ref().is_some_and(|b| b.has(m.local, &m.path));
+                                if new && !tried.has(m.local, &m.path) {
+                                    tried.moved.push(m.clone());
+                                }
+                            }
+                        }
                     }
                     self.block(&arm.body);
                     after = join(after, self.state.take());
@@ -646,21 +686,26 @@ impl Walk<'_> {
 
     /// Gives each local `pat` binds a new value.
     fn bind_all(&mut self, pat: PatId) {
+        let mut locals = Vec::new();
+        self.pattern_locals(pat, &mut locals);
+        for local in locals {
+            self.bind(local);
+        }
+    }
+
+    /// The locals `pat` binds.
+    fn pattern_locals(&self, pat: PatId, out: &mut Vec<LocalId>) {
         let m = self.m;
         match &m.pats[pat].kind {
-            PatKind::Bind(_) => {
-                if let Some(&local) = self.p.pat_local.get(pat) {
-                    self.bind(local);
-                }
-            }
+            PatKind::Bind(_) => out.extend(self.p.pat_local.get(pat).copied()),
             PatKind::Tuple(parts) => {
                 for &part in parts {
-                    self.bind_all(part);
+                    self.pattern_locals(part, out);
                 }
             }
             PatKind::Ctor { fields: Some(fields), .. } => {
                 for field in fields {
-                    self.bind_all(field.pat);
+                    self.pattern_locals(field.pat, out);
                 }
             }
             _ => {}
