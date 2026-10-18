@@ -1,8 +1,9 @@
 //! Name resolution and type checking for the phase-1 subset (scalar types, functions,
 //! control flow, `fails` and `try`, and the prelude's `System` with only `stdout`), for
 //! records, for enums, `match` and patterns, for `Option`, `Result`, `fail` and `attempt`,
-//! for methods, interfaces and generic functions, and for tuples, `let` patterns, the `else`
-//! forms, `check`, the text operations and `example` declarations.
+//! for methods, interfaces and generic functions, for tuples, `let` patterns, the `else`
+//! forms, `check`, the text operations and `example` declarations, for collections, and for
+//! kinds, moves, `take` and `inout` parameters and `std.pool`.
 //!
 //! The checker never rewrites the tree. It records what it learns in side tables of
 //! [`Program`], which the interpreter reads.
@@ -522,7 +523,7 @@ struct Checker<'a> {
     /// value or returned (REFERENCE §4.8).
     copying: bool,
     /// The expressions of the body being checked whose values are copied, or moved when
-    /// their type is unique (REFERENCE §5.1), which [`moves`] reads.
+    /// their type is unique (REFERENCE §5.1), which the move pass reads.
     consumed: HashSet<ExprId>,
     /// [`Checker::copying`], handed from an `if` or `match` to the values of its branches.
     tail_copying: bool,

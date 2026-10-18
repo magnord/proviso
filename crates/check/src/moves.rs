@@ -2,7 +2,7 @@
 //! types are settled.
 //!
 //! A value of a unique type, or an owned value of a type parameter without `Copy`, moves
-//! wherever the checker found it copied ([`Checker::consumed`](super::Checker)), and
+//! wherever the checker found it copied (its `consumed` expressions), and
 //! wherever a pattern binds its parts. The walk tracks which places may have moved: a local,
 //! or a field of one at any depth. A use of a place that may have moved, or of a record one
 //! of whose fields may have, is a use after move (E0501). Branches join what they moved, and
