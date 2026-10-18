@@ -1,0 +1,153 @@
+// phase: 2.7
+// expect-error: E0504
+// expect-error: E0503
+// expect-error: E0301
+// A borrowed parameter is lent to the function, and so is an `inout` one, so a unique value
+// in one can't move. It can't be bound to a new name, assigned, returned, stored, passed to
+// a `take` parameter or consumed by a loop (REFERENCE §5.2). The same holds for its fields,
+// for the parts a pattern binds from it (§6.4), for the elements a loop that doesn't
+// consume its collection binds, and for a branch's value. A copyable value is copied
+// instead, so it may be. In generic code a borrowed value whose type parameter lacks `Copy`
+// is copied in the same places, which needs `Copy` (§4.8), and so is an `inout` one. A
+// consuming loop goes over a list or a map, and a range has nothing to consume (§6.5).
+use std.pool { Pool }
+
+record Holder {
+    pool: Pool[Int]
+    n: Int
+}
+
+enum Slot {
+    Empty
+    Full(pool: Pool[Int])
+}
+
+fn fresh() -> Pool[Int] {
+    return Pool.new()
+}
+
+fn consume(pool: take Pool[Int]) -> Int {
+    return pool.len()
+}
+
+fn bind_borrowed(pool: Pool[Int]) -> Int {
+    let p = pool                                    // <- E0504
+    return p.len()
+}
+
+fn assign_borrowed(pool: Pool[Int]) -> Int {
+    var other = fresh()
+    other = pool                                    // <- E0504
+    return other.len()
+}
+
+fn return_borrowed(pool: Pool[Int]) -> Pool[Int] {
+    return pool                                     // <- E0504
+}
+
+fn take_borrowed(pool: Pool[Int]) -> Int {
+    return consume(pool)                            // <- E0504
+}
+
+fn store_borrowed(pool: Pool[Int]) -> Holder {
+    return Holder(pool: pool, n: 0)                 // <- E0504
+}
+
+fn list_borrowed(pool: Pool[Int]) -> List[Pool[Int]] {
+    return [pool]                                   // <- E0504
+}
+
+fn push_borrowed(pool: Pool[Int]) -> Int {
+    var pools: List[Pool[Int]] = []
+    pools.push(pool)                                // <- E0504
+    return pools.len()
+}
+
+fn field_of_borrowed(h: Holder) -> Int {
+    let p = h.pool                                  // <- E0504
+    return p.len() + h.n
+}
+
+fn with_borrowed(h: Holder) -> Holder {
+    return h.with(n: 2)                             // <- E0504
+}
+
+fn branch_of_borrowed(c: Bool, pool: Pool[Int]) -> Pool[Int] {
+    let p = if c { pool } else { fresh() }          // <- E0504
+    return p
+}
+
+fn fallback_of_borrowed(o: Option[Pool[Int]]) -> Int {
+    let p = o else fresh()                          // <- E0504
+    return p.len()
+}
+
+fn move_inout(pool: inout Pool[Int]) -> Int {
+    let p = pool                                    // <- E0504
+    pool = fresh()
+    return p.len()
+}
+
+fn pattern_of_borrowed(s: Slot) -> Int {
+    match s {
+        Full(pool) => return consume(pool)          // <- E0504
+        Empty => return 0
+    }
+}
+
+fn let_pattern_of_borrowed(pair: (Pool[Int], Int)) -> Int {
+    let (p, n) = pair
+    return consume(p) + n                           // <- E0504
+}
+
+fn loop_variable(pools: List[Pool[Int]]) -> Int {
+    var total = 0
+    for pool in pools {
+        total += consume(pool)                      // <- E0504
+    }
+    return total
+}
+
+fn consume_borrowed(pools: List[Pool[Int]]) -> Int {
+    for pool in take pools {                        // <- E0504
+        let n = pool.len()
+    }
+    return 0
+}
+
+fn copyable_borrowed(n: Int, xs: List[Int], h: Holder) -> List[Int] {
+    let m = n
+    var ys: List[Int] = []
+    ys.push(n)
+    for x in take xs {
+        ys.push(x)
+    }
+    let k = h.n
+    return xs
+}
+
+fn range_taken(n: Int) -> Int {
+    var total = 0
+    for i in take 0..n {                            // <- E0301
+        total += i
+    }
+    return total
+}
+
+fn consume_t[T](x: take T) -> Int {
+    return 0
+}
+
+fn generic_take[T](x: T) -> Int {
+    return consume_t(x)                             // <- E0503
+}
+
+fn generic_loop[T](xs: List[T]) -> Int {
+    for x in take xs {                              // <- E0503
+    }
+    return 0
+}
+
+fn generic_inout[T](x: inout T) -> T {
+    return x                                        // <- E0503
+}

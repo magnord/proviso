@@ -1,0 +1,96 @@
+// phase: 2.7
+// run: test
+// expect-exit: 70
+// Passing part of a refined value as `inout` re-checks every enclosing refinement when the
+// call returns (REFERENCE §8.3), which the v1 profile does at run time (OPEN_QUESTIONS P3),
+// innermost first, as after an assignment. A broken one is a `refinement_failed` defect at
+// the call. Every `inout` argument is written back before any is checked, so a call that
+// moves both ends of a span keeps it valid. A failed call writes nothing back, so nothing
+// is checked. The same holds for an `inout self` method called on a part, whose own
+// assignments are checked inside it, as every assignment is. An example that hits a defect
+// names a valid value, which is never compared.
+enum Stop {
+    Halt
+}
+
+record Span derives(Eq, Show) {
+    lo: Int
+    hi: Int
+} where lo <= hi
+
+record Window derives(Eq, Show) {
+    span: Span
+    label: Text where not label.is_empty()
+} where span.hi < 10
+
+impl Span {
+    pub fn widen(inout self, by: Int) {
+        self.hi += by
+    }
+}
+
+fn set_to(x: inout Int, to: Int) {
+    x = to
+}
+
+fn set_both(lo: inout Int, hi: inout Int) {
+    lo = 10
+    hi = 20
+}
+
+fn set_then_fail(x: inout Int) fails Stop {
+    x = 100
+    fail Stop.Halt
+}
+
+fn clear(t: inout Text) {
+    t = ""
+}
+
+fn shift(lo: Int) -> Span {
+    var span = Span(lo: 1, hi: 4)
+    set_to(x: &span.lo, to: lo)
+    return span
+}
+
+fn deep(hi: Int) -> Window {
+    var w = Window(span: Span(lo: 0, hi: 5), label: "w")
+    set_to(x: &w.span.hi, to: hi)
+    return w
+}
+
+fn moved_both() -> Span {
+    var span = Span(lo: 1, hi: 4)
+    set_both(lo: &span.lo, hi: &span.hi)
+    return span
+}
+
+fn rolled_back() -> Span {
+    var span = Span(lo: 1, hi: 4)
+    let r = attempt set_then_fail(x: &span.lo)
+    return span
+}
+
+fn cleared() -> Window {
+    var w = Window(span: Span(lo: 0, hi: 1), label: "w")
+    clear(t: &w.label)
+    return w
+}
+
+fn widened(by: Int) -> Window {
+    var w = Window(span: Span(lo: 0, hi: 1), label: "w")
+    w.span.widen(by)
+    return w
+}
+
+example shift(2) == Span(lo: 2, hi: 4)
+example shift(9) == Span(lo: 4, hi: 9)
+example deep(7) == Window(span: Span(lo: 0, hi: 7), label: "w")
+example deep(-1) == Window(span: Span(lo: -1, hi: 0), label: "w")
+example deep(12) == Window(span: Span(lo: 0, hi: 9), label: "w")
+example moved_both() == Span(lo: 10, hi: 20)
+example rolled_back() == Span(lo: 1, hi: 4)
+example cleared() == Window(span: Span(lo: 0, hi: 1), label: "w")
+example widened(2) == Window(span: Span(lo: 0, hi: 3), label: "w")
+example widened(20) == Window(span: Span(lo: 0, hi: 9), label: "w")
+example widened(-5) == Window(span: Span(lo: -4, hi: 0), label: "w")

@@ -1,0 +1,380 @@
+// phase: 2.7
+// expect-error: E0501
+// A unique value can't be used after it moves (REFERENCE §5.1), whichever way it left, to a
+// new name, `let _`, an assignment, a `take` parameter, a field of a record or variant, an
+// element of a list, tuple or map, a consuming loop, or the bindings of a pattern (§6.4).
+// A value moved in one branch, in both, or in a loop body that may run again is moved
+// after it, so is one moved in an `else` fallback or on the right of `and`. Moving a field
+// moves only that field, so the record can't be used whole after it, one level down too.
+// A pool is unique (§5.5), and so is a record that holds one, even through an `Option`, a
+// `unique record`, and an owned value of a type parameter without `Copy` (§4.8). `with` on
+// a `unique record` consumes it, even when its fields are copyable (§4.4). Each use of a
+// moved value is its own mistake, so each is reported.
+use std.pool { Pool }
+
+unique record Token {
+    id: Int
+}
+
+record Holder {
+    pool: Pool[Int]
+    n: Int
+}
+
+record Outer {
+    inner: Holder
+}
+
+record Maybe {
+    pool: Option[Pool[Int]]
+}
+
+enum Slot {
+    Empty
+    Full(pool: Pool[Int])
+}
+
+fn fresh() -> Pool[Int] {
+    return Pool.new()
+}
+
+fn consume(pool: take Pool[Int]) -> Int {
+    return pool.len()
+}
+
+fn look(pool: Pool[Int]) -> Int {
+    return pool.len()
+}
+
+fn look_nested(o: Option[Option[Pool[Int]]]) -> Int {
+    return 0
+}
+
+fn grow(pool: inout Pool[Int]) {
+    pool.insert(1)
+}
+
+fn by_binding() -> Int {
+    let a = fresh()
+    let b = a
+    return a.len()                                  // <- E0501
+}
+
+fn by_var_binding() -> Int {
+    var a = fresh()
+    var b = a
+    a.insert(1)                                     // <- E0501
+    return b.len()
+}
+
+fn by_wildcard() -> Int {
+    let a = fresh()
+    let _ = a
+    return a.len()                                  // <- E0501
+}
+
+fn by_assignment() -> Int {
+    let a = fresh()
+    var b = fresh()
+    b = a
+    return look(a)                                  // <- E0501
+}
+
+fn by_take_argument() -> Int {
+    let a = fresh()
+    let n = consume(a)
+    return a.len() + n                              // <- E0501
+}
+
+fn by_builtin_take() -> Int {
+    let a = fresh()
+    var pools: List[Pool[Int]] = []
+    pools.push(a)
+    return a.len()                                  // <- E0501
+}
+
+fn by_field() -> Int {
+    let a = fresh()
+    let h = Holder(pool: a, n: 1)
+    return a.len()                                  // <- E0501
+}
+
+fn by_variant() -> Int {
+    let a = fresh()
+    let s = Slot.Full(pool: a)
+    return a.len()                                  // <- E0501
+}
+
+fn by_some() -> Int {
+    let a = fresh()
+    let o = Some(a)
+    return a.len()                                  // <- E0501
+}
+
+fn by_list_element() -> Int {
+    let a = fresh()
+    let pools = [a]
+    return a.len()                                  // <- E0501
+}
+
+fn by_tuple_element() -> (Pool[Int], Pool[Int]) {
+    let a = fresh()
+    return (a, a)                                   // <- E0501
+}
+
+fn by_map_value() -> Int {
+    let a = fresh()
+    let m = [1: a]
+    return a.len()                                  // <- E0501
+}
+
+fn by_two_arguments() -> (Pool[Int], Int) {
+    let a = fresh()
+    return (a, consume(a))                          // <- E0501
+}
+
+fn by_consuming_loop() -> Int {
+    let pools = [fresh()]
+    for pool in take pools {
+        let n = pool.len()
+    }
+    return pools.len()                              // <- E0501
+}
+
+fn by_match_arm(s: take Slot) -> Int {
+    match s {
+        Full(pool) => {
+            let p = pool
+            return pool.len()                       // <- E0501
+        }
+        Empty => return 0
+    }
+}
+
+fn by_match_scrutinee(s: take Slot) -> Int {
+    let n = match s {
+        Full(pool) => consume(pool)
+        Empty => 0
+    }
+    let t = s                                       // <- E0501
+    return n
+}
+
+fn by_let_pattern(pair: take (Pool[Int], Int)) -> Int {
+    let (p, n) = pair
+    let again = pair                                // <- E0501
+    return n
+}
+
+fn by_is(o: take Option[Pool[Int]]) -> Int {
+    if o is Some(pool) {
+        let n = consume(pool)
+    }
+    let p = o                                       // <- E0501
+    return 0
+}
+
+fn by_inout_after_move() {
+    var a = fresh()
+    let b = a
+    grow(pool: &a)                                  // <- E0501
+}
+
+fn by_debug() {
+    let a = fresh()
+    let b = a
+    debug(a.len())                                  // <- E0501
+}
+
+fn by_interpolation() -> Text {
+    let a = fresh()
+    let b = a
+    return f"{a.len()}"                             // <- E0501
+}
+
+fn assign_part_after_move() {
+    var h = Holder(pool: fresh(), n: 1)
+    let g = h
+    h.n = 2                                         // <- E0501
+}
+
+fn each_use() -> Int {
+    let a = fresh()
+    let b = a
+    let n = a.len()                                 // <- E0501
+    return a.len() + n                              // <- E0501
+}
+
+fn one_branch(c: Bool) -> Int {
+    let a = fresh()
+    if c {
+        let b = a
+    }
+    return a.len()                                  // <- E0501
+}
+
+fn other_branch(c: Bool) -> Int {
+    let a = fresh()
+    if c {
+        let n = 1
+    } else {
+        let b = a
+    }
+    return a.len()                                  // <- E0501
+}
+
+fn both_branches(c: Bool) -> Int {
+    let a = fresh()
+    if c {
+        let b = a
+    } else {
+        let n = consume(a)
+    }
+    return a.len()                                  // <- E0501
+}
+
+fn one_arm(k: Int) -> Int {
+    let a = fresh()
+    match k {
+        0 => {
+            let b = a
+        }
+        _ => {}
+    }
+    return a.len()                                  // <- E0501
+}
+
+fn in_fallback(o: take Option[Int]) -> Int {
+    let a = fresh()
+    let n = o else consume(a)
+    return a.len()                                  // <- E0501
+}
+
+fn on_the_right(c: Bool) -> Bool {
+    let a = fresh()
+    let b = c and consume(a) > 0
+    return a.len() > 0                              // <- E0501
+}
+
+fn in_for(n: Int) -> Int {
+    let a = fresh()
+    var total = 0
+    for i in 0..n {
+        total += consume(a)                         // <- E0501
+    }
+    return total
+}
+
+fn in_while(n: Int) -> Int {
+    let a = fresh()
+    var i = 0
+    while i < n {
+        let b = a                                   // <- E0501
+        i += 1
+    }
+    return i
+}
+
+fn in_loop() -> Int {
+    let a = fresh()
+    var i = 0
+    loop {
+        i += consume(a)                             // <- E0501
+        if i > 3 {
+            break
+        }
+    }
+    return i
+}
+
+fn used_before_the_move(n: Int) -> Int {
+    let a = fresh()
+    var total = 0
+    for i in 0..n {
+        total += a.len()                            // <- E0501
+        let b = a                                   // <- E0501
+    }
+    return total
+}
+
+fn nested_loops() -> Int {
+    let a = fresh()
+    var total = 0
+    for i in 0..2 {
+        for j in 0..2 {
+            if i == j {
+                total += consume(a)                 // <- E0501
+            }
+        }
+    }
+    return total
+}
+
+fn nested_branches(b: Bool, c: Bool) -> Int {
+    let a = fresh()
+    if b {
+        if c {
+            let moved = a
+        }
+    }
+    return a.len()                                  // <- E0501
+}
+
+fn moved_field() -> Int {
+    let h = Holder(pool: fresh(), n: 1)
+    let p = h.pool
+    let g = h                                       // <- E0501
+    return p.len()
+}
+
+fn moved_field_used() -> Int {
+    var h = Holder(pool: fresh(), n: 1)
+    let p = h.pool
+    return h.pool.len()                             // <- E0501
+}
+
+fn nested_field() -> Int {
+    let outer = Outer(inner: Holder(pool: fresh(), n: 1))
+    let p = outer.inner.pool
+    let q = outer.inner                             // <- E0501
+    return p.len()
+}
+
+fn nested_option() -> Int {
+    let o = Some(Some(fresh()))
+    let p = o
+    return look_nested(o)                           // <- E0501
+}
+
+fn unique_records() -> Int {
+    let t = Token(id: 1)
+    let u = t
+    return t.id                                     // <- E0501
+}
+
+fn with_unique() -> Int {
+    let t = Token(id: 1)
+    let u = t.with(id: 2)
+    return t.id + u.id                              // <- E0501
+}
+
+fn aggregates() -> Int {
+    let m = Maybe(pool: None)
+    let n = m
+    let k = m                                       // <- E0501
+    return 0
+}
+
+fn twice[T](x: take T) -> (T, T) {
+    return (x, x)                                   // <- E0501
+}
+
+fn generic_binding[T](x: take T) -> T {
+    let y = x
+    return x                                        // <- E0501
+}
+
+fn generic_list[T](xs: take List[T]) -> Int {
+    let ys = xs
+    return xs.len()                                 // <- E0501
+}

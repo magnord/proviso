@@ -1,0 +1,105 @@
+// phase: 2.7
+// expect-error: E0506
+// expect-error: E0305
+// expect-error: E0106
+// expect-error: E0301
+// expect-error: E0505
+// expect-error: E0306
+// An argument for an `inout` parameter is written with `&`, and no other argument is
+// (REFERENCE §5.2, H5). It changes the caller's variable, so it is a `var` or an `inout`
+// parameter, or a field or element of one, as an assignment's target is. A pool's element
+// can't be changed through `pool[h]`. Data flows both ways, so its type is the parameter's
+// exactly, and a `Never` in it doesn't widen as it would for a borrowed argument (§8.3).
+//
+// While an `inout` access to a variable is active, no other access to it is allowed
+// (§5.3). The access begins once the other arguments are evaluated and lasts for the call,
+// so the other arguments may read the variable, but two `&` arguments of one call may not
+// overlap, however deep. Two fields are disjoint, and so are two elements whose indices are
+// different literals. Before the verifier, nothing shows that two other indices differ, even
+// where a fact would (OPEN_QUESTIONS P5).
+use std.pool { Pool, Handle }
+
+record Pt {
+    x: Int
+    y: Int
+}
+
+fn add(x: inout Int, n: Int) {
+    x += n
+}
+
+fn look(n: Int) -> Int {
+    return n
+}
+
+fn take_it(n: take Int) -> Int {
+    return n
+}
+
+fn both(a: inout Int, b: inout Int) {
+    a = b
+}
+
+fn first_inout(a: inout Int, b: Int) {
+    a = b
+}
+
+fn last_inout(b: Int, a: inout Int) {
+    a = b
+}
+
+fn markers() -> Int {
+    var v = 1
+    add(x: v, n: 1)                                 // <- E0506
+    let k = look(&v)                                // <- E0506
+    let j = take_it(&v)                             // <- E0506
+    return k + j
+}
+
+fn not_variables(p: Int, q: inout Int, pt: Pt) {
+    let fixed = 1
+    add(x: &fixed, n: 1)                            // <- E0305
+    add(x: &p, n: 1)                                // <- E0305
+    add(x: &pt.x, n: 1)                             // <- E0305
+    add(x: &q, n: 1)
+    add(x: &(q + 1), n: 1)                          // <- E0106
+    add(x: &look(2), n: 1)                          // <- E0106
+    for i in 0..2 {
+        add(x: &i, n: 1)                            // <- E0305
+    }
+}
+
+fn set_some(o: inout Option[Int]) {
+    o = Some(1)
+}
+
+fn exact_types() {
+    var small: Int8 = 1
+    add(x: &small, n: 1)                            // <- E0301
+    var nothing: Option[Never] = None
+    let widened: Option[Int] = nothing
+    set_some(o: &nothing)                           // <- E0301
+}
+
+fn pools(pool: inout Pool[Int], h: Handle[Int]) {
+    add(x: &pool[h], n: 1)                          // <- E0306
+}
+
+fn overlaps(i: Int, j: Int) {
+    var a = 1
+    var p = Pt(x: 1, y: 2)
+    var xs = [1, 2, 3]
+    both(a: &a, b: &a)                              // <- E0505
+    both(a: &p.x, b: &p.y)
+    both(a: &p.x, b: &p.x)                          // <- E0505
+    both(a: &xs[0], b: &xs[1])
+    both(a: &xs[0], b: &xs[0])                      // <- E0505
+    both(a: &xs[i], b: &xs[j])                      // <- E0505
+    first_inout(a: &a, b: a)
+    first_inout(a: &p.x, b: p.y)
+    first_inout(a: &p.x, b: look(p.x))
+    first_inout(a: &xs[0], b: xs.len())
+    first_inout(a: &xs[0], b: xs[1])
+    last_inout(b: a, a: &a)
+    last_inout(b: xs.len(), a: &xs[0])
+}

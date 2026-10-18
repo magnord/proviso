@@ -10,6 +10,7 @@
 pub mod decls;
 pub mod exhaust;
 pub mod infer;
+mod moves;
 pub mod types;
 
 use std::collections::hash_map::Entry;
@@ -72,13 +73,14 @@ pub enum Builtin {
     Parse(IntTy),
     /// `Text.lines() -> List[Text]`
     Lines,
-    /// `List.len() -> Int` and `Map.len() -> Int`
+    /// `List.len() -> Int`, `Map.len() -> Int` and `Pool.len() -> Int`
     Len,
     /// `List.push(inout self, value: take T)`
     Push,
     /// `List.pop(inout self) -> Option[T]`
     Pop,
-    /// `List.get(index: Int) -> Option[T]` and `Map.get(key: K) -> Option[V]`
+    /// `List.get(index: Int) -> Option[T]`, `Map.get(key: K) -> Option[V]` and
+    /// `Pool.get(handle: Handle[T]) -> Option[T]`
     Get,
     /// `List.enumerate() -> List[(Int, T)]`
     Enumerate,
@@ -88,15 +90,22 @@ pub enum Builtin {
     ContainsKey,
     /// `Map.set(inout self, key: take K, value: take V) -> Option[V]`
     Set,
-    /// `Map.remove(inout self, key: K) -> Option[V]`
+    /// `Map.remove(inout self, key: K) -> Option[V]`, and `Pool.remove(inout self, handle:
+    /// Handle[T]) -> Option[T]`
     Remove,
+    /// `Pool.new() -> Pool[T]`, which is called on the type, so it has no receiver.
+    PoolNew,
+    /// `Pool.insert(inout self, value: take T) -> Handle[T]`
+    Insert,
+    /// `Pool.duplicate(self) -> Pool[T]`
+    Duplicate,
 }
 
 impl Builtin {
     /// Whether it takes `inout self`, so its receiver is a variable or a part of one that it
     /// changes (STD.md, REFERENCE §5.2).
     pub fn changes_receiver(self) -> bool {
-        matches!(self, Builtin::Push | Builtin::Pop | Builtin::Set | Builtin::Remove)
+        matches!(self, Builtin::Push | Builtin::Pop | Builtin::Set | Builtin::Remove | Builtin::Insert)
     }
 }
 
@@ -134,6 +143,8 @@ pub struct FnInfo {
     /// The type of `self`, which is local 0, for a method; `None` for a function or an
     /// associated function.
     pub receiver: Option<Ty>,
+    /// How a method takes `self`: borrowed, `inout self` or `take self` (REFERENCE §5.2).
+    pub self_mode: ParamMode,
     /// The type of the `impl` block that declares it, which `Self` names there.
     pub owner: Option<Ty>,
     pub params: Vec<ParamInfo>,
@@ -208,6 +219,9 @@ pub struct Program {
     /// The local that holds `it` in the fallback of each `else` form on a call that can
     /// fail. An `else` form without one unwraps an `Option`.
     pub it_local: SideTable<Expr, LocalId>,
+    /// The names whose values move out of their locals, which nothing reads again before
+    /// it is assigned (REFERENCE §5.1), so the interpreter may take the value out.
+    pub moves_out: SideTable<Expr, ()>,
     /// The module's examples, in declaration order.
     pub examples: Vec<ExampleInfo>,
 }
@@ -265,6 +279,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         generic_scope: Vec::new(),
         param_names: Vec::new(),
         copying: false,
+        consumed: HashSet::new(),
         tail_copying: false,
         pattern_borrowed: false,
         pattern_mutable: false,
@@ -284,6 +299,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     checker.iface_names();
     checker.unknown_impl_targets();
     checker.adt_fields();
+    checker.p.decls.settle_kinds();
     checker.inhabited = Some(checker.p.decls.inhabited());
     checker.iface_methods();
     checker.adt_derives();
@@ -376,6 +392,7 @@ enum Callee {
 struct Signature {
     generics: Vec<GenericInfo>,
     receiver: Option<Ty>,
+    self_mode: ParamMode,
     params: Vec<ParamInfo>,
     ret: Ty,
     fails: Option<Ty>,
@@ -431,6 +448,15 @@ struct Marker {
     /// The error type the handler gives its calls before its chain is checked: the function's
     /// `fails` under `try`, or the error type of the `Result` an `attempt` is expected to be.
     target: Option<Ty>,
+}
+
+/// How a call takes its arguments: each borrowed, each taken, as a construction's are, or
+/// each by its parameter's mode.
+#[derive(Clone, Copy)]
+enum Modes<'a> {
+    Borrow,
+    Take,
+    Each(&'a [ParamMode]),
 }
 
 /// Whether an `if` is used for its value, as a statement, or as the last statement of a
@@ -495,6 +521,9 @@ struct Checker<'a> {
     /// Set while checking an expression whose value is copied: bound to a name, stored in a
     /// value or returned (REFERENCE §4.8).
     copying: bool,
+    /// The expressions of the body being checked whose values are copied, or moved when
+    /// their type is unique (REFERENCE §5.1), which [`moves`] reads.
+    consumed: HashSet<ExprId>,
     /// [`Checker::copying`], handed from an `if` or `match` to the values of its branches.
     tail_copying: bool,
     /// Set while checking a pattern that matches a borrowed value, so its bindings are too.
@@ -996,10 +1025,11 @@ impl Checker<'_> {
             ["std", "io"] => Some(vec![("IoError", Ty::IoError), ("Out", Ty::out())]),
             // `ParseError` is the only item `std.text` declares (STD.md).
             ["std", "text"] => Some(vec![("ParseError", Ty::adt(AdtId::PARSE_ERROR))]),
+            // A generic import names its type without type arguments, which each use gives.
+            ["std", "pool"] => Some(vec![("Pool", Ty::adt(AdtId::POOL)), ("Handle", Ty::adt(AdtId::HANDLE))]),
             ["std", module] => {
                 let planned = match *module {
                     "fs" | "test" => Planned::Phase(3),
-                    "pool" => Planned::Phase(2),
                     "task" => Planned::Phase(6),
                     _ => Planned::Unscheduled,
                 };
@@ -1010,7 +1040,7 @@ impl Checker<'_> {
                 self.error(
                     codes::UNKNOWN_IMPORT,
                     span,
-                    format!("unknown module `{joined}`; phase 1 checks one file at a time, and the standard library provides only `std.io` and `std.text`"),
+                    format!("unknown module `{joined}`; phase 1 checks one file at a time, and the standard library provides only `std.io`, `std.pool` and `std.text`"),
                 );
                 None
             }
@@ -1081,7 +1111,7 @@ impl Checker<'_> {
             let mut def = match kind {
                 AdtKind::Record => AdtDef::record(text, Vec::new()),
                 AdtKind::Enum => AdtDef::enumeration(text),
-                AdtKind::Collection => unreachable!("only the prelude declares collections"),
+                AdtKind::Native => unreachable!("only the toolchain declares native types"),
             };
             let mut variants: Vec<(Ident, &[FieldDecl])> = Vec::new();
             let mut variant_index: HashMap<Symbol, usize> = HashMap::new();
@@ -1109,6 +1139,7 @@ impl Checker<'_> {
                 _ => {}
             }
             let what = if kind == AdtKind::Enum { "enum" } else { "record" };
+            def.unique = matches!(&item.kind, ItemKind::Record(decl) if decl.unique);
             let id = self.p.decls.push(def);
             self.adts.push(AdtSrc { id, name, vis: item.vis, derives, variants, refinement });
             // A rejected name is reported once. Its uses, and what it collides with, are not.
@@ -1292,7 +1323,8 @@ impl Checker<'_> {
                 }
                 let receiver = method.receiver.expect("the parser keeps only interface methods with `self`");
                 if receiver.mode != ParamMode::Borrow {
-                    self.not_implemented(receiver.span, "`inout self` and `take self` methods", Planned::Phase(2));
+                    let what = "interface methods that take `inout self` or `take self`";
+                    self.not_implemented(receiver.span, what, Planned::Phase(2));
                     incomplete = true;
                     continue;
                 }
@@ -1497,6 +1529,7 @@ impl Checker<'_> {
                 name: decl.name.sym,
                 generics: sig.generics,
                 receiver: None,
+                self_mode: ParamMode::Borrow,
                 owner: None,
                 params: sig.params,
                 ret: sig.ret,
@@ -1554,11 +1587,17 @@ impl Checker<'_> {
         let outer_bounds = std::mem::replace(&mut self.f.bounds, generics.iter().map(|g| g.bounds.clone()).collect());
         self.self_ty = owner.clone();
         let mut rejected = false;
-        if let Some(receiver) = decl.receiver
-            && receiver.mode != ParamMode::Borrow
-        {
-            self.not_implemented(receiver.span, "`inout self` and `take self` methods", Planned::Phase(2));
-            rejected = true;
+        let self_mode = decl.receiver.map_or(ParamMode::Borrow, |r| r.mode);
+        if let Some(receiver) = decl.receiver {
+            let what = match receiver.mode {
+                ParamMode::Borrow | ParamMode::Inout | ParamMode::Take => None,
+                ParamMode::InoutPartial => Some("`inout(partial) self` methods"),
+                ParamMode::Keep => Some("`keep self` methods"),
+            };
+            if let Some(what) = what {
+                self.not_implemented(receiver.span, what, Planned::Phase(2));
+                rejected = true;
+            }
         }
         let receiver = decl.receiver.and(owner);
         let mut params: Vec<ParamInfo> = Vec::new();
@@ -1607,18 +1646,17 @@ impl Checker<'_> {
         self.param_names.clear();
         self.f.bounds = outer_bounds;
         self.self_ty = None;
-        Signature { generics, receiver, params, ret, fails, rejected }
+        Signature { generics, receiver, self_mode, params, ret, fails, rejected }
     }
 
     /// Reports a parameter mode that phase 2 doesn't support yet, and returns whether the
     /// mode is supported.
     fn param_mode(&mut self, param: &Param, ty: &Ty) -> bool {
         let what = match param.mode {
-            ParamMode::Borrow => return true,
+            ParamMode::Borrow | ParamMode::Inout | ParamMode::Take => return true,
             ParamMode::Keep if matches!(ty, Ty::Adt(AdtId::SYSTEM, _) | Ty::Error) => return true,
             ParamMode::Keep => "`keep` parameters other than `System`",
-            ParamMode::Inout | ParamMode::InoutPartial => "`inout` parameters",
-            ParamMode::Take => "`take` parameters",
+            ParamMode::InoutPartial => "`inout(partial)` parameters",
         };
         self.not_implemented(param.span, what, Planned::Phase(2));
         false
@@ -1945,6 +1983,7 @@ impl Checker<'_> {
             name: method.decl.name.sym,
             generics: sig.generics,
             receiver: sig.receiver,
+            self_mode: sig.self_mode,
             owner: Some(owner.clone()),
             params: sig.params,
             ret: sig.ret,
@@ -1979,8 +2018,10 @@ impl Checker<'_> {
             (Some(want), Some(have)) => same(want, have),
             _ => false,
         };
+        // An interface's methods borrow `self` in this phase.
         if info.generics.is_empty()
             && info.receiver.is_some()
+            && info.self_mode == ParamMode::Borrow
             && params_agree
             && same(&want.ret, &info.ret)
             && fails_agree
@@ -2122,7 +2163,7 @@ impl Checker<'_> {
                     self.error(codes::UNKNOWN_TYPE, te.span, format!("`{text}` takes no type arguments"));
                     return Ty::Error;
                 }
-                if let Some(id) = prelude_adt(text).or_else(|| collection_adt(text)) {
+                if let Some(id) = self.generic_adt(name.sym) {
                     let args = args.as_deref().unwrap_or_default();
                     let tys: Vec<Ty> = args.iter().map(|&arg| self.resolve_type(arg)).collect();
                     let n = self.p.decls.adt(id).params;
@@ -2180,9 +2221,9 @@ impl Checker<'_> {
         if let Some(&id) = self.adt_names.get(&name.sym) {
             return Ty::adt(id);
         }
-        if let Some(id) = prelude_adt(text).or_else(|| collection_adt(text)) {
-            let n = self.p.decls.adt(id).params;
-            let message = format!("`{text}` takes {}, as in `{}`", type_args(n), example_type(text));
+        if let Some(id) = self.generic_adt(name.sym) {
+            let def = self.p.decls.adt(id);
+            let message = format!("`{text}` takes {}, as in `{}`", type_args(def.params), example_type(&def.name));
             self.error(codes::UNKNOWN_TYPE, name.span, message);
             return Ty::Error;
         }
@@ -2206,6 +2247,20 @@ impl Checker<'_> {
             None => self.error(codes::UNKNOWN_TYPE, name.span, format!("unknown type `{text}`")),
         }
         Ty::Error
+    }
+
+    /// The generic type `sym` names, which a use gives type arguments: the prelude's, or one
+    /// imported from the standard library, such as `Pool`.
+    fn generic_adt(&self, sym: Symbol) -> Option<AdtId> {
+        let text = self.m.text(sym);
+        if self.adt_names.contains_key(&sym) {
+            return None;
+        }
+        match self.imports.get(&sym) {
+            Some(Import::Type(Ty::Adt(id, args))) if args.is_empty() && self.p.decls.adt(*id).params > 0 => Some(*id),
+            Some(_) => None,
+            None => prelude_adt(text).or_else(|| collection_adt(text)),
+        }
     }
 
     /// Reports a type or variant name that isn't PascalCase, and returns whether it is. A
@@ -2256,22 +2311,23 @@ impl Checker<'_> {
             .collect();
         self.param_names = info.generics.iter().map(|g| g.name.clone()).collect();
         self.self_ty = info.owner.clone();
-        // The function borrows `self` and its parameters (REFERENCE §5.2). A `take` parameter
-        // is owned instead, and an `inout` one is rejected in this phase.
+        // The function borrows `self` and its parameters (REFERENCE §5.2). An `inout` one is
+        // lent to it too, but it may change it. A `take` one is owned, and immutable as a `let`
+        // is (OPEN_QUESTIONS P5).
+        let local = |mode: ParamMode, ty: &Ty| {
+            let mutable = matches!(mode, ParamMode::Inout | ParamMode::InoutPartial);
+            Local { ty: ty.clone(), mutable, borrowed: mode != ParamMode::Take, in_loop: false }
+        };
         let mut scope = Vec::new();
         if let Some(ty) = &info.receiver {
-            state.locals.push(Local { ty: ty.clone(), mutable: false, borrowed: true, in_loop: false });
+            state.locals.push(local(info.self_mode, ty));
             if let Some(sym) = m.interner.lookup("self") {
                 scope.push((sym, LocalId(0)));
             }
         }
         for param in &info.params {
             scope.push((param.name, LocalId(state.locals.len() as u32)));
-            let borrowed = matches!(param.mode, ParamMode::Borrow | ParamMode::Keep);
-            // An `inout` parameter may be changed, so a use of it that would change it isn't
-            // reported after the mode is (§15.1).
-            let mutable = matches!(param.mode, ParamMode::Inout | ParamMode::InoutPartial);
-            state.locals.push(Local { ty: param.ty.clone(), mutable, borrowed, in_loop: false });
+            state.locals.push(local(param.mode, &param.ty));
         }
         state.scopes.push(scope);
         self.f = state;
@@ -2280,6 +2336,8 @@ impl Checker<'_> {
         }
         self.fn_body(decl, body);
         self.settle();
+        let consumed = std::mem::take(&mut self.consumed);
+        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &consumed, body, self.diags);
         self.p.fns[id].locals = self.f.locals.len();
         self.generic_scope.clear();
         self.param_names.clear();
@@ -2734,6 +2792,11 @@ impl Checker<'_> {
             ExprKind::Index { base, index } => {
                 let (root, id, base_ty) = self.place(base)?;
                 let span = self.span(target);
+                if let Ty::Adt(AdtId::POOL, _) = base_ty {
+                    self.rejected_value(index);
+                    self.pool_element(span);
+                    return None;
+                }
                 (root, id, self.indexed(&base_ty, index, span)?)
             }
             _ => {
@@ -2745,6 +2808,12 @@ impl Checker<'_> {
         };
         self.record(target, ty.clone());
         Some((root, id, ty))
+    }
+
+    /// Reports a change to a pool's element through `pool[h]` (OPEN_QUESTIONS P5).
+    fn pool_element(&mut self, span: Span) {
+        let message = "a pool's element can't be changed through `pool[h]`; `remove` it and `insert` the new value";
+        self.error(codes::UNSUPPORTED_OPERATOR, span, message);
     }
 
     /// An expression whose only effect is its value, so it is not a statement on its own.
@@ -2996,22 +3065,28 @@ impl Checker<'_> {
         self.in_chain = chain;
         let base_ty = self.infer(base);
         let base_ty = match self.vars.resolve(&base_ty) {
-            list @ Ty::Adt(AdtId::LIST, _) => list,
+            ty @ Ty::Adt(AdtId::LIST | AdtId::POOL, _) => ty,
             _ => self.force(&base_ty),
         };
         let span = self.span(e);
         let Some(element) = self.indexed(&base_ty, index, span) else { return Ty::Error };
         if copying {
-            self.needs(element.clone(), IfaceId::COPY, "xs[i]", "T", span);
+            let what = if matches!(base_ty, Ty::Adt(AdtId::POOL, _)) { "pool[h]" } else { "xs[i]" };
+            self.needs(element.clone(), IfaceId::COPY, what, "T", span);
         }
         element
     }
 
-    /// The type of element `index` of a value of type `base_ty`, a list, whose index is an
-    /// `Int` (STD.md). Only a list has an index (E0306). `None` once reported.
+    /// The type of element `index` of a value of type `base_ty`: a list, whose index is an
+    /// `Int`, or a pool, whose index is a handle into it (STD.md). Nothing else has an index
+    /// (E0306). `None` once reported.
     fn indexed(&mut self, base_ty: &Ty, index: ExprId, span: Span) -> Option<Ty> {
         if let Ty::Adt(AdtId::LIST, args) = base_ty {
             self.check(index, &Ty::INT);
+            return Some(args[0].clone());
+        }
+        if let Ty::Adt(AdtId::POOL, args) = base_ty {
+            self.check(index, &Ty::applied(AdtId::HANDLE, vec![args[0].clone()]));
             return Some(args[0].clone());
         }
         self.rejected_value(index);
@@ -3020,7 +3095,7 @@ impl Checker<'_> {
             let message = match base_ty {
                 Ty::Adt(AdtId::MAP, _) => format!("`{ty}` has no index; read a map with `get`, as in `m.get(k)`"),
                 Ty::Text => "`Text` has no index; text is never indexed by integers (§12.3)".to_string(),
-                _ => format!("`{ty}` has no index; only a list has one, as in `xs[i]`"),
+                _ => format!("`{ty}` has no index; only a list and a pool have one, as in `xs[i]` and `pool[h]`"),
             };
             self.error(codes::UNSUPPORTED_OPERATOR, span, message);
         }
@@ -3045,6 +3120,10 @@ impl Checker<'_> {
         loop {
             match m.exprs[e].kind {
                 ExprKind::Field { base, .. } if matches!(self.p.res(e), Some(Res::Field(_))) => e = base,
+                ExprKind::Index { base, .. } if matches!(self.p.ty(base), Ty::Adt(AdtId::POOL, _)) => {
+                    self.pool_element(self.span(e));
+                    return;
+                }
                 ExprKind::Index { base, .. } => e = base,
                 ExprKind::Name(name) if let Some(Res::Local(id)) = self.p.res(e) => {
                     if !self.f.locals[id.index()].mutable {
@@ -3104,6 +3183,7 @@ impl Checker<'_> {
         let ty = self.vars.resolve(&ty);
         if copying {
             self.copied(e, &ty);
+            self.consumed.insert(e);
         }
         self.record(e, ty.clone());
         ty
@@ -3325,7 +3405,7 @@ impl Checker<'_> {
                     Ty::Never
                 }
             }
-            ExprKind::For { label, pat, iter, body } => self.for_loop(e, *label, *pat, *iter, body),
+            ExprKind::For { label, pat, iter, consume, body } => self.for_loop(e, *label, *pat, *iter, *consume, body),
             // What the hole meets may be given its type by the code that fills it (Q25).
             ExprKind::Todo(_) if self.opts.incomplete => {
                 if let Some(expected) = expected {
@@ -3768,6 +3848,17 @@ impl Checker<'_> {
                 self.rejected_args(args);
                 return Ty::Error;
             }
+            // Only the toolchain builds a pool or a handle (STD.md).
+            if self.p.decls.adt(id).is_native() {
+                let text = m.text(name.sym);
+                let message = match id {
+                    AdtId::POOL => format!("`{text}` has no constructor; `{text}.new()` builds an empty pool"),
+                    _ => format!("`{text}` has no constructor; a pool's `insert` makes handles"),
+                };
+                self.error(codes::UNKNOWN_NAME, name.span, message);
+                self.rejected_args(args);
+                return Ty::Error;
+            }
             return self.construct(callee, id, args, span);
         }
         let callee_span = self.span(callee);
@@ -3838,6 +3929,7 @@ impl Checker<'_> {
         }
         let name = m.text(info.name);
         let params: Vec<(&str, Ty)> = info.params.iter().map(|p| (m.text(p.name), p.ty.clone())).collect();
+        let modes: Vec<ParamMode> = info.params.iter().map(|p| p.mode).collect();
         let (ret, fails) = (info.ret.clone(), info.fails.clone());
         let generics: Vec<(Box<str>, Vec<IfaceId>)> =
             info.generics.iter().map(|g| (g.name.clone(), g.bounds.clone())).collect();
@@ -3888,7 +3980,7 @@ impl Checker<'_> {
         {
             self.vars.subsume(expected, &ret.subst(&tvars));
         }
-        let counted = self.generic_args(name, &params, &tvars, args, span, false);
+        let counted = self.generic_args(name, &params, &tvars, args, span, Modes::Each(&modes));
         // An expected type with an error may have given them, and arguments that don't
         // match their parameters leave them to nothing (§15.1).
         if expected == Some(&Ty::Error) || !counted {
@@ -3932,7 +4024,7 @@ impl Checker<'_> {
         let def = self.p.decls.adt(id);
         let name = def.name.clone();
         let params: Vec<(Box<str>, Ty)> = def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-        self.generic_args(&name, &params, &[], args, span, true);
+        self.generic_args(&name, &params, &[], args, span, Modes::Take);
         Ty::adt(id)
     }
 
@@ -4008,7 +4100,7 @@ impl Checker<'_> {
         let receiver_ty = self.infer(receiver);
         let open = self.vars.resolve(&receiver_ty);
         let receiver_ty = match open {
-            Ty::Adt(AdtId::LIST | AdtId::MAP, _) if builtin_method(&open, name).is_some() => open,
+            Ty::Adt(AdtId::LIST | AdtId::MAP | AdtId::POOL, _) if builtin_method(&open, name).is_some() => open,
             _ => self.force(&receiver_ty),
         };
         if let (Ty::Adt(id, _), "with") = (&receiver_ty, name)
@@ -4017,6 +4109,11 @@ impl Checker<'_> {
         {
             self.no_targs(targs, name, span);
             self.p.res.insert(e, Res::With);
+            // The new record takes the fields it doesn't replace, so a unique one is consumed
+            // (REFERENCE §4.4).
+            if self.p.decls.adt(*id).unique {
+                self.consumed.insert(receiver);
+            }
             self.with_args(e, *id, args, span);
             return receiver_ty;
         }
@@ -4025,6 +4122,11 @@ impl Checker<'_> {
         if receiver_ty == Ty::Text && planned {
             let what = format!("`Text` methods of §12.3, such as `{name}`,");
             self.not_implemented(method.span, &what, Planned::Unscheduled);
+            self.rejected_args(args);
+            return Ty::Error;
+        }
+        if let (Ty::Adt(AdtId::POOL, _), "update") = (&receiver_ty, name) {
+            self.not_implemented(method.span, "`Pool.update`, whose `change` is a closure,", Planned::Phase(3));
             self.rejected_args(args);
             return Ty::Error;
         }
@@ -4044,7 +4146,8 @@ impl Checker<'_> {
             if let Some((ty, iface, param)) = sig.needs {
                 self.needs(ty, iface, name, param, span);
             }
-            self.generic_args(name, &sig.params, &[], args, span, sig.takes);
+            let modes = if sig.takes { Modes::Take } else { Modes::Borrow };
+            self.generic_args(name, &sig.params, &[], args, span, modes);
             if let Some(err) = sig.fails {
                 self.fallible_call(e, name, &err, span, chain);
             }
@@ -4053,6 +4156,15 @@ impl Checker<'_> {
         match self.resolve_method(&receiver_ty, method) {
             Some(Callee::Fn(f)) => {
                 self.p.res.insert(e, Res::Fn(f));
+                // An `inout self` method changes its receiver, and a `take self` one owns it
+                // (REFERENCE §5.2).
+                match self.p.fns[f].self_mode {
+                    ParamMode::Inout => self.changes(receiver, name),
+                    ParamMode::Take => {
+                        self.consumed.insert(receiver);
+                    }
+                    _ => {}
+                }
                 self.fn_call(e, f, targs, args, span, chain, expected)
             }
             Some(Callee::Iface(iface, j)) => {
@@ -4199,6 +4311,9 @@ impl Checker<'_> {
         expected: Option<&Ty>,
     ) -> Ty {
         let name = self.m.text(method.sym);
+        if self.p.decls.adt(adt).is_native() {
+            return self.native_call(e, adt, method, targs, args, span, expected);
+        }
         let def = self.p.decls.adt(adt);
         let entries = self.inherent.get(&adt).map_or(&[][..], Vec::as_slice);
         // A rejected declaration of the name may be the one the call means, and it has been
@@ -4228,6 +4343,42 @@ impl Checker<'_> {
         }
         self.rejected_args(args);
         Ty::Error
+    }
+
+    /// `Pool.new()`, the one associated function of `std.pool`'s types, whose element type
+    /// comes from the type it is expected to have, or else from what it meets, as `[]`'s
+    /// does (STD.md).
+    #[allow(clippy::too_many_arguments)]
+    fn native_call(
+        &mut self,
+        e: ExprId,
+        adt: AdtId,
+        method: Ident,
+        targs: Option<&[TypeId]>,
+        args: &[Arg],
+        span: Span,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let name = self.m.text(method.sym);
+        let ty = self.p.decls.adt(adt).name.clone();
+        if (adt, name) != (AdtId::POOL, "new") {
+            let message = match adt {
+                AdtId::POOL => format!("`{ty}` has no associated function `{name}`; `{ty}.new()` builds an empty pool"),
+                _ => format!("`{ty}` has no associated function `{name}`; a pool's `insert` makes handles"),
+            };
+            self.error(codes::UNKNOWN_MEMBER, method.span, message);
+            self.rejected_args(args);
+            return Ty::Error;
+        }
+        self.no_targs(targs, "Pool.new", span);
+        self.p.res.insert(e, Res::Method(Builtin::PoolNew));
+        self.args("Pool.new", &[] as &[(&str, Ty)], args, span);
+        let element = match expected {
+            Some(Ty::Adt(AdtId::POOL, args)) => args[0].clone(),
+            Some(Ty::Error) => self.vars.rejected(),
+            _ => self.vars.fresh(Kind::Any, Origin::Variant { adt: AdtId::POOL, span }),
+        };
+        Ty::applied(AdtId::POOL, vec![element])
     }
 
     /// The interface that `sym` names, the module's or the prelude's.
@@ -4316,10 +4467,11 @@ impl Checker<'_> {
         let def = &self.p.decls.iface(iface).methods[j];
         let receiver = [receiver_ty.clone()];
         let params: Vec<(Box<str>, Ty)> = def.params.iter().map(|(n, t)| (n.clone(), t.subst(&receiver))).collect();
+        let modes = def.modes.clone();
         let ret = def.ret.subst(&receiver);
         let fails = def.fails.as_ref().map(|t| t.subst(&receiver));
         self.p.res.insert(e, Res::Dispatch { iface, method: j, qualified });
-        self.args(name, &params, args, span);
+        self.generic_args(name, &params, &[], args, span, Modes::Each(&modes));
         if let Some(err) = fails {
             self.fallible_call(e, name, &err, span, chain);
         }
@@ -4372,7 +4524,8 @@ impl Checker<'_> {
         for arg in args {
             if arg.inout {
                 let span = self.span(arg.value);
-                self.not_implemented(span, "`&` (inout) arguments", Planned::Phase(2));
+                let message = "`with` replaces fields, which aren't `inout` parameters, so its arguments take no `&`";
+                self.error(codes::INOUT_MARKER_MISMATCH, span, message);
             }
             let label = arg.label.map(|label| (label, m.text(label.sym)));
             let index = label.and_then(|(_, text)| fields.iter().position(|(name, _)| **name == *text));
@@ -4426,13 +4579,14 @@ impl Checker<'_> {
 
     /// Checks arguments against parameters, including the label rules (REFERENCE §3, H3).
     fn args<S: AsRef<str>>(&mut self, callee: &str, params: &[(S, Ty)], args: &[Arg], span: Span) {
-        self.generic_args(callee, params, &[], args, span, false);
+        self.generic_args(callee, params, &[], args, span, Modes::Borrow);
     }
 
     /// Checks arguments against parameters whose types may mention the type parameters
     /// `targs` gives, which may be variables, so an argument in any position may give them
-    /// (OPEN_QUESTIONS P5; issue #10). A construction, which stores its arguments, `copy`s
-    /// them. Returns whether the number of arguments was right.
+    /// (OPEN_QUESTIONS P5; issue #10). An argument for a `take` parameter is copied, or moved,
+    /// as a construction's are, and one for an `inout` parameter is written `&x` (REFERENCE
+    /// §5.2). Returns whether the number of arguments was right.
     fn generic_args<S: AsRef<str>>(
         &mut self,
         callee: &str,
@@ -4440,7 +4594,7 @@ impl Checker<'_> {
         targs: &[Ty],
         args: &[Arg],
         span: Span,
-        copy: bool,
+        modes: Modes,
     ) -> bool {
         let m = self.m;
         if args.len() != params.len() {
@@ -4460,10 +4614,6 @@ impl Checker<'_> {
         let mut labels_reported = false;
         for (i, (arg, (param, _))) in args.iter().zip(params).enumerate() {
             let param = param.as_ref();
-            if arg.inout {
-                let span = self.span(arg.value);
-                self.not_implemented(span, "`&` (inout) arguments", Planned::Phase(2));
-            }
             match arg.label {
                 _ if labels_reported => {}
                 Some(label) if m.text(label.sym) != param => {
@@ -4492,17 +4642,67 @@ impl Checker<'_> {
                 _ => {}
             }
         }
-        for (arg, (_, ty)) in args.iter().zip(params) {
-            self.copying = copy;
+        for (i, (arg, (param, ty))) in args.iter().zip(params).enumerate() {
+            let mode = match modes {
+                Modes::Borrow => ParamMode::Borrow,
+                Modes::Take => ParamMode::Take,
+                Modes::Each(modes) => modes.get(i).copied().unwrap_or(ParamMode::Borrow),
+            };
             // A type parameter that `targs` doesn't cover is the caller's own, such as the `T`
             // that `Self` stands for in `x.bigger(y)` where `x: T`, so it is a type like any.
-            if mentions_targ(ty, targs) {
-                self.check(arg.value, &ty.subst(targs));
-            } else {
-                self.check(arg.value, ty);
+            let ty = if mentions_targ(ty, targs) { ty.subst(targs) } else { ty.clone() };
+            let inout = matches!(mode, ParamMode::Inout | ParamMode::InoutPartial);
+            if inout && arg.inout {
+                self.inout_arg(arg.value, &ty);
+                continue;
             }
+            if inout || arg.inout {
+                let (param, value) = (param.as_ref(), self.span(arg.value));
+                let message = if inout {
+                    format!(
+                        "`{param}` is an `inout` parameter, so its argument is marked with `&`, as in `{param}: &x`"
+                    )
+                } else {
+                    format!("`{param}` isn't an `inout` parameter, so its argument takes no `&`")
+                };
+                self.error(codes::INOUT_MARKER_MISMATCH, value, message);
+            }
+            self.copying = mode == ParamMode::Take;
+            self.check(arg.value, &ty);
         }
         true
+    }
+
+    /// `&x`, the argument of an `inout` parameter of type `ty`. It is a variable the caller
+    /// may change, or a field or element of one, as an assignment's target is, and its type is
+    /// the parameter's exactly, since the callee's value flows back into it (REFERENCE §5.2,
+    /// §8.3).
+    fn inout_arg(&mut self, value: ExprId, ty: &Ty) {
+        let span = self.span(value);
+        if !matches!(self.m.exprs[value].kind, ExprKind::Name(_) | ExprKind::Field { .. } | ExprKind::Index { .. }) {
+            let message = "an `&` argument is a variable, or a field or element of one, which the call may change";
+            self.error(codes::INVALID_ASSIGNMENT_TARGET, span, message);
+            self.rejected_value(value);
+            return;
+        }
+        let Some((root, id, actual)) = self.place(value) else { return };
+        if !self.f.locals[id.index()].mutable {
+            let message = self.immutable(root, id, "pass it with `&`");
+            self.error(codes::IMMUTABLE_ASSIGNMENT, span, message);
+        }
+        if actual.is_unknown() || ty.is_unknown() {
+            return;
+        }
+        if !(self.vars.subsume(ty, &actual) && self.vars.subsume(&actual, ty)) {
+            let message = format!(
+                "an `&` argument has its parameter's type exactly, `{}`, but this is `{}`",
+                self.show(ty),
+                self.show(&actual)
+            );
+            self.error(codes::TYPE_MISMATCH, span, message);
+            self.vars.poison(&actual);
+            self.vars.quiet(ty);
+        }
     }
 
     fn fallible_call(&mut self, call: ExprId, callee: &str, err: &Ty, span: Span, chain: bool) {
@@ -4954,7 +5154,7 @@ impl Checker<'_> {
             return self.variant_type(id, targs, expected, span, true);
         }
         self.p.res.insert(e, Res::Ctor(id, v));
-        let counted = self.generic_args(&ctor, &params, &targs, args, span, true);
+        let counted = self.generic_args(&ctor, &params, &targs, args, span, Modes::Take);
         self.variant_type(id, targs, expected, span, !counted)
     }
 
@@ -5187,7 +5387,7 @@ impl Checker<'_> {
         let span = m.pats[pat].span;
         // A collection has no constructor to match, as a scalar has none (REFERENCE §6.4).
         let adt = match ty {
-            Ty::Adt(id, targs) if !self.p.decls.adt(*id).is_collection() => Some((id, targs)),
+            Ty::Adt(id, targs) if !self.p.decls.adt(*id).is_native() => Some((id, targs)),
             _ => None,
         };
         let Some((id, targs)) = adt else {
@@ -5243,7 +5443,7 @@ impl Checker<'_> {
         let found = match def.kind {
             AdtKind::Enum => def.variant_named(text).map(|(v, _)| v),
             AdtKind::Record => (*def.name == *text).then_some(VariantIdx::RECORD),
-            AdtKind::Collection => unreachable!("collections were rejected above"),
+            AdtKind::Native => unreachable!("native types were rejected above"),
         };
         let Some(v) = found else {
             if self.poisoned.contains(&name.sym) {
@@ -5405,11 +5605,28 @@ impl Checker<'_> {
 
     /// `for pat in iter`, over a range, a list's elements or a map's entries as `(k, v)`
     /// (REFERENCE §6.5). The pattern matches every element, as a `let` pattern does. A loop
-    /// over a collection borrows the elements it binds (OPEN_QUESTIONS P5).
-    fn for_loop(&mut self, e: ExprId, label: Option<Ident>, pat: PatId, iter: ExprId, body: &Block) -> Ty {
+    /// over a collection borrows the elements it binds (OPEN_QUESTIONS P5), and one that
+    /// `consume`s it, `for pat in take xs`, owns them.
+    fn for_loop(
+        &mut self,
+        e: ExprId,
+        label: Option<Ident>,
+        pat: PatId,
+        iter: ExprId,
+        consume: bool,
+        body: &Block,
+    ) -> Ty {
         let m = self.m;
         let span = self.span(iter);
         let (element, borrowed) = match m.exprs[iter].kind {
+            ExprKind::Range { lo, hi, .. } if consume => {
+                self.operands(lo, hi, None, span);
+                let message =
+                    "a consuming loop goes over a list or a map; a range has nothing to consume, so drop `take`";
+                self.error(codes::TYPE_MISMATCH, span, message);
+                self.record(iter, Ty::Error);
+                (Ty::Error, false)
+            }
             ExprKind::Range { lo, hi, .. } => {
                 let ty = self.operands(lo, hi, None, span);
                 let element = match self.force(&ty) {
@@ -5425,6 +5642,7 @@ impl Checker<'_> {
                 (element, false)
             }
             _ => {
+                self.copying = consume;
                 let ty = self.infer(iter);
                 let element = match self.force(&ty) {
                     Ty::Adt(AdtId::LIST, args) => args[0].clone(),
@@ -5437,7 +5655,7 @@ impl Checker<'_> {
                         Ty::Error
                     }
                 };
-                (element, true)
+                (element, !consume)
             }
         };
         self.f.scopes.push(Vec::new());
@@ -5569,6 +5787,24 @@ fn builtin_method(ty: &Ty, name: &str) -> Option<BuiltinSig> {
                 _ => return None,
             }
         }
+        (Ty::Adt(AdtId::POOL, args), _) => {
+            let t = args[0].clone();
+            let handle = Ty::applied(AdtId::HANDLE, vec![t.clone()]);
+            match name {
+                "len" => sig(Builtin::Len, vec![], Ty::INT),
+                "insert" => BuiltinSig { takes: true, ..sig(Builtin::Insert, vec![("value", t)], handle) },
+                "remove" => sig(Builtin::Remove, vec![("handle", handle)], Ty::option(t)),
+                "get" => BuiltinSig {
+                    needs: Some((t.clone(), IfaceId::COPY, "T")),
+                    ..sig(Builtin::Get, vec![("handle", handle)], Ty::option(t))
+                },
+                "duplicate" => BuiltinSig {
+                    needs: Some((t.clone(), IfaceId::COPY, "T")),
+                    ..sig(Builtin::Duplicate, vec![], Ty::applied(AdtId::POOL, vec![t]))
+                },
+                _ => return None,
+            }
+        }
         _ => return None,
     })
 }
@@ -5653,6 +5889,8 @@ fn example_type(name: &str) -> &'static str {
         "Result" => "Result[T, E]",
         "List" => "List[T]",
         "Map" => "Map[K, V]",
+        "Pool" => "Pool[T]",
+        "Handle" => "Handle[T]",
         _ => "Option[T]",
     }
 }

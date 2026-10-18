@@ -1,0 +1,69 @@
+// phase: 2.7
+// Pools, moves and `inout` calls take time in proportion to the work. A million inserts,
+// reads and removes of one pool change it in place. Moving a pool to a new name and back
+// copies none of it, and neither does passing a list as `inout` to a function that can't
+// fail, so a loop of such calls stays linear (OPEN_QUESTIONS P5). A consuming loop owns
+// each element it takes.
+use std.io { IoError }
+use std.pool { Pool, Handle }
+
+fn add_one(xs: inout List[Int], i: Int) {
+    xs.push(i)
+}
+
+fn inserts(n: Int) -> Int {
+    var pool: Pool[Int] = Pool.new()
+    var handles: List[Handle[Int]] = []
+    for i in 0..n {
+        handles.push(pool.insert(i))
+    }
+    var total = 0
+    for h in handles {
+        total += pool[h]
+    }
+    for h in handles {
+        let gone = pool.remove(h) else 0
+    }
+    return total + pool.len()
+}
+
+fn inout_calls(n: Int) -> Int {
+    var xs: List[Int] = []
+    for i in 0..n {
+        add_one(xs: &xs, i: i)
+    }
+    return xs.len()
+}
+
+fn moves(n: Int) -> Int {
+    var pool: Pool[Int] = Pool.new()
+    for i in 0..n {
+        var next = pool
+        next.insert(i)
+        pool = next
+    }
+    return pool.len()
+}
+
+fn consumed(n: Int) -> Int {
+    var pools: List[Pool[Int]] = []
+    for i in 0..n {
+        var p: Pool[Int] = Pool.new()
+        p.insert(i)
+        pools.push(p)
+    }
+    var total = 0
+    for p in take pools {
+        var mine = p
+        mine.insert(0)
+        total += mine.len()
+    }
+    return total
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{inserts(1_000_000)}")
+    try sys.stdout.write_line(f"{inout_calls(300_000)}")
+    try sys.stdout.write_line(f"{moves(300_000)}")
+    try sys.stdout.write_line(f"{consumed(100_000)}")
+}

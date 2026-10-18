@@ -1,0 +1,4 @@
+Counter(n: 5, limit: 5) over 5 ok
+10 Counter(n: 0, limit: 5)
+2 3
+2 c 2

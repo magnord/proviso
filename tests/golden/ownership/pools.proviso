@@ -1,0 +1,110 @@
+// phase: 2.7
+// A pool stores values and hands out handles to them (REFERENCE §5.5, STD.md). A handle
+// reads its element until the element is removed, and never reads another element after
+// that. Every insert takes a generation no handle has had, also when it reuses a removed
+// element's slot, and a handle into another pool, or into the pool a duplicate was made
+// from, reads `None`. A pool moves, and its handles stay valid in the pool it moved to.
+// `pool[h]` borrows the element, as `xs[i]` does. Handles are copyable and implement `Eq`
+// and `Hash`, so they compare and can be map keys. `debug` writes a pool as its elements
+// in slot order, and a handle by its slot and generation (OPEN_QUESTIONS P5).
+use std.io { IoError }
+use std.pool { Pool, Handle }
+
+record Person derives(Show) {
+    name: Text
+    age: Int
+}
+
+fn basics() -> Text {
+    var people: Pool[Text] = Pool.new()
+    let a = people.insert("ada")
+    let b = people.insert(value: "bob")
+    let n = people.len()
+    let removed = people.remove(a) else "none"
+    let again = people.remove(handle: a) else "none"
+    let c = people.insert("cy")
+    let via_a = people.get(a) else "stale"
+    let via_c = people.get(handle: c) else "stale"
+    return f"{n} {removed} {again} {people.len()} {via_a} {via_c} {people[b]} {a == c} {b == b} {a != b}"
+}
+
+fn other_pools() -> Text {
+    var first: Pool[Int] = Pool.new()
+    var second: Pool[Int] = Pool.new()
+    let h = first.insert(1)
+    let k = second.insert(2)
+    let wrong = second.get(h) else -1
+    let copy = first.duplicate()
+    let in_copy = copy.get(h) else -1
+    let in_first = first.get(h) else -1
+    let gone = second.remove(h) else -1
+    let other = first.get(k) else -1
+    return f"{wrong} {in_copy} {in_first} {gone} {other} {second.len()} {copy.len()}"
+}
+
+fn moved() -> Text {
+    var a: Pool[Text] = Pool.new()
+    let h = a.insert("kept")
+    var b = a
+    let k = b.insert("added")
+    let got = b.get(h) else "lost"
+    return f"{got} {b.len()}"
+}
+
+fn reused() -> Text {
+    var pool: Pool[Int] = Pool.new()
+    let old = pool.insert(1)
+    let dropped = pool.remove(old) else 0
+    let fresh = pool.insert(2)
+    let stale = pool.get(old) else -1
+    let current = pool.get(fresh) else -1
+    return f"{stale} {current} {old == fresh}"
+}
+
+fn keyed() -> Text {
+    var pool: Pool[Text] = Pool.new()
+    let h = pool.insert("x")
+    let k = pool.insert("y")
+    let names = [h: "first", k: "second"]
+    let found = names.get(k) else "none"
+    return f"{found} {names.len()} {names.contains_key(h)}"
+}
+
+fn records() -> Text {
+    var people: Pool[Person] = Pool.new()
+    let h = people.insert(Person(name: "ada", age: 36))
+    let age = people[h].age
+    let shown = people[h].show()
+    let person = people.remove(h) else Person(name: "none", age: 0)
+    return f"{age} {shown} {person.name}"
+}
+
+fn fill[T](pool: inout Pool[T], value: take T) -> Handle[T] {
+    return pool.insert(value)
+}
+
+fn generic() -> Text {
+    var pool: Pool[List[Int]] = Pool.new()
+    let h = fill(pool: &pool, value: [1, 2])
+    let list = pool.get(h) else []
+    return f"{list} {pool[h].len()}"
+}
+
+fn debugged() {
+    var pool: Pool[Text] = Pool.new()
+    let a = pool.insert("a")
+    let b = pool.insert("b")
+    let gone = pool.remove(a) else ""
+    debug(pool, b)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    debugged()
+    try sys.stdout.write_line(basics())
+    try sys.stdout.write_line(other_pools())
+    try sys.stdout.write_line(moved())
+    try sys.stdout.write_line(reused())
+    try sys.stdout.write_line(keyed())
+    try sys.stdout.write_line(records())
+    try sys.stdout.write_line(generic())
+}

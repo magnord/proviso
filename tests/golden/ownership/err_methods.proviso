@@ -1,0 +1,109 @@
+// phase: 2.7
+// expect-error: E0305
+// expect-error: E0106
+// expect-error: E0504
+// expect-error: E0501
+// expect-error: E0505
+// expect-error: E0314
+// An `inout self` method changes its receiver, so the receiver is a `var` or an `inout`
+// parameter, or a part of one, as `push`'s is (REFERENCE §5.2). A `take self` method owns
+// its receiver, so a unique receiver moves, and a lent one can't (§5.2). Inside a borrowed
+// or `inout self` method, `self` is lent too. The receiver's access begins once the
+// arguments are evaluated, so an argument may read it but not pass it with `&` (§5.3). An
+// implementation repeats its interface's receiver as written (§4.9).
+use std.pool { Pool }
+
+record Counter {
+    n: Int
+}
+
+impl Counter {
+    pub fn bump(inout self) {
+        self.n += 1
+    }
+
+    pub fn add(inout self, k: Int) {
+        self.n += k
+    }
+
+    pub fn absorb(inout self, other: inout Counter) {
+        self.n += other.n
+        other.n = 0
+    }
+
+    pub fn total(take self) -> Int {
+        return self.n
+    }
+}
+
+unique record Bag {
+    pool: Pool[Int]
+}
+
+impl Bag {
+    pub fn size(self) -> Int {
+        return self.pool.len()
+    }
+
+    pub fn finish(take self) -> Int {
+        return self.pool.len()
+    }
+
+    pub fn peek(self) -> Pool[Int] {
+        return self.pool                            // <- E0504
+    }
+
+    pub fn steal(inout self) -> Pool[Int] {
+        return self.pool                            // <- E0504
+    }
+
+    pub fn swap_out(inout self) -> Pool[Int] {
+        let old = self.pool                         // <- E0504
+        self.pool = Pool.new()
+        return old
+    }
+}
+
+interface Sized {
+    fn size(self) -> Int
+}
+
+impl Sized for Counter {
+    fn size(inout self) -> Int {                    // <- E0314
+        return self.n
+    }
+}
+
+fn make() -> Counter {
+    return Counter(n: 0)
+}
+
+fn receivers(c: Counter, d: inout Counter) {
+    let e = Counter(n: 0)
+    e.bump()                                        // <- E0305
+    c.bump()                                        // <- E0305
+    d.bump()
+    make().bump()                                   // <- E0106
+    let t = make().total() + c.total()
+}
+
+fn consumed(b: Bag) -> Int {
+    return b.finish()                               // <- E0504
+}
+
+fn moved_receiver(b: take Bag) -> Int {
+    let n = b.finish()
+    return b.size()                                 // <- E0501
+}
+
+fn twice(b: take Bag) -> Int {
+    return b.finish() + b.finish()                  // <- E0501
+}
+
+fn overlaps() {
+    var c = Counter(n: 1)
+    var d = Counter(n: 2)
+    c.add(c.n)
+    c.absorb(other: &d)
+    c.absorb(other: &c)                             // <- E0505
+}

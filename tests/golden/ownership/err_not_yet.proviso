@@ -1,0 +1,58 @@
+// phase: 2.7
+// expect-error: E0901
+// Resources and `Abandon` come in a later slice of phase 2, and so do `opaque` records,
+// `inout(partial)`, `keep` parameters other than `System`, and interface methods that take
+// `inout self` or `take self`. `Pool.update` takes a closure, which comes in phase 3. Uses
+// of what they declare aren't reported again (REFERENCE §15.1).
+use std.pool { Pool, Handle }
+
+resource record Lock {                              // <- E0901
+    id: Int
+}
+
+opaque record Secret {                              // <- E0901
+    id: Int
+}
+
+unique record Token {
+    id: Int
+}
+
+fn later_uses(l: Lock, s: Secret) -> Int {
+    return l.id + s.id
+}
+
+fn partial(x: inout(partial) Int) {                 // <- E0901
+    x = 1
+}
+
+fn kept(p: keep Pool[Int]) -> Int {                 // <- E0901
+    return p.len()
+}
+
+fn update(pool: inout Pool[Int], h: Handle[Int]) -> Bool {
+    return pool.update(handle: h, change: 1)        // <- E0901
+}
+
+interface Finish {
+    fn finish(take self) -> Int                     // <- E0901
+}
+
+interface Grow {
+    fn grow(inout self)                             // <- E0901
+}
+
+impl Finish for Token {
+    fn finish(take self) -> Int {
+        return self.id
+    }
+}
+
+impl Abandon for Token {                            // <- E0901
+    fn abandon(take self) {
+    }
+}
+
+fn finished(t: take Token) -> Int {
+    return t.finish()
+}

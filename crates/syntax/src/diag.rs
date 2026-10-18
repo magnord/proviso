@@ -188,7 +188,7 @@ pub mod codes {
         REFUTABLE_PATTERN = "E0318", "refutable_pattern",
             "A `let` or `for` pattern that may not match its value, such as `let Some(x) = o` or one with a literal; use `match`, `is` or an `else` form (REFERENCE §6.4, §6.6).";
 
-        // E0412 to E0414, E0501, E0502, E0601 and E0602 are reserved for later phases: the §F
+        // E0412 to E0414, E0502, E0601 and E0602 are reserved for later phases: the §F
         // goldens already expect them.
         REFINEMENT_REFUTED = "E0412", "refinement_refuted",
             "A refinement obligation is refuted: values consistent with every admissible fact violate it (REFERENCE §8.3, §8.5).";
@@ -203,7 +203,13 @@ pub mod codes {
         LENT_RESOURCE_CONSUMED = "E0502", "lent_resource_consumed",
             "A borrowed or `inout` resource cannot be passed to `take` or used by a `take self` method (REFERENCE §10).";
         NOT_COPYABLE = "E0503", "not_copyable",
-            "A borrowed value of a type parameter without `Copy`, or of a type built from one, is copied: bound to a new name, assigned, stored in a value, returned or failed with (REFERENCE §4.8).";
+            "A borrowed or `inout` value of a type parameter without `Copy`, or of a type built from one, is copied: bound to a new name, assigned, stored in a value, returned or failed with (REFERENCE §4.8).";
+        LENT_VALUE_MOVED = "E0504", "lent_value_moved",
+            "A borrowed or `inout` value of a unique type, or a part of one, is moved: bound, assigned, returned, stored, passed to `take`, consumed by `for … in take`, or by a `take self` method or `with` (REFERENCE §5.1, §5.2).";
+        OVERLAPPING_ACCESS = "E0505", "overlapping_access",
+            "Two accesses to one variable overlap in a call while one of them is `inout`, such as `swap(a: &x, b: &x)`, or a value lent to a call is moved in it (REFERENCE §5.3).";
+        INOUT_MARKER_MISMATCH = "E0506", "inout_marker_mismatch",
+            "An argument for an `inout` parameter without `&`, or `&` on an argument whose parameter isn't `inout` (REFERENCE §5.2, H5).";
         EFFECTS_CALL_IN_OBSERVES = "E0601", "effects_call_in_observes",
             "An operation that needs only `observes` permissions calls an `effects` operation (REFERENCE §9.2).";
         REACH_NOT_ADMITTED = "E0602", "reach_not_admitted",

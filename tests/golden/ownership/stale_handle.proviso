@@ -1,0 +1,40 @@
+// phase: 2.7
+// run: test
+// expect-exit: 70
+// `pool[h]` with a handle whose element was removed, or with a handle into another pool,
+// is a `stale_handle` defect at the indexing expression (REFERENCE §5.5, §7.3), where `get`
+// gives `None`. The message says which of the two it was (OPEN_QUESTIONS P5).
+use std.pool { Pool }
+
+fn removed() -> Int {
+    var pool: Pool[Int] = Pool.new()
+    let h = pool.insert(5)
+    let gone = pool.remove(h) else 0
+    return pool[h]
+}
+
+fn elsewhere() -> Int {
+    var mine: Pool[Int] = Pool.new()
+    var theirs: Pool[Int] = Pool.new()
+    let h = theirs.insert(5)
+    let k = mine.insert(6)
+    return mine[h]
+}
+
+fn duplicated() -> Int {
+    var pool: Pool[Int] = Pool.new()
+    let h = pool.insert(5)
+    let copy = pool.duplicate()
+    return copy[h]
+}
+
+fn present() -> Int {
+    var pool: Pool[Int] = Pool.new()
+    let h = pool.insert(5)
+    return pool[h]
+}
+
+example removed() == 5
+example elsewhere() == 5
+example duplicated() == 5
+example present() == 5

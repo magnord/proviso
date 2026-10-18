@@ -1,0 +1,75 @@
+// phase: 2.7
+// expect-error: E0205
+// expect-error: E0307
+// expect-error: E0312
+// expect-error: E0309
+// expect-error: E0306
+// expect-error: E0301
+// expect-error: E0201
+// expect-error: E0303
+// expect-error: E0305
+// expect-error: E0106
+// `std.pool` declares `Pool` and `Handle` (STD.md). Both take one type argument. An empty
+// pool's element type comes from what it meets, as `[]`'s does, so `var p = Pool.new()` needs
+// a type. `get`, `duplicate` and copying `pool[h]` need `T: Copy`, while borrowing it
+// doesn't. A pool's element can't be changed through `pool[h]`, whose index is a
+// `Handle[T]`. `Pool.new()` builds a pool and only a pool builds handles, so neither type
+// has a constructor. A pool implements no interface, and a handle only `Eq` and `Hash`.
+// `insert` and `remove` take `inout self`, so they need a variable.
+use std.pool { Pool, Handle, Slot }                 // <- E0205
+
+unique record Token {
+    id: Int
+}
+
+fn fresh() -> Pool[Int] {
+    return Pool.new()
+}
+
+fn types(p: Pool, h: Handle[Int, Int]) {            // <- E0307, E0307
+}
+
+fn inferred() {
+    var p = Pool.new()                              // <- E0312
+}
+
+fn copies(pool: Pool[Token], h: Handle[Token]) -> Int {
+    let a = pool.get(h)                             // <- E0309
+    let b = pool.duplicate()                        // <- E0309
+    let c = pool[h]                                 // <- E0309
+    return pool[h].id
+}
+
+fn changes(pool: inout Pool[Int], h: Handle[Int]) {
+    pool[h] = 3                                     // <- E0306
+    pool[h] += 1                                    // <- E0306
+}
+
+fn indices(pool: Pool[Int], h: Handle[Text]) -> Int {
+    let a = pool[0]                                 // <- E0301
+    return pool.get(h) else 0                       // <- E0301
+}
+
+fn constructors() {
+    let p = Pool(1)                                 // <- E0201
+    let h = Handle(slot: 0)                         // <- E0201
+    let q = Pool.with_capacity(3)                   // <- E0303
+    let k = Handle.new()                            // <- E0303
+}
+
+fn operators(a: Pool[Int], h: Handle[Int], k: Handle[Int]) -> Bool {
+    let shown = f"{h}"                              // <- E0306
+    let less = h < k                                // <- E0306
+    return a == a                                   // <- E0306
+}
+
+fn members(pool: Pool[Int], h: Handle[Int]) -> Int {
+    let s = h.slot                                  // <- E0303
+    return pool.size()                              // <- E0303
+}
+
+fn variables(pool: Pool[Int], h: Handle[Int]) {
+    pool.insert(1)                                  // <- E0305
+    let r = pool.remove(h)                          // <- E0305
+    fresh().insert(2)                               // <- E0106
+}

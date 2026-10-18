@@ -1,0 +1,45 @@
+// phase: 2.7
+// expect-error: E0309
+// expect-error: E0310
+// `Copy` holds only for copyable types with no reach (REFERENCE §5.1), and a unique type is
+// not copyable. A pool is unique (§5.5), and so are a `unique record` and any aggregate that
+// holds one, such as a list, a tuple, an `Option` or a record. So none of them meets a
+// `Copy` constraint, and an element of a list of them can't be copied by `xs[i]`, `get` or
+// `enumerate` (STD.md). A handle is copyable, and so is a record of handles. `Copy` can't be
+// derived.
+use std.pool { Pool, Handle }
+
+unique record Token {
+    id: Int
+}
+
+record Holder {
+    token: Token
+}
+
+record Refs {
+    first: Handle[Token]
+    second: Handle[Int]
+}
+
+unique record Plain derives(Eq, Show, Copy) {       // <- E0310
+    n: Int
+}
+
+fn dup[T: Copy](x: T) -> T {
+    return x
+}
+
+fn kinds(t: Token, h: Holder, xs: List[Pool[Int]], o: Option[Token], pair: (Int, Token), r: Refs) -> Int {
+    let a = dup(t)                                  // <- E0309
+    let b = dup(h)                                  // <- E0309
+    let c = dup(xs)                                 // <- E0309
+    let d = dup(o)                                  // <- E0309
+    let e = dup(pair)                               // <- E0309
+    let f = dup(r)
+    let g = dup(r.first)
+    let i = xs.get(0)                               // <- E0309
+    let j = xs.enumerate()                          // <- E0309
+    let k = xs[0]                                   // <- E0309
+    return xs[0].len() + t.id
+}

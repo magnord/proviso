@@ -1,0 +1,157 @@
+// phase: 2.7
+// A unique value moves where a copyable one is copied (REFERENCE §5.1), and keeps what it
+// holds wherever it goes, to a new name, by assignment, out of a function, into a field of
+// a record or a variant, into an element of a list, tuple or map, into a `take` parameter,
+// through a consuming loop, and into the bindings of a pattern (§6.4). Moving a field leaves
+// the rest of the record usable, and `with` on a record that holds a unique value consumes
+// it (§4.4). A
+// consuming loop owns each element, so it can move it on (§6.5). A `var` that moved holds a
+// new value once assigned. A `unique record` moves, and so does a value of a type parameter
+// without `Copy`.
+use std.io { IoError }
+use std.pool { Pool }
+
+unique record Token {
+    id: Int
+}
+
+record Holder {
+    name: Text
+    pool: Pool[Text]
+}
+
+enum Slot {
+    Empty
+    Full(pool: Pool[Text])
+}
+
+fn filled(name: Text) -> Pool[Text] {
+    var pool: Pool[Text] = Pool.new()
+    pool.insert(name)
+    return pool
+}
+
+fn count(pool: take Pool[Text]) -> Int {
+    return pool.len()
+}
+
+fn pass_on(pool: take Pool[Text]) -> Pool[Text] {
+    var mine = pool
+    mine.insert("passed")
+    return mine
+}
+
+fn swap_pair[T](pair: take (T, T)) -> (T, T) {
+    let (a, b) = pair
+    return (b, a)
+}
+
+fn names() -> Text {
+    let a = filled("a")
+    var b = a
+    b.insert("b")
+    let c = b
+    return f"{c.len()}"
+}
+
+fn assignments() -> Text {
+    var a = filled("a")
+    var b = filled("x")
+    b = a
+    a = filled("again")
+    a.insert("more")
+    return f"{a.len()} {b.len()}"
+}
+
+fn fields() -> Text {
+    var holder = Holder(name: "h", pool: filled("f"))
+    holder.pool.insert("g")
+    let back = holder.pool
+    let name = holder.name
+    holder.pool = filled("new")
+    let whole = holder
+    return f"{back.len()} {whole.pool.len()} {name}"
+}
+
+fn elements() -> Text {
+    let a = filled("a")
+    let b = filled("b")
+    var pools = [a, b]
+    pools[1].insert("c")
+    let last = pools.pop() else filled("none")
+    let pair = (last, filled("d"))
+    let (first, second) = pair
+    var by_name: Map[Text, Pool[Text]] = [:]
+    by_name.set(key: "k", value: first)
+    let out = by_name.remove("k") else filled("none")
+    return f"{pools.len()} {out.len()} {second.len()} {by_name.len()}"
+}
+
+fn options() -> Text {
+    let some = Some(filled("o"))
+    let inner = some else filled("none")
+    let slot = Slot.Full(pool: inner)
+    let pool = match slot {
+        Full(p) => p
+        Empty => filled("e")
+    }
+    return f"{pool.len()}"
+}
+
+fn calls() -> Text {
+    let pool = filled("t")
+    let n = count(pool)
+    let back = pass_on(filled("u"))
+    let (x, y) = swap_pair((filled("one"), pass_on(filled("two"))))
+    return f"{n} {back.len()} {x.len()} {y.len()}"
+}
+
+fn loops() -> Text {
+    let pools = [filled("a"), filled("b"), filled("c")]
+    var total = 0
+    var kept: List[Pool[Text]] = []
+    for pool in take pools {
+        total += pool.len()
+        kept.push(pool)
+    }
+    let by_key: Map[Text, Pool[Text]] = ["x": filled("x"), "y": pass_on(filled("y"))]
+    var keys = ""
+    for (key, value) in take by_key {
+        keys = f"{keys}{key}{value.len()}"
+        kept.push(value)
+    }
+    var stopped = 0
+    for pool in take kept {
+        if stopped == 2 {
+            break
+        }
+        stopped += count(pool)
+    }
+    return f"{total} {keys} {stopped}"
+}
+
+fn renamed() -> Text {
+    let holder = Holder(name: "w", pool: filled("w"))
+    let other = holder.with(name: "v")
+    return f"{other.name} {other.pool.len()}"
+}
+
+fn tokens() -> Text {
+    let t = Token(id: 1)
+    let u = t
+    var list = [u, Token(id: 2)]
+    let last = list.pop() else Token(id: 0)
+    return f"{last.id} {list.len()}"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(names())
+    try sys.stdout.write_line(assignments())
+    try sys.stdout.write_line(fields())
+    try sys.stdout.write_line(elements())
+    try sys.stdout.write_line(options())
+    try sys.stdout.write_line(calls())
+    try sys.stdout.write_line(loops())
+    try sys.stdout.write_line(renamed())
+    try sys.stdout.write_line(tokens())
+}
