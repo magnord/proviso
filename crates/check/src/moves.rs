@@ -132,10 +132,9 @@ enum Access {
     Inout,
     /// A borrowed argument or receiver of a unique type.
     Lent,
-    /// An argument of a unique type that moves into the call.
+    /// An argument of a unique type that moves into the call. A receiver that moves has
+    /// moved before any `&` argument reaches it, which is a use after move instead.
     Move,
-    /// A `take self` receiver of a unique type.
-    ReceiverMove,
 }
 
 struct CallAccess {
@@ -681,8 +680,9 @@ impl Walk<'_> {
         {
             self.expr(receiver);
             // A `take self` receiver, and that of `with` on a unique record, move.
-            let access = if self.consumed.contains(&receiver) { Access::ReceiverMove } else { Access::Lent };
-            self.note(&mut accesses, receiver, access);
+            if !self.consumed.contains(&receiver) {
+                self.note(&mut accesses, receiver, Access::Lent);
+            }
         }
         for arg in args.iter().filter(|arg| !arg.inout) {
             self.expr(arg.value);
@@ -705,7 +705,7 @@ impl Walk<'_> {
     /// or moved value matters only when its type is unique.
     fn note(&mut self, accesses: &mut Vec<CallAccess>, e: ExprId, access: Access) {
         let Some((local, steps)) = self.access_path(e) else { return };
-        if matches!(access, Access::Lent | Access::Move | Access::ReceiverMove) && !self.moves(self.p.ty(e)) {
+        if matches!(access, Access::Lent | Access::Move) && !self.moves(self.p.ty(e)) {
             return;
         }
         let conflict = accesses.iter().find(|other| {
@@ -717,7 +717,6 @@ impl Walk<'_> {
                         | (Access::Inout, Access::Lent)
                         | (Access::Lent, Access::Inout)
                         | (Access::Lent, Access::Move)
-                        | (Access::ReceiverMove, Access::Inout)
                 )
         });
         if let Some(other) = conflict {
@@ -728,14 +727,12 @@ impl Walk<'_> {
                         "`{here}` is lent to this call by an earlier argument, so it can't also move into it (§5.3)"
                     )
                 }
-                (Access::ReceiverMove, _) => {
-                    format!(
-                        "`{there}` moves into this call as its receiver, so `{here}` can't also be passed with `&` (§5.3)"
-                    )
-                }
                 _ if other.steps.iter().chain(&steps).any(|s| *s == Step::Element(None)) => format!(
                     "`{here}` may overlap `{there}`, which this call also reaches while one of them is `inout`; two elements are known to differ only when their indices are different literals (§5.3; OPEN_QUESTIONS P5)"
                 ),
+                _ if here == there => {
+                    format!("this call reaches `{here}` twice while one of the accesses is `inout` (§5.3)")
+                }
                 _ => format!(
                     "`{here}` overlaps `{there}`, which this call also reaches while one of them is `inout`, so the call would have two accesses to one variable (§5.3)"
                 ),

@@ -340,6 +340,13 @@ fn nested_field() -> Int {
     return p.len()
 }
 
+fn outer_twice() -> Int {
+    let o = Outer(inner: Holder(pool: fresh(), n: 1))
+    let p = o
+    let q = o                                       // <- E0501
+    return 0
+}
+
 fn nested_option() -> Int {
     let o = Some(Some(fresh()))
     let p = o

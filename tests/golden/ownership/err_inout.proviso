@@ -16,7 +16,8 @@
 // so the other arguments may read the variable, but two `&` arguments of one call may not
 // overlap, however deep. Two fields are disjoint, and so are two elements whose indices are
 // different literals. Before the verifier, nothing shows that two other indices differ, even
-// where a fact would (OPEN_QUESTIONS P5).
+// where a fact would (OPEN_QUESTIONS P5). A unique value lent to a call by one argument
+// can't move into it through a later one.
 use std.pool { Pool, Handle }
 
 record Pt {
@@ -46,6 +47,9 @@ fn first_inout(a: inout Int, b: Int) {
 
 fn last_inout(b: Int, a: inout Int) {
     a = b
+}
+
+fn lend_then_take(a: Pool[Int], b: take Pool[Int]) {
 }
 
 fn markers() -> Int {
@@ -102,4 +106,9 @@ fn overlaps(i: Int, j: Int) {
     first_inout(a: &xs[0], b: xs[1])
     last_inout(b: a, a: &a)
     last_inout(b: xs.len(), a: &xs[0])
+}
+
+fn lent_then_moved() {
+    let pool: Pool[Int] = Pool.new()
+    lend_then_take(a: pool, b: pool)                // <- E0505
 }

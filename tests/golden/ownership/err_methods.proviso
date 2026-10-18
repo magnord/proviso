@@ -9,7 +9,8 @@
 // parameter, or a part of one, as `push`'s is (REFERENCE §5.2). A `take self` method owns
 // its receiver, so a unique receiver moves, and a lent one can't (§5.2). Inside a borrowed
 // or `inout self` method, `self` is lent too. The receiver's access begins once the
-// arguments are evaluated, so an argument may read it but not pass it with `&` (§5.3). An
+// arguments are evaluated, so an argument may read it but not pass it with `&`. A receiver
+// that moves into the call has moved before an `&` argument reaches it (§5.1, §5.3). An
 // implementation repeats its interface's receiver as written (§4.9).
 use std.pool { Pool }
 
@@ -47,6 +48,10 @@ impl Bag {
 
     pub fn finish(take self) -> Int {
         return self.pool.len()
+    }
+
+    pub fn merge(take self, other: inout Bag) -> Int {
+        return self.pool.len() + other.pool.len()
     }
 
     pub fn peek(self) -> Pool[Int] {
@@ -106,4 +111,6 @@ fn overlaps() {
     c.add(c.n)
     c.absorb(other: &d)
     c.absorb(other: &c)                             // <- E0505
+    var b = Bag(pool: Pool.new())
+    let n = b.merge(other: &b)                      // <- E0501
 }
