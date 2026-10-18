@@ -13,7 +13,8 @@
 // argument the hole meets is `Never`, as the hole is, unless something gives it a type, in
 // either argument order. A method on a chain's call, as `.show()` is, leaves the error type
 // the hole met open until its handler joins it with a `try`'s `fails`, another call of the
-// chain or an `attempt`'s expected `Result` (P5, `fails Never`; issue #37).
+// chain, an `attempt`'s expected `Result` or a value after the chain (P5, `fails Never`;
+// issue #37).
 
 fn rethrow[E: Copy](e: E) -> Int fails E {
     fail e

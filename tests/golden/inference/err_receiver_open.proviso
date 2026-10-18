@@ -1,5 +1,6 @@
 // phase: 2.5
 // expect-error: E0201
+// expect-error: E0301
 // expect-error: E0303
 // expect-error: E0702
 // A method call needs only its receiver's head to find the method. The error types its
@@ -12,9 +13,11 @@
 // So `.show()` on an `Option[E]` whose `E` settles as a type without `Show` is
 // E0303, as it is when the type is known first. A receiver that is the error type itself
 // needs its head, so it joins the chain's other error types and what the handler knows
-// first, and a value that gives it only after the chain still comes too late (k1).
-// Each line's verdict is the one its rewrite without the method, or with its operands
-// swapped, gets. `err_receiver_holes` holds the same lines with `todo` as the source.
+// first, and a value that gives it only after the chain still comes too late (k1, issue
+// #NN). Each line gets the error-type verdict of its rewrite without the method or with its
+// operands swapped. Whether the receiver has the method is a check of its own, so a line
+// such as b2 is E0303 where its rewrite without the method checks. `err_receiver_holes`
+// repeats the main families with `todo` as the source.
 
 record Box {
     n: Int
@@ -148,6 +151,25 @@ fn heads() -> Int {
 
 fn heads_late() -> Int {
     let k1 = attempt give2(e: stop()).byte_len() == Err("k1")      // <- E0303
+    return 0
+}
+
+fn mismatched() -> Int {
+    let m1: Result[Text, Bare] = attempt boxof(e: "m1").give(e: stop())          // <- E0301
+    let m2: Result[Int, Bare] = attempt boxof(e: "m2").give(e: stop()).byte_len() // <- E0301
+    let m3: Result[Int, Text] = attempt boxof(e: 3).give(e: stop()).byte_len()    // <- E0303
+    return 0
+}
+
+fn mismatched_text() -> Int fails Text {
+    let m4 = try boxof(e: 4).give(e: stop())                       // <- E0702
+    let m5 = try boxof(e: 5).give(e: stop()).byte_len()            // <- E0702
+    return 0
+}
+
+fn mismatched_bare() -> Int fails Bare {
+    let m6 = try boxof(e: "m6").give(e: stop())                    // <- E0702
+    let m7 = try boxof(e: "m7").give(e: stop()).byte_len()         // <- E0702
     return 0
 }
 

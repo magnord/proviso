@@ -673,19 +673,19 @@ impl Checker<'_> {
     /// chain, as far as finding its member needs (OPEN_QUESTIONS P5, `fails Never`; issue #37).
     ///
     /// Invariant: an open variable in the error type of a call that a `try`, `attempt`, `else`
-    /// or example marks is settled by its handler's join, or by the statement around it, and
-    /// never by a later part of the chain. Only `Never` or a `todo` hole may have reached it
-    /// yet, and a value after the chain, such as `== Err("x")` or the `it` of a fallback, may
-    /// still give it its type. So:
+    /// or example marks, and that stays inside a later receiver's type arguments, is settled
+    /// by its handler's join or by the statement around it, never by that receiver. Only
+    /// `Never` or a `todo` hole may have reached it yet, and a value after the chain, such as
+    /// `== Err("x")` or the `it` of a fallback, may still give it its type. So:
     /// - Inside the receiver's type arguments it stays open. The caller finds the method on
     ///   [`Vars::as_never`] of the type, where it implements every interface, as the `Never`
     ///   the variable would have settled as does. An interface method found that way is
     ///   checked again once the variable settles ([`Pending::Method`]).
-    /// - At the receiver's head, finding the member needs the type itself. So the variable
-    ///   joins what its handler knows now: the `Result` an `attempt` is expected to be or a
-    ///   `try`'s `fails`, and the error types of the chain's other calls, which the handler
-    ///   joins with it, as a `try` with a `fails` does through that `fails`. Then it settles.
-    ///   A value after the chain is too late for it.
+    /// - The one exception is a variable at the receiver's head, since finding the member
+    ///   needs the type itself. It first joins what its handler knows now, which is a `try`'s
+    ///   `fails` or the `Result` an `attempt` is expected to be, and the error types of the
+    ///   chain's other calls (see [`Checker::join_known`]). Then it settles, and a value after
+    ///   the chain is too late for it.
     ///
     /// Every other open variable settles as [`Checker::force`] settles it.
     fn force_receiver(&mut self, ty: &Ty) -> Ty {
@@ -712,20 +712,44 @@ impl Checker<'_> {
     }
 
     /// Joins open variable `v`, if it is in the error type of a call a handler marks, with
-    /// what that handler knows now (see [`Checker::force_receiver`]). A mismatch is reported
-    /// once the handler joins them all. A rejected call's error type poisons it, since that
-    /// call may have given it its type (§15.1).
+    /// what that handler knows now (see [`Checker::force_receiver`]), in the order the handler
+    /// compares them. A `try` compares each call's error type with its function's `fails`, so
+    /// that comes first. The other handlers join the chain's error types and then compare
+    /// their join with an `attempt`'s expected `Result`, so those come first. Each takes the
+    /// first that gives `v` a type. So a mismatch is the one the handler reports, and not
+    /// also a member the receiver lacks (§15.1). A `try` whose `fails` already disagrees with
+    /// another call reports that call, so `v`, which either may have been meant to give,
+    /// is an error, which the `try` doesn't report again. A rejected call's error type
+    /// poisons `v` too, since that call may have given it its type.
     fn join_known(&mut self, v: u32) {
         let v = self.vars.root(v);
         let holds = |vars: &Vars, err: &Ty| matches!(vars.resolve(err), Ty::Var(w) if vars.root(w) == v);
         let Some(marker) = self.markers.iter().rev().find(|m| m.errors.iter().any(|err| holds(&self.vars, err))) else {
             return;
         };
-        let known: Vec<Ty> =
-            marker.target.iter().chain(&marker.errors).filter(|err| !holds(&self.vars, err)).cloned().collect();
+        let errors = marker.errors.iter().filter(|err| !holds(&self.vars, err)).cloned();
+        let (handler, target) = (marker.handler, marker.target.clone());
+        if let (None, Some(target)) = (handler, &target) {
+            let target = self.vars.zonk(target);
+            let disagrees = errors
+                .clone()
+                .map(|err| self.vars.zonk(&err))
+                .any(|err| err != Ty::Error && err != Ty::Never && err != target && !self.vars.has_open(&err));
+            if disagrees {
+                self.vars.poison(&Ty::Var(v));
+                return;
+            }
+        }
+        let known: Vec<Ty> = match handler {
+            None => target.into_iter().chain(errors).collect(),
+            Some(_) => errors.chain(target).collect(),
+        };
         let err = Ty::Var(v);
-        for known in known {
-            let _ = self.vars.subsume(&known, &err) && self.vars.subsume(&err, &known);
+        for known in &known {
+            if !matches!(self.vars.resolve(&err), Ty::Var(_)) {
+                break;
+            }
+            let _ = self.vars.subsume(known, &err) && self.vars.subsume(&err, known);
         }
     }
 
@@ -4592,8 +4616,8 @@ impl Checker<'_> {
         }
         match self.markers.last_mut() {
             Some(marker) if chain => {
-                // Its handler joins the error type, which a later part of the chain leaves
-                // open (see `force_receiver`).
+                // Its handler joins the error type. A later receiver leaves it open inside its
+                // type arguments (see `force_receiver`).
                 marker.errors.push(err.clone());
                 if let Some(handler) = marker.handler {
                     self.p.handler_of.insert(call, handler);
