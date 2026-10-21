@@ -1654,6 +1654,7 @@ impl Checker<'_> {
                 let mut state = FnState::new(Ty::Unit, None);
                 state.returns = false;
                 state.refinement = true;
+                state.params = fields.len();
                 state.locals = fields
                     .iter()
                     // A refinement looks at the value it checks, so the fields are lent to it.
@@ -3335,7 +3336,7 @@ impl Checker<'_> {
     fn immutable(&self, name: Ident, id: LocalId, does: &str) -> String {
         let text = self.m.text(name.sym);
         let local = &self.f.locals[id.index()];
-        if self.f.refinement && local.borrowed {
+        if self.f.refinement && id.index() < self.f.params {
             format!(
                 "`{text}` is a field this refinement only looks at, so the refinement can't {does} (OPEN_QUESTIONS P5)"
             )
@@ -3400,7 +3401,17 @@ impl Checker<'_> {
         if !self.vars.subsume(expected, &actual) {
             let span = self.span(e);
             let message = format!("expected `{}`, found `{}`", self.show(expected), self.show(&actual));
-            self.error_of(e, codes::TYPE_MISMATCH, span, message);
+            // A mismatched place moves nothing. Any other value, such as a call, still takes
+            // what it is given, and the mismatch is about the value it gives.
+            if matches!(
+                self.m.exprs[e].kind,
+                ExprKind::Name(_) | ExprKind::It | ExprKind::Field { .. } | ExprKind::Index { .. }
+            ) {
+                self.error_of(e, codes::TYPE_MISMATCH, span, message);
+            } else {
+                self.error(codes::TYPE_MISMATCH, span, message);
+                self.inner_errors += 1;
+            }
             // What the value leaves open has no other way to be given, and what the expected
             // type leaves open may have been the value's to give (§15.1).
             self.vars.poison(&actual);
@@ -4942,10 +4953,6 @@ impl Checker<'_> {
         true
     }
 
-    /// `&x`, the argument of an `inout` parameter of type `ty`. It is a variable the caller
-    /// may change, or a field or element of one, as an assignment's target is, and its type is
-    /// the parameter's exactly, since the callee's value flows back into it (REFERENCE §5.2,
-    /// §8.3).
     /// Checks an `&` argument. An error about it rejects the argument, not the call.
     fn inout_arg(&mut self, value: ExprId, ty: &Ty) {
         let (errors, inner) = (self.errors, self.inner_errors);
@@ -4957,6 +4964,10 @@ impl Checker<'_> {
         self.inner_errors += own;
     }
 
+    /// `&x`, the argument of an `inout` parameter of type `ty`. It is a variable the caller
+    /// may change, or a field or element of one, as an assignment's target is, and its type is
+    /// the parameter's exactly, since the callee's value flows back into it (REFERENCE §5.2,
+    /// §8.3).
     fn inout_place(&mut self, value: ExprId, ty: &Ty) {
         let span = self.span(value);
         if !matches!(self.m.exprs[value].kind, ExprKind::Name(_) | ExprKind::Field { .. } | ExprKind::Index { .. }) {

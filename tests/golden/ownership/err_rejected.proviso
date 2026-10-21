@@ -6,15 +6,17 @@
 // expect-error: E0208
 // expect-error: E0207
 // expect-error: E0303
+// expect-error: E0504
 // expect-error: E0506
 // expect-error: E0301
 // expect-error: E0701
 // expect-error: E0106
 // expect-error: E0303
-// A rejected call moves and lends nothing, and a rejected argument moves or accesses nothing,
-// so no move or overlap that depends on them is reported (REFERENCE §15.1). The suppression
-// stops at the rejected construct. An error about one argument rejects only that argument,
-// so the call's other arguments still move, and a missing `try` rejects nothing. A valid
+// A rejected call moves and lends nothing, and a rejected argument moves or accesses
+// nothing, so no move or overlap that depends on them is reported (REFERENCE §15.1). The
+// suppression stops at the rejected construct. An error about one argument rejects only
+// that argument, so the call's other arguments still move, and a missing `try` rejects
+// nothing. A call whose result has the wrong type still takes what it is given. A valid
 // call inside a rejected one still moves what it takes. A value used after it moved is
 // reported once, as a use after move, and isn't lent to its index, a guard or a call.
 use std.pool { Pool, Handle }
@@ -202,4 +204,14 @@ fn moved_scrutinee_assigned(b: take Bin, c: Bool) -> Int {
         } => return 1
         _ => return 0
     }
+}
+
+fn mismatched_result(t: take Token, u: take Token) -> Int {
+    let s: Text = eat(t)                            // <- E0301
+    let n = eat(eat(u))                             // <- E0301
+    return t.id + u.id                              // <- E0501, E0501
+}
+
+fn mismatched_lent(t: Token) -> Text {
+    return eat(t)                                   // <- E0301, E0504
 }

@@ -862,8 +862,6 @@ impl Interp<'_> {
         Ok((root, path))
     }
 
-    /// Takes the value of the local or field `e` names out of its place, which nothing reads
-    /// again before it is assigned (REFERENCE §5.1), so what it holds isn't copied.
     /// Whether `e` is a local or a field of one.
     fn is_place(&self, e: ExprId) -> bool {
         match (&self.m.exprs[e].kind, self.p.res(e)) {
@@ -873,6 +871,8 @@ impl Interp<'_> {
         }
     }
 
+    /// Takes the value of the local or field `e` names out of its place, which nothing reads
+    /// again before it is assigned (REFERENCE §5.1), so what it holds isn't copied.
     fn take_out(&self, e: ExprId, frame: &mut Frame) -> Option<Value> {
         let mut path = Vec::new();
         let mut at = e;
