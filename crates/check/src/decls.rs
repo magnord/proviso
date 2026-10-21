@@ -634,6 +634,35 @@ impl Decls {
     /// holds a unique value, or is a type parameter that `params` doesn't give `Copy`, which
     /// may stand for a unique type (§4.8). An aggregate takes the strongest kind of its
     /// parts, so a generic one moves when one of its type arguments does.
+    /// Whether `ty` moves only because a type parameter in it may lack `Copy`, so it would
+    /// be copyable if each were `Copy` (REFERENCE §4.8).
+    pub fn moves_by_param(&self, ty: &Ty, params: &[Vec<IfaceId>]) -> bool {
+        let copy: Vec<Vec<IfaceId>> =
+            params.iter().map(|bounds| bounds.iter().copied().chain([IfaceId::COPY]).collect()).collect();
+        self.moves(ty, params) && !self.moves(ty, &copy)
+    }
+
+    /// [`Decls::moves`], where `memo` holds what each argument list already walked gave, by
+    /// its address, so a walk over many types that share parts costs each part once. The
+    /// types must outlive `memo`.
+    pub fn moves_memo(&self, ty: &Ty, params: &[Vec<IfaceId>], memo: &mut HashMap<usize, bool>) -> bool {
+        match ty {
+            Ty::Param(i) => !params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)),
+            Ty::Adt(id, _) if self.adt(*id).unique => true,
+            Ty::Adt(AdtId::HANDLE, _) => false,
+            Ty::Adt(_, args) => {
+                let key = Arc::as_ptr(args) as *const Ty as usize;
+                if let Some(&moves) = memo.get(&key) {
+                    return moves;
+                }
+                let moves = args.iter().any(|arg| self.moves_memo(arg, params, memo));
+                memo.insert(key, moves);
+                moves
+            }
+            _ => false,
+        }
+    }
+
     pub fn moves(&self, ty: &Ty, params: &[Vec<IfaceId>]) -> bool {
         self.moves_in(ty, params, &mut HashSet::new())
     }

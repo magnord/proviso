@@ -3062,6 +3062,33 @@ impl Checker<'_> {
         }
     }
 
+    /// Whether `e` is an element of a list or a pool, or a field of one at any depth.
+    fn in_element(&self, e: ExprId) -> bool {
+        match self.m.exprs[e].kind {
+            ExprKind::Index { .. } => true,
+            ExprKind::Field { base, .. } => self.in_element(base),
+            _ => false,
+        }
+    }
+
+    /// Reports a copy of a field of an element, which stays in its list or pool, so copying
+    /// it needs `Copy` as copying the element does (STD.md, OPEN_QUESTIONS P5).
+    fn element_part_copied(&mut self, e: ExprId, ty: &Ty) {
+        let span = self.span(e);
+        let ty = self.vars.resolve(ty);
+        if self.vars.has_open(&ty) {
+            return self.needs(ty, IfaceId::COPY, "xs[i]", "T", span);
+        }
+        if ty.is_unknown() || self.implements(&ty, IfaceId::COPY) || self.unknown_interfaces(&ty) {
+            return;
+        }
+        let message = format!(
+            "this copies a part of an element, which stays in its list or pool, and `{}` doesn't implement `Copy`; move the element out first, as with `remove` or `pop` (STD.md)",
+            self.show(&ty)
+        );
+        self.error(codes::MISSING_IMPLEMENTATION, span, message);
+    }
+
     /// `xs[i]`, which reads element `i` of a list (STD.md). The element stays in the list, so
     /// it is borrowed, and only `copying` it needs `T: Copy`, as for a borrowed parameter
     /// (REFERENCE §4.8, OPEN_QUESTIONS P5). The element's type need not be known yet, so what
@@ -3214,6 +3241,11 @@ impl Checker<'_> {
             return;
         }
         let ty = &self.vars.zonk(ty);
+        // A type that moves whatever its parameters are, such as `Pool[T]`, is a move of a
+        // lent value, which the move pass reports (E0504).
+        if !self.p.decls.moves_by_param(ty, &self.f.bounds) {
+            return;
+        }
         let Some(param) = self.uncopyable(ty) else { return };
         let message = match self.f.anonymous.get(param as usize).cloned().flatten() {
             Some((name, iface)) => format!(
@@ -3341,7 +3373,11 @@ impl Checker<'_> {
                 self.in_chain = chain;
                 let base_ty = self.infer(*base);
                 let base_ty = self.force(&base_ty);
-                self.field(e, &base_ty, *name)
+                let ty = self.field(e, &base_ty, *name);
+                if copying && self.in_element(*base) {
+                    self.element_part_copied(e, &ty);
+                }
+                ty
             }
             ExprKind::Unary { op: UnaryOp::Not, operand } => {
                 self.check(*operand, &Ty::Bool);

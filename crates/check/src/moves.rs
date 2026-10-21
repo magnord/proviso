@@ -17,7 +17,9 @@
 //! them may not overlap, and a unique value lent to the call by one argument may not move in
 //! a later one (E0505; OPEN_QUESTIONS P5).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use proviso_syntax::ast::*;
 use proviso_syntax::diag::{Code, Diagnostics, Planned, codes};
@@ -54,6 +56,9 @@ pub(crate) fn check(
         lent: Vec::new(),
         handled: HashMap::new(),
         loop_cache: HashMap::new(),
+        memo: RefCell::new(HashMap::new()),
+        copy_memo: RefCell::new(HashMap::new()),
+        copy_bounds: bounds.iter().map(|b| b.iter().copied().chain([IfaceId::COPY]).collect()).collect(),
         touched: Vec::new(),
         reach: usize::MAX,
         moves_out: HashSet::new(),
@@ -84,10 +89,11 @@ pub(crate) fn check(
 type Path = Vec<u32>;
 
 /// What may have moved at a point of the body that is reached: each place, by its local's
-/// index and its path, with how diagnostics write it.
+/// index and its path, with how diagnostics write it. The map is shared until it changes,
+/// so a branch that moves nothing costs nothing to copy or join.
 #[derive(Clone, Default)]
 struct State {
-    moved: BTreeMap<(u32, Path), String>,
+    moved: Arc<BTreeMap<(u32, Path), String>>,
 }
 
 impl State {
@@ -99,14 +105,18 @@ impl State {
     /// Forgets the places of `local` whose paths `keep` rejects.
     fn forget(&mut self, local: LocalId, keep: impl Fn(&Path) -> bool) {
         let gone: Vec<Path> = self.of(local).filter(|(p, _)| !keep(p)).map(|(p, _)| p.clone()).collect();
+        if gone.is_empty() {
+            return;
+        }
+        let moved = Arc::make_mut(&mut self.moved);
         for path in gone {
-            self.moved.remove(&(local.0, path));
+            moved.remove(&(local.0, path));
         }
     }
 
     /// Whether every place `other` holds is in this one too.
     fn covers(&self, other: &State) -> bool {
-        other.moved.keys().all(|key| self.moved.contains_key(key))
+        Arc::ptr_eq(&self.moved, &other.moved) || other.moved.keys().all(|key| self.moved.contains_key(key))
     }
 }
 
@@ -114,8 +124,15 @@ impl State {
 fn join(a: Option<State>, b: Option<State>) -> Option<State> {
     match (a, b) {
         (Some(mut a), Some(b)) => {
-            for (key, desc) in b.moved {
-                a.moved.entry(key).or_insert(desc);
+            if a.covers(&b) {
+                return Some(a);
+            }
+            if b.covers(&a) {
+                return Some(b);
+            }
+            let moved = Arc::make_mut(&mut a.moved);
+            for (key, desc) in b.moved.iter() {
+                moved.entry(key.clone()).or_insert_with(|| desc.clone());
             }
             Some(a)
         }
@@ -223,6 +240,11 @@ struct Walk<'a> {
     /// What may have moved where a call that never returns fails to the `else` form or
     /// `attempt` that handles it, by that handler.
     handled: HashMap<ExprId, Option<State>>,
+    /// What [`Walk::moves`] found for each argument list, by its address.
+    memo: RefCell<HashMap<usize, bool>>,
+    /// The same, were every type parameter `Copy`.
+    copy_memo: RefCell<HashMap<usize, bool>>,
+    copy_bounds: Vec<Vec<IfaceId>>,
     /// What each loop reached when it was last walked.
     loop_cache: HashMap<ExprId, LoopWalk>,
     /// The locals each loop being walked has touched, innermost last.
@@ -255,27 +277,13 @@ impl Walk<'_> {
     }
 
     fn moves(&self, ty: &Ty) -> bool {
-        self.p.decls.moves(ty, self.bounds)
+        self.p.decls.moves_memo(ty, self.bounds, &mut self.memo.borrow_mut())
     }
 
-    /// Whether `ty` mentions a type parameter without `Copy`, whose copy of a borrowed value
-    /// the checker reports instead (E0503).
+    /// Whether `ty` moves only because a type parameter in it may lack `Copy`. The checker
+    /// reports the copy of a lent value of such a type instead (E0503).
     fn generic(&self, ty: &Ty) -> bool {
-        // A type that doesn't move mentions no such parameter.
-        self.moves(ty) && self.generic_in(ty, &mut HashSet::new())
-    }
-
-    /// [`Walk::generic`], where `seen` holds the argument lists already walked, so a type that
-    /// shares a part costs each part once.
-    fn generic_in(&self, ty: &Ty, seen: &mut HashSet<usize>) -> bool {
-        match ty {
-            Ty::Param(i) => !self.bounds.get(*i as usize).is_some_and(|b| b.contains(&IfaceId::COPY)),
-            Ty::Adt(_, args) => {
-                seen.insert(std::sync::Arc::as_ptr(args) as *const Ty as usize)
-                    && args.iter().any(|arg| self.generic_in(arg, seen))
-            }
-            _ => false,
-        }
+        self.moves(ty) && !self.p.decls.moves_memo(ty, &self.copy_bounds, &mut self.copy_memo.borrow_mut())
     }
 
     /// The local and fields that `e` names, when it is a place a move can leave.
@@ -429,7 +437,7 @@ impl Walk<'_> {
             return;
         }
         state.forget(local, |m| !is_prefix(&path, m));
-        state.moved.insert((local.0, path.clone()), desc);
+        Arc::make_mut(&mut state.moved).insert((local.0, path.clone()), desc);
         if self.place(e).is_some_and(|named| named == (local, path.clone())) && self.unrefined(local, &path) {
             self.moves_out.insert(e);
         }
@@ -762,7 +770,7 @@ impl Walk<'_> {
                 let mut exit = last.exit.clone();
                 if let Some(exit) = &mut exit {
                     for (key, desc) in gained {
-                        exit.moved.entry(key.clone()).or_insert_with(|| desc.clone());
+                        Arc::make_mut(&mut exit.moved).entry(key.clone()).or_insert_with(|| desc.clone());
                     }
                 }
                 let touched = last.touched.clone();

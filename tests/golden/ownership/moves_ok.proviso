@@ -5,7 +5,7 @@
 // binding declared in a loop body is a new value on each turn. Moving a field leaves the
 // record's other fields usable, and assigning the field makes the record whole again.
 // Copyable values, handles among them, are copied, so they never move, and neither does a
-// value of a type parameter with `Copy` (§4.8).
+// value of a type parameter with `Copy` (§4.8). A handle is copied whatever its element type.
 // Borrowing a value, as a method's receiver or a borrowed argument, doesn't move it, and a
 // `_` inside a pattern moves nothing (§6.4). A loop that doesn't consume its list goes over
 // a snapshot, so its body may still change the list.
@@ -189,4 +189,13 @@ fn copy_bound[T: Copy](x: take T) -> (T, T) {
 fn moved_generic[T](x: take T) -> T {
     let y = x
     return y
+}
+
+fn same_handle[T](h: Handle[T]) -> Handle[T] {
+    return h
+}
+
+fn handle_pair[T](h: Handle[T]) -> (Handle[T], Handle[T]) {
+    let a = h
+    return (h, a)
 }

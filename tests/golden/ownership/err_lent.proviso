@@ -9,6 +9,7 @@
 // consume its collection binds, and for a branch's value. A copyable value is copied
 // instead, so it may be. In generic code a borrowed value whose type parameter lacks `Copy`
 // is copied in the same places, which needs `Copy` (§4.8), and so is an `inout` one. A
+// borrowed value whose type moves whatever its parameters are, such as `Pool[T]`, is moved. A
 // consuming loop goes over a list or a map, and a range has nothing to consume (§6.5). A
 // guard may look at what its arm's pattern binds, and at the scrutinee, but not move either,
 // since the arm may still not be chosen.
@@ -205,4 +206,18 @@ fn guard_nested(s: take Slot, k: Int) -> Int {
         } => 1
         _ => 0
     }
+}
+
+fn generic_pool[T](p: Pool[T]) -> Pool[T] {
+    return p                                        // <- E0504
+}
+
+fn generic_with_pool[T](pair: (Pool[Int], T)) -> (Pool[Int], T) {
+    return pair                                     // <- E0504
+}
+
+fn generic_pools[T](ps: List[Pool[T]]) -> Int {
+    for p in take ps {                              // <- E0504
+    }
+    return 0
 }

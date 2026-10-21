@@ -5,8 +5,8 @@
 // not copyable. A pool is unique (§5.5), and so are a `unique record` and any aggregate that
 // holds one, such as a list, a tuple, an `Option` or a record. So none of them meets a
 // `Copy` constraint, and an element of a list of them can't be copied by `xs[i]`, `get` or
-// `enumerate` (STD.md). A handle is copyable, and so is a record of handles. `Copy` can't be
-// derived.
+// `enumerate` (STD.md), nor can a field of such an element, at any depth or in a branch. A
+// handle is copyable, and so is a record of handles. `Copy` can't be derived.
 use std.pool { Pool, Handle }
 
 unique record Token {
@@ -42,4 +42,28 @@ fn kinds(t: Token, h: Holder, xs: List[Pool[Int]], o: Option[Token], pair: (Int,
     let j = xs.enumerate()                          // <- E0309
     let k = xs[0]                                   // <- E0309
     return xs[0].len() + t.id
+}
+
+record Shelf {
+    holders: List[Holder]
+}
+
+fn element_field(hs: List[Holder]) -> Token {
+    return hs[0].token                               // <- E0309
+}
+
+fn pool_element_field(holders: Pool[Holder], k: Handle[Holder]) -> Token {
+    return holders[k].token                          // <- E0309
+}
+
+fn deeper_element_field(shelf: take Shelf) -> Token {
+    return shelf.holders[0].token                    // <- E0309
+}
+
+fn branch_element_field(hs: take List[Holder], i: Int) -> Token {
+    return if i > 0 { hs[0].token } else { Token(id: 0) } // <- E0309
+}
+
+fn element_field_looked_at(hs: List[Holder]) -> Int {
+    return hs[0].token.id
 }
