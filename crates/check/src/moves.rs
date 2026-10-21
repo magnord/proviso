@@ -415,6 +415,11 @@ impl Walk<'_> {
     /// Moves `local`'s `path`, which `e` writes as `desc`.
     fn move_place(&mut self, e: ExprId, local: LocalId, path: Path, desc: String) {
         self.use_place(e, local, &path);
+        self.leave(e, local, path, desc);
+    }
+
+    /// Moves `local`'s `path` once its use is checked.
+    fn leave(&mut self, e: ExprId, local: LocalId, path: Path, desc: String) {
         if self.locals[local.index()].borrowed {
             let message = format!(
                 "`{desc}` is lent here, not owned, so it can't move; only an owned value, such as a `take` parameter, can (§5.2)"
@@ -984,6 +989,42 @@ impl Walk<'_> {
                 self.read(value);
             }
             return;
+        }
+        // `with` takes the fields it keeps from a receiver that moves once its arguments are
+        // evaluated, so they may read the receiver and the fields it replaces may have moved
+        // (OPEN_QUESTIONS P5).
+        if let Some((receiver, _)) = receiver
+            && self.p.res(e) == Some(Res::With)
+            && self.consumed.contains(&receiver)
+            && self.moves(self.p.ty(receiver))
+            && let Some((local, path)) = self.place(receiver)
+        {
+            for arg in args {
+                self.expr(arg.value);
+            }
+            let replaced = self.p.with_fields.get(e).expect("`with` is resolved");
+            let kept = |m: &[u32]| m.len() <= path.len() || !replaced.iter().any(|i| i.0 == m[path.len()]);
+            self.touch(local);
+            let desc = self.describe(receiver);
+            let moved = self.state.as_ref().and_then(|state| {
+                state
+                    .of(local)
+                    .find(|(m, _)| (is_prefix(m, &path) || is_prefix(&path, m)) && kept(m))
+                    .map(|(_, d)| d.clone())
+            });
+            if let Some(moved) = moved {
+                let message = if moved == desc {
+                    format!(
+                        "`{desc}` may have moved already, so it can't be used here; assign it a new value first (§5.1)"
+                    )
+                } else {
+                    format!(
+                        "`{moved}` may have moved already, and `with` keeps it, so `{desc}` can't be used here (§5.1)"
+                    )
+                };
+                self.report(codes::USE_AFTER_MOVE, self.span(receiver), message);
+            }
+            return self.leave(receiver, local, path, desc);
         }
         let mut accesses: Vec<CallAccess> = Vec::new();
         let outer = self.lent.len();

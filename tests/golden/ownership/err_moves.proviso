@@ -6,14 +6,16 @@
 // A value moved in one branch, in both, or in a loop body that may run again is moved
 // after it, so is one moved in an `else` fallback or on the right of `and`. A guard that
 // moves a value and fails leaves it moved for every later arm. A call that never returns
-// still fails to the `else` or `attempt` that handles it, which goes on with what it moved. A target's or an `&`
-// argument's indices run before its variable is reached, so an index that moves the variable
-// leaves nothing to reach, and one that moves a later argument leaves nothing to pass. Moving a field
-// moves only that field, so the record can't be used whole after it, one level down too.
-// A pool is unique (§5.5), and so is a record that holds one, even through an `Option`, a
-// `unique record`, and an owned value of a type parameter without `Copy` (§4.8). `with` on
-// a `unique record` consumes it, even when its fields are copyable (§4.4). Each use of a
-// moved value is its own mistake, so each is reported.
+// still fails to the `else` or `attempt` that handles it, which goes on with what it moved.
+// A target's or an `&` argument's indices run before its variable is reached, so an index
+// that moves the variable leaves nothing to reach, and one that moves a later argument
+// leaves nothing to pass. Moving a field moves only that field, so the record can't be used
+// whole after it, one level down too. A pool is unique (§5.5), and so is a record that holds
+// one, even through an `Option`, a `unique record`, and an owned value of a type parameter
+// without `Copy` (§4.8). `with` on a `unique record` consumes it, even when its fields are
+// copyable (§4.4). It does so once its arguments are evaluated, so a field it keeps can't
+// have moved before it or in its arguments. Each use of a moved value is its own mistake,
+// so each is reported.
 use std.pool { Pool }
 
 unique record Token {
@@ -490,6 +492,32 @@ fn with_unique() -> Int {
     let t = Token(id: 1)
     let u = t.with(id: 2)
     return t.id + u.id                              // <- E0501
+}
+
+fn with_kept_field_moved() -> Int {
+    let h = Holder(pool: fresh(), n: 1)
+    let p = h.pool
+    let g = h.with(n: 2)                            // <- E0501
+    return g.n
+}
+
+fn with_moves_kept_field() -> Int {
+    let h = Holder(pool: fresh(), n: 1)
+    let g = h.with(n: consume(h.pool))              // <- E0501
+    return g.n
+}
+
+fn with_moved_receiver() -> Int {
+    let t = Token(id: 1)
+    let u = t
+    let v = t.with(id: t.id + 1)                    // <- E0501, E0501
+    return u.id + v.id
+}
+
+fn used_after_with() -> Int {
+    let h = Holder(pool: fresh(), n: 1)
+    let g = h.with(pool: fresh())
+    return h.n + g.n                                // <- E0501
 }
 
 fn aggregates() -> Int {

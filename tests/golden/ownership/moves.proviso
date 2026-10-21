@@ -4,7 +4,8 @@
 // a record or a variant, into an element of a list, tuple or map, into a `take` parameter,
 // through a consuming loop, and into the bindings of a pattern (§6.4). Moving a field leaves
 // the rest of the record usable, and `with` on a record that holds a unique value consumes
-// it (§4.4). A consuming loop owns each element, so it can move it on (§6.5). A `var` that
+// it (§4.4) once its arguments are evaluated, so they may read it, and a field it replaces
+// may have moved already. A consuming loop owns each element, so it can move it on (§6.5). A `var` that
 // moved holds a new value once assigned. A `unique record` moves, and so does a value of a
 // type parameter without `Copy`. An arm's pattern moves the scrutinee only once its guard
 // holds, so the next arm may still use it. A record whose predicate reads a moved field
@@ -167,6 +168,19 @@ fn tokens() -> Text {
     return f"{last.id} {list.len()}"
 }
 
+fn updates() -> Text {
+    let t = Token(id: 1)
+    let u = t.with(id: t.id + 1)
+    let h = Holder(name: "a", pool: filled("x"))
+    let p = h.pool
+    let g = h.with(pool: filled("y"))
+    let k = g.with(name: f"{g.name}b", pool: g.pool)
+    let r = Guarded(pool: filled("r"), n: 1)
+    let q = r.pool
+    let s = r.with(pool: q, n: r.n + 1)
+    return f"{u.id} {p.len()} {k.name} {k.pool.len()} {s.n} {s.pool.len()}"
+}
+
 pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(names())
     try sys.stdout.write_line(assignments())
@@ -179,4 +193,5 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(tokens())
     try sys.stdout.write_line(guards())
     try sys.stdout.write_line(refined_field())
+    try sys.stdout.write_line(updates())
 }

@@ -994,7 +994,16 @@ impl Interp<'_> {
                     }
                     _ => Shape::default(),
                 };
-                let (values, places) = self.args(shape, receiver, args, frame)?;
+                // A receiver that `with` moves leaves its local once the arguments, which may
+                // read it, are evaluated. Being a place, it has no effects to reorder.
+                let (values, places) =
+                    if let Some(taken) = receiver.filter(|&r| res == Res::With && self.p.moves_out.get(r).is_some()) {
+                        let (values, places) = self.args(shape, None, args, frame)?;
+                        let taken = self.take_out(taken, frame).expect("a moved receiver is a place");
+                        (std::iter::once(taken).chain(values).collect(), places)
+                    } else {
+                        self.args(shape, receiver, args, frame)?
+                    };
                 match res {
                     Res::Method(builtin) => {
                         let result = self.builtin(builtin, values, span);
