@@ -864,6 +864,15 @@ impl Interp<'_> {
 
     /// Takes the value of the local or field `e` names out of its place, which nothing reads
     /// again before it is assigned (REFERENCE §5.1), so what it holds isn't copied.
+    /// Whether `e` is a local or a field of one.
+    fn is_place(&self, e: ExprId) -> bool {
+        match (&self.m.exprs[e].kind, self.p.res(e)) {
+            (ExprKind::Name(_) | ExprKind::It, Some(Res::Local(_))) => true,
+            (ExprKind::Field { base, .. }, Some(Res::Field(_))) => self.is_place(*base),
+            _ => false,
+        }
+    }
+
     fn take_out(&self, e: ExprId, frame: &mut Frame) -> Option<Value> {
         let mut path = Vec::new();
         let mut at = e;
@@ -994,16 +1003,19 @@ impl Interp<'_> {
                     }
                     _ => Shape::default(),
                 };
-                // A receiver that `with` moves leaves its local once the arguments, which may
-                // read it, are evaluated. Being a place, it has no effects to reorder.
-                let (values, places) =
-                    if let Some(taken) = receiver.filter(|&r| res == Res::With && self.p.moves_out.get(r).is_some()) {
-                        let (values, places) = self.args(shape, None, args, frame)?;
-                        let taken = self.take_out(taken, frame).expect("a moved receiver is a place");
-                        (std::iter::once(taken).chain(values).collect(), places)
-                    } else {
-                        self.args(shape, receiver, args, frame)?
+                // `with` reads a receiver that is a variable or a field of one once its
+                // arguments, which may read or assign it, are evaluated. One that moves leaves
+                // its local then.
+                let (values, places) = if let Some(place) = receiver.filter(|&r| res == Res::With && self.is_place(r)) {
+                    let (values, places) = self.args(shape, None, args, frame)?;
+                    let taken = match self.p.moves_out.get(place) {
+                        Some(()) => self.take_out(place, frame).expect("a moved receiver is a place"),
+                        None => self.expr(place, frame)?,
                     };
+                    (std::iter::once(taken).chain(values).collect(), places)
+                } else {
+                    self.args(shape, receiver, args, frame)?
+                };
                 match res {
                     Res::Method(builtin) => {
                         let result = self.builtin(builtin, values, span);

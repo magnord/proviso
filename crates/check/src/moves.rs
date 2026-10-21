@@ -688,6 +688,7 @@ impl Walk<'_> {
                 let outer = self.lent.len();
                 if let Some((local, steps)) = self.access_path(*base)
                     && self.moves(self.p.ty(*base))
+                    && !self.moved_here(*base)
                 {
                     self.lent.push(CallAccess { access: Access::Lent, local, steps, expr: *base, by: Lender::Index });
                 }
@@ -777,6 +778,7 @@ impl Walk<'_> {
                         self.guarded.extend(locals);
                         if let Some((local, steps)) = self.access_path(*scrutinee)
                             && self.moves(self.p.ty(*scrutinee))
+                            && !self.moved_here(*scrutinee)
                         {
                             self.lent.push(CallAccess {
                                 access: Access::Lent,
@@ -1058,13 +1060,15 @@ impl Walk<'_> {
             }
             self.expr(arg.value);
             // An argument that moves was checked against what the call lends as it moved.
-            if !self.consumed.contains(&arg.value) {
+            if !self.consumed.contains(&arg.value) && !self.rejected.contains(&arg.value) {
                 self.note(&mut accesses, outer, arg.value, Access::Lent);
             }
         }
         for arg in args.iter().filter(|arg| arg.inout) {
             self.root(arg.value);
-            self.note(&mut accesses, outer, arg.value, Access::Inout);
+            if !self.rejected.contains(&arg.value) {
+                self.note(&mut accesses, outer, arg.value, Access::Inout);
+            }
         }
         if let Some((receiver, _)) = receiver
             && late
@@ -1073,6 +1077,12 @@ impl Walk<'_> {
             self.note(&mut accesses, outer, receiver, Access::Inout);
         }
         self.lent.truncate(outer);
+    }
+
+    /// Whether `e` was reported as used after it moved, which leaves nothing for it to lend
+    /// or access.
+    fn moved_here(&self, e: ExprId) -> bool {
+        self.reported.contains(&(codes::USE_AFTER_MOVE.id, self.span(e)))
     }
 
     /// Reads `e` without moving it, as a rejected call does with what it is given.
@@ -1089,8 +1099,7 @@ impl Walk<'_> {
     /// Records the access `e` makes for its call, and reports one it conflicts with. A lent
     /// or moved value matters only when its type is unique.
     fn note(&mut self, accesses: &mut Vec<CallAccess>, outer: usize, e: ExprId, access: Access) {
-        // A value used after it moved was already reported, and has nothing left to access.
-        if self.reported.contains(&(codes::USE_AFTER_MOVE.id, self.span(e))) {
+        if self.moved_here(e) {
             return;
         }
         if access == Access::Inout {

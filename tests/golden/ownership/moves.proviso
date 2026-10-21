@@ -4,8 +4,8 @@
 // a record or a variant, into an element of a list, tuple or map, into a `take` parameter,
 // through a consuming loop, and into the bindings of a pattern (§6.4). Moving a field leaves
 // the rest of the record usable, and `with` on a record that holds a unique value consumes
-// it (§4.4) once its arguments are evaluated, so they may read it, and a field it replaces
-// may have moved already. A consuming loop owns each element, so it can move it on (§6.5). A `var` that
+// it (§4.4). It reads a receiver that is a variable or a field of one once its arguments
+// are evaluated, so they may read or assign it, and a field it replaces may have moved. A consuming loop owns each element, so it can move it on (§6.5). A `var` that
 // moved holds a new value once assigned. A `unique record` moves, and so does a value of a
 // type parameter without `Copy`. An arm's pattern moves the scrutinee only once its guard
 // holds, so the next arm may still use it. A record whose predicate reads a moved field
@@ -181,6 +181,34 @@ fn updates() -> Text {
     return f"{u.id} {p.len()} {k.name} {k.pool.len()} {s.n} {s.pool.len()}"
 }
 
+record Shelf {
+    h: Holder
+    k: Int
+}
+
+record CheckedShelf {
+    h: Holder
+    k: Int
+} where k >= 0
+
+fn assigned_in_with() -> Text {
+    var plain = Shelf(h: Holder(name: "old", pool: filled("a")), k: 1)
+    let g = plain.h.with(pool: if plain.k > 0 {
+        plain.h = Holder(name: "new", pool: filled("b"))
+        filled("c")
+    } else {
+        filled("d")
+    })
+    var checked = CheckedShelf(h: Holder(name: "old", pool: filled("a")), k: 1)
+    let r = checked.h.with(pool: if checked.k > 0 {
+        checked.h = Holder(name: "new", pool: filled("b"))
+        filled("c")
+    } else {
+        filled("d")
+    })
+    return f"{g.name} {r.name}"
+}
+
 pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(names())
     try sys.stdout.write_line(assignments())
@@ -194,4 +222,5 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(guards())
     try sys.stdout.write_line(refined_field())
     try sys.stdout.write_line(updates())
+    try sys.stdout.write_line(assigned_in_with())
 }

@@ -420,6 +420,8 @@ struct FnState {
     locals: Vec<Local>,
     /// How many of the locals are `self` and the parameters, which come first.
     params: usize,
+    /// Whether this is a refinement, whose locals are the fields it looks at.
+    refinement: bool,
     loops: Vec<LoopState>,
     /// False in a refinement or an example, which are expressions with no function to return
     /// from or fail.
@@ -441,6 +443,7 @@ impl FnState {
             scopes: Vec::new(),
             locals: Vec::new(),
             params: 0,
+            refinement: false,
             loops: Vec::new(),
             returns: true,
             example: false,
@@ -655,6 +658,14 @@ impl Checker<'_> {
     fn error(&mut self, code: Code, span: Span, message: impl Into<String>) {
         self.errors += 1;
         self.diags.error(code, span, message);
+    }
+
+    /// Reports an error about the value `e`, which rejects `e` but not what holds it, such
+    /// as a call it is an argument of (REFERENCE §15.1).
+    fn error_of(&mut self, e: ExprId, code: Code, span: Span, message: impl Into<String>) {
+        self.error(code, span, message);
+        self.rejected.insert(e);
+        self.inner_errors += 1;
     }
 
     fn not_implemented(&mut self, span: Span, what: &str, planned: Planned) {
@@ -1642,6 +1653,7 @@ impl Checker<'_> {
                 let fields = &self.p.decls.adt(id).variants[v].fields;
                 let mut state = FnState::new(Ty::Unit, None);
                 state.returns = false;
+                state.refinement = true;
                 state.locals = fields
                     .iter()
                     // A refinement looks at the value it checks, so the fields are lent to it.
@@ -3323,7 +3335,11 @@ impl Checker<'_> {
     fn immutable(&self, name: Ident, id: LocalId, does: &str) -> String {
         let text = self.m.text(name.sym);
         let local = &self.f.locals[id.index()];
-        if local.in_loop {
+        if self.f.refinement && local.borrowed {
+            format!(
+                "`{text}` is a field this refinement only looks at, so the refinement can't {does} (OPEN_QUESTIONS P5)"
+            )
+        } else if local.in_loop {
             format!("`{text}` is a loop variable, which can't be changed; copy it into a `var` to {does}")
         } else if id.index() >= self.f.params {
             format!("`{text}` is bound by `let` or a pattern; declare it with `var` to {does}")
@@ -3384,7 +3400,7 @@ impl Checker<'_> {
         if !self.vars.subsume(expected, &actual) {
             let span = self.span(e);
             let message = format!("expected `{}`, found `{}`", self.show(expected), self.show(&actual));
-            self.error(codes::TYPE_MISMATCH, span, message);
+            self.error_of(e, codes::TYPE_MISMATCH, span, message);
             // What the value leaves open has no other way to be given, and what the expected
             // type leaves open may have been the value's to give (§15.1).
             self.vars.poison(&actual);
@@ -4918,7 +4934,7 @@ impl Checker<'_> {
                 } else {
                     format!("`{param}` isn't an `inout` parameter, so its argument takes no `&`")
                 };
-                self.error(codes::INOUT_MARKER_MISMATCH, value, message);
+                self.error_of(arg.value, codes::INOUT_MARKER_MISMATCH, value, message);
             }
             self.copying = mode == ParamMode::Take;
             self.check(arg.value, &ty);
@@ -4930,7 +4946,18 @@ impl Checker<'_> {
     /// may change, or a field or element of one, as an assignment's target is, and its type is
     /// the parameter's exactly, since the callee's value flows back into it (REFERENCE §5.2,
     /// §8.3).
+    /// Checks an `&` argument. An error about it rejects the argument, not the call.
     fn inout_arg(&mut self, value: ExprId, ty: &Ty) {
+        let (errors, inner) = (self.errors, self.inner_errors);
+        self.inout_place(value, ty);
+        let own = (self.errors - errors) - (self.inner_errors - inner);
+        if self.errors > errors {
+            self.rejected.insert(value);
+        }
+        self.inner_errors += own;
+    }
+
+    fn inout_place(&mut self, value: ExprId, ty: &Ty) {
         let span = self.span(value);
         if !matches!(self.m.exprs[value].kind, ExprKind::Name(_) | ExprKind::Field { .. } | ExprKind::Index { .. }) {
             let message = "an `&` argument is a variable, or a field or element of one, which the call may change";
@@ -4996,7 +5023,9 @@ impl Checker<'_> {
         let with = if *err == Ty::Error { String::new() } else { format!(" with `{}`", self.show(err)) };
         let message =
             format!("`{callee}` can fail{with}, so the call must be marked with `try`, `else` or `attempt` (§7.2)");
+        // A missing marker doesn't change what the call takes, so it rejects nothing.
         self.error(codes::UNMARKED_FALLIBLE_CALL, span, message);
+        self.inner_errors += 1;
     }
 
     fn try_expr(&mut self, inner: ExprId, expected: Option<&Ty>, span: Span) -> Ty {

@@ -8,10 +8,15 @@
 // expect-error: E0303
 // expect-error: E0506
 // expect-error: E0301
-// A rejected call moves and lends nothing, and a rejected `&` argument accesses nothing, so
-// no move or overlap that depends on them is reported (REFERENCE §15.1). The suppression
-// stops at the rejected construct. A valid call inside a rejected one still moves what it
-// takes, and an `&` argument used after it moved is reported once, as a use after move.
+// expect-error: E0701
+// expect-error: E0106
+// expect-error: E0303
+// A rejected call moves and lends nothing, and a rejected argument moves or accesses nothing,
+// so no move or overlap that depends on them is reported (REFERENCE §15.1). The suppression
+// stops at the rejected construct. An error about one argument rejects only that argument,
+// so the call's other arguments still move, and a missing `try` rejects nothing. A valid
+// call inside a rejected one still moves what it takes. A value used after it moved is
+// reported once, as a use after move, and isn't lent to its index, a guard or a call.
 use std.pool { Pool, Handle }
 
 unique record Token {
@@ -113,4 +118,88 @@ fn eat_with(t: take Token, n: Int) -> Int {
 fn rejected_argument(t: take Token) -> Int {
     let n = eat_with(t: t, n: missing)              // <- E0201
     return t.id                                     // <- E0501
+}
+
+fn eat_and_grow(t: take Token, n: inout Int) -> Int {
+    return t.id + n
+}
+
+fn eat_both(t: take Token, n: Int) -> Int {
+    return t.id + n
+}
+
+fn rejected_beside(t: take Token, u: take Token, v: take Token, w: take Token, y: take Token) -> Int {
+    var xs = [1, 2]
+    var k = 1
+    let fixed = 1
+    let f = eat_both(t: y, n: &k)                   // <- E0506
+    let a = eat_and_grow(t: t, n: &xs.nope)         // <- E0303
+    let b = eat_and_grow(t: u, n: &3)               // <- E0106
+    let d = eat_and_grow(t: v, n: &fixed)           // <- E0305
+    let e = eat_both(t: w, n: "one")                // <- E0301
+    return t.id + u.id + v.id + w.id + y.id         // <- E0501, E0501, E0501, E0501, E0501
+}
+
+record Oops {
+    n: Int
+}
+
+fn eat_or_fail(t: take Token) -> Int fails Oops {
+    return t.id
+}
+
+fn unmarked(t: take Token) -> Int fails Oops {
+    let n = eat_or_fail(t)                          // <- E0701
+    return t.id                                     // <- E0501
+}
+
+fn eat_pools(xs: take List[Pool[Int]]) -> Int {
+    return xs.len()
+}
+
+fn grows(p: inout Pool[Int]) -> Bool {
+    let h = p.insert(1)
+    return true
+}
+
+record Bin {
+    pool: Pool[Int]
+}
+
+fn moved_base(c: Bool) -> Int {
+    var xs: List[Pool[Int]] = [Pool.new(), Pool.new()]
+    let ys = xs
+    let a = xs[eat_pools(xs) - 2].len()             // <- E0501, E0501
+    var zs: List[Pool[Int]] = [Pool.new()]
+    let ws = zs
+    let b = zs[if c {                               // <- E0501
+        zs = [Pool.new()]
+        0
+    } else {
+        0
+    }].len()
+    return a + b
+}
+
+fn moved_scrutinee(b: take Bin) -> Int {
+    var bin = b
+    let other = bin
+    match bin {                                     // <- E0501
+        Bin(pool: p) if grows(p: &bin.pool) => return 1 // <- E0501
+        _ => return 0
+    }
+}
+
+fn moved_scrutinee_assigned(b: take Bin, c: Bool) -> Int {
+    var bin = b
+    let other = bin
+    match bin {                                     // <- E0501
+        Bin(pool: p) if if c {
+            bin = Bin(pool: Pool.new())
+            true
+        } else {
+            false
+        } => return 1
+        _ => return 0
+    }
 }
