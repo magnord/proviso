@@ -203,8 +203,19 @@ struct CallAccess {
     local: LocalId,
     steps: Vec<Step>,
     expr: ExprId,
-    /// Whether a `match` arm's guard is what the place is lent to, not a call.
-    guard: bool,
+    /// What the place is lent to.
+    by: Lender,
+}
+
+/// What a lent place is lent to, for as long as it runs.
+#[derive(Clone, Copy, PartialEq)]
+enum Lender {
+    /// A call, while its later arguments are evaluated.
+    Call,
+    /// A `match` arm's guard.
+    Guard,
+    /// Its own index, as the base of an indexing expression.
+    Index,
 }
 
 /// What a loop reached when it was last walked: what may have moved at its head and where it
@@ -419,16 +430,24 @@ impl Walk<'_> {
         }
         let steps: Vec<Step> = path.iter().map(|&i| Step::Field(i)).collect();
         if let Some(lender) = self.lent.iter().find(|l| l.local == local && overlap(&l.steps, &steps) != Overlap::No) {
-            if lender.guard {
-                let message = format!(
-                    "`{desc}` is lent to this arm's guard, which can only look at it, since the arm may still not be chosen; move it in the arm's body (OPEN_QUESTIONS P5)"
-                );
-                self.report(codes::LENT_VALUE_MOVED, self.span(e), message);
-            } else {
-                let message = format!(
-                    "`{desc}` is lent to this call by an earlier argument, so it can't also move into it (§5.3)"
-                );
-                self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
+            match lender.by {
+                Lender::Guard => {
+                    let message = format!(
+                        "`{desc}` is lent to this arm's guard, which can only look at it, since the arm may still not be chosen; move it in the arm's body (OPEN_QUESTIONS P5)"
+                    );
+                    self.report(codes::LENT_VALUE_MOVED, self.span(e), message);
+                }
+                Lender::Call => {
+                    let message = format!(
+                        "`{desc}` is lent to this call by an earlier argument, so it can't also move into it (§5.3)"
+                    );
+                    self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
+                }
+                Lender::Index => {
+                    let message =
+                        format!("`{desc}` is indexed here, so it can't move while its index is evaluated (§5.3)");
+                    self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
+                }
             }
             return;
         }
@@ -482,6 +501,9 @@ impl Walk<'_> {
             }
             StmtKind::Assign { target, op, value } => {
                 self.expr(*value);
+                if self.place(*target).is_some() {
+                    self.change_lent(*target, self.lent.len());
+                }
                 match self.place(*target) {
                     Some((local, path)) if *op == AssignOp::Set => self.assign_place(*target, local, &path),
                     Some((local, path)) => self.use_place(*target, local, &path),
@@ -516,10 +538,43 @@ impl Walk<'_> {
         }
     }
 
+    /// Reports a change to the place `e`, by assignment or an `&` access, while a call, an
+    /// index or a guard that `self.lent[..upto]` lists still has it lent (§5.3).
+    fn change_lent(&mut self, e: ExprId, upto: usize) {
+        let Some((local, steps)) = self.access_path(e) else { return };
+        let found = self.lent[..upto].iter().rev().find_map(|l| {
+            let overlap = if l.local == local { overlap(&l.steps, &steps) } else { Overlap::No };
+            (overlap != Overlap::No).then_some((l.by, l.expr, overlap))
+        });
+        let Some((by, there, overlap)) = found else { return };
+        let span = self.span(e);
+        if overlap == Overlap::Unknown {
+            if self.reported.insert((codes::NOT_IMPLEMENTED.id, span)) {
+                self.later.push(span);
+            }
+            return;
+        }
+        let (here, there) = (self.describe(e), self.describe(there));
+        let lent = match by {
+            Lender::Call => {
+                format!("`{there}` is lent to a call by one of its earlier arguments until the call returns")
+            }
+            Lender::Guard => format!("`{there}` is lent to this arm's guard, which can only look at it"),
+            Lender::Index => format!("`{there}` is indexed while its index is evaluated"),
+        };
+        let message = if here == there {
+            format!("{lent}, so it can't change here (§5.3)")
+        } else {
+            format!("{lent}, so `{here}` can't change here (§5.3)")
+        };
+        self.report(codes::OVERLAPPING_ACCESS, span, message);
+    }
+
     /// An assignment's target that isn't a place, such as `xs[i].n`, which uses the
     /// variable it changes once the target's indices are evaluated.
     fn target(&mut self, target: ExprId) {
         self.indices(target);
+        self.change_lent(target, self.lent.len());
         self.root(target);
     }
 
@@ -616,7 +671,15 @@ impl Walk<'_> {
             ExprKind::Field { base, .. } => self.expr(*base),
             ExprKind::Index { base, index } => {
                 self.expr(*base);
+                // The base is reached before its index, which may not move or change it.
+                let outer = self.lent.len();
+                if let Some((local, steps)) = self.access_path(*base)
+                    && self.moves(self.p.ty(*base))
+                {
+                    self.lent.push(CallAccess { access: Access::Lent, local, steps, expr: *base, by: Lender::Index });
+                }
                 self.expr(*index);
+                self.lent.truncate(outer);
             }
             ExprKind::Unary { operand, .. } => self.expr(*operand),
             ExprKind::Binary { op: BinOp::And, .. } => self.condition(e),
@@ -707,7 +770,7 @@ impl Walk<'_> {
                                 local,
                                 steps,
                                 expr: *scrutinee,
-                                guard: true,
+                                by: Lender::Guard,
                             });
                         }
                         self.condition(guard);
@@ -927,7 +990,7 @@ impl Walk<'_> {
                 self.expr(receiver);
                 // A `take self` receiver, and that of `with` on a unique record, move.
                 if !self.consumed.contains(&receiver) {
-                    self.note(&mut accesses, receiver, Access::Lent);
+                    self.note(&mut accesses, outer, receiver, Access::Lent);
                 }
             }
             None => {}
@@ -940,25 +1003,28 @@ impl Walk<'_> {
             self.expr(arg.value);
             // An argument that moves was checked against what the call lends as it moved.
             if !self.consumed.contains(&arg.value) {
-                self.note(&mut accesses, arg.value, Access::Lent);
+                self.note(&mut accesses, outer, arg.value, Access::Lent);
             }
         }
         for arg in args.iter().filter(|arg| arg.inout) {
             self.root(arg.value);
-            self.note(&mut accesses, arg.value, Access::Inout);
+            self.note(&mut accesses, outer, arg.value, Access::Inout);
         }
         if let Some((receiver, _)) = receiver
             && late
         {
             self.root(receiver);
-            self.note(&mut accesses, receiver, Access::Inout);
+            self.note(&mut accesses, outer, receiver, Access::Inout);
         }
         self.lent.truncate(outer);
     }
 
     /// Records the access `e` makes for its call, and reports one it conflicts with. A lent
     /// or moved value matters only when its type is unique.
-    fn note(&mut self, accesses: &mut Vec<CallAccess>, e: ExprId, access: Access) {
+    fn note(&mut self, accesses: &mut Vec<CallAccess>, outer: usize, e: ExprId, access: Access) {
+        if access == Access::Inout {
+            self.change_lent(e, outer);
+        }
         let Some((local, steps)) = self.access_path(e) else { return };
         if access == Access::Lent && !self.moves(self.p.ty(e)) {
             return;
@@ -988,7 +1054,7 @@ impl Walk<'_> {
             };
             self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
         }
-        let access = CallAccess { access, local, steps, expr: e, guard: false };
+        let access = CallAccess { access, local, steps, expr: e, by: Lender::Call };
         if access.access == Access::Lent {
             self.lent.push(access.clone());
         }

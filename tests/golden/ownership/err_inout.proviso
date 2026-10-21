@@ -18,7 +18,9 @@
 // different literals. Two elements whose indices are the same literal or variable overlap.
 // Other indices need a fact, which ownership/err_not_yet covers. A unique value lent to a
 // call by one argument can't move into it through a later one, at any depth, in a branch or
-// a nested call. It is lent only for the call.
+// a nested call. Nor can it change there, by assignment or an `&` access. It is lent only
+// for the call, so a change before the lending argument or after the call is fine. An index
+// may not move or change a unique base, and a guard may not change its scrutinee.
 use std.pool { Pool, Handle }
 
 record Pt {
@@ -160,4 +162,102 @@ fn lent_then_moved_later() -> Int {
     let b = consume(p)
     let c = lend_and_count(a: Pool.new(), n: consume(q))
     return a + b + c
+}
+
+fn grow(p: inout Pool[Int]) -> Int {
+    let h = p.insert(5)
+    return p.len()
+}
+
+fn grows(p: inout Pool[Int]) -> Bool {
+    let h = p.insert(5)
+    return true
+}
+
+fn changed_while_lent(c: Bool) -> Int {
+    var p: Pool[Int] = Pool.new()
+    var bin = Bin(pool: Pool.new())
+    let a = lend_and_count(a: p, n: grow(p: &p))    // <- E0505
+    let b = lend_and_count(a: bin.pool, n: grow(p: &bin.pool)) // <- E0505
+    let d = lend_bin_and_count(a: bin, n: grow(p: &bin.pool)) // <- E0505
+    let e = lend_and_count(a: p, n: if c {
+        let h = p.insert(1)                         // <- E0505
+        1
+    } else {
+        0
+    })
+    let f = lend_and_count(a: p, n: if c {
+        p = Pool.new()                              // <- E0505
+        1
+    } else {
+        0
+    })
+    let g = lend_and_count(a: bin.pool, n: if c {
+        bin.pool = Pool.new()                       // <- E0505
+        1
+    } else {
+        0
+    })
+    var xs: List[Pool[Int]] = [Pool.new()]
+    let k = lend_list(xs: xs, n: if c {
+        xs[0] = Pool.new()                          // <- E0505
+        1
+    } else {
+        0
+    })
+    return a + b + d + e + f + g + k
+}
+
+fn lend_list(xs: List[Pool[Int]], n: Int) -> Int {
+    return xs.len() + n
+}
+
+fn lend_bin_and_count(a: Bin, n: Int) -> Int {
+    return a.pool.len() + n
+}
+
+fn changed_before_or_after_lent(c: Bool) -> Int {
+    var p: Pool[Int] = Pool.new()
+    var q: Pool[Int] = Pool.new()
+    var bin = Bin(pool: Pool.new())
+    let a = count_then_lend(n: grow(p: &p), a: p)
+    let b = lend_and_count(a: p, n: 1) + grow(p: &p)
+    let d = lend_and_count(a: q, n: grow(p: &p))
+    let e = lend_bin_and_count(a: bin, n: 1)
+    let f = grow(p: &bin.pool)
+    return a + b + d + e + f
+}
+
+fn count_then_lend(n: Int, a: Pool[Int]) -> Int {
+    return a.len() + n
+}
+
+fn changed_in_guard(b: inout Bin, s: inout Bin) -> Int {
+    var other: Pool[Int] = Pool.new()
+    match b {
+        Bin(pool: q) if grows(p: &b.pool) => return 1 // <- E0505
+        Bin(pool: q) if grows(p: &other) => return 2
+        _ => {}
+    }
+    return 0
+}
+
+fn eat_list(xs: take List[Pool[Int]]) -> Int {
+    return xs.len()
+}
+
+fn changed_or_moved_in_index() -> Int {
+    var xs: List[Pool[Int]] = [Pool.new(), Pool.new()]
+    var ys: List[Pool[Int]] = [Pool.new(), Pool.new()]
+    var ints = [0, 1]
+    let a = xs[grow(p: &xs[0]) - 1].len()           // <- E0505
+    let b = xs[eat_list(xs) - 2].len()              // <- E0505
+    let d = xs[grow(p: &ys[0]) - 1].len()
+    let e = ints[bump(n: &ints[0])]
+    return a + b + d + e
+}
+
+fn bump(n: inout Int) -> Int {
+    n += 1
+    return 0
 }

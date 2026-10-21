@@ -207,7 +207,7 @@ pub mod codes {
         LENT_VALUE_MOVED = "E0504", "lent_value_moved",
             "A borrowed or `inout` value of a unique type, or a part of one, is moved: bound to a new name, assigned, returned, stored in a value, passed to `take`, consumed by `for … in take`, or by a `take self` method or `with` (REFERENCE §5.1, §5.2). An arm's scrutinee and what its pattern binds are lent to the arm's guard, so moving them there is the same mistake (OPEN_QUESTIONS P5).";
         OVERLAPPING_ACCESS = "E0505", "overlapping_access",
-            "Two accesses to one variable overlap in a call while one of them is `inout`, such as `swap(a: &x, b: &x)`, or a value lent to a call is moved in it (REFERENCE §5.3).";
+            "Two accesses to one variable overlap in a call while one of them is `inout`, such as `swap(a: &x, b: &x)`, or a unique value is moved or changed while a call, its own index or a guard has it lent (REFERENCE §5.3).";
         INOUT_MARKER_MISMATCH = "E0506", "inout_marker_mismatch",
             "An argument for an `inout` parameter without `&`, or `&` on an argument whose parameter isn't `inout` (REFERENCE §5.2, H5).";
         EFFECTS_CALL_IN_OBSERVES = "E0601", "effects_call_in_observes",
