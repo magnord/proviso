@@ -1,0 +1,116 @@
+// phase: 2.7
+// expect-error: E0306
+// expect-error: E0305
+// expect-error: E0501
+// expect-error: E0201
+// expect-error: E0208
+// expect-error: E0207
+// expect-error: E0303
+// expect-error: E0506
+// expect-error: E0301
+// A rejected call moves and lends nothing, and a rejected `&` argument accesses nothing, so
+// no move or overlap that depends on them is reported (REFERENCE §15.1). The suppression
+// stops at the rejected construct. A valid call inside a rejected one still moves what it
+// takes, and an `&` argument used after it moved is reported once, as a use after move.
+use std.pool { Pool, Handle }
+
+unique record Token {
+    id: Int
+}
+
+impl Token {
+    pub fn finish(take self) -> Int {
+        return self.id
+    }
+}
+
+fn both(a: inout Int, b: inout Int) {
+    a = b
+}
+
+fn both_pools(a: inout Pool[Int], b: inout Pool[Int]) {
+}
+
+fn grow(a: inout Int) {
+    a += 1
+}
+
+fn eat(t: take Token) -> Int {
+    return t.id
+}
+
+fn consume(p: take Pool[Int]) -> Int {
+    return p.len()
+}
+
+fn rejected_places(pool: inout Pool[Int], h: Handle[Int], k: Handle[Int]) {
+    var m: Map[Text, Int] = ["a": 1, "b": 2]
+    both(a: &m["a"], b: &m["b"])                    // <- E0306, E0306
+    both(a: &pool[h], b: &pool[k])                  // <- E0306, E0306
+    let fixed = 1
+    both(a: &fixed, b: &fixed)                      // <- E0305, E0305
+}
+
+fn moved_place() {
+    var p: Pool[Int] = Pool.new()
+    let q = p
+    both_pools(a: &p, b: &p)                        // <- E0501, E0501
+}
+
+fn rejected_calls() {
+    var n = 1
+    nope(x: &n, y: &n)                              // <- E0201
+    grow(a: &n, a: &n)                              // <- E0208
+}
+
+fn rejected_with(t: take Token) -> Int {
+    let u = t.with(nope: 1)                         // <- E0303
+    return t.id
+}
+
+fn rejected_take_self(t: take Token) -> Int {
+    let n = t.finish(1)                             // <- E0208
+    return t.id
+}
+
+fn rejected_label(t: take Token) -> Int {
+    let n = eat(x: t)                               // <- E0207
+    return t.id
+}
+
+fn rejected_arity(t: take Token) -> Int {
+    let n = eat(t, 1)                               // <- E0208
+    return t.id
+}
+
+fn rejected_marker() -> Int {
+    var p: Pool[Int] = Pool.new()
+    let n = consume(&p)                             // <- E0506
+    return p.len()
+}
+
+fn rejected_type(t: take Token) -> Int {
+    let n = consume(p: t)                           // <- E0301
+    return t.id
+}
+
+fn valid_inside_rejected() -> Int {
+    let p: Pool[Int] = Pool.new()
+    let n = nope(x: consume(p))                     // <- E0201
+    return p.len()                                  // <- E0501
+}
+
+fn unrelated_beside_rejected(t: take Token) -> Int {
+    let n = eat(t, 1)                               // <- E0208
+    let u = t
+    return t.id                                     // <- E0501
+}
+
+fn eat_with(t: take Token, n: Int) -> Int {
+    return t.id + n
+}
+
+fn rejected_argument(t: take Token) -> Int {
+    let n = eat_with(t: t, n: missing)              // <- E0201
+    return t.id                                     // <- E0501
+}

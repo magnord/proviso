@@ -29,6 +29,14 @@ use crate::decls::{AdtId, IfaceId};
 use crate::types::Ty;
 use crate::{Local, LocalId, Program, Res};
 
+/// What the checker found about the expressions of a body.
+pub(crate) struct Found {
+    /// The expressions whose values are copied, or moved when their type is unique.
+    pub consumed: HashSet<ExprId>,
+    /// The expressions an error was reported at, not at one of their parts.
+    pub rejected: HashSet<ExprId>,
+}
+
 /// Checks the moves and accesses of `body`, whose locals are `locals` and whose type
 /// parameters implement `bounds`, given the expressions the checker found `consumed`.
 /// Records each expression that moves a whole local in [`Program::moves_out`], and each
@@ -38,7 +46,7 @@ pub(crate) fn check(
     p: &mut Program,
     locals: &[Local],
     bounds: &[Vec<IfaceId>],
-    consumed: &HashSet<ExprId>,
+    found: &Found,
     body: &Block,
     diags: &mut Diagnostics,
 ) {
@@ -47,7 +55,8 @@ pub(crate) fn check(
         p,
         locals,
         bounds,
-        consumed,
+        consumed: &found.consumed,
+        rejected: &found.rejected,
         state: Some(State::default()),
         loops: Vec::new(),
         reported: HashSet::new(),
@@ -57,8 +66,6 @@ pub(crate) fn check(
         handled: HashMap::new(),
         loop_cache: HashMap::new(),
         memo: RefCell::new(HashMap::new()),
-        copy_memo: RefCell::new(HashMap::new()),
-        copy_bounds: bounds.iter().map(|b| b.iter().copied().chain([IfaceId::COPY]).collect()).collect(),
         touched: Vec::new(),
         reach: usize::MAX,
         moves_out: HashSet::new(),
@@ -238,6 +245,9 @@ struct Walk<'a> {
     locals: &'a [Local],
     bounds: &'a [Vec<IfaceId>],
     consumed: &'a HashSet<ExprId>,
+    /// The expressions the checker rejected, which move nothing and lend nothing, so that
+    /// nothing is reported that depends on them (REFERENCE §15.1).
+    rejected: &'a HashSet<ExprId>,
     /// What may have moved here, or `None` where the code is unreachable.
     state: Option<State>,
     loops: Vec<LoopFrame>,
@@ -253,9 +263,6 @@ struct Walk<'a> {
     handled: HashMap<ExprId, Option<State>>,
     /// What [`Walk::moves`] found for each argument list, by its address.
     memo: RefCell<HashMap<usize, bool>>,
-    /// The same, were every type parameter `Copy`.
-    copy_memo: RefCell<HashMap<usize, bool>>,
-    copy_bounds: Vec<Vec<IfaceId>>,
     /// What each loop reached when it was last walked.
     loop_cache: HashMap<ExprId, LoopWalk>,
     /// The locals each loop being walked has touched, innermost last.
@@ -289,12 +296,6 @@ impl Walk<'_> {
 
     fn moves(&self, ty: &Ty) -> bool {
         self.p.decls.moves_memo(ty, self.bounds, &mut self.memo.borrow_mut())
-    }
-
-    /// Whether `ty` moves only because a type parameter in it may lack `Copy`. The checker
-    /// reports the copy of a lent value of such a type instead (E0503).
-    fn generic(&self, ty: &Ty) -> bool {
-        self.moves(ty) && !self.p.decls.moves_memo(ty, &self.copy_bounds, &mut self.copy_memo.borrow_mut())
     }
 
     /// The local and fields that `e` names, when it is a place a move can leave.
@@ -628,12 +629,8 @@ impl Walk<'_> {
     fn expr_kind(&mut self, e: ExprId) {
         let m = self.m;
         if let Some((local, path)) = self.place(e) {
-            if self.consumed.contains(&e) && self.moves(self.p.ty(e)) {
+            if self.consumed.contains(&e) && !self.rejected.contains(&e) && self.moves(self.p.ty(e)) {
                 let desc = self.describe(e);
-                // A lent value whose type parameter lacks `Copy` is reported by the checker.
-                if self.locals[local.index()].borrowed && self.generic(self.p.ty(e)) {
-                    return;
-                }
                 self.move_place(e, local, path, desc);
             } else {
                 self.use_place(e, local, &path);
@@ -659,14 +656,14 @@ impl Walk<'_> {
                     }
                 }
             }
-            ExprKind::Call { args, .. } => self.call(None, args),
+            ExprKind::Call { args, .. } => self.call(e, None, args),
             ExprKind::MethodCall { receiver, args, .. } => {
                 let mode = match self.p.res(e) {
                     Some(Res::Fn(f)) if self.p.fns[f].receiver.is_some() => self.p.fns[f].self_mode,
                     Some(Res::Method(builtin)) if builtin.changes_receiver() => ParamMode::Inout,
                     _ => ParamMode::Borrow,
                 };
-                self.call(Some((*receiver, mode)), args);
+                self.call(e, Some((*receiver, mode)), args);
             }
             ExprKind::Field { base, .. } => self.expr(*base),
             ExprKind::Index { base, index } => {
@@ -980,7 +977,14 @@ impl Walk<'_> {
     /// indices of an `&` argument and an `inout self` receiver are evaluated in order with
     /// the other arguments, but the place is reached once they all are (§5.3), and no two
     /// accesses of the call may conflict.
-    fn call(&mut self, receiver: Option<(ExprId, ParamMode)>, args: &[Arg]) {
+    fn call(&mut self, e: ExprId, receiver: Option<(ExprId, ParamMode)>, args: &[Arg]) {
+        if self.rejected.contains(&e) {
+            // A rejected call only reads what it is given.
+            for value in receiver.map(|(r, _)| r).into_iter().chain(args.iter().map(|arg| arg.value)) {
+                self.read(value);
+            }
+            return;
+        }
         let mut accesses: Vec<CallAccess> = Vec::new();
         let outer = self.lent.len();
         let late = matches!(receiver, Some((_, ParamMode::Inout)));
@@ -1019,9 +1023,24 @@ impl Walk<'_> {
         self.lent.truncate(outer);
     }
 
+    /// Reads `e` without moving it, as a rejected call does with what it is given.
+    fn read(&mut self, e: ExprId) {
+        match self.place(e) {
+            Some((local, path)) => self.use_place(e, local, &path),
+            None => {
+                self.indices(e);
+                self.root(e);
+            }
+        }
+    }
+
     /// Records the access `e` makes for its call, and reports one it conflicts with. A lent
     /// or moved value matters only when its type is unique.
     fn note(&mut self, accesses: &mut Vec<CallAccess>, outer: usize, e: ExprId, access: Access) {
+        // A value used after it moved was already reported, and has nothing left to access.
+        if self.reported.contains(&(codes::USE_AFTER_MOVE.id, self.span(e))) {
+            return;
+        }
         if access == Access::Inout {
             self.change_lent(e, outer);
         }

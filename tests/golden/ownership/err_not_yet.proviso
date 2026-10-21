@@ -32,6 +32,12 @@ fn kept(p: keep Pool[Int]) -> Int {                 // <- E0901
     return p.len()
 }
 
+fn partial_calls() {
+    var v = 1
+    partial(x: v)
+    partial(x: &v)
+}
+
 fn update(pool: inout Pool[Int], h: Handle[Int]) -> Bool {
     return pool.update(handle: h, change: 1)        // <- E0901
 }

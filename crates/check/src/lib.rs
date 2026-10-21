@@ -285,6 +285,9 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         param_names: Vec::new(),
         copying: false,
         consumed: HashSet::new(),
+        rejected: HashSet::new(),
+        errors: 0,
+        inner_errors: 0,
         tail_copying: false,
         pattern_borrowed: false,
         pattern_mutable: false,
@@ -529,6 +532,13 @@ struct Checker<'a> {
     /// The expressions of the body being checked whose values are copied, or moved when
     /// their type is unique (REFERENCE §5.1), which the move pass reads.
     consumed: HashSet<ExprId>,
+    /// The expressions of the body being checked that an error was reported at, not at one
+    /// of their parts, which the move pass leaves alone (REFERENCE §15.1).
+    rejected: HashSet<ExprId>,
+    /// How many errors were reported, and how many of them inside the parts of the
+    /// expression being checked.
+    errors: usize,
+    inner_errors: usize,
     /// [`Checker::copying`], handed from an `if` or `match` to the values of its branches.
     tail_copying: bool,
     /// Set while checking a pattern that matches a borrowed value, so its bindings are too.
@@ -636,10 +646,12 @@ impl Pending {
 
 impl Checker<'_> {
     fn error(&mut self, code: Code, span: Span, message: impl Into<String>) {
+        self.errors += 1;
         self.diags.error(code, span, message);
     }
 
     fn not_implemented(&mut self, span: Span, what: &str, planned: Planned) {
+        self.errors += 1;
         self.diags.not_implemented(span, what, planned);
     }
 
@@ -2341,8 +2353,9 @@ impl Checker<'_> {
         }
         self.fn_body(decl, body);
         self.settle();
-        let consumed = std::mem::take(&mut self.consumed);
-        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &consumed, body, self.diags);
+        let found =
+            moves::Found { consumed: std::mem::take(&mut self.consumed), rejected: std::mem::take(&mut self.rejected) };
+        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags);
         self.p.fns[id].locals = self.f.locals.len();
         self.generic_scope.clear();
         self.param_names.clear();
@@ -3211,12 +3224,17 @@ impl Checker<'_> {
             let ty = self.vars.resolve(ty);
             if self.vars.shape(&ty).never { self.vars.open_nevers(&ty) } else { ty }
         });
+        let (before, outer) = (self.errors, std::mem::replace(&mut self.inner_errors, 0));
         let ty = self.expr_kind(e, expected.as_ref(), chain, copying);
         let ty = self.vars.resolve(&ty);
         if copying {
             self.copied(e, &ty);
             self.consumed.insert(e);
         }
+        if self.errors - before > self.inner_errors {
+            self.rejected.insert(e);
+        }
+        self.inner_errors = outer + (self.errors - before);
         self.record(e, ty.clone());
         ty
     }
@@ -4701,7 +4719,8 @@ impl Checker<'_> {
                 self.inout_arg(arg.value, &ty);
                 continue;
             }
-            if inout || arg.inout {
+            // `inout(partial)` was rejected at the parameter, so its marker isn't checked.
+            if (inout || arg.inout) && mode != ParamMode::InoutPartial {
                 let (param, value) = (param.as_ref(), self.span(arg.value));
                 let message = if inout {
                     format!(
