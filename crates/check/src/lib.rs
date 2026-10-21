@@ -418,6 +418,8 @@ struct FnState {
     fails: Option<Ty>,
     scopes: Vec<Vec<(Symbol, LocalId)>>,
     locals: Vec<Local>,
+    /// How many of the locals are `self` and the parameters, which come first.
+    params: usize,
     loops: Vec<LoopState>,
     /// False in a refinement or an example, which are expressions with no function to return
     /// from or fail.
@@ -438,6 +440,7 @@ impl FnState {
             fails,
             scopes: Vec::new(),
             locals: Vec::new(),
+            params: 0,
             loops: Vec::new(),
             returns: true,
             example: false,
@@ -1485,7 +1488,8 @@ impl Checker<'_> {
                 state.returns = false;
                 state.locals = fields
                     .iter()
-                    .map(|f| Local { ty: f.ty.clone(), mutable: false, borrowed: false, in_loop: false })
+                    // A refinement looks at the value it checks, so the fields are lent to it.
+                    .map(|f| Local { ty: f.ty.clone(), mutable: false, borrowed: true, in_loop: false })
                     .collect();
                 self.f = state;
                 let mut preds = Vec::new();
@@ -1494,6 +1498,7 @@ impl Checker<'_> {
                         self.f.scopes = vec![vec![(field.name.sym, LocalId(i as u32))]];
                         self.check(expr, &Ty::Bool);
                         self.settle();
+                        self.predicate_moves(expr);
                         preds.push(Pred { expr, field: Some(FieldIdx(i as u32)) });
                     }
                 }
@@ -1502,6 +1507,7 @@ impl Checker<'_> {
                     self.f.scopes = vec![all.collect()];
                     self.check(expr, &Ty::Bool);
                     self.settle();
+                    self.predicate_moves(expr);
                     preds.push(Pred { expr, field: None });
                 }
                 let variant = &mut self.p.decls.adt_mut(id).variants[v];
@@ -1509,6 +1515,15 @@ impl Checker<'_> {
                 variant.locals = self.f.locals.len();
             }
         }
+    }
+
+    /// Checks what the refinement `expr` moves, which can't be the fields lent to it.
+    fn predicate_moves(&mut self, expr: ExprId) {
+        let m = self.m;
+        let found =
+            moves::Found { consumed: std::mem::take(&mut self.consumed), rejected: std::mem::take(&mut self.rejected) };
+        let body = moves::Body::Predicate(expr);
+        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags);
     }
 
     fn signatures(&mut self) {
@@ -2346,6 +2361,7 @@ impl Checker<'_> {
             scope.push((param.name, LocalId(state.locals.len() as u32)));
             state.locals.push(local(param.mode, &param.ty));
         }
+        state.params = state.locals.len();
         state.scopes.push(scope);
         self.f = state;
         for param in &decl.params {
@@ -2355,7 +2371,7 @@ impl Checker<'_> {
         self.settle();
         let found =
             moves::Found { consumed: std::mem::take(&mut self.consumed), rejected: std::mem::take(&mut self.rejected) };
-        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags);
+        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, moves::Body::Fn(body), self.diags);
         self.p.fns[id].locals = self.f.locals.len();
         self.generic_scope.clear();
         self.param_names.clear();
@@ -3150,10 +3166,17 @@ impl Checker<'_> {
     /// Why local `id`, called `name`, can't be changed by what `does` (E0305).
     fn immutable(&self, name: Ident, id: LocalId, does: &str) -> String {
         let text = self.m.text(name.sym);
-        if self.f.locals[id.index()].in_loop {
+        let local = &self.f.locals[id.index()];
+        if local.in_loop {
             format!("`{text}` is a loop variable, which can't be changed; copy it into a `var` to {does}")
+        } else if id.index() >= self.f.params {
+            format!("`{text}` is bound by `let` or a pattern; declare it with `var` to {does}")
+        } else if !local.borrowed {
+            format!("`{text}` is a `take` parameter, which can't be changed; copy it into a `var` to {does}")
+        } else if text == "self" {
+            format!("`self` is borrowed by this method; declare it `inout self` to {does}")
         } else {
-            format!("`{text}` is a `let` binding or a parameter; declare it with `var` to {does}")
+            format!("`{text}` is a borrowed parameter; declare it `inout` to {does}")
         }
     }
 

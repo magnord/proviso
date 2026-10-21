@@ -37,6 +37,14 @@ pub(crate) struct Found {
     pub rejected: HashSet<ExprId>,
 }
 
+/// What the move pass walks.
+pub(crate) enum Body<'a> {
+    /// A function's body.
+    Fn(&'a Block),
+    /// A refinement, whose fields are lent to it.
+    Predicate(ExprId),
+}
+
 /// Checks the moves and accesses of `body`, whose locals are `locals` and whose type
 /// parameters implement `bounds`, given the expressions the checker found `consumed`.
 /// Records each expression that moves a whole local in [`Program::moves_out`], and each
@@ -47,7 +55,7 @@ pub(crate) fn check(
     locals: &[Local],
     bounds: &[Vec<IfaceId>],
     found: &Found,
-    body: &Block,
+    body: Body,
     diags: &mut Diagnostics,
 ) {
     let mut walk = Walk {
@@ -72,7 +80,10 @@ pub(crate) fn check(
         arms_out: HashSet::new(),
         guarded: Vec::new(),
     };
-    walk.block(body);
+    match body {
+        Body::Fn(block) => walk.block(block),
+        Body::Predicate(e) => walk.expr(e),
+    }
     let (errors, later, moves_out, arms_out) = (walk.errors, walk.later, walk.moves_out, walk.arms_out);
     for (code, span, message) in errors {
         diags.error(code, span, message);
