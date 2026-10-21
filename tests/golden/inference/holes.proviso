@@ -11,9 +11,10 @@
 // type can't fail. A hole may be the `Option` an `else` unwraps. A `try` without `fails` is
 // wrong whatever fills the hole, and a call the hole doesn't meet is still checked. A type
 // argument the hole meets is `Never`, as the hole is, unless something gives it a type, in
-// either argument order. A chain whose receiver needs its type settled early, as `.show()`
-// does, keeps what the hole met, and the error type the hole met joins a `try`'s `fails`, and under
-// the other handlers another call of the chain or an `attempt`'s expected `Result` (P5, `fails Never`).
+// either argument order. A method on a chain's call, as `.show()` is, leaves the error type
+// the hole met open until its handler joins it with a `try`'s `fails`, another call of the
+// chain, an `attempt`'s expected `Result` or a value after the chain (P5, `fails Never`;
+// issue #37).
 
 fn rethrow[E: Copy](e: E) -> Int fails E {
     fail e
