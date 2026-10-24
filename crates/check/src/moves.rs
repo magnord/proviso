@@ -513,6 +513,12 @@ impl Walk<'_> {
     /// released, or it is a record or tuple whose parts all are. A base resource holds itself,
     /// apart from the `self` of its own `take self` method (OPEN_QUESTIONS Q35).
     fn released_fully(&self, local: LocalId, path: &mut Path, ty: &Ty) -> bool {
+        self.released_within(local, path, ty, &mut Vec::new())
+    }
+
+    /// [`Walk::released_fully`] inside the records in `within`. A record that holds itself
+    /// has no values, so it holds no resource.
+    fn released_within(&self, local: LocalId, path: &mut Path, ty: &Ty, within: &mut Vec<AdtId>) -> bool {
         let Some(state) = &self.state else { return true };
         if state.is_released(local, path) || !self.is_resource(ty) {
             return true;
@@ -523,12 +529,18 @@ impl Walk<'_> {
         if def.is_enum() || def.is_native() || (def.resource_base && !own_self) {
             return false;
         }
-        def.field_types(VariantIdx::RECORD, args).iter().enumerate().all(|(i, field)| {
+        if within.contains(id) {
+            return true;
+        }
+        within.push(*id);
+        let released = def.field_types(VariantIdx::RECORD, args).iter().enumerate().all(|(i, field)| {
             path.push(i as u32);
-            let released = self.released_fully(local, path, field);
+            let released = self.released_within(local, path, field, within);
             path.pop();
             released
-        })
+        });
+        within.pop();
+        released
     }
 
     // ---- resources ----

@@ -9,7 +9,8 @@
 // arm whose variant holds no resource has nothing left to consume, and nor has an arm after
 // those that took every variant that does. A borrowed or `inout` resource is lent, so the
 // callee reads it and an `inout self` method changes it. A `var` whose resource was
-// consumed may take a new one, and an element popped from a list is owned (Q35).
+// consumed may take a new one, and an element popped from a list is owned (Q35). Records
+// that hold each other have no values, so checking one ends.
 use std.io { Out, IoError }
 
 resource record Probe {
@@ -68,6 +69,19 @@ enum Slot {
 
 enum Refused {
     Closed(name: Text)
+}
+
+record Ring {
+    link: Link
+}
+
+record Link {
+    ring: Ring
+    probe: Probe
+}
+
+fn unreachable_ring(ring: take Ring) {
+    ring.link.probe.close()
 }
 
 fn say(out: Out, line: Text) {
