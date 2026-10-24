@@ -47,6 +47,9 @@ close full
 empty
 close second
 close first
+close rest
+close tested
+close bound
 close x3
 probe x1
 probe x2

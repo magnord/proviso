@@ -85,6 +85,13 @@ fn matched_apart(o: take Option[Probe]) {           // <- E0507
     }
 }
 
+fn rest_bound(o: take Option[Option[Probe]]) {
+    match o {
+        Some(None) => {}
+        rest => {}                                  // <- E0507
+    }
+}
+
 fn returned_early(c: Bool) {
     let p = open(name: "p")                         // <- E0507
     if c {

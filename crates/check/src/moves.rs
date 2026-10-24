@@ -672,12 +672,6 @@ impl Walk<'_> {
         }
     }
 
-    /// Whether variant `v` of `ty`'s enum holds a resource.
-    fn variant_holds(&self, ty: &Ty, v: usize) -> bool {
-        let Some((id, args)) = self.adt_of(ty) else { return false };
-        self.p.decls.adt(id).field_types(VariantIdx::new(v), args).iter().any(|f| self.is_resource(f))
-    }
-
     /// Whether `pat` matches every value of its type.
     fn irrefutable(&self, pat: PatId) -> bool {
         match &self.m.pats[pat].kind {
@@ -720,11 +714,63 @@ impl Walk<'_> {
         }
     }
 
-    /// Whether `pat` matches every value of the variant it names, or of its type.
-    fn irrefutable_in_variant(&self, pat: PatId) -> bool {
+    /// Whether a value of type `ty` that `pat` matches, any when `None`, and that no pattern
+    /// of `taken` matches, may hold a resource. It looks through enums, records and tuples
+    /// at any depth, so `_` after `Some(Some(p))` meets only values without one (OPEN_QUESTIONS
+    /// P5). A pattern of `taken` with two refutable parts takes no part on its own.
+    fn rest_holds(&self, ty: &Ty, pat: Option<PatId>, taken: &[PatId]) -> bool {
+        if !self.is_resource(ty) || taken.iter().any(|&x| self.irrefutable(x)) {
+            return false;
+        }
+        let pat = pat.filter(|&p| !self.irrefutable(p));
+        let Some((id, args)) = self.adt_of(ty) else { return true };
+        let def = self.p.decls.adt(id);
+        if def.resource_base || def.is_native() {
+            return true;
+        }
+        let variants: Vec<usize> = match pat.map(|p| self.shape_of(p)) {
+            Some(None) => return true,
+            Some(Some((v, _))) => vec![v],
+            None => (0..def.variants.len()).collect(),
+        };
+        variants.into_iter().any(|v| {
+            let types = def.field_types(VariantIdx::new(v), args);
+            let parts: Vec<Vec<Option<PatId>>> = taken
+                .iter()
+                .filter_map(|&x| self.shape_of(x).filter(|(w, _)| *w == v).map(|(_, parts)| parts))
+                .collect();
+            let refutable = |part: &Option<PatId>| part.is_some_and(|p| !self.irrefutable(p));
+            if parts.iter().any(|parts| !parts.iter().any(refutable)) {
+                return false;
+            }
+            let own = pat.and_then(|p| self.shape_of(p)).map(|(_, parts)| parts);
+            (0..types.len()).any(|i| {
+                let taken_here: Vec<PatId> = parts
+                    .iter()
+                    .filter(|parts| parts.iter().enumerate().all(|(j, part)| j == i || !refutable(part)))
+                    .filter_map(|parts| parts[i])
+                    .collect();
+                let mine = own.as_ref().and_then(|parts| parts[i]);
+                self.rest_holds(&types[i], mine, &taken_here)
+            })
+        })
+    }
+
+    /// The variant a constructor or tuple pattern matches, 0 for a record or tuple, and the
+    /// pattern each field must match, `None` for any. `None` for a pattern it can't read.
+    fn shape_of(&self, pat: PatId) -> Option<(usize, Vec<Option<PatId>>)> {
         match &self.m.pats[pat].kind {
-            PatKind::Ctor { fields, .. } => fields.iter().flatten().all(|field| self.irrefutable(field.pat)),
-            _ => self.irrefutable(pat),
+            PatKind::Tuple(parts) => Some((0, parts.iter().map(|&p| Some(p)).collect())),
+            PatKind::Ctor { fields, .. } => {
+                let ctor = self.p.pat_ctor.get(pat)?;
+                let count = self.p.decls.adt(ctor.adt).variants[ctor.variant.index()].fields.len();
+                let mut parts = vec![None; count];
+                for (field, idx) in fields.iter().flatten().zip(ctor.fields.iter()) {
+                    parts[idx.index()] = Some(field.pat);
+                }
+                Some((ctor.variant.index(), parts))
+            }
+            _ => None,
         }
     }
 
@@ -740,19 +786,7 @@ impl Walk<'_> {
         self.bound_paths(pat, &mut Vec::new(), &mut moved);
         let lost_when_matched = self.lost(pat, &ty, temp);
         // The value is gone after a failed test when the test moves it or it is a temporary.
-        let lost_when_failed = (temp || !moved.is_empty()) && {
-            let variants = match self.adt_of(&ty) {
-                Some((id, _)) if self.p.decls.adt(id).is_enum() => self.p.decls.adt(id).variants.len(),
-                _ => 0,
-            };
-            match self.pattern_variant(pat) {
-                _ if self.irrefutable(pat) => false,
-                Some(v) if self.irrefutable_in_variant(pat) => {
-                    (0..variants).any(|other| other != v && self.variant_holds(&ty, other))
-                }
-                _ => true,
-            }
-        };
+        let lost_when_failed = (temp || !moved.is_empty()) && self.rest_holds(&ty, None, &[pat]);
         if lost_when_matched || lost_when_failed {
             let message = if lost_when_matched {
                 "this pattern leaves out a resource of the value it moves, which would drop it (§10)"
@@ -760,17 +794,6 @@ impl Walk<'_> {
                 "this test moves the value whether or not it matches, so a value it doesn't match, which may hold a resource, would be lost; use `match` (§10)"
             };
             self.report(codes::RESOURCE_DISCARDED, self.m.pats[pat].span, message.to_string());
-        }
-    }
-
-    /// The variant of an enum that `pat` names, or `None` when it names none.
-    fn pattern_variant(&self, pat: PatId) -> Option<usize> {
-        match &self.m.pats[pat].kind {
-            PatKind::Ctor { .. } => {
-                let ctor = self.p.pat_ctor.get(pat)?;
-                self.p.decls.adt(ctor.adt).is_enum().then_some(ctor.variant.index())
-            }
-            _ => None,
         }
     }
 
@@ -1457,13 +1480,9 @@ impl Walk<'_> {
                 if resource && temp {
                     self.held.insert(*scrutinee);
                 }
-                // The variants an arm may still meet: an earlier arm without a guard that
-                // matches all of a variant takes it (OPEN_QUESTIONS P5).
-                let variants = match self.adt_of(&ty) {
-                    Some((id, _)) if self.p.decls.adt(id).is_enum() => self.p.decls.adt(id).variants.len(),
-                    _ => 0,
-                };
-                let mut remaining = vec![true; variants];
+                // The values an arm may still meet: those no earlier arm without a guard
+                // matches (OPEN_QUESTIONS P5).
+                let mut taken: Vec<PatId> = Vec::new();
                 // What may have moved when an arm is tried: what moved before the `match`,
                 // and what the guards of the arms before it moved.
                 let mut tried = self.state.clone();
@@ -1471,20 +1490,10 @@ impl Walk<'_> {
                 for arm in arms {
                     self.state = tried.clone();
                     self.open_scope();
-                    let arm_variant = self.pattern_variant(arm.pat);
-                    let meets: Vec<usize> =
-                        (0..variants).filter(|&v| remaining[v] && arm_variant.is_none_or(|a| a == v)).collect();
                     // An arm whose values hold no resource leaves nothing to consume.
-                    let empty = match &self.m.pats[arm.pat].kind {
-                        PatKind::Wild | PatKind::Bind(_) => {
-                            variants > 0 && meets.iter().all(|&v| !self.variant_holds(&ty, v))
-                        }
-                        _ => !self.may_hold(arm.pat, &ty),
-                    };
-                    if arm.guard.is_none() && self.irrefutable_in_variant(arm.pat) {
-                        for &v in &meets {
-                            remaining[v] = false;
-                        }
+                    let empty = !self.rest_holds(&ty, Some(arm.pat), &taken) || !self.may_hold(arm.pat, &ty);
+                    if arm.guard.is_none() {
+                        taken.push(arm.pat);
                     }
                     if let Some(guard) = arm.guard {
                         // The guard runs before the pattern moves anything, with the
@@ -1523,6 +1532,14 @@ impl Walk<'_> {
                         && let Some(state) = &mut self.state
                     {
                         state.release(local, path);
+                    }
+                    // So is a binding of the whole value that meets only values without one.
+                    if empty
+                        && matches!(self.m.pats[arm.pat].kind, PatKind::Bind(_))
+                        && let Some(&local) = self.p.pat_local.get(arm.pat)
+                        && let Some(state) = &mut self.state
+                    {
+                        state.release(local, Vec::new());
                     }
                     // The scrutinee leaves its local only once this arm is chosen.
                     if self.moves_out.remove(scrutinee) {
