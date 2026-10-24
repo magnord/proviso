@@ -1263,6 +1263,14 @@ impl Walk<'_> {
                 self.move_place(e, local, path, desc);
             } else {
                 self.use_place(e, local, &path);
+                // A rejected place moves nothing, but it was meant to, so what it names isn't
+                // reported as left over (REFERENCE §15.1).
+                if self.consumed.contains(&e)
+                    && self.rejected.contains(&e)
+                    && let Some(state) = &mut self.state
+                {
+                    state.release(local, path);
+                }
             }
             return;
         }

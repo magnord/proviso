@@ -3,13 +3,15 @@
 // expect-error: E0316
 // expect-error: E0319
 // expect-error: E0301
+// expect-error: E0202
 // expect-error: E0314
 // expect-error: E0709
 // Every resource type implements `Abandon` (REFERENCE §10), so a `resource record` needs an
 // `impl Abandon`, whose `abandon` takes `take self` and can't fail (STD.md). An aggregate
 // that holds a resource implements it by itself, abandoning what it holds, and a type that
 // isn't a resource has nothing to abandon, so neither takes an `impl Abandon`. A call of
-// `abandon` on a type whose implementation was rejected or is missing isn't reported, and
+// `abandon` on a type whose implementation was rejected or is missing isn't reported, nor is
+// a second declaration of a resource left without one, and
 // nor is the `self` of a rejected one left over, while other errors in its body are (§15.1).
 // An interface method that takes `take self` is implemented with `take self`. An error type
 // can't be a resource (§10 rule 5), whether it is one or holds one.
@@ -83,4 +85,16 @@ fn fails_with_probe() fails Probe {                 // <- E0709
 }
 
 fn fails_with_option() fails Option[Probe] {        // <- E0709
+}
+
+resource record Twice {
+    n: Int
+}
+
+resource record Twice {                             // <- E0202
+    n: Int
+}
+
+impl Abandon for Twice {
+    fn abandon(take self) {}
 }

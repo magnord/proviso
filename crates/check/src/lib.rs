@@ -1996,7 +1996,10 @@ impl Checker<'_> {
             if !def.resource_base || def.unknown_interfaces || self.poisoned.contains(&name.sym) {
                 continue;
             }
-            if self.p.decls.impl_of(IfaceId::ABANDON, ImplKey::Adt(id)).is_none() {
+            // A second declaration of the name is reported as such, and the `impl` names the
+            // first (REFERENCE §15.1).
+            let duplicate = self.adts[..k].iter().any(|earlier| earlier.name.sym == name.sym);
+            if !duplicate && self.p.decls.impl_of(IfaceId::ABANDON, ImplKey::Adt(id)).is_none() {
                 let text = self.m.text(name.sym);
                 let message = format!(
                     "`{text}` is a resource, so it must implement `Abandon`, whose `abandon` ends it on a failure exit (§10)"

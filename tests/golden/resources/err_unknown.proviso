@@ -2,8 +2,9 @@
 // expect-error: E0307
 // expect-error: E0201
 // expect-error: E0508
+// expect-error: E0101
 // A call that resolves to nothing, as a method of a value of an unknown type or a function
-// that doesn't exist, is rejected, so a resource it was given isn't reported as only borrowed
+// that doesn't exist, or a variant that doesn't parse, is rejected, so a resource it was given isn't reported as only borrowed
 // and then lost (REFERENCE §15.1). A resource dropped beside it still is.
 resource record Probe {
     name: Text
@@ -29,4 +30,13 @@ fn unknown_result() {
 
 fn unknown_function() {
     unknown_fn(p: open(name: "d"))                  // <- E0201
+}
+
+enum Chain {
+    End
+    Link(tag: Probe, next: Chain)                   // <- E0101
+}
+
+fn unparsed_variant() {
+    let c = Chain.Link(open(name: "e"), Chain.End)
 }
