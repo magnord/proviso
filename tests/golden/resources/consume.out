@@ -3,6 +3,11 @@ close a
 close b!?
 close c
 abandon d
+abandon pr
+abandon pl
+abandon maybe
+abandon m2
+abandon m1
 close e
 close e2
 conn 1 holds probe conn

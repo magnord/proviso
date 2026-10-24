@@ -642,6 +642,11 @@ impl Decls {
         if iface == IfaceId::COPY {
             return self.copyable(ty, params, &mut Vec::new());
         }
+        // Every resource type implements `Abandon`: a base resource by its `impl`, which
+        // E0309 asks for, and an aggregate by abandoning what it holds (REFERENCE §10).
+        if iface == IfaceId::ABANDON && self.is_resource(ty) {
+            return true;
+        }
         let by_impl =
             || ImplKey::of(ty).is_some_and(|key| self.impls.contains_key(&(iface, key)) || self.unknown.contains(&key));
         match ty {

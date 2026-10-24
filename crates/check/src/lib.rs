@@ -286,6 +286,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         iface_names: HashMap::new(),
         ifaces: Vec::new(),
         inherent: HashMap::new(),
+        rejected_abandon: HashSet::new(),
         unknown_tys: Vec::new(),
         f: FnState::new(Ty::Unit, None),
         in_chain: false,
@@ -534,6 +535,9 @@ struct Checker<'a> {
     ifaces: Vec<IfaceSrc<'a>>,
     /// The methods and associated functions of each record and enum, in declaration order.
     inherent: HashMap<AdtId, Vec<Inherent>>,
+    /// The methods of a rejected `impl Abandon`, whose `self` isn't reported as left over,
+    /// since its `abandon` was never going to be called (REFERENCE §15.1).
+    rejected_abandon: HashSet<FnId>,
     /// Types without an [`ImplKey`], such as `Never` and `Out`, that a rejected `impl` block
     /// is for. They may have methods and interfaces that nothing records (REFERENCE §15.1).
     unknown_tys: Vec<Ty>,
@@ -2095,17 +2099,25 @@ impl Checker<'_> {
         // A `resource record` is a base resource, which its own `abandon` ends, and any other
         // resource abandons what it holds (REFERENCE §10 rule 4).
         if iface == IfaceId::ABANDON && !matches!(&target, Ty::Adt(id, _) if self.p.decls.adt(*id).resource_base) {
-            let message = if self.p.decls.is_resource(&target) {
-                format!(
-                    "`{target_text}` is a resource because it holds one, so abandoning it abandons what it holds; only a `resource record` implements `Abandon` (§10)"
-                )
+            if self.p.decls.is_resource(&target) {
+                let message = format!(
+                    "`{target_text}` is a resource because it holds one, so it implements `Abandon` by itself, abandoning what it holds (§10)"
+                );
+                self.error(codes::NOT_IMPLEMENTABLE, iface_name.span, message);
             } else {
-                format!(
-                    "`{target_text}` isn't a resource, so it has nothing to abandon; only a `resource record` implements `Abandon` (§10)"
-                )
-            };
-            self.error(codes::NOT_IMPLEMENTABLE, iface_name.span, message);
+                let message = format!("`{target_text}` isn't a resource, so it has nothing to abandon (§10)");
+                self.error(codes::ABANDON_NOT_RESOURCE, iface_name.span, message);
+            }
+            let first = self.p.fns.len();
             self.declare_rejected(item, decl, &target);
+            self.rejected_abandon.extend(first..self.p.fns.len());
+            // A call of a method the block declares may mean it, so it isn't reported.
+            if let Ty::Adt(adt, _) = target {
+                let entries = self.inherent.entry(adt).or_default();
+                for (i, method) in decl.methods.iter().enumerate() {
+                    entries.push(Inherent { name: method.decl.name.sym, f: first + i, rejected: true });
+                }
+            }
             return;
         }
         if let Ty::Adt(id, _) = &target
@@ -2627,6 +2639,7 @@ impl Checker<'_> {
         if let (Some(ty), Some(receiver)) = (&info.receiver, decl.receiver)
             && info.self_mode == ParamMode::Take
             && decls.is_resource(ty)
+            && !self.rejected_abandon.contains(&id)
         {
             params.push((LocalId(0), receiver.span, "self".to_string()));
         }

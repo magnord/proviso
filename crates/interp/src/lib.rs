@@ -1313,6 +1313,9 @@ impl Interp<'_> {
                     Res::Dispatch { iface, method, .. } => {
                         let result = match iface {
                             IfaceId::SHOW | IfaceId::EQ => self.dispatch(iface, method, values, span),
+                            IfaceId::ABANDON if !matches!(&values[0], Value::Adt(adt) if self.p.decls.adt(adt.def).resource_base) => {
+                                self.dispatch(iface, method, values, span)
+                            }
                             _ => {
                                 let key = impl_key(&values[0]);
                                 let f = self.p.decls.impl_method(iface, key, method);
@@ -1935,6 +1938,16 @@ impl Interp<'_> {
         match (iface, values.as_slice()) {
             (IfaceId::SHOW, [value]) => Ok(Value::Text(self.show(value, site)?.into())),
             (IfaceId::EQ, [a, b]) => Ok(Value::Bool(self.equal(a, b, site)?)),
+            // Every resource implements `Abandon`, and an aggregate abandons what it holds
+            // (REFERENCE §10 rule 4).
+            (IfaceId::ABANDON, [value]) if !matches!(value, Value::Adt(adt) if self.p.decls.adt(adt.def).resource_base) =>
+            {
+                let value = values.into_iter().next().expect("one value");
+                match self.abandon(value, site, Unwind::Return(Value::Unit)) {
+                    Unwind::Return(_) => Ok(Value::Unit),
+                    unwind => Err(unwind),
+                }
+            }
             _ => {
                 let key = impl_key(&values[0]);
                 let f = self.p.decls.impl_method(iface, key, method).expect("the checker found an implementation");

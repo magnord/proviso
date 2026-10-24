@@ -168,7 +168,7 @@ pub mod codes {
         INVALID_MAIN = "E0308", "invalid_main",
             "A program needs `pub fn main(sys: keep System)`, optionally with `fails E` (REFERENCE §7.4).";
         MISSING_IMPLEMENTATION = "E0309", "missing_implementation",
-            "A type doesn't implement an interface it needs, such as a field's type in a `derives` list, a type argument that a constraint of its parameter names, a map's key type without `Eq` and `Hash`, or an element that `xs[i]`, `pool[h]`, `get`, `enumerate`, `duplicate` or `contains` copies or compares (REFERENCE §4.2, §4.4, §4.8, §4.9). A unique type isn't `Copy` (REFERENCE §5.1).";
+            "A type doesn't implement an interface it needs, such as a field's type in a `derives` list, a type argument that a constraint of its parameter names, a map's key type without `Eq` and `Hash`, or an element that `xs[i]`, `pool[h]`, `get`, `enumerate`, `duplicate` or `contains` copies or compares (REFERENCE §4.2, §4.4, §4.8, §4.9). A unique type isn't `Copy` (REFERENCE §5.1). A `resource record` without an `impl Abandon` (REFERENCE §10).";
         NOT_DERIVABLE = "E0310", "not_derivable",
             "A `derives` list names a prelude interface that can't be derived, such as `Copy` or `Add` (REFERENCE §4.4).";
         NON_EXHAUSTIVE_MATCH = "E0311", "non_exhaustive_match",
@@ -182,18 +182,20 @@ pub mod codes {
         ORPHAN_IMPL = "E0315", "orphan_impl",
             "An `impl` lives in neither the module of the interface nor that of the type (REFERENCE §3, §4.9).";
         NOT_IMPLEMENTABLE = "E0316", "not_implementable",
-            "An `impl` of an interface that cannot be implemented by hand, such as `Copy` (REFERENCE §5.1).";
+            "An `impl` of an interface that holds by itself, so it cannot be implemented by hand, such as `Copy` (REFERENCE §5.1), or `Abandon` for a resource that holds one (REFERENCE §10).";
         TYPE_ARGUMENT_COUNT = "E0317", "type_argument_count",
             "A call whose `::[…]` gives a function or method more or fewer type arguments than it has type parameters (REFERENCE §4.8).";
         REFUTABLE_PATTERN = "E0318", "refutable_pattern",
             "A `let` or `for` pattern that may not match its value, such as `let Some(x) = o` or one with a literal; use `match`, `is` or an `else` form (REFERENCE §6.4, §6.6).";
+        ABANDON_NOT_RESOURCE = "E0319", "abandon_not_resource",
+            "An `impl Abandon` for a type that isn't a resource, which has nothing to abandon (REFERENCE §10).";
 
-        // E0412 to E0414, E0502, E0601 and E0602 are reserved for later phases: the §F
+        // E0412, E0414, E0601 and E0602 are reserved for later phases: the §F
         // goldens already expect them.
         REFINEMENT_REFUTED = "E0412", "refinement_refuted",
             "A refinement obligation is refuted: values consistent with every admissible fact violate it (REFERENCE §8.3, §8.5).";
         PARTIAL_INOUT_OF_REFINED_PART = "E0413", "partial_inout_of_refined_part",
-            "A part of a refined value cannot be passed as `inout(partial)` (REFERENCE §5.4).";
+            "A part of a refined value cannot be passed as `inout(partial)` or as `inout` of a resource, or be the receiver of an `inout self` method of a resource (REFERENCE §5.4).";
         IMPL_REQUIRES_MISMATCH = "E0414", "impl_requires_mismatch",
             "An implementation takes the interface method's `requires` clauses exactly as written (REFERENCE §4.9).";
         CHECK_FALLS_THROUGH = "E0415", "check_falls_through",
@@ -201,7 +203,7 @@ pub mod codes {
         USE_AFTER_MOVE = "E0501", "use_after_move",
             "A unique or resource value, or an owned value of a type parameter without `Copy`, is used after it moved, also on a path where it may have moved, as after a branch or in a loop (REFERENCE §4.8, §5.1).";
         LENT_RESOURCE_CONSUMED = "E0502", "lent_resource_consumed",
-            "A borrowed or `inout` resource cannot be consumed: passed to `take`, used by a `take self` method, bound to a new name, returned or consumed by a loop (REFERENCE §10).";
+            "A borrowed or `inout` resource, or a part of one, cannot be consumed: passed to `take`, used by a `take self` method, bound to a new name, returned, stored or consumed by a loop (REFERENCE §10).";
         NOT_COPYABLE = "E0503", "not_copyable",
             "A borrowed or `inout` value of a type parameter without `Copy`, or of a type built from one such as `Option[T]`, is copied: bound to a new name, assigned, stored in a value, returned or failed with, passed to `take`, or consumed by `for … in take` (REFERENCE §4.8).";
         LENT_VALUE_MOVED = "E0504", "lent_value_moved",
@@ -236,7 +238,7 @@ pub mod codes {
         EXAMPLE_CANNOT_FAIL = "E0708", "example_cannot_fail",
             "An `example … fails P` whose call can't fail (REFERENCE §14).";
         RESOURCE_ERROR_TYPE = "E0709", "resource_error_type",
-            "An error type can't be a resource (REFERENCE §10).";
+            "A `fails` type cannot be a resource or hold one (REFERENCE §10).";
 
         NOT_IMPLEMENTED = "E0901", "not_implemented",
             "A construct the language has that this implementation does not support yet.";

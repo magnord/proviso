@@ -10,7 +10,8 @@
 // those that took every variant that does. A borrowed or `inout` resource is lent, so the
 // callee reads it and an `inout self` method changes it. A `var` whose resource was
 // consumed may take a new one, and an element popped from a list is owned (Q35). Records
-// that hold each other have no values, so checking one ends.
+// that hold each other have no values, so checking one ends. Every resource implements
+// `Abandon`, so an aggregate's `abandon` consumes it by abandoning what it holds (§10).
 use std.io { Out, IoError }
 
 resource record Probe {
@@ -127,6 +128,12 @@ fn singles(out: keep Out) {
     open(name: "c", out: out).close()
     let d = open(name: "d", out: out)
     d.abandon()
+    let pair = Pair(left: open(name: "pl", out: out), right: open(name: "pr", out: out), count: 0)
+    pair.abandon()
+    let maybe: Option[Probe] = Some(open(name: "maybe", out: out))
+    maybe.abandon()
+    let many = [open(name: "m1", out: out), open(name: "m2", out: out)]
+    Abandon.abandon(many)
     var e = open(name: "e", out: out)
     e.close()
     e = open(name: "e2", out: out)

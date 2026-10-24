@@ -1,11 +1,16 @@
 // phase: 2.8
 // expect-error: E0309
 // expect-error: E0316
+// expect-error: E0319
+// expect-error: E0301
 // expect-error: E0314
 // expect-error: E0709
 // Every resource type implements `Abandon` (REFERENCE §10), so a `resource record` needs an
 // `impl Abandon`, whose `abandon` takes `take self` and can't fail (STD.md). An aggregate
-// that holds a resource abandons what it holds, so only a `resource record` implements it.
+// that holds a resource implements it by itself, abandoning what it holds, and a type that
+// isn't a resource has nothing to abandon, so neither takes an `impl Abandon`. A call of
+// `abandon` on a type whose implementation was rejected or is missing isn't reported, and
+// nor is the `self` of a rejected one left over, while other errors in its body are (§15.1).
 // An interface method that takes `take self` is implemented with `take self`. An error type
 // can't be a resource (§10 rule 5), whether it is one or holds one.
 resource record Probe {
@@ -24,7 +29,7 @@ record Plain {
     id: Int
 }
 
-impl Abandon for Plain {                            // <- E0316
+impl Abandon for Plain {                            // <- E0319
     fn abandon(take self) {}
 }
 
@@ -34,8 +39,14 @@ record Holder {
 
 impl Abandon for Holder {                           // <- E0316
     fn abandon(take self) {
-        self.probe.abandon()
+        let n: Int = "not a number"                 // <- E0301
     }
+}
+
+fn rejected_calls(b: take Bare, p: Plain, h: take Holder) {
+    b.abandon()
+    p.abandon()
+    h.abandon()
 }
 
 resource record Borrowing {
