@@ -1353,7 +1353,11 @@ impl Interp<'_> {
                         for (i, value) in replaced.iter().zip(values) {
                             fields[i.index()] = value;
                         }
+                        // The new record holds what the receiver and the arguments held, which
+                        // a refinement that fails abandons with it.
                         let value = Value::Adt(adt);
+                        self.owned.truncate(mark);
+                        self.acquire(Owned::Value(value.clone(), span));
                         self.refine(&value, span)?;
                         self.owned.truncate(mark);
                         value

@@ -1,0 +1,50 @@
+// phase: 2.8
+// expect-exit: 70
+// expect-report: defect refinement_failed
+// A `with` holds the record it builds while that record's refinement runs, so a refinement
+// that fails abandons it, with the resources it took from a variable it copied, before the
+// resources bound earlier (REFERENCE §7.3, §10 rule 3).
+use std.io { Out }
+
+resource record Probe {
+    name: Text
+    out: Out
+}
+
+impl Probe {
+    fn close(take self) {
+        say(out: self.out, line: f"close {self.name}")
+    }
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.name}")
+    }
+}
+
+record Gauge {
+    probe: Probe
+    level: Int where level >= 0
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)
+}
+
+fn close_gauge(g: take Gauge) {
+    g.probe.close()
+}
+
+fn with_place(out: keep Out, level: Int) {
+    let other = Probe(name: "other", out: out)
+    let g = Gauge(probe: Probe(name: "gauge", out: out), level: 1)
+    let h = g.with(level: level)
+    close_gauge(g: h)
+    other.close()
+}
+
+pub fn main(sys: keep System) {
+    with_place(out: sys.stdout, level: 2)
+    with_place(out: sys.stdout, level: -1)
+}
