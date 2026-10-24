@@ -2348,8 +2348,19 @@ impl Parser<'_> {
 
 /// A keyword that begins an item. `let` also begins a statement, so it never ends one.
 fn item_keyword(kw: Kw) -> bool {
-    matches!(kw, Kw::Fn | Kw::Use | Kw::Record | Kw::Enum | Kw::Impl | Kw::Interface | Kw::Example)
-        || (kw != Kw::Let && planned_item(kw).is_some())
+    matches!(
+        kw,
+        Kw::Fn
+            | Kw::Use
+            | Kw::Record
+            | Kw::Unique
+            | Kw::Resource
+            | Kw::Opaque
+            | Kw::Enum
+            | Kw::Impl
+            | Kw::Interface
+            | Kw::Example
+    ) || (kw != Kw::Let && planned_item(kw).is_some())
 }
 
 /// Item keywords that belong to later phases, with what to call them.

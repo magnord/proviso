@@ -1,0 +1,32 @@
+// phase: 2.8
+// expect-error: E0101
+// An item ends before the next item, which is parsed as usual, and so does one before a
+// `unique record`, a `resource record` or an `opaque record` (REFERENCE §15.1).
+fn before_unique() {                                // <- E0101
+    let x = 1
+
+unique record Ticket {
+    n: Int
+}
+
+fn before_resource() {                              // <- E0101
+    let x = 1
+
+resource record Probe {
+    name: Text
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+fn before_opaque() {                                // <- E0101
+    let x = 1
+
+opaque record Cache {
+    n: Int
+}
+
+fn reads(t: Ticket, p: Probe, c: Cache) -> Int {
+    return t.n + c.n
+}
