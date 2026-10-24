@@ -5,8 +5,8 @@
 // made again in a loop is abandoned once, for the value it holds. An aggregate abandons what
 // it holds (§10 rule 4): a record or tuple its fields last first, an `Option` or `Result`
 // its variant's resource, a list its elements last first, and a map its entries last first.
-// A field moved out of a record is abandoned on its own, and the record abandons the rest.
-// A `take` parameter belongs to the callee, which abandons it. The values a call or a
+// A field moved out of a record, by a field read or a pattern, is abandoned on its own, and
+// the record abandons the rest. A `take` parameter belongs to the callee, which abandons it. The values a call or a
 // literal holds while a later argument fails are abandoned, newest first, and so are the
 // elements a consuming loop hasn't reached, after its loop variable. A base resource whose
 // own `take self` method fails is abandoned, unless a resource field of it has moved out,
@@ -148,6 +148,12 @@ fn moved_field(out: keep Out) fails Stop {
     fail Stop.Halt
 }
 
+fn moved_by_pattern(out: keep Out) fails Stop {
+    let pair = Pair(left: open(name: "left", out: out), count: 1, right: open(name: "right", out: out))
+    let Pair(left: moved, ..) = pair
+    fail Stop.Halt
+}
+
 fn arguments(out: keep Out) fails Stop {
     let held = open(name: "held", out: out)
     let built = make_pair(left: open(name: "arg", out: out), right: try stop(out: out, why: "argument"))
@@ -195,6 +201,7 @@ pub fn main(sys: keep System) fails IoError {
     run(out: out, name: "transferred", outcome: attempt transferred(out: out))
     run(out: out, name: "aggregates", outcome: attempt aggregates(out: out))
     run(out: out, name: "moved field", outcome: attempt moved_field(out: out))
+    run(out: out, name: "moved by pattern", outcome: attempt moved_by_pattern(out: out))
     run(out: out, name: "arguments", outcome: attempt arguments(out: out))
     run(out: out, name: "literal", outcome: attempt literal(out: out))
     run(out: out, name: "consuming", outcome: attempt consuming(out: out))

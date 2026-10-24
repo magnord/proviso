@@ -36,6 +36,9 @@ abandon left
 abandon left
 abandon right
 -- moved field
+abandon left
+abandon right
+-- moved by pattern
 failing: argument
 abandon arg
 abandon held

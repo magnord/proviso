@@ -64,6 +64,16 @@ fn one_branch(c: Bool) {
     }
 }
 
+fn crossed(c: Bool) {
+    let a = open(name: "a")                         // <- E0507
+    let b = open(name: "b")                         // <- E0507
+    if c {
+        a.close()
+    } else {
+        b.close()
+    }
+}
+
 fn returned_early(c: Bool) {
     let p = open(name: "p")                         // <- E0507
     if c {
