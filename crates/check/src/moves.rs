@@ -1075,6 +1075,7 @@ impl Walk<'_> {
                 // A place that may still hold a resource can't be assigned over (§10 rule 5).
                 if self.is_resource(self.p.ty(*target)) && !self.tainted(*target) && !self.tainted(*value) {
                     let released = match self.place(*target) {
+                        Some((local, _)) if self.excused.contains(&local) => true,
                         Some((local, mut path)) => {
                             let ty = self.ty_at(local, &path);
                             self.released_fully(local, &mut path, &ty)
@@ -1257,8 +1258,13 @@ impl Walk<'_> {
             | ExprKind::Name(_)
             | ExprKind::It
             | ExprKind::Todo(_)
-            | ExprKind::Unreachable
-            | ExprKind::Error => {}
+            | ExprKind::Unreachable => {}
+            // Code that failed to parse may have consumed what the scopes own, so none of it
+            // is reported as left over or assigned over (§15.1).
+            ExprKind::Error => {
+                let owned: Vec<LocalId> = self.scopes.iter().flatten().map(|(local, ..)| *local).collect();
+                self.excused.extend(owned);
+            }
             ExprKind::FText(parts) => {
                 for part in parts {
                     if let FTextPart::Expr(x) = part {

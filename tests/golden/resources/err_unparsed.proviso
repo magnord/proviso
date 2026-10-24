@@ -1,0 +1,50 @@
+// phase: 2.8
+// expect-error: E0101
+// expect-error: E0507
+// Code that fails to parse may have consumed what its scopes own, so a resource bound before
+// it isn't reported as left over at an exit, or as assigned over, after it (REFERENCE §15.1).
+// A resource bound after it is still checked.
+resource record Probe {
+    id: Int
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+fn eat(p: take Probe) -> Int {
+    p.close()
+    return 1
+}
+
+fn lost_init() -> Int {
+    let p = Probe(id: 1)
+    let n = eat(p: p) + * 2                         // <- E0101
+    return n
+}
+
+fn lost_in_branch(c: Bool) {
+    let p = Probe(id: 1)
+    if c {
+        let n = eat(p: p) + * 2                     // <- E0101
+    } else {
+        p.close()
+    }
+}
+
+fn assigned_after(c: Bool) {
+    var p = Probe(id: 1)
+    let n = eat(p: p) + * 2                         // <- E0101
+    p = Probe(id: 2)
+    p.close()
+}
+
+fn bound_after() {
+    let p = Probe(id: 1)
+    let n = eat(p: p) + * 2                         // <- E0101
+    let q = Probe(id: 2)                            // <- E0507
+}
