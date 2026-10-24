@@ -93,7 +93,7 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0707 | `nothing_to_unwrap` | 2 | An `else` form whose left side is neither an `Option` nor a call that can fail, such as a `Result` from `attempt` or a call a `try` already marks (§6.6; OPEN_QUESTIONS P5). | parse_user/err_else |
 | E0708 | `example_cannot_fail` | 2 | An `example … fails P` whose call can't fail (§14). | parse_user/err_examples |
 | E0709 | `resource_error_type` | 2 | A `fails` type that is a resource, or holds one (§10 rule 5). | resources/err_abandon |
-| E0901 | `not_implemented` | 1 | A construct the language has but this implementation doesn't support yet. The message says whether it is planned for a v1 phase, deferred past v1, or not yet scheduled. | basics/err_not_implemented, records/err_not_yet, enums/err_not_yet, enums/err_construction, option_result/err_types, methods/err_not_yet, parse_user/err_not_yet, collections/err_not_yet, ownership/err_not_yet |
+| E0901 | `not_implemented` | 1 | A construct the language has but this implementation doesn't support yet. The message says whether it is planned for a v1 phase, deferred past v1, or not yet scheduled. | basics/err_not_implemented, records/err_not_yet, enums/err_not_yet, enums/err_construction, option_result/err_types, methods/err_not_yet, parse_user/err_not_yet, collections/err_not_yet, ownership/err_not_yet, resources/err_not_yet |
 | E0902 | `nesting_too_deep` | 1 | Expressions and blocks nested more than 1,000 levels deep, counting each operator of a chain such as `a + b + c` (OPEN_QUESTIONS P5). | basics/err_nesting_too_deep |
 | E0903 | `match_too_complex` | 2 | A `match` whose exhaustiveness takes more than 10 million steps to check, as some sets of arms take exponential work (OPEN_QUESTIONS P5). | enums/err_match_too_complex |
 
@@ -103,8 +103,8 @@ Goldens that run check these reports with `// expect-report: <kind> <detail>`. O
 
 | Report | Meaning | Goldens |
 |---|---|---|
-| `defect <defect kind>` | The run hit a defect of this kind (§7.3). | f09, records/refinement_construction, records/refinement_trace, enums/no_arm_matched, enums/variant_refinement |
-| `leak <Type>` | A resource of this type leaked because its `abandon` hit a defect (§10). | f09 |
+| `defect <defect kind>` | The run hit a defect of this kind (§7.3). | f09, records/refinement_construction, records/refinement_trace, enums/no_arm_matched, enums/variant_refinement, resources/defect, resources/leak, resources/leak_after_defect |
+| `leak <Type>` | A resource of this type leaked because its `abandon` hit a defect (§10). The type is the one whose `abandon` hit it, also when the resource is inside an aggregate. | f09, resources/leak, resources/leak_after_defect |
 | `overlap <op> <op>` | Replay found two capability calls that overlapped on aliased resources (§9.8). | f10 |
 
 The defect kinds so far are:
