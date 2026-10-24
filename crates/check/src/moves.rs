@@ -42,6 +42,9 @@ pub(crate) struct Found {
     pub consumed: HashSet<ExprId>,
     /// The expressions an error was reported at, not at one of their parts.
     pub rejected: HashSet<ExprId>,
+    /// Where the checker reported errors in the body, which the resources reported here must
+    /// not depend on (REFERENCE §15.1).
+    pub errors: Vec<Span>,
 }
 
 /// What the move pass walks.
@@ -50,6 +53,8 @@ pub(crate) enum Body<'a> {
     Fn(FnBody<'a>),
     /// A refinement, whose fields are lent to it.
     Predicate(ExprId),
+    /// An example's call and the value it is compared with, which it drops.
+    Example { call: ExprId, expected: Option<ExprId> },
 }
 
 /// A function's body, with what it owns from the start.
@@ -84,6 +89,7 @@ pub(crate) fn check(
         bounds,
         consumed: &found.consumed,
         rejected: &found.rejected,
+        checked: &found.errors,
         state: Some(State::default()),
         loops: Vec::new(),
         reported: HashSet::new(),
@@ -107,6 +113,7 @@ pub(crate) fn check(
         parts_out: HashMap::new(),
         unscheduled: Vec::new(),
         refused: HashSet::new(),
+        excused: HashSet::new(),
     };
     match body {
         Body::Fn(body) => {
@@ -116,6 +123,15 @@ pub(crate) fn check(
             walk.close_scope("the end of the function");
         }
         Body::Predicate(e) => walk.expr(e),
+        Body::Example { call, expected } => {
+            for e in std::iter::once(call).chain(expected) {
+                walk.expr(e);
+                // An example with an error may not compare at all (REFERENCE §15.1).
+                if found.errors.is_empty() {
+                    walk.discarded(e, "the example drops once it has compared it");
+                }
+            }
+        }
     }
     let Walk { errors, later, moves_out, arms_out, unscheduled, held, owned_binds, parts_out, used, .. } = walk;
     for (code, span, message) in errors {
@@ -368,6 +384,8 @@ struct Walk<'a> {
     /// The expressions the checker rejected, which move nothing and lend nothing, so that
     /// nothing is reported that depends on them (REFERENCE §15.1).
     rejected: &'a HashSet<ExprId>,
+    /// See [`Found::errors`].
+    checked: &'a [Span],
     /// What may have moved here, or `None` where the code is unreachable.
     state: Option<State>,
     loops: Vec<LoopFrame>,
@@ -414,6 +432,8 @@ struct Walk<'a> {
     /// The values reported for moving out of a lent place, which hand nothing on, so what
     /// binds them owns nothing (REFERENCE §15.1).
     refused: HashSet<ExprId>,
+    /// The locals a rejected move would have consumed, which aren't reported as left over.
+    excused: HashSet<LocalId>,
 }
 
 impl Walk<'_> {
@@ -433,6 +453,13 @@ impl Walk<'_> {
 
     fn span(&self, e: ExprId) -> Span {
         self.m.exprs[e].span
+    }
+
+    /// Whether the checker rejected `e` or reported an error inside it, so that what it holds
+    /// or gives is unknown (REFERENCE §15.1).
+    fn tainted(&self, e: ExprId) -> bool {
+        let span = self.span(e);
+        self.rejected.contains(&e) || self.checked.iter().any(|at| span.lo <= at.lo && at.hi <= span.hi)
     }
 
     fn moves(&self, ty: &Ty) -> bool {
@@ -514,6 +541,9 @@ impl Walk<'_> {
         }
         let owned: Vec<(LocalId, Span, String)> = self.scopes[from..].iter().flatten().cloned().collect();
         for (local, span, name) in owned {
+            if self.excused.contains(&local) {
+                continue;
+            }
             let ty = self.locals[local.index()].ty.clone();
             if !self.released_fully(local, &mut Vec::new(), &ty) {
                 let message = format!(
@@ -555,7 +585,7 @@ impl Walk<'_> {
 
     /// Reports a resource that `e` makes and nothing consumes (§10 rule 5).
     fn discarded(&mut self, e: ExprId, how: &str) {
-        if self.is_temp(e) && self.holds_resource(e) && !self.rejected.contains(&e) && *self.p.ty(e) != Ty::Never {
+        if self.is_temp(e) && self.holds_resource(e) && !self.tainted(e) && *self.p.ty(e) != Ty::Never {
             let message = format!(
                 "this makes a resource, `{}`, that {how}, so it would be lost; consume it or transfer it (§10)",
                 self.p.decls.display(self.p.ty(e))
@@ -676,7 +706,7 @@ impl Walk<'_> {
     /// matches (OPEN_QUESTIONS P5), so a failed test loses a resource the value may hold.
     fn tested(&mut self, value: ExprId, pat: PatId) {
         let ty = self.p.ty(value).clone();
-        if !self.is_resource(&ty) || self.rejected.contains(&value) {
+        if !self.is_resource(&ty) || self.tainted(value) {
             return;
         }
         let temp = self.is_temp(value);
@@ -898,6 +928,9 @@ impl Walk<'_> {
                 "`{desc}` is bound by this arm's pattern and lent to its guard, which can only look at it, since the arm may still not be chosen; move it in the arm's body (OPEN_QUESTIONS P5)"
             );
             self.report(lent, self.span(e), message);
+            self.refused.insert(e);
+            // It was meant to move, so it isn't reported as left over (REFERENCE §15.1).
+            self.excused.insert(local);
             return;
         }
         let steps: Vec<Step> = path.iter().map(|&i| Step::Field(i)).collect();
@@ -1018,13 +1051,13 @@ impl Walk<'_> {
                 self.expr(*init);
                 let ty = self.p.ty(*init).clone();
                 let gone = self.is_temp(*init) || self.consumed.contains(init);
-                if self.is_resource(&ty) && !self.rejected.contains(init) && self.lost(*pat, &ty, gone) {
+                if self.is_resource(&ty) && !self.tainted(*init) && self.lost(*pat, &ty, gone) {
                     let message = "this pattern leaves out a resource of the value it takes, which would drop it (§10)";
                     self.report(codes::RESOURCE_DISCARDED, m.pats[*pat].span, message.to_string());
                 }
                 self.matched(*init, *pat);
                 // A value that holds no resource, such as `None`, has nothing to consume.
-                if !self.holds_resource(*init) || self.refused.contains(init) {
+                if !self.holds_resource(*init) || self.refused.contains(init) || self.tainted(*init) {
                     let mut locals = Vec::new();
                     self.pattern_locals(*pat, &mut locals);
                     if let Some(state) = &mut self.state {
@@ -1040,7 +1073,7 @@ impl Walk<'_> {
                     self.change_lent(*target, self.lent.len());
                 }
                 // A place that may still hold a resource can't be assigned over (§10 rule 5).
-                if self.is_resource(self.p.ty(*target)) && !self.rejected.contains(target) {
+                if self.is_resource(self.p.ty(*target)) && !self.tainted(*target) && !self.tainted(*value) {
                     let released = match self.place(*target) {
                         Some((local, mut path)) => {
                             let ty = self.ty_at(local, &path);
@@ -1376,7 +1409,7 @@ impl Walk<'_> {
             ExprKind::Match { scrutinee, arms, .. } => {
                 self.expr(*scrutinee);
                 let ty = self.p.ty(*scrutinee).clone();
-                let resource = self.is_resource(&ty) && !self.rejected.contains(scrutinee);
+                let resource = self.is_resource(&ty) && !self.tainted(*scrutinee);
                 let temp = self.is_temp(*scrutinee);
                 // A temporary that guards may still fail past is held until an arm takes it.
                 if resource && temp {

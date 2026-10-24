@@ -1,0 +1,136 @@
+// phase: 2.8
+// Abandonment reaches resources at any depth, last first (REFERENCE §10 rule 4): a tuple
+// inside an `Option`, a list inside a tuple, the values of a map, a list inside an enum's
+// variant, and a pool's elements, last slot first. A `var` given a new resource acquires it
+// then, so it is abandoned before resources bound earlier. A resource a `match` arm bound
+// from a temporary is the arm's, a call that fails abandons its own before its caller
+// does, and `with` holds the record it copies while its arguments run. A consuming loop over
+// a map owns the entries it hasn't reached.
+use std.io { Out, IoError }
+use std.pool { Pool }
+
+resource record Probe {
+    name: Text
+    out: Out
+}
+
+impl Probe {
+    fn close(take self) {
+        say(out: self.out, line: f"close {self.name}")
+    }
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.name}")
+    }
+}
+
+record Pair {
+    left: Probe
+    count: Int
+    right: Probe
+}
+
+enum Box {
+    Empty
+    Many(label: Text, items: List[Probe])
+}
+
+enum Stop {
+    Halt
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)
+}
+
+fn p(name: Text, out: keep Out) -> Probe {
+    return Probe(name: name, out: out)
+}
+
+fn stop(out: Out) -> Int fails Stop {
+    say(out: out, line: "stop")
+    fail Stop.Halt
+}
+
+fn nested(out: keep Out) fails Stop {
+    let a: Option[(Probe, List[Probe])] = Some((p(name: "a1", out: out), [p(name: "a2", out: out), p(name: "a3", out: out)]))
+    let m: Map[Text, Option[Probe]] = ["x": Some(p(name: "m1", out: out)), "y": None, "z": Some(p(name: "m3", out: out))]
+    let b = Box.Many(label: "b", items: [p(name: "b1", out: out), p(name: "b2", out: out)])
+    fail Stop.Halt
+}
+
+fn pooled(out: keep Out) fails Stop {
+    var pool: Pool[Probe] = Pool.new()
+    let h1 = pool.insert(p(name: "s0", out: out))
+    let h2 = pool.insert(p(name: "s1", out: out))
+    match pool.remove(h1) {
+        Some(q) => q.close()
+        None => {}
+    }
+    let h3 = pool.insert(p(name: "s2", out: out))
+    fail Stop.Halt
+}
+
+fn in_arm(out: keep Out) fails Stop {
+    match Some(Pair(left: p(name: "l", out: out), count: 1, right: p(name: "r", out: out))) {
+        Some(Pair(left: l, right: r, ..)) => {
+            l.close()
+            let n = try stop(out: out)
+            r.close()
+        }
+        None => {}
+    }
+}
+
+fn reassigned(out: keep Out) fails Stop {
+    var v = p(name: "v1", out: out)
+    let w = p(name: "w", out: out)
+    v.close()
+    v = p(name: "v2", out: out)
+    fail Stop.Halt
+}
+
+fn inner(out: keep Out) fails Stop {
+    let i = p(name: "inner", out: out)
+    let n = try stop(out: out)
+    i.close()
+}
+
+fn outer(out: keep Out) fails Stop {
+    let o = p(name: "outer", out: out)
+    try inner(out: out)
+    o.close()
+}
+
+fn with_held(out: keep Out) fails Stop {
+    let q = Pair(left: p(name: "wl", out: out), count: 0, right: p(name: "wr", out: out)).with(count: try stop(out: out))
+    q.left.close()
+    q.right.close()
+}
+
+fn map_loop(out: keep Out) fails Stop {
+    let m = ["k1": p(name: "e1", out: out), "k2": p(name: "e2", out: out), "k3": p(name: "e3", out: out)]
+    for (k, v) in take m {
+        if k == "k2" {
+            fail Stop.Halt
+        }
+        v.close()
+    }
+}
+
+fn run(out: Out, name: Text, r: Result[Unit, Stop]) {
+    say(out: out, line: f"-- {name}")
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let out = sys.stdout
+    run(out: out, name: "nested", r: attempt nested(out: out))
+    run(out: out, name: "pooled", r: attempt pooled(out: out))
+    run(out: out, name: "in arm", r: attempt in_arm(out: out))
+    run(out: out, name: "reassigned", r: attempt reassigned(out: out))
+    run(out: out, name: "outer", r: attempt outer(out: out))
+    run(out: out, name: "with", r: attempt with_held(out: out))
+    run(out: out, name: "map loop", r: attempt map_loop(out: out))
+}

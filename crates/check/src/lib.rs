@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use proviso_syntax::arena::SideTable;
 use proviso_syntax::ast::*;
-use proviso_syntax::diag::{Code, Diagnostics, Planned, codes};
+use proviso_syntax::diag::{Code, Diagnostics, Planned, Severity, codes};
 use proviso_syntax::intern::Symbol;
 use proviso_syntax::source::Span;
 
@@ -1709,12 +1709,22 @@ impl Checker<'_> {
         }
     }
 
+    /// What the move pass needs to know of the body just checked, whose diagnostics begin at
+    /// `start`.
+    fn found(&mut self, start: usize) -> moves::Found {
+        let errors = self.diags.iter().skip(start).filter(|d| d.severity == Severity::Error).map(|d| d.span).collect();
+        moves::Found {
+            consumed: std::mem::take(&mut self.consumed),
+            rejected: std::mem::take(&mut self.rejected),
+            errors,
+        }
+    }
+
     /// Checks what the refinement `expr` moves, which can't be the fields lent to it, and
     /// returns the locals it reads.
     fn predicate_moves(&mut self, expr: ExprId) -> HashSet<LocalId> {
         let m = self.m;
-        let found =
-            moves::Found { consumed: std::mem::take(&mut self.consumed), rejected: std::mem::take(&mut self.rejected) };
+        let found = self.found(0);
         let body = moves::Body::Predicate(expr);
         moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags)
     }
@@ -2606,10 +2616,10 @@ impl Checker<'_> {
         for param in &decl.params {
             self.shadows_item(param.name);
         }
+        let start = self.diags.iter().count();
         self.fn_body(decl, body);
         self.settle();
-        let found =
-            moves::Found { consumed: std::mem::take(&mut self.consumed), rejected: std::mem::take(&mut self.rejected) };
+        let found = self.found(start);
         // The resources it owns from the start: its `take` parameters and a `take self`.
         let info = &self.p.fns[id];
         let decls = &self.p.decls;
@@ -2670,8 +2680,17 @@ impl Checker<'_> {
                 self.error(codes::UNEXPECTED_TOKEN, span, message);
                 continue;
             }
+            let start = self.diags.iter().count();
             self.example(decl);
             self.settle();
+            // An example drops what its call and its expected value give (REFERENCE §10).
+            let found = self.found(start);
+            let expected = match decl.expect {
+                Expectation::Equals(x) => Some(x),
+                Expectation::Fails(_) => None,
+            };
+            let body = moves::Body::Example { call: decl.call, expected };
+            moves::check(m, &mut self.p, &self.f.locals, &[], &found, body, self.diags);
             self.p.examples.push(ExampleInfo { item: index, locals: self.f.locals.len() });
         }
     }

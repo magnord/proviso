@@ -1,0 +1,48 @@
+// phase: 2.8
+// expect-error: E0309
+// expect-error: E0502
+// expect-error: E0306
+// A resource is never copied (REFERENCE §10 rule 1), so it isn't `Copy`, and what copies an
+// element, such as `get`, `xs[i]` bound to a name, `enumerate` or `duplicate`, needs one
+// (E0309). What such a copy is bound to isn't reported again as left over, and nor is what a
+// guard tried to consume, or the values of an example that can't compare them (§15.1).
+use std.pool { Pool, Handle }
+
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+fn open() -> Probe {
+    return Probe(name: "p")
+}
+
+fn take_it(p: take Probe) -> Bool {
+    p.close()
+    return true
+}
+
+fn copies(xs: List[Probe], pool: Pool[Probe], h: Handle[Probe]) {
+    let a = xs.get(0)                               // <- E0309
+    let b = xs[0]                                   // <- E0309
+    let c = pool.get(h)                             // <- E0309
+    let d = pool.duplicate()                        // <- E0309
+    let e = xs.enumerate()                          // <- E0309
+}
+
+fn guard(o: take Option[Probe]) {
+    match o {
+        Some(p) if take_it(p: p) => {}              // <- E0502
+        Some(p) => p.close()
+        None => {}
+    }
+}
+
+example open() == open()                            // <- E0306

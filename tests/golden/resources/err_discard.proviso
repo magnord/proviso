@@ -7,8 +7,9 @@
 // `with` replaces. A pattern on a value that moves takes all of it, so a part it leaves is
 // lost, and an `is` test moves what it binds whether or not it matches (OPEN_QUESTIONS P5),
 // so it loses a resource when the variants it fails on may hold one. A `break` out of a
-// consuming loop, or a `return` while a call is being built, would drop what is left. A
-// `with` after the replaced field moved, and a resource that `set` hands back, are fine.
+// consuming loop, or a `return` while a call is being built, would drop what is left, and
+// an example drops both values it compares. A `with` after the replaced field moved, and a
+// resource that `set` hands back, are fine.
 resource record Probe {
     name: Text
 }
@@ -142,3 +143,17 @@ fn breaks_consuming(probes: take List[Probe]) {
 fn returns_mid_call(c: Bool) -> Int {
     return width(pair: Pair(left: open(name: "l"), right: open(name: "r")), n: if c { return 0 } else { 1 }) // <- E0508
 }
+
+resource record Tag derives(Eq) {
+    id: Int
+}
+
+impl Abandon for Tag {
+    fn abandon(take self) {}
+}
+
+fn make_tag(id: Int) -> Tag {
+    return Tag(id: id)
+}
+
+example make_tag(id: 1) == make_tag(id: 1)          // <- E0508, E0508

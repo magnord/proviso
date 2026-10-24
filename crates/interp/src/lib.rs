@@ -991,6 +991,16 @@ impl Interp<'_> {
                 // (OPEN_QUESTIONS P5).
                 let value = self.expr(*value, frame)?;
                 let (root, path) = self.place(*target, frame)?;
+                // A local given a new resource acquires it now (REFERENCE §10 rule 3).
+                if path.is_empty() {
+                    let base = self.base;
+                    if let Some(i) =
+                        self.owned[base..].iter().position(|o| matches!(o, Owned::Local(l, _) if *l == root))
+                    {
+                        let entry = self.owned.remove(base + i);
+                        self.owned.push(entry);
+                    }
+                }
                 let slot = slot(&mut frame[root.index()], &path)?;
                 *slot = match op.bin_op() {
                     None => value,
