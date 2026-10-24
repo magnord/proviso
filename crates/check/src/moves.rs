@@ -505,15 +505,23 @@ impl Walk<'_> {
     }
 
     /// Whether the value of `e` may hold a resource: its type is a resource, unless it is a
-    /// construction none of whose arguments is one, such as `None` or `Slot.Empty`.
+    /// construction or literal none of whose parts is one, such as `None`, `Slot.Empty`,
+    /// `(1, None)` or `[]`. A base resource's construction holds itself.
     fn holds_resource(&self, e: ExprId) -> bool {
         if !self.is_resource(self.p.ty(e)) {
             return false;
         }
         match (&self.m.exprs[e].kind, self.p.res(e)) {
             (ExprKind::Name(_) | ExprKind::Field { .. }, Some(Res::Ctor(..))) => false,
-            (ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. }, Some(Res::Ctor(..))) => {
-                args.iter().any(|arg| self.holds_resource(arg.value))
+            (ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. }, Some(Res::Ctor(adt, _))) => {
+                self.p.decls.adt(adt).resource_base || args.iter().any(|arg| self.holds_resource(arg.value))
+            }
+            (ExprKind::Call { callee, args, .. }, _) if let Some(Res::Ctor(adt, _)) = self.p.res(*callee) => {
+                self.p.decls.adt(adt).resource_base || args.iter().any(|arg| self.holds_resource(arg.value))
+            }
+            (ExprKind::Tuple(parts) | ExprKind::List(parts), _) => parts.iter().any(|&part| self.holds_resource(part)),
+            (ExprKind::Map(entries), _) => {
+                entries.iter().any(|&(k, v)| self.holds_resource(k) || self.holds_resource(v))
             }
             _ => true,
         }
