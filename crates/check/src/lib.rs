@@ -2105,13 +2105,13 @@ impl Checker<'_> {
         // A `resource record` is a base resource, which its own `abandon` ends, and any other
         // resource abandons what it holds (REFERENCE §10 rule 4).
         if iface == IfaceId::ABANDON && !matches!(&target, Ty::Adt(id, _) if self.p.decls.adt(*id).resource_base) {
-            // A name declared twice may mean the other declaration, which is reported as such.
+            // A name declared twice, once as a resource, may mean that declaration, which is
+            // reported as a duplicate.
             let twice = match &target {
-                Ty::Adt(id, _) => self
-                    .adts
-                    .iter()
-                    .find(|a| a.id == *id)
-                    .is_some_and(|found| self.adts.iter().filter(|a| a.name.sym == found.name.sym).count() > 1),
+                Ty::Adt(id, _) => self.adts.iter().find(|a| a.id == *id).is_some_and(|found| {
+                    let mut named = self.adts.iter().filter(|a| a.name.sym == found.name.sym);
+                    named.clone().count() > 1 && named.any(|a| self.p.decls.adt(a.id).resource_base)
+                }),
                 _ => false,
             };
             if twice {
@@ -2128,9 +2128,13 @@ impl Checker<'_> {
             let first = self.p.fns.len();
             self.declare_rejected(item, decl, &target);
             self.rejected_abandon.extend(first..self.p.fns.len());
-            self.rejected_abandon_for.insert(target.clone());
-            // A call of a method the block declares may mean it, so it isn't reported.
-            if let Ty::Adt(adt, _) = target {
+            // A resource implements `Abandon` by itself, so calls of `abandon` on it resolve. On
+            // another type, a call of a method the block declares may mean it, so it isn't
+            // reported.
+            if let Ty::Adt(adt, _) = target
+                && !self.p.decls.is_resource(&target)
+            {
+                self.rejected_abandon_for.insert(target.clone());
                 let entries = self.inherent.entry(adt).or_default();
                 for (i, method) in decl.methods.iter().enumerate() {
                     entries.push(Inherent { name: method.decl.name.sym, f: first + i, rejected: true });

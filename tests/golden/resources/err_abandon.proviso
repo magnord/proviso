@@ -4,6 +4,7 @@
 // expect-error: E0319
 // expect-error: E0301
 // expect-error: E0202
+// expect-error: E0501
 // expect-error: E0314
 // expect-error: E0709
 // Every resource type implements `Abandon` (REFERENCE §10), so a `resource record` needs an
@@ -109,5 +110,22 @@ resource record Mixed {                             // <- E0202
 }
 
 impl Abandon for Mixed {
+    fn abandon(take self) {}
+}
+
+fn holder_twice(h: take Holder) {
+    Abandon.abandon(h)
+    Abandon.abandon(h)                              // <- E0501
+}
+
+record Bland {
+    n: Int
+}
+
+record Bland {                                      // <- E0202
+    n: Int
+}
+
+impl Abandon for Bland {                            // <- E0319
     fn abandon(take self) {}
 }
