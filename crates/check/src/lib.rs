@@ -4279,7 +4279,6 @@ impl Checker<'_> {
     /// `targs`, or else from the type the call is expected to have and then from the
     /// arguments, and each must implement its parameter's constraints (REFERENCE §4.8;
     /// OPEN_QUESTIONS P5).
-    #[allow(clippy::too_many_arguments)]
     /// Reports a resource as the type argument for `param` of the generic function `callee`.
     /// Its body may drop a value of a type parameter without `Copy`, which a resource can't
     /// allow, and the reference doesn't say how a type parameter admits one (OPEN_QUESTIONS
@@ -4293,6 +4292,7 @@ impl Checker<'_> {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fn_call(
         &mut self,
         e: ExprId,
