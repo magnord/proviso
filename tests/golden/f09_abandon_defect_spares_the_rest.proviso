@@ -1,5 +1,5 @@
 // §F row 9: a defect in one abandon doesn't stop the others
-// phase: 2
+// phase: 2.8
 // expect-exit: 70
 // expect-report: defect assertion_failed
 // expect-report: leak Probe

@@ -201,7 +201,7 @@ pub mod codes {
         USE_AFTER_MOVE = "E0501", "use_after_move",
             "A unique or resource value, or an owned value of a type parameter without `Copy`, is used after it moved, also on a path where it may have moved, as after a branch or in a loop (REFERENCE §4.8, §5.1).";
         LENT_RESOURCE_CONSUMED = "E0502", "lent_resource_consumed",
-            "A borrowed or `inout` resource cannot be passed to `take` or used by a `take self` method (REFERENCE §10).";
+            "A borrowed or `inout` resource cannot be consumed: passed to `take`, used by a `take self` method, bound to a new name, returned or consumed by a loop (REFERENCE §10).";
         NOT_COPYABLE = "E0503", "not_copyable",
             "A borrowed or `inout` value of a type parameter without `Copy`, or of a type built from one such as `Option[T]`, is copied: bound to a new name, assigned, stored in a value, returned or failed with, passed to `take`, or consumed by `for … in take` (REFERENCE §4.8).";
         LENT_VALUE_MOVED = "E0504", "lent_value_moved",
@@ -210,6 +210,10 @@ pub mod codes {
             "Two accesses to one variable overlap in a call while one of them is `inout`, such as `swap(a: &x, b: &x)`, or a unique value is moved or changed while a call, its own index or a guard has it lent (REFERENCE §5.3).";
         INOUT_MARKER_MISMATCH = "E0506", "inout_marker_mismatch",
             "An argument for an `inout` parameter without `&`, or `&` on an argument whose parameter isn't `inout` (REFERENCE §5.2, H5).";
+        RESOURCE_NOT_CONSUMED = "E0507", "resource_not_consumed",
+            "A resource the scope owns is neither consumed nor transferred on a path to a normal exit: the end of its block, `return`, `break` or `continue` (REFERENCE §10).";
+        RESOURCE_DISCARDED = "E0508", "resource_discarded",
+            "A resource is overwritten or discarded: assigned over, or produced by an expression that nothing consumes (REFERENCE §10).";
         EFFECTS_CALL_IN_OBSERVES = "E0601", "effects_call_in_observes",
             "An operation that needs only `observes` permissions calls an `effects` operation (REFERENCE §9.2).";
         REACH_NOT_ADMITTED = "E0602", "reach_not_admitted",
@@ -231,6 +235,8 @@ pub mod codes {
             "An `else` form whose left side is neither an `Option` nor a call that can fail (REFERENCE §6.6).";
         EXAMPLE_CANNOT_FAIL = "E0708", "example_cannot_fail",
             "An `example … fails P` whose call can't fail (REFERENCE §14).";
+        RESOURCE_ERROR_TYPE = "E0709", "resource_error_type",
+            "An error type can't be a resource (REFERENCE §10).";
 
         NOT_IMPLEMENTED = "E0901", "not_implemented",
             "A construct the language has that this implementation does not support yet.";

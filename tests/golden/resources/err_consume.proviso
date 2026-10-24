@@ -1,0 +1,167 @@
+// phase: 2.8
+// expect-error: E0507
+// Every normal exit leaves the resources its scope owns consumed or transferred, on every
+// path (REFERENCE §10 rule 2): the end of a block, `return`, `break` and `continue`. A
+// local, a `take` parameter and what a pattern binds are owned, and so is what is left in
+// a record after some of its fields moved, and a value an arm matched without moving it,
+// when its variant may hold a resource. A base resource whose field moved out can't be
+// consumed whole. A `take self` method of the type's own consumes `self` only once it has
+// consumed the resources `self` holds (OPEN_QUESTIONS Q35). Each leaked resource is
+// reported once, at its binding. A failure exit abandons instead, so a scope may fail
+// holding resources, and a borrowed parameter is lent, so its caller consumes it.
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+record Pair {
+    left: Probe
+    right: Probe
+}
+
+resource record Conn {
+    probe: Probe
+}
+
+impl Conn {
+    fn close(take self) {                           // <- E0507
+    }
+
+    fn close_both(take self, other: take Probe) {   // <- E0507
+        self.probe.close()
+    }
+}
+
+impl Abandon for Conn {
+    fn abandon(take self) {
+        self.probe.abandon()
+    }
+}
+
+enum Stop {
+    Halt
+}
+
+fn open(name: Text) -> Probe {
+    return Probe(name: name)
+}
+
+fn kept() {
+    let p = open(name: "p")                         // <- E0507
+}
+
+fn one_branch(c: Bool) {
+    let p = open(name: "p")                         // <- E0507
+    if c {
+        p.close()
+    }
+}
+
+fn returned_early(c: Bool) {
+    let p = open(name: "p")                         // <- E0507
+    if c {
+        return
+    }
+    p.close()
+}
+
+fn broken() {
+    let outer = open(name: "outer")
+    loop {
+        let p = open(name: "p")                     // <- E0507
+        break
+    }
+    outer.close()
+}
+
+fn continued(n: Int) {
+    var i = 0
+    while i < n {
+        i += 1
+        let p = open(name: "p")                     // <- E0507
+        if i == 1 {
+            continue
+        }
+        p.close()
+    }
+}
+
+fn reassigned() {
+    var p = open(name: "a")                         // <- E0507
+    p.close()
+    p = open(name: "b")
+}
+
+fn taken(p: take Probe) {                           // <- E0507
+}
+
+fn half(pair: take Pair) {                          // <- E0507
+    pair.left.close()
+}
+
+fn bound_part(pair: take Pair) {
+    let Pair(left: l, right: r) = pair              // <- E0507
+    l.close()
+}
+
+fn arm_keeps(o: take Option[Probe]) {               // <- E0507
+    match o {
+        Some(_) => {}
+        None => {}
+    }
+}
+
+fn bound_unused(o: take Option[Probe]) {
+    match o {
+        Some(p) => {}                               // <- E0507
+        None => {}
+    }
+}
+
+fn tested(o: take Option[Probe]) {
+    if o is Some(p) {                               // <- E0507
+    }
+}
+
+fn checked(o: take Option[Probe]) fails Stop {
+    check o is Some(p) else fail Stop.Halt          // <- E0507
+}
+
+fn loop_unconsumed(probes: take List[Probe]) {
+    for p in take probes {                          // <- E0507
+    }
+}
+
+fn moved_base(c: take Conn) {                       // <- E0507
+    let p = c.probe
+    p.close()
+}
+
+fn fails_holding(c: Bool) fails Stop {
+    let p = open(name: "p")
+    if c {
+        fail Stop.Halt
+    }
+    p.close()
+}
+
+fn lent(p: Probe, q: inout Probe) {
+}
+
+fn released(o: take Option[Probe], r: take Result[Probe, Stop]) {
+    match o {
+        Some(p) => p.close()
+        None => {}
+    }
+    match r {
+        Ok(p) => p.close()
+        _ => {}
+    }
+}

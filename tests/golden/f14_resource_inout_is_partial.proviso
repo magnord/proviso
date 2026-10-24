@@ -1,5 +1,5 @@
 // §F row 14: an inout argument that holds a resource is never rolled back
-// phase: 2
+// phase: 2.8
 // sig: close_last_then_fail
 //
 // `close_last_then_fail` pops a probe, closes it, then fails. Rolling `probes`

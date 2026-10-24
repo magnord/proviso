@@ -16,16 +16,23 @@
 //! other arguments are evaluated, as in Swift (SE-0176), and keep it for the call. Two of
 //! them may not overlap, and a unique value lent to the call by one argument may not move in
 //! a later one (E0505; OPEN_QUESTIONS P5).
+//!
+//! Resources (REFERENCE §10) are tracked twice: a resource may have moved (E0501), and it
+//! is released where it has moved, or holds none, on every path. Each owned resource must be
+//! released at every normal exit of its scope (E0507), and nothing may overwrite or drop one
+//! (E0508). The pass records what the interpreter needs to abandon them on a failure exit:
+//! the bindings that own one, the parts a pattern moves out of a place, and the values a call
+//! or a literal holds while its later arguments run.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use proviso_syntax::ast::*;
 use proviso_syntax::diag::{Code, Diagnostics, Planned, codes};
 use proviso_syntax::source::Span;
 
-use crate::decls::{AdtId, IfaceId};
+use crate::decls::{AdtId, FieldIdx, IfaceId, VariantIdx};
 use crate::types::Ty;
 use crate::{Local, LocalId, Program, Res};
 
@@ -35,20 +42,37 @@ pub(crate) struct Found {
     pub consumed: HashSet<ExprId>,
     /// The expressions an error was reported at, not at one of their parts.
     pub rejected: HashSet<ExprId>,
+    /// Where the checker reported errors in the body, which the resources reported here must
+    /// not depend on (REFERENCE §15.1).
+    pub errors: Vec<Span>,
 }
 
 /// What the move pass walks.
 pub(crate) enum Body<'a> {
     /// A function's body.
-    Fn(&'a Block),
+    Fn(FnBody<'a>),
     /// A refinement, whose fields are lent to it.
     Predicate(ExprId),
+    /// An example's call and the value it is compared with, which it drops.
+    Example { call: ExprId, expected: Option<ExprId> },
+}
+
+/// A function's body, with what it owns from the start.
+pub(crate) struct FnBody<'a> {
+    pub block: &'a Block,
+    /// Its owned resource parameters, `take` ones and a `take self`, with their spans and
+    /// names.
+    pub params: Vec<(LocalId, Span, String)>,
+    /// It is a `take self` method of a base resource, which consumes `self` when it returns
+    /// once the resources `self` holds are consumed (OPEN_QUESTIONS Q35).
+    pub consumes_self: bool,
 }
 
 /// Checks the moves and accesses of `body`, whose locals are `locals` and whose type
 /// parameters implement `bounds`, given the expressions the checker found `consumed`.
-/// Records each expression that moves a whole local in [`Program::moves_out`], and each
-/// `match` arm whose pattern does in [`Program::arms_out`].
+/// Records each expression that moves a whole local in [`Program::moves_out`], each `match`
+/// arm whose pattern does in [`Program::arms_out`], and what the interpreter needs to
+/// abandon resources. Returns the locals the body uses.
 pub(crate) fn check(
     m: &Module,
     p: &mut Program,
@@ -57,7 +81,7 @@ pub(crate) fn check(
     found: &Found,
     body: Body,
     diags: &mut Diagnostics,
-) {
+) -> HashSet<LocalId> {
     let mut walk = Walk {
         m,
         p,
@@ -65,6 +89,7 @@ pub(crate) fn check(
         bounds,
         consumed: &found.consumed,
         rejected: &found.rejected,
+        checked: &found.errors,
         state: Some(State::default()),
         loops: Vec::new(),
         reported: HashSet::new(),
@@ -79,12 +104,36 @@ pub(crate) fn check(
         moves_out: HashSet::new(),
         arms_out: HashSet::new(),
         guarded: Vec::new(),
+        scopes: Vec::new(),
+        pending: Vec::new(),
+        consumes_self: false,
+        used: HashSet::new(),
+        held: HashSet::new(),
+        owned_binds: HashSet::new(),
+        parts_out: HashMap::new(),
+        unscheduled: Vec::new(),
+        refused: HashSet::new(),
+        excused: HashSet::new(),
     };
     match body {
-        Body::Fn(block) => walk.block(block),
+        Body::Fn(body) => {
+            walk.consumes_self = body.consumes_self;
+            walk.scopes.push(body.params);
+            walk.block(body.block);
+            walk.close_scope("the end of the function");
+        }
         Body::Predicate(e) => walk.expr(e),
+        Body::Example { call, expected } => {
+            for e in std::iter::once(call).chain(expected) {
+                walk.expr(e);
+                // An example with an error may not compare at all (REFERENCE §15.1).
+                if found.errors.is_empty() {
+                    walk.discarded(e, "the example drops once it has compared it");
+                }
+            }
+        }
     }
-    let (errors, later, moves_out, arms_out) = (walk.errors, walk.later, walk.moves_out, walk.arms_out);
+    let Walk { errors, later, moves_out, arms_out, unscheduled, held, owned_binds, parts_out, used, .. } = walk;
     for (code, span, message) in errors {
         diags.error(code, span, message);
     }
@@ -95,12 +144,25 @@ pub(crate) fn check(
             Planned::Phase(5),
         );
     }
+    for (span, what) in unscheduled {
+        diags.not_implemented(span, &what, Planned::Unscheduled);
+    }
     for e in moves_out {
         p.moves_out.insert(e, ());
     }
     for pat in arms_out {
         p.arms_out.insert(pat, ());
     }
+    for e in held {
+        p.held.insert(e, ());
+    }
+    for pat in owned_binds {
+        p.owned_binds.insert(pat, ());
+    }
+    for (pat, paths) in parts_out {
+        p.parts_out.insert(pat, paths.into_iter().map(Vec::into_boxed_slice).collect());
+    }
+    used
 }
 
 /// A local, or a field of one, by the index of each field on the way.
@@ -112,6 +174,9 @@ type Path = Vec<u32>;
 #[derive(Clone, Default)]
 struct State {
     moved: Arc<BTreeMap<(u32, Path), String>>,
+    /// The places that hold no resource on every path here: those that moved, and those
+    /// found to hold none, such as a value an arm's variant shows to be `None` (§10 rule 2).
+    released: Arc<BTreeSet<(u32, Path)>>,
 }
 
 impl State {
@@ -136,21 +201,71 @@ impl State {
     fn covers(&self, other: &State) -> bool {
         Arc::ptr_eq(&self.moved, &other.moved) || other.moved.keys().all(|key| self.moved.contains_key(key))
     }
+
+    /// Whether every place this one has released, `other` has too.
+    fn released_in(&self, other: &State) -> bool {
+        Arc::ptr_eq(&self.released, &other.released) || self.released.is_subset(&other.released)
+    }
+
+    /// Whether `other` adds nothing to what may have moved here, and releases all this does.
+    fn holds(&self, other: &State) -> bool {
+        self.covers(other) && self.released_in(other)
+    }
+
+    fn release(&mut self, local: LocalId, path: Path) {
+        if !self.released.contains(&(local.0, path.clone())) {
+            Arc::make_mut(&mut self.released).insert((local.0, path));
+        }
+    }
+
+    /// Forgets that the places of `local` that `gone` accepts are released.
+    fn unrelease(&mut self, local: LocalId, gone: impl Fn(&Path) -> bool) {
+        let range = (local.0, Vec::new())..;
+        let found: Vec<Path> = self
+            .released
+            .range(range)
+            .take_while(|(l, _)| *l == local.0)
+            .filter(|(_, p)| gone(p))
+            .map(|(_, p)| p.clone())
+            .collect();
+        if found.is_empty() {
+            return;
+        }
+        let released = Arc::make_mut(&mut self.released);
+        for path in found {
+            released.remove(&(local.0, path));
+        }
+    }
+
+    /// Whether `local`'s `path`, or a place holding it, is released.
+    fn is_released(&self, local: LocalId, path: &[u32]) -> bool {
+        (0..=path.len()).any(|n| self.released.contains(&(local.0, path[..n].to_vec())))
+    }
 }
 
 /// What may have moved after either of two paths, where `None` is a path that leaves.
 fn join(a: Option<State>, b: Option<State>) -> Option<State> {
     match (a, b) {
         (Some(mut a), Some(b)) => {
-            if a.covers(&b) {
+            if a.holds(&b) {
                 return Some(a);
             }
-            if b.covers(&a) {
+            if b.holds(&a) {
                 return Some(b);
             }
-            let moved = Arc::make_mut(&mut a.moved);
-            for (key, desc) in b.moved.iter() {
-                moved.entry(key.clone()).or_insert_with(|| desc.clone());
+            if !a.covers(&b) {
+                let moved = Arc::make_mut(&mut a.moved);
+                for (key, desc) in b.moved.iter() {
+                    moved.entry(key.clone()).or_insert_with(|| desc.clone());
+                }
+            }
+            // Released on both paths, so it is released after either.
+            if !a.released_in(&b) {
+                a.released = if b.released_in(&a) {
+                    b.released
+                } else {
+                    Arc::new(a.released.intersection(&b.released).cloned().collect())
+                };
             }
             Some(a)
         }
@@ -248,6 +363,16 @@ struct LoopFrame {
     expr: ExprId,
     breaks: Option<State>,
     continues: Option<State>,
+    /// How many scopes and held values were open when the loop began, which a jump out of
+    /// its turn leaves.
+    scopes: usize,
+    pending: usize,
+}
+
+/// A resource a call, a literal or a consuming loop holds while the rest of it runs, which a
+/// jump out of it would drop, with the consuming loop that holds it, if one does.
+struct Held {
+    by_loop: Option<ExprId>,
 }
 
 struct Walk<'a> {
@@ -259,6 +384,8 @@ struct Walk<'a> {
     /// The expressions the checker rejected, which move nothing and lend nothing, so that
     /// nothing is reported that depends on them (REFERENCE §15.1).
     rejected: &'a HashSet<ExprId>,
+    /// See [`Found::errors`].
+    checked: &'a [Span],
     /// What may have moved here, or `None` where the code is unreachable.
     state: Option<State>,
     loops: Vec<LoopFrame>,
@@ -285,6 +412,28 @@ struct Walk<'a> {
     arms_out: HashSet<PatId>,
     /// The locals an arm's pattern binds, while its guard is walked.
     guarded: Vec<LocalId>,
+    /// The owned resources of each scope, innermost last, with the span and name of each
+    /// one's binding, which every normal exit must have released (§10 rule 2).
+    scopes: Vec<Vec<(LocalId, Span, String)>>,
+    /// The resources held while the rest of their call, literal or loop runs.
+    pending: Vec<Held>,
+    /// See [`FnBody::consumes_self`]; `self` is local 0.
+    consumes_self: bool,
+    /// The locals the body uses.
+    used: HashSet<LocalId>,
+    /// See [`Program::held`].
+    held: HashSet<ExprId>,
+    /// See [`Program::owned_binds`].
+    owned_binds: HashSet<PatId>,
+    /// See [`Program::parts_out`].
+    parts_out: HashMap<PatId, Vec<Vec<FieldIdx>>>,
+    /// Constructs that are not yet scheduled, with how to name them.
+    unscheduled: Vec<(Span, String)>,
+    /// The values reported for moving out of a lent place, which hand nothing on, so what
+    /// binds them owns nothing (REFERENCE §15.1).
+    refused: HashSet<ExprId>,
+    /// The locals a rejected move would have consumed, which aren't reported as left over.
+    excused: HashSet<LocalId>,
 }
 
 impl Walk<'_> {
@@ -296,6 +445,7 @@ impl Walk<'_> {
 
     /// Notes that the loops being walked touch `local`.
     fn touch(&mut self, local: LocalId) {
+        self.used.insert(local);
         if let Some(top) = self.touched.last_mut() {
             top.insert(local);
         }
@@ -305,8 +455,333 @@ impl Walk<'_> {
         self.m.exprs[e].span
     }
 
+    /// Whether the checker rejected `e` or reported an error inside it, so that what it holds
+    /// or gives is unknown (REFERENCE §15.1).
+    fn tainted(&self, e: ExprId) -> bool {
+        let span = self.span(e);
+        self.rejected.contains(&e) || self.checked.iter().any(|at| span.lo <= at.lo && at.hi <= span.hi)
+    }
+
     fn moves(&self, ty: &Ty) -> bool {
         self.p.decls.moves_memo(ty, self.bounds, &mut self.memo.borrow_mut())
+    }
+
+    fn is_resource(&self, ty: &Ty) -> bool {
+        self.p.decls.is_resource(ty)
+    }
+
+    /// The type of `local`'s part at `path`, a field of a field and so on.
+    fn ty_at(&self, local: LocalId, path: &[u32]) -> Ty {
+        let mut ty = self.locals[local.index()].ty.clone();
+        for &i in path {
+            let Ty::Adt(id, args) = &ty else { return Ty::Error };
+            let Some(field) = self.p.decls.adt(*id).variants.first().and_then(|v| v.fields.get(i as usize)) else {
+                return Ty::Error;
+            };
+            ty = field.ty.subst(args);
+        }
+        ty
+    }
+
+    /// Whether `e` makes a new value, rather than naming a place or a part of one.
+    fn is_temp(&self, e: ExprId) -> bool {
+        match self.m.exprs[e].kind {
+            ExprKind::Name(_) | ExprKind::It => !matches!(self.p.res(e), Some(Res::Local(_))),
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => {
+                matches!(self.p.res(e), Some(Res::Ctor(..))) || self.is_temp(base)
+            }
+            _ => true,
+        }
+    }
+
+    /// Whether the value of `e` may hold a resource: its type is a resource, unless it is a
+    /// construction none of whose arguments is one, such as `None` or `Slot.Empty`.
+    fn holds_resource(&self, e: ExprId) -> bool {
+        if !self.is_resource(self.p.ty(e)) {
+            return false;
+        }
+        match (&self.m.exprs[e].kind, self.p.res(e)) {
+            (ExprKind::Name(_) | ExprKind::Field { .. }, Some(Res::Ctor(..))) => false,
+            (ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. }, Some(Res::Ctor(..))) => {
+                args.iter().any(|arg| self.holds_resource(arg.value))
+            }
+            _ => true,
+        }
+    }
+
+    /// Whether `local`'s `path`, of type `ty`, holds no resource on every path here: it is
+    /// released, or it is a record or tuple whose parts all are. A base resource holds itself,
+    /// apart from the `self` of its own `take self` method (OPEN_QUESTIONS Q35).
+    fn released_fully(&self, local: LocalId, path: &mut Path, ty: &Ty) -> bool {
+        let Some(state) = &self.state else { return true };
+        if state.is_released(local, path) || !self.is_resource(ty) {
+            return true;
+        }
+        let Ty::Adt(id, args) = ty else { return false };
+        let def = self.p.decls.adt(*id);
+        let own_self = self.consumes_self && local == LocalId(0) && path.is_empty();
+        if def.is_enum() || def.is_native() || (def.resource_base && !own_self) {
+            return false;
+        }
+        def.field_types(VariantIdx::RECORD, args).iter().enumerate().all(|(i, field)| {
+            path.push(i as u32);
+            let released = self.released_fully(local, path, field);
+            path.pop();
+            released
+        })
+    }
+
+    // ---- resources ----
+
+    /// Reports each owned resource in `self.scopes[from..]` that some path reaches `exit`
+    /// without releasing (§10 rule 2).
+    fn unreleased(&mut self, from: usize, exit: &str) {
+        if self.state.is_none() {
+            return;
+        }
+        let owned: Vec<(LocalId, Span, String)> = self.scopes[from..].iter().flatten().cloned().collect();
+        for (local, span, name) in owned {
+            if self.excused.contains(&local) {
+                continue;
+            }
+            let ty = self.locals[local.index()].ty.clone();
+            if !self.released_fully(local, &mut Vec::new(), &ty) {
+                let message = format!(
+                    "`{name}` is a resource that may still be owned at {exit}; consume it, as a `take self` method does, or transfer it, as to a `take` parameter, first (§10)"
+                );
+                self.report(codes::RESOURCE_NOT_CONSUMED, span, message);
+            }
+        }
+    }
+
+    fn open_scope(&mut self) {
+        self.scopes.push(Vec::new());
+    }
+
+    /// Ends the innermost scope, whose resources must be released here.
+    fn close_scope(&mut self, exit: &str) {
+        let from = self.scopes.len() - 1;
+        self.unreleased(from, exit);
+        self.scopes.pop();
+    }
+
+    /// Reports the resources held by the calls, literals and loops being walked from
+    /// `self.pending[from..]`, which a jump to `exit` would drop. `except` is the consuming loop
+    /// a `continue` goes on with.
+    fn drops_held(&mut self, from: usize, exit: &str, span: Span, except: Option<ExprId>) {
+        if self.state.is_none() {
+            return;
+        }
+        if let Some(held) = self.pending[from..].iter().find(|h| h.by_loop.is_none() || h.by_loop != except) {
+            let what = if held.by_loop.is_some() {
+                "the elements a consuming loop hasn't reached yet"
+            } else {
+                "a resource that a call or literal around it already holds"
+            };
+            let message = format!("{exit} would drop {what}, which can't be discarded (§10)");
+            self.report(codes::RESOURCE_DISCARDED, span, message);
+        }
+    }
+
+    /// Reports a resource that `e` makes and nothing consumes (§10 rule 5).
+    fn discarded(&mut self, e: ExprId, how: &str) {
+        if self.is_temp(e) && self.holds_resource(e) && !self.tainted(e) && *self.p.ty(e) != Ty::Never {
+            let message = format!(
+                "this makes a resource, `{}`, that {how}, so it would be lost; consume it or transfer it (§10)",
+                self.p.decls.display(self.p.ty(e))
+            );
+            self.report(codes::RESOURCE_DISCARDED, self.span(e), message);
+        }
+    }
+
+    /// A resource `e` makes that its context only borrows, which drops it afterwards.
+    fn borrowed_temp(&mut self, e: ExprId) {
+        if !self.consumed.contains(&e) {
+            self.discarded(e, "is only borrowed here");
+        }
+    }
+
+    /// Notes that the call, literal or loop being walked holds what `e` gives it while the
+    /// rest of it runs.
+    fn hold(&mut self, e: ExprId) {
+        if self.is_resource(self.p.ty(e)) && !self.rejected.contains(&e) {
+            self.held.insert(e);
+            self.pending.push(Held { by_loop: None });
+        }
+    }
+
+    /// Notes the owned resources `pat` binds in the innermost scope.
+    fn own(&mut self, pat: PatId) {
+        let m = self.m;
+        match &m.pats[pat].kind {
+            PatKind::Bind(name) => {
+                if let Some(&local) = self.p.pat_local.get(pat)
+                    && !self.locals[local.index()].borrowed
+                    && self.is_resource(&self.locals[local.index()].ty)
+                {
+                    self.owned_binds.insert(pat);
+                    let entry = (local, m.pats[pat].span, m.text(name.sym).to_string());
+                    if let Some(top) = self.scopes.last_mut()
+                        && !top.iter().any(|(l, ..)| *l == local)
+                    {
+                        top.push(entry);
+                    }
+                }
+            }
+            PatKind::Tuple(parts) => {
+                for &part in parts {
+                    self.own(part);
+                }
+            }
+            PatKind::Ctor { fields: Some(fields), .. } => {
+                for field in fields {
+                    self.own(field.pat);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The type arguments of `ty`, and its record or enum.
+    fn adt_of<'t>(&self, ty: &'t Ty) -> Option<(AdtId, &'t [Ty])> {
+        match ty {
+            Ty::Adt(id, args) => Some((*id, args)),
+            _ => None,
+        }
+    }
+
+    /// Whether variant `v` of `ty`'s enum holds a resource.
+    fn variant_holds(&self, ty: &Ty, v: usize) -> bool {
+        let Some((id, args)) = self.adt_of(ty) else { return false };
+        self.p.decls.adt(id).field_types(VariantIdx::new(v), args).iter().any(|f| self.is_resource(f))
+    }
+
+    /// Whether `pat` matches every value of its type.
+    fn irrefutable(&self, pat: PatId) -> bool {
+        match &self.m.pats[pat].kind {
+            PatKind::Wild | PatKind::Bind(_) => true,
+            PatKind::Lit(_) | PatKind::Range { .. } => false,
+            PatKind::Tuple(parts) => parts.iter().all(|&part| self.irrefutable(part)),
+            PatKind::Ctor { fields, .. } => {
+                let Some(ctor) = self.p.pat_ctor.get(pat) else { return true };
+                let def = self.p.decls.adt(ctor.adt);
+                (!def.is_enum() || def.variants.len() == 1)
+                    && fields.iter().flatten().all(|field| self.irrefutable(field.pat))
+            }
+        }
+    }
+
+    /// Whether a value of type `ty` that `pat` matches may hold a resource.
+    fn may_hold(&self, pat: PatId, ty: &Ty) -> bool {
+        match &self.m.pats[pat].kind {
+            PatKind::Wild | PatKind::Bind(_) => self.is_resource(ty),
+            PatKind::Lit(_) | PatKind::Range { .. } => false,
+            PatKind::Tuple(parts) => {
+                let Some((_, args)) = self.adt_of(ty) else { return false };
+                parts.iter().zip(args).any(|(&part, arg)| self.may_hold(part, arg))
+            }
+            PatKind::Ctor { fields, .. } => {
+                let (Some(ctor), Some((_, args))) = (self.p.pat_ctor.get(pat), self.adt_of(ty)) else {
+                    return self.is_resource(ty);
+                };
+                let types = self.p.decls.adt(ctor.adt).field_types(ctor.variant, args);
+                let written = fields.iter().flatten().zip(ctor.fields.iter());
+                let left_out = (0..types.len())
+                    .filter(|i| !ctor.fields.iter().any(|f| f.index() == *i))
+                    .any(|i| self.is_resource(&types[i]));
+                left_out || written.into_iter().any(|(field, idx)| self.may_hold(field.pat, &types[idx.index()]))
+            }
+        }
+    }
+
+    /// Whether `pat` matches every value of the variant it names, or of its type.
+    fn irrefutable_in_variant(&self, pat: PatId) -> bool {
+        match &self.m.pats[pat].kind {
+            PatKind::Ctor { fields, .. } => fields.iter().flatten().all(|field| self.irrefutable(field.pat)),
+            _ => self.irrefutable(pat),
+        }
+    }
+
+    /// An `is` test of `value` against `pat`, which moves what it binds whether or not it
+    /// matches (OPEN_QUESTIONS P5), so a failed test loses a resource the value may hold.
+    fn tested(&mut self, value: ExprId, pat: PatId) {
+        let ty = self.p.ty(value).clone();
+        if !self.is_resource(&ty) || self.tainted(value) {
+            return;
+        }
+        let temp = self.is_temp(value);
+        let mut moved = Vec::new();
+        self.bound_paths(pat, &mut Vec::new(), &mut moved);
+        let lost_when_matched = self.lost(pat, &ty, temp);
+        // The value is gone after a failed test when the test moves it or it is a temporary.
+        let lost_when_failed = (temp || !moved.is_empty()) && {
+            let variants = match self.adt_of(&ty) {
+                Some((id, _)) if self.p.decls.adt(id).is_enum() => self.p.decls.adt(id).variants.len(),
+                _ => 0,
+            };
+            match self.pattern_variant(pat) {
+                _ if self.irrefutable(pat) => false,
+                Some(v) if self.irrefutable_in_variant(pat) => {
+                    (0..variants).any(|other| other != v && self.variant_holds(&ty, other))
+                }
+                _ => true,
+            }
+        };
+        if lost_when_matched || lost_when_failed {
+            let message = if lost_when_matched {
+                "this pattern leaves out a resource of the value it moves, which would drop it (§10)"
+            } else {
+                "this test moves the value whether or not it matches, so a value it doesn't match, which may hold a resource, would be lost; use `match` (§10)"
+            };
+            self.report(codes::RESOURCE_DISCARDED, self.m.pats[pat].span, message.to_string());
+        }
+    }
+
+    /// The variant of an enum that `pat` names, or `None` when it names none.
+    fn pattern_variant(&self, pat: PatId) -> Option<usize> {
+        match &self.m.pats[pat].kind {
+            PatKind::Ctor { .. } => {
+                let ctor = self.p.pat_ctor.get(pat)?;
+                self.p.decls.adt(ctor.adt).is_enum().then_some(ctor.variant.index())
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether matching `pat` against a value of type `ty` drops a resource part of it: one
+    /// the pattern leaves out of a value that doesn't stay in its place (`gone`). A binding
+    /// inside an enum's variant moves the whole value, so what the rest leaves out goes
+    /// with it (OPEN_QUESTIONS P5).
+    fn lost(&self, pat: PatId, ty: &Ty, gone: bool) -> bool {
+        match &self.m.pats[pat].kind {
+            PatKind::Wild => gone && self.is_resource(ty),
+            PatKind::Bind(_) | PatKind::Lit(_) | PatKind::Range { .. } => false,
+            PatKind::Tuple(parts) => {
+                let Some((_, args)) = self.adt_of(ty) else { return false };
+                parts.iter().zip(args).any(|(&part, arg)| self.lost(part, arg, gone))
+            }
+            PatKind::Ctor { fields, .. } => {
+                let (Some(ctor), Some((_, args))) = (self.p.pat_ctor.get(pat), self.adt_of(ty)) else { return false };
+                let def = self.p.decls.adt(ctor.adt);
+                let gone = gone || {
+                    let mut moved = Vec::new();
+                    def.is_enum() && {
+                        self.bound_paths(pat, &mut Vec::new(), &mut moved);
+                        !moved.is_empty()
+                    }
+                };
+                let types = def.field_types(ctor.variant, args);
+                let written = fields.iter().flatten().zip(ctor.fields.iter());
+                let mut lost = false;
+                for (field, idx) in written {
+                    lost |= self.lost(field.pat, &types[idx.index()], gone);
+                }
+                let left_out = (0..types.len())
+                    .filter(|i| !ctor.fields.iter().any(|f| f.index() == *i))
+                    .any(|i| self.is_resource(&types[i]));
+                lost || (gone && left_out)
+            }
+        }
     }
 
     /// The local and fields that `e` names, when it is a place a move can leave.
@@ -431,18 +906,31 @@ impl Walk<'_> {
 
     /// Moves `local`'s `path` once its use is checked.
     fn leave(&mut self, e: ExprId, local: LocalId, path: Path, desc: String) {
+        let resource = self.is_resource(&self.ty_at(local, &path));
+        // A lent resource can't be consumed (§10 rule 6).
+        let lent = if resource { codes::LENT_RESOURCE_CONSUMED } else { codes::LENT_VALUE_MOVED };
         if self.locals[local.index()].borrowed {
-            let message = format!(
-                "`{desc}` is lent here, not owned, so it can't move; only an owned value, such as a `take` parameter, can (§5.2)"
-            );
-            self.report(codes::LENT_VALUE_MOVED, self.span(e), message);
+            let message = if resource {
+                format!(
+                    "`{desc}` is a resource lent here, not owned, so it can't be consumed; only its owner can consume it, such as through a `take` parameter (§10)"
+                )
+            } else {
+                format!(
+                    "`{desc}` is lent here, not owned, so it can't move; only an owned value, such as a `take` parameter, can (§5.2)"
+                )
+            };
+            self.report(lent, self.span(e), message);
+            self.refused.insert(e);
             return;
         }
         if self.guarded.contains(&local) {
             let message = format!(
                 "`{desc}` is bound by this arm's pattern and lent to its guard, which can only look at it, since the arm may still not be chosen; move it in the arm's body (OPEN_QUESTIONS P5)"
             );
-            self.report(codes::LENT_VALUE_MOVED, self.span(e), message);
+            self.report(lent, self.span(e), message);
+            self.refused.insert(e);
+            // It was meant to move, so it isn't reported as left over (REFERENCE §15.1).
+            self.excused.insert(local);
             return;
         }
         let steps: Vec<Step> = path.iter().map(|&i| Step::Field(i)).collect();
@@ -468,15 +956,43 @@ impl Walk<'_> {
             }
             return;
         }
+        if resource && !self.unrefined(local, &path) && self.read_by_refinement(local, &path) {
+            let what = "moving a resource out of a field that its record's refinement reads, which may run again,";
+            if self.reported.insert((codes::NOT_IMPLEMENTED.id, self.span(e))) {
+                self.unscheduled.push((self.span(e), what.to_string()));
+            }
+        }
         let Some(state) = &mut self.state else { return };
+        if resource {
+            state.release(local, path.clone());
+        }
         if state.of(local).any(|(m, _)| is_prefix(m, &path)) {
             return;
         }
         state.forget(local, |m| !is_prefix(&path, m));
         Arc::make_mut(&mut state.moved).insert((local.0, path.clone()), desc);
-        if self.place(e).is_some_and(|named| named == (local, path.clone())) && self.unrefined(local, &path) {
+        // A resource always leaves its place, so the interpreter never abandons it twice.
+        if self.place(e).is_some_and(|named| named == (local, path.clone()))
+            && (resource || self.unrefined(local, &path))
+        {
             self.moves_out.insert(e);
         }
+    }
+
+    /// Whether a refinement of a record that holds `local`'s `path` reads the field on the
+    /// way to it.
+    fn read_by_refinement(&self, local: LocalId, path: &[u32]) -> bool {
+        let mut ty = self.locals[local.index()].ty.clone();
+        for &i in path {
+            let Ty::Adt(id, args) = &ty else { return false };
+            let Some(variant) = self.p.decls.adt(*id).variants.first() else { return false };
+            let Some(field) = variant.fields.get(i as usize) else { return false };
+            if variant.read_fields.get(i as usize).copied().unwrap_or(false) {
+                return true;
+            }
+            ty = field.ty.subst(args);
+        }
+        false
     }
 
     /// Gives `local`'s `path` a new value, which makes it and its parts usable again. A part
@@ -490,6 +1006,7 @@ impl Walk<'_> {
         }
         if let Some(state) = &mut self.state {
             state.forget(local, |m| !is_prefix(path, m));
+            state.unrelease(local, |m| is_prefix(path, m));
         }
     }
 
@@ -498,15 +1015,33 @@ impl Walk<'_> {
         self.touch(local);
         if let Some(state) = &mut self.state {
             state.forget(local, |_| false);
+            state.unrelease(local, |_| true);
         }
     }
 
     // ---- statements ----
 
+    /// A block whose value, if any, is dropped.
     fn block(&mut self, block: &Block) {
-        for &s in &block.stmts {
-            self.stmt(s);
+        self.value_block(block, false);
+    }
+
+    /// A block whose final expression gives its value, which is `used` when the expression
+    /// around the block takes it.
+    fn value_block(&mut self, block: &Block, used: bool) {
+        for (i, &s) in block.stmts.iter().enumerate() {
+            match self.m.stmts[s].kind {
+                StmtKind::Expr(e) if used && i + 1 == block.stmts.len() => self.expr(e),
+                _ => self.stmt(s),
+            }
         }
+    }
+
+    /// A block with a scope of its own, whose owned resources its end releases.
+    fn scoped_block(&mut self, block: &Block, used: bool) {
+        self.open_scope();
+        self.value_block(block, used);
+        self.close_scope("the end of its block");
     }
 
     fn stmt(&mut self, s: StmtId) {
@@ -514,30 +1049,80 @@ impl Walk<'_> {
         match &m.stmts[s].kind {
             StmtKind::Let { pat, init, .. } => {
                 self.expr(*init);
+                let ty = self.p.ty(*init).clone();
+                let gone = self.is_temp(*init) || self.consumed.contains(init);
+                if self.is_resource(&ty) && !self.tainted(*init) && self.lost(*pat, &ty, gone) {
+                    let message = "this pattern leaves out a resource of the value it takes, which would drop it (§10)";
+                    self.report(codes::RESOURCE_DISCARDED, m.pats[*pat].span, message.to_string());
+                }
                 self.matched(*init, *pat);
+                // A value that holds no resource, such as `None`, has nothing to consume.
+                if !self.holds_resource(*init) || self.refused.contains(init) || self.tainted(*init) {
+                    let mut locals = Vec::new();
+                    self.pattern_locals(*pat, &mut locals);
+                    if let Some(state) = &mut self.state {
+                        for local in locals {
+                            state.release(local, Vec::new());
+                        }
+                    }
+                }
             }
             StmtKind::Assign { target, op, value } => {
                 self.expr(*value);
                 if self.place(*target).is_some() {
                     self.change_lent(*target, self.lent.len());
                 }
+                // A place that may still hold a resource can't be assigned over (§10 rule 5).
+                if self.is_resource(self.p.ty(*target)) && !self.tainted(*target) && !self.tainted(*value) {
+                    let released = match self.place(*target) {
+                        Some((local, mut path)) => {
+                            let ty = self.ty_at(local, &path);
+                            self.released_fully(local, &mut path, &ty)
+                        }
+                        None => false,
+                    };
+                    if !released {
+                        let message = "this place may still hold a resource, which assigning would discard; consume or transfer it first (§10)";
+                        self.report(codes::RESOURCE_DISCARDED, self.span(*target), message.to_string());
+                    }
+                }
                 match self.place(*target) {
-                    Some((local, path)) if *op == AssignOp::Set => self.assign_place(*target, local, &path),
+                    Some((local, path)) if *op == AssignOp::Set => {
+                        self.assign_place(*target, local, &path);
+                        if !self.holds_resource(*value)
+                            && let Some(state) = &mut self.state
+                        {
+                            state.release(local, path);
+                        }
+                    }
                     Some((local, path)) => self.use_place(*target, local, &path),
                     None => self.target(*target),
                 }
             }
-            StmtKind::Expr(e) | StmtKind::Assert(e) => self.expr(*e),
+            StmtKind::Expr(e) => {
+                self.expr(*e);
+                self.discarded(*e, "this statement drops");
+            }
+            StmtKind::Assert(e) => self.expr(*e),
             StmtKind::Return(value) => {
                 if let Some(value) = value {
                     self.expr(*value);
                 }
+                self.drops_held(0, "this `return`", m.stmts[s].span, None);
+                self.unreleased(0, "this `return`");
                 self.state = None;
             }
             StmtKind::Break(_) | StmtKind::Continue(_) => {
                 let is_break = matches!(m.stmts[s].kind, StmtKind::Break(_));
-                let state = self.state.take();
                 let target = self.p.jump_target.get(s).copied();
+                if let Some(i) = self.loops.iter().rposition(|f| Some(f.expr) == target) {
+                    let (scopes, pending, expr) = (self.loops[i].scopes, self.loops[i].pending, self.loops[i].expr);
+                    let exit = if is_break { "this `break`" } else { "this `continue`" };
+                    let except = (!is_break).then_some(expr);
+                    self.drops_held(pending, exit, m.stmts[s].span, except);
+                    self.unreleased(scopes, exit);
+                }
+                let state = self.state.take();
                 if let Some(i) = self.loops.iter().rposition(|f| Some(f.expr) == target) {
                     let frame = &mut self.loops[i];
                     let slot = if is_break { &mut frame.breaks } else { &mut frame.continues };
@@ -546,11 +1131,18 @@ impl Walk<'_> {
                 }
             }
             StmtKind::Check { cond, fallback } => {
+                // What the condition binds is in scope after the `check`, where the fallback,
+                // which leaves, doesn't reach (OPEN_QUESTIONS P5).
+                self.open_scope();
                 self.condition(*cond);
+                let bound = self.scopes.pop().expect("the condition's scope was opened");
                 // The fallback leaves, so only the code after it runs on.
                 let after = self.state.clone();
-                self.fallback(fallback);
+                self.fallback(fallback, false);
                 self.state = after;
+                if let Some(top) = self.scopes.last_mut() {
+                    top.extend(bound);
+                }
             }
         }
     }
@@ -619,10 +1211,12 @@ impl Walk<'_> {
         }
     }
 
-    fn fallback(&mut self, fallback: &Fallback) {
+    /// The fallback of an `else` form, whose value is `used` when it is a resource, or of a
+    /// `check`.
+    fn fallback(&mut self, fallback: &Fallback, used: bool) {
         match fallback {
             Fallback::Value(x) => self.expr(*x),
-            Fallback::Block(block) => self.block(block),
+            Fallback::Block(block) => self.scoped_block(block, used),
         }
     }
 
@@ -669,6 +1263,7 @@ impl Walk<'_> {
                 for part in parts {
                     if let FTextPart::Expr(x) = part {
                         self.expr(*x);
+                        self.borrowed_temp(*x);
                     }
                 }
             }
@@ -677,13 +1272,22 @@ impl Walk<'_> {
                 let mode = match self.p.res(e) {
                     Some(Res::Fn(f)) if self.p.fns[f].receiver.is_some() => self.p.fns[f].self_mode,
                     Some(Res::Method(builtin)) if builtin.changes_receiver() => ParamMode::Inout,
+                    Some(Res::Dispatch { iface, method, qualified: false }) => {
+                        self.p.decls.iface(iface).methods[method].self_mode
+                    }
                     _ => ParamMode::Borrow,
                 };
                 self.call(e, Some((*receiver, mode)), args);
             }
-            ExprKind::Field { base, .. } => self.expr(*base),
+            ExprKind::Field { base, .. } => {
+                self.expr(*base);
+                if !matches!(self.p.res(e), Some(Res::Ctor(..))) {
+                    self.borrowed_temp(*base);
+                }
+            }
             ExprKind::Index { base, index } => {
                 self.expr(*base);
+                self.borrowed_temp(*base);
                 // The base is reached before its index, which may not move or change it.
                 let outer = self.lent.len();
                 if let Some((local, steps)) = self.access_path(*base)
@@ -706,6 +1310,8 @@ impl Walk<'_> {
             ExprKind::Binary { lhs, rhs, .. } | ExprKind::Range { lo: lhs, hi: rhs, .. } => {
                 self.expr(*lhs);
                 self.expr(*rhs);
+                self.borrowed_temp(*lhs);
+                self.borrowed_temp(*rhs);
             }
             ExprKind::Try(inner) | ExprKind::Fail(inner) => self.expr(*inner),
             ExprKind::Attempt(inner) => {
@@ -714,12 +1320,16 @@ impl Walk<'_> {
                 self.state = join(self.state.take(), failed);
             }
             ExprKind::If { cond, then_block, else_branch } => {
+                // What the condition binds is in scope in the then-block only.
+                let used = self.is_resource(self.p.ty(e));
+                self.open_scope();
                 self.condition(*cond);
                 let after = self.state.clone();
-                self.block(then_block);
+                self.value_block(then_block, used);
+                self.close_scope("the end of its block");
                 let then_state = std::mem::replace(&mut self.state, after);
                 match else_branch {
-                    Some(ElseBranch::Block(block)) => self.block(block),
+                    Some(ElseBranch::Block(block)) => self.scoped_block(block, used),
                     Some(ElseBranch::If(nested)) => self.expr(*nested),
                     None => {}
                 }
@@ -727,46 +1337,113 @@ impl Walk<'_> {
             }
             ExprKind::While { cond, body, .. } => {
                 self.looped(e, |w| {
+                    w.open_scope();
                     w.condition(*cond);
                     let exit = w.state.clone();
                     w.block(body);
+                    w.close_scope("the end of the loop's body");
                     exit
                 });
             }
             ExprKind::Loop { body, .. } => {
                 self.looped(e, |w| {
-                    w.block(body);
+                    w.scoped_block(body, false);
                     None
                 });
             }
-            ExprKind::For { pat, iter, body, .. } => {
+            ExprKind::For { pat, iter, body, consume, .. } => {
                 self.expr(*iter);
+                if !consume {
+                    self.borrowed_temp(*iter);
+                }
+                // A consuming loop owns what is left of its collection until it ends (§6.5).
+                let elements = match self.p.ty(*iter) {
+                    Ty::Adt(AdtId::LIST, args) if *consume => args[0].clone(),
+                    Ty::Adt(AdtId::MAP, args) if *consume => Ty::applied(AdtId::PAIR, args.to_vec()),
+                    _ => Ty::Error,
+                };
+                let holds = self.is_resource(&elements);
+                if holds && self.lost(*pat, &elements, true) {
+                    let message = "this pattern leaves out a resource of each element, which the loop would drop (§10)";
+                    self.report(codes::RESOURCE_DISCARDED, self.m.pats[*pat].span, message.to_string());
+                }
                 self.looped(e, |w| {
                     let exit = w.state.clone();
+                    w.open_scope();
+                    if holds {
+                        w.pending.push(Held { by_loop: Some(e) });
+                    }
                     w.bind_all(*pat);
                     w.block(body);
+                    if holds {
+                        w.pending.pop();
+                    }
+                    w.close_scope("the end of the loop's body");
                     exit
                 });
             }
-            ExprKind::Debug(values) | ExprKind::Tuple(values) | ExprKind::List(values) => {
+            ExprKind::Debug(values) => {
                 for &value in values {
                     self.expr(value);
+                    self.borrowed_temp(value);
                 }
             }
+            ExprKind::Tuple(values) | ExprKind::List(values) => {
+                let outer = self.pending.len();
+                for &value in values {
+                    self.expr(value);
+                    self.hold(value);
+                }
+                self.pending.truncate(outer);
+            }
             ExprKind::Map(entries) => {
+                let outer = self.pending.len();
                 for &(k, v) in entries {
                     self.expr(k);
+                    self.hold(k);
                     self.expr(v);
+                    self.hold(v);
                 }
+                self.pending.truncate(outer);
             }
             ExprKind::Match { scrutinee, arms, .. } => {
                 self.expr(*scrutinee);
+                let ty = self.p.ty(*scrutinee).clone();
+                let resource = self.is_resource(&ty) && !self.tainted(*scrutinee);
+                let temp = self.is_temp(*scrutinee);
+                // A temporary that guards may still fail past is held until an arm takes it.
+                if resource && temp {
+                    self.held.insert(*scrutinee);
+                }
+                // The variants an arm may still meet: an earlier arm without a guard that
+                // matches all of a variant takes it (OPEN_QUESTIONS P5).
+                let variants = match self.adt_of(&ty) {
+                    Some((id, _)) if self.p.decls.adt(id).is_enum() => self.p.decls.adt(id).variants.len(),
+                    _ => 0,
+                };
+                let mut remaining = vec![true; variants];
                 // What may have moved when an arm is tried: what moved before the `match`,
                 // and what the guards of the arms before it moved.
                 let mut tried = self.state.clone();
                 let mut after = None;
                 for arm in arms {
                     self.state = tried.clone();
+                    self.open_scope();
+                    let arm_variant = self.pattern_variant(arm.pat);
+                    let meets: Vec<usize> =
+                        (0..variants).filter(|&v| remaining[v] && arm_variant.is_none_or(|a| a == v)).collect();
+                    // An arm whose values hold no resource leaves nothing to consume.
+                    let empty = match &self.m.pats[arm.pat].kind {
+                        PatKind::Wild | PatKind::Bind(_) => {
+                            variants > 0 && meets.iter().all(|&v| !self.variant_holds(&ty, v))
+                        }
+                        _ => !self.may_hold(arm.pat, &ty),
+                    };
+                    if arm.guard.is_none() && self.irrefutable_in_variant(arm.pat) {
+                        for &v in &meets {
+                            remaining[v] = false;
+                        }
+                    }
                     if let Some(guard) = arm.guard {
                         // The guard runs before the pattern moves anything, with the
                         // scrutinee and what the pattern binds lent to it. A guard that fails
@@ -793,18 +1470,31 @@ impl Walk<'_> {
                         self.lent.truncate(lent);
                         tried = join(tried, self.state.clone());
                     }
+                    if resource && !empty && self.lost(arm.pat, &ty, temp) {
+                        let message =
+                            "this pattern leaves out a resource of a value it moves, which would drop it (§10)";
+                        self.report(codes::RESOURCE_DISCARDED, self.m.pats[arm.pat].span, message.to_string());
+                    }
                     self.matched(*scrutinee, arm.pat);
+                    if empty
+                        && let Some((local, path)) = self.place(*scrutinee)
+                        && let Some(state) = &mut self.state
+                    {
+                        state.release(local, path);
+                    }
                     // The scrutinee leaves its local only once this arm is chosen.
                     if self.moves_out.remove(scrutinee) {
                         self.arms_out.insert(arm.pat);
                     }
-                    self.block(&arm.body);
+                    self.value_block(&arm.body, self.is_resource(self.p.ty(e)));
+                    self.close_scope("the end of its arm");
                     after = join(after, self.state.take());
                 }
                 self.state = after;
             }
             ExprKind::Is { value, pat } => {
                 self.expr(*value);
+                self.tested(*value, *pat);
                 self.matched(*value, *pat);
             }
             ExprKind::Else { value, fallback } => {
@@ -812,7 +1502,7 @@ impl Walk<'_> {
                 let after = self.state.clone();
                 let failed = self.handled.remove(&e).flatten();
                 self.state = join(self.state.take(), failed);
-                self.fallback(fallback);
+                self.fallback(fallback, self.is_resource(self.p.ty(e)));
                 self.state = join(after, self.state.take());
             }
         }
@@ -842,7 +1532,12 @@ impl Walk<'_> {
     /// in their depth.
     fn looped(&mut self, e: ExprId, turn: impl Fn(&mut Self) -> Option<State>) {
         let entry = self.state.clone();
-        if let (Some(entry), Some(last)) = (&entry, self.loop_cache.get(&e)) {
+        // What is released at the head must be what it was too, which a program without
+        // resources always has.
+        if let (Some(entry), Some(last)) = (&entry, self.loop_cache.get(&e))
+            && entry.released_in(&last.head)
+            && last.head.released_in(entry)
+        {
             let gained: Vec<_> = entry.moved.iter().filter(|(key, _)| !last.head.moved.contains_key(key)).collect();
             if gained.iter().all(|((local, _), _)| !last.touched.contains(&LocalId(*local))) {
                 let mut exit = last.exit.clone();
@@ -868,13 +1563,14 @@ impl Walk<'_> {
         self.touched.push(HashSet::new());
         loop {
             self.state = head.clone();
-            self.loops.push(LoopFrame { expr: e, breaks: None, continues: None });
+            let (scopes, pending) = (self.scopes.len(), self.pending.len());
+            self.loops.push(LoopFrame { expr: e, breaks: None, continues: None, scopes, pending });
             let exit = turn(self);
             let frame = self.loops.pop().expect("the loop's frame was pushed");
             let back = join(self.state.take(), frame.continues);
             let next = join(entry.clone(), back);
             let grew = match (&head, &next) {
-                (Some(head), Some(next)) => !head.covers(next),
+                (Some(head), Some(next)) => !head.holds(next),
                 (None, Some(_)) => true,
                 (_, None) => false,
             };
@@ -914,6 +1610,15 @@ impl Walk<'_> {
             let ty = self.p.ty(value).clone();
             for path in paths {
                 let part = self.describe_path(&desc, &ty, &path[base.len()..]);
+                // A resource part leaves the value it is in, so the interpreter doesn't abandon
+                // it twice.
+                if path.len() > base.len() && self.is_resource(&self.ty_at(local, &path)) {
+                    let rel = path[base.len()..].iter().map(|&i| FieldIdx(i)).collect();
+                    let parts = self.parts_out.entry(pat).or_default();
+                    if !parts.contains(&rel) {
+                        parts.push(rel);
+                    }
+                }
                 self.move_place(value, local, path, part);
             }
         }
@@ -961,13 +1666,15 @@ impl Walk<'_> {
         }
     }
 
-    /// Gives each local `pat` binds a new value.
+    /// Gives each local `pat` binds a new value, and the innermost scope owns the resources
+    /// among them.
     fn bind_all(&mut self, pat: PatId) {
         let mut locals = Vec::new();
         self.pattern_locals(pat, &mut locals);
         for local in locals {
             self.bind(local);
         }
+        self.own(pat);
     }
 
     /// The locals `pat` binds.
@@ -997,9 +1704,15 @@ impl Walk<'_> {
     /// accesses of the call may conflict.
     fn call(&mut self, e: ExprId, receiver: Option<(ExprId, ParamMode)>, args: &[Arg]) {
         if self.rejected.contains(&e) {
-            // A rejected call only reads what it is given.
+            // A rejected call only reads what it is given, and may have meant to consume it,
+            // so no resource it reads is reported as left over (REFERENCE §15.1).
             for value in receiver.map(|(r, _)| r).into_iter().chain(args.iter().map(|arg| arg.value)) {
                 self.read(value);
+                if let Some((local, path)) = self.place(value)
+                    && let Some(state) = &mut self.state
+                {
+                    state.release(local, path);
+                }
             }
             return;
         }
@@ -1012,10 +1725,14 @@ impl Walk<'_> {
             && self.moves(self.p.ty(receiver))
             && let Some((local, path)) = self.place(receiver)
         {
+            let outer = self.pending.len();
             for arg in args {
                 self.expr(arg.value);
+                self.hold(arg.value);
             }
+            self.pending.truncate(outer);
             let replaced = self.p.with_fields.get(e).expect("`with` is resolved");
+            self.replaced(receiver, Some((local, &path)), replaced);
             let kept = |m: &[u32]| m.len() <= path.len() || !replaced.iter().any(|i| i.0 == m[path.len()]);
             self.touch(local);
             let desc = self.describe(receiver);
@@ -1041,6 +1758,7 @@ impl Walk<'_> {
         }
         let mut accesses: Vec<CallAccess> = Vec::new();
         let outer = self.lent.len();
+        let held = self.pending.len();
         let late = matches!(receiver, Some((_, ParamMode::Inout)));
         match receiver {
             Some((receiver, _)) if late => self.indices(receiver),
@@ -1049,6 +1767,15 @@ impl Walk<'_> {
                 // A `take self` receiver, and that of `with` on a unique record, move.
                 if !self.consumed.contains(&receiver) {
                     self.note(&mut accesses, outer, receiver, Access::Lent);
+                    if self.is_value(receiver) {
+                        self.borrowed_temp(receiver);
+                    }
+                } else {
+                    self.hold(receiver);
+                }
+                if self.p.res(e) == Some(Res::With) {
+                    let replaced = self.p.with_fields.get(e).expect("`with` is resolved");
+                    self.replaced(receiver, None, replaced);
                 }
             }
             None => {}
@@ -1062,8 +1789,12 @@ impl Walk<'_> {
             // An argument that moves was checked against what the call lends as it moved.
             if !self.consumed.contains(&arg.value) && !self.rejected.contains(&arg.value) {
                 self.note(&mut accesses, outer, arg.value, Access::Lent);
+                self.borrowed_temp(arg.value);
+            } else if self.consumed.contains(&arg.value) {
+                self.hold(arg.value);
             }
         }
+        self.pending.truncate(held);
         for arg in args.iter().filter(|arg| arg.inout) {
             self.root(arg.value);
             if !self.rejected.contains(&arg.value) {
@@ -1077,6 +1808,36 @@ impl Walk<'_> {
             self.note(&mut accesses, outer, receiver, Access::Inout);
         }
         self.lent.truncate(outer);
+    }
+
+    /// Reports a field that `with` replaces while it may still hold a resource, which the new
+    /// record would discard (§10 rule 5). `place` is the receiver's place, when it is one.
+    fn replaced(&mut self, receiver: ExprId, place: Option<(LocalId, &Path)>, replaced: &[FieldIdx]) {
+        let Some((id, args)) = self.adt_of(self.p.ty(receiver)) else { return };
+        let types = self.p.decls.adt(id).field_types(VariantIdx::RECORD, args);
+        for field in replaced {
+            let ty = &types[field.index()];
+            if !self.is_resource(ty) {
+                continue;
+            }
+            let released = match place {
+                Some((local, path)) => {
+                    let mut path = path.clone();
+                    path.push(field.0);
+                    self.released_fully(local, &mut path, ty)
+                }
+                None => false,
+            };
+            if !released {
+                let message = "`with` replaces a field that may still hold a resource, which the new record would discard; move it out first (§10)";
+                self.report(codes::RESOURCE_DISCARDED, self.span(receiver), message.to_string());
+            }
+        }
+    }
+
+    /// Whether the receiver `e` is a value, not the name of a type or interface.
+    fn is_value(&self, e: ExprId) -> bool {
+        self.p.expr_ty.get(e).is_some()
     }
 
     /// Whether `e` was reported as used after it moved, which leaves nothing for it to lend

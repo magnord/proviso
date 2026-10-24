@@ -1,0 +1,61 @@
+// phase: 2.8
+// expect-exit: 70
+// expect-report: defect assertion_failed
+// expect-report: defect assertion_failed
+// expect-report: leak Probe
+// expect-report: leak Conn
+// A defect in `abandon` is reported, and the resource is reported as leaked, at the binding
+// that owned it. The rest are still abandoned, newest first, and a defect in another
+// `abandon` is reported too (REFERENCE §10, OPEN_QUESTIONS T10). The first one propagates,
+// so the error that began the exit isn't printed, and the run exits with code 70. A
+// resource in an aggregate leaks as the type whose `abandon` hit the defect, at the binding
+// of the aggregate, whose other elements are still abandoned. A `Conn` whose `abandon` hits
+// a defect in its probe's leaks as a `Conn`.
+use std.io { Out }
+
+resource record Probe {
+    id: Int
+    fragile: Bool
+    out: Out
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.id}")
+        assert not self.fragile
+    }
+}
+
+resource record Conn {
+    probe: Probe
+}
+
+impl Abandon for Conn {
+    fn abandon(take self) {
+        say(out: self.probe.out, line: "abandon conn")
+        self.probe.abandon()
+    }
+}
+
+enum Stop derives(Show) {
+    Halt
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)
+}
+
+fn probe(id: Int, fragile: Bool, out: keep Out) -> Probe {
+    return Probe(id: id, fragile: fragile, out: out)
+}
+
+fn work(out: keep Out) fails Stop {
+    let first = probe(id: 1, fragile: false, out: out)
+    let conn = Conn(probe: probe(id: 2, fragile: true, out: out))
+    let list = [probe(id: 3, fragile: false, out: out), probe(id: 4, fragile: true, out: out), probe(id: 5, fragile: false, out: out)]
+    fail Stop.Halt
+}
+
+pub fn main(sys: keep System) fails Stop {
+    try work(out: sys.stdout)
+}

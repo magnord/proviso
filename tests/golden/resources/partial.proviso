@@ -1,0 +1,102 @@
+// phase: 2.8
+// An `inout` argument that holds a resource is never rolled back (REFERENCE §5.4). When the
+// callee fails, the caller sees what the callee left, since a resource can't be copied, so
+// such an `inout` behaves as `inout(partial)`. A parameter may declare `inout(partial)` for
+// any type, and then a failure leaves its partial changes too, while a plain `inout` of
+// copyable data is still rolled back. A field passed as `inout` is partial when it holds a
+// resource, and an `inout self` method of a resource is too. A call that succeeds commits
+// its changes either way.
+use std.io { Out, IoError }
+
+resource record Probe {
+    name: Text
+    out: Out
+}
+
+impl Probe {
+    fn close(take self) {
+        say(out: self.out, line: f"close {self.name}")
+    }
+
+    fn rename_then_fail(inout self, name: Text) fails Stop {
+        self.name = name
+        fail Stop.Halt
+    }
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.name}")
+    }
+}
+
+record Bench {
+    label: Text
+    probes: List[Probe]
+}
+
+enum Stop {
+    Halt
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)
+}
+
+fn close_last_then_fail(probes: inout List[Probe]) fails Stop {
+    let last = probes.pop() else fail Stop.Halt
+    last.close()
+    fail Stop.Halt
+}
+
+fn add(probes: inout List[Probe], probe: take Probe) fails Stop {
+    probes.push(probe)
+}
+
+fn push_then_fail(xs: inout List[Int]) fails Stop {
+    xs.push(9)
+    fail Stop.Halt
+}
+
+fn push_partly(xs: inout(partial) List[Int]) fails Stop {
+    xs.push(9)
+    fail Stop.Halt
+}
+
+fn count_partly(n: inout(partial) Int) fails Stop {
+    n += 1
+    if n > 1 {
+        fail Stop.Halt
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let out = sys.stdout
+    var probes = [Probe(name: "a", out: out), Probe(name: "b", out: out)]
+    let _ = attempt close_last_then_fail(probes: &probes)
+    try out.write_line(f"left: {probes.len()}")
+    var bench = Bench(label: "bench", probes: [Probe(name: "c", out: out)])
+    let _ = attempt close_last_then_fail(probes: &bench.probes)
+    try out.write_line(f"{bench.label}: {bench.probes.len()}")
+    let _ = attempt add(probes: &bench.probes, probe: Probe(name: "d", out: out))
+    try out.write_line(f"{bench.label} after add: {bench.probes.len()}")
+    var single = Probe(name: "e", out: out)
+    let _ = attempt single.rename_then_fail(name: "e2")
+    try out.write_line(f"renamed: {single.name}")
+    var xs = [1]
+    let _ = attempt push_then_fail(xs: &xs)
+    try out.write_line(f"rolled back: {xs.len()}")
+    let _ = attempt push_partly(xs: &xs)
+    try out.write_line(f"partial: {xs.len()}")
+    var n = 0
+    let _ = attempt count_partly(n: &n)
+    let _ = attempt count_partly(n: &n)
+    try out.write_line(f"count: {n}")
+    single.close()
+    for probe in take probes {
+        probe.close()
+    }
+    for probe in take bench.probes {
+        probe.close()
+    }
+}

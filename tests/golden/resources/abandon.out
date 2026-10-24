@@ -1,0 +1,58 @@
+close turn 1
+abandon turn 2
+abandon third
+abandon second
+abandon first
+-- locals
+close first
+close turn 1
+abandon turn 2
+abandon third
+abandon second
+-- locals consumed
+failing: try
+abandon held
+-- propagated
+failing: else
+abandon held
+-- converted
+abandon given
+abandon kept
+-- transferred
+abandon s2
+abandon s1
+abandon v2
+abandon v1
+abandon e3
+abandon e2
+abandon e1
+abandon ok
+abandon some
+abandon t2
+abandon t1
+abandon right
+abandon left
+-- aggregates
+abandon left
+abandon right
+-- moved field
+failing: argument
+abandon arg
+abandon held
+-- arguments
+failing: element
+abandon x2
+abandon x1
+-- literal
+close c1
+abandon c2
+abandon c3
+-- consuming
+abandon conn c
+abandon second
+abandon first
+-- conn whole
+close first
+abandon second
+-- conn half
+done

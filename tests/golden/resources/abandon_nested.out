@@ -1,0 +1,32 @@
+abandon b2
+abandon b1
+abandon m3
+abandon m1
+abandon a3
+abandon a2
+abandon a1
+-- nested
+close s0
+abandon s1
+abandon s2
+-- pooled
+close l
+stop
+abandon r
+-- in arm
+close v1
+abandon v2
+abandon w
+-- reassigned
+stop
+abandon inner
+abandon outer
+-- outer
+stop
+abandon wr
+abandon wl
+-- with
+close e1
+abandon e2
+abandon e3
+-- map loop

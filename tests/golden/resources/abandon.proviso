@@ -1,0 +1,204 @@
+// phase: 2.8
+// A failure exit, by `fail`, a `try` that propagates or an `else fail`, abandons the
+// resources the scope still owns, newest first (REFERENCE §10 rule 3). One that was
+// consumed or transferred first isn't abandoned, whichever path consumed it, and a binding
+// made again in a loop is abandoned once, for the value it holds. An aggregate abandons what
+// it holds (§10 rule 4): a record or tuple its fields last first, an `Option` or `Result`
+// its variant's resource, a list its elements last first, and a map its entries last first.
+// A field moved out of a record is abandoned on its own, and the record abandons the rest.
+// A `take` parameter belongs to the callee, which abandons it. The values a call or a
+// literal holds while a later argument fails are abandoned, newest first, and so are the
+// elements a consuming loop hasn't reached, after its loop variable. A base resource whose
+// own `take self` method fails is abandoned, unless a resource field of it has moved out,
+// when only the rest of its resource fields are (OPEN_QUESTIONS P5).
+use std.io { Out, IoError }
+
+resource record Probe {
+    name: Text
+    out: Out
+}
+
+impl Probe {
+    fn close(take self) {
+        say(out: self.out, line: f"close {self.name}")
+    }
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.name}")
+    }
+}
+
+resource record Conn {
+    name: Text
+    first: Probe
+    second: Probe
+}
+
+impl Conn {
+    fn fail_whole(take self) fails Stop {
+        fail Stop.Halt
+    }
+
+    fn fail_half(take self) fails Stop {
+        self.first.close()
+        fail Stop.Halt
+    }
+}
+
+impl Abandon for Conn {
+    fn abandon(take self) {
+        say(out: self.first.out, line: f"abandon conn {self.name}")
+        self.second.abandon()
+        self.first.abandon()
+    }
+}
+
+record Pair {
+    left: Probe
+    count: Int
+    right: Probe
+}
+
+enum Slot {
+    Empty
+    Two(first: Probe, second: Probe)
+}
+
+enum Stop {
+    Halt
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)
+}
+
+fn open(name: Text, out: keep Out) -> Probe {
+    return Probe(name: name, out: out)
+}
+
+fn stop(out: Out, why: Text) -> Probe fails Stop {
+    say(out: out, line: f"failing: {why}")
+    fail Stop.Halt
+}
+
+fn make_pair(left: take Probe, right: take Probe) -> Pair {
+    return Pair(left: left, count: 2, right: right)
+}
+
+fn locals(out: keep Out, consumed: Bool) fails Stop {
+    let first = open(name: "first", out: out)
+    let second = open(name: "second", out: out)
+    if consumed {
+        first.close()
+    }
+    let third = open(name: "third", out: out)
+    var n = 0
+    loop {
+        n += 1
+        let turn = open(name: f"turn {n}", out: out)
+        if n == 2 {
+            fail Stop.Halt
+        }
+        turn.close()
+    }
+}
+
+fn propagated(out: keep Out) fails Stop {
+    let held = open(name: "held", out: out)
+    let got = try stop(out: out, why: "try")
+    got.close()
+    held.close()
+}
+
+fn converted(out: keep Out) fails Stop {
+    let held = open(name: "held", out: out)
+    let got = stop(out: out, why: "else") else fail Stop.Halt
+    got.close()
+    held.close()
+}
+
+fn taken(probe: take Probe) fails Stop {
+    fail Stop.Halt
+}
+
+fn transferred(out: keep Out) fails Stop {
+    let kept = open(name: "kept", out: out)
+    try taken(probe: open(name: "given", out: out))
+    kept.close()
+}
+
+fn aggregates(out: keep Out) fails Stop {
+    let pair = Pair(left: open(name: "left", out: out), count: 1, right: open(name: "right", out: out))
+    let tuple = (open(name: "t1", out: out), open(name: "t2", out: out))
+    let some: Option[Probe] = Some(open(name: "some", out: out))
+    let none: Option[Probe] = None
+    let ok: Result[Probe, Stop] = Ok(open(name: "ok", out: out))
+    let err: Result[Probe, Stop] = Err(Stop.Halt)
+    let list = [open(name: "e1", out: out), open(name: "e2", out: out), open(name: "e3", out: out)]
+    let map = ["k1": open(name: "v1", out: out), "k2": open(name: "v2", out: out)]
+    let slots = [Slot.Two(first: open(name: "s1", out: out), second: open(name: "s2", out: out)), Slot.Empty]
+    fail Stop.Halt
+}
+
+fn moved_field(out: keep Out) fails Stop {
+    let pair = Pair(left: open(name: "left", out: out), count: 1, right: open(name: "right", out: out))
+    let moved = pair.left
+    fail Stop.Halt
+}
+
+fn arguments(out: keep Out) fails Stop {
+    let held = open(name: "held", out: out)
+    let built = make_pair(left: open(name: "arg", out: out), right: try stop(out: out, why: "argument"))
+    held.close()
+    built.left.close()
+    built.right.close()
+}
+
+fn literal(out: keep Out) fails Stop {
+    let list = [open(name: "x1", out: out), open(name: "x2", out: out), try stop(out: out, why: "element")]
+    for probe in take list {
+        probe.close()
+    }
+}
+
+fn consuming(out: keep Out) fails Stop {
+    let list = [open(name: "c1", out: out), open(name: "c2", out: out), open(name: "c3", out: out)]
+    for probe in take list {
+        if probe.name == "c2" {
+            fail Stop.Halt
+        }
+        probe.close()
+    }
+}
+
+fn conns(out: keep Out, half: Bool) fails Stop {
+    let conn = Conn(name: "c", first: open(name: "first", out: out), second: open(name: "second", out: out))
+    if half {
+        try conn.fail_half()
+    } else {
+        try conn.fail_whole()
+    }
+}
+
+fn run(out: Out, name: Text, outcome: Result[Unit, Stop]) {
+    say(out: out, line: f"-- {name}")
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let out = sys.stdout
+    run(out: out, name: "locals", outcome: attempt locals(out: out, consumed: false))
+    run(out: out, name: "locals consumed", outcome: attempt locals(out: out, consumed: true))
+    run(out: out, name: "propagated", outcome: attempt propagated(out: out))
+    run(out: out, name: "converted", outcome: attempt converted(out: out))
+    run(out: out, name: "transferred", outcome: attempt transferred(out: out))
+    run(out: out, name: "aggregates", outcome: attempt aggregates(out: out))
+    run(out: out, name: "moved field", outcome: attempt moved_field(out: out))
+    run(out: out, name: "arguments", outcome: attempt arguments(out: out))
+    run(out: out, name: "literal", outcome: attempt literal(out: out))
+    run(out: out, name: "consuming", outcome: attempt consuming(out: out))
+    run(out: out, name: "conn whole", outcome: attempt conns(out: out, half: false))
+    run(out: out, name: "conn half", outcome: attempt conns(out: out, half: true))
+    try sys.stdout.write_line("done")
+}
