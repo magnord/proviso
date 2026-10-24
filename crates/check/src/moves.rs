@@ -677,6 +677,9 @@ impl Walk<'_> {
                 let mode = match self.p.res(e) {
                     Some(Res::Fn(f)) if self.p.fns[f].receiver.is_some() => self.p.fns[f].self_mode,
                     Some(Res::Method(builtin)) if builtin.changes_receiver() => ParamMode::Inout,
+                    Some(Res::Dispatch { iface, method, qualified: false }) => {
+                        self.p.decls.iface(iface).methods[method].self_mode
+                    }
                     _ => ParamMode::Borrow,
                 };
                 self.call(e, Some((*receiver, mode)), args);

@@ -421,17 +421,22 @@ impl Parser<'_> {
                 return self.not_implemented("re-exports (`pub use`)", Planned::Unscheduled);
             }
             T::Keyword(Kw::Use) => ItemKind::Use(self.use_decl()?),
-            T::Keyword(Kw::Record) => ItemKind::Record(self.record_decl()?),
-            T::Keyword(Kw::Unique) if self.nth(1) == T::Keyword(Kw::Record) => {
+            // An `opaque` record hides its fields from other modules (REFERENCE §9.2), and a
+            // program is one module in phase 2, so it is a record like any other there
+            // (OPEN_QUESTIONS P5).
+            T::Keyword(Kw::Opaque)
+                if matches!(self.nth(1), T::Keyword(Kw::Record | Kw::Unique | Kw::Resource)) =>
+            {
                 self.bump();
-                ItemKind::Record(RecordDecl { unique: true, ..self.record_decl()? })
+                ItemKind::Record(self.kinded_record_decl()?)
             }
-            T::Keyword(Kw::Unique) => {
+            T::Keyword(Kw::Opaque) => {
                 self.poison_declared_type();
                 let span = self.peek().span;
-                self.error(codes::UNEXPECTED_TOKEN, span, "`unique` marks a record, as in `unique record Token { … }`");
+                self.error(codes::UNEXPECTED_TOKEN, span, "`opaque` marks a record, as in `opaque record Cache { … }`");
                 return Err(());
             }
+            T::Keyword(Kw::Record | Kw::Unique | Kw::Resource) => ItemKind::Record(self.kinded_record_decl()?),
             T::Keyword(Kw::Enum) => ItemKind::Enum(self.enum_decl()?),
             T::Keyword(Kw::Impl) => {
                 // The block is kept, so its methods are still checked.
@@ -612,6 +617,30 @@ impl Parser<'_> {
         Ok(UseDecl { path, names })
     }
 
+    /// `record`, `unique record` or `resource record` (REFERENCE §5.1, §10).
+    fn kinded_record_decl(&mut self) -> PResult<RecordDecl> {
+        let kind = self.kind();
+        if kind != T::Keyword(Kw::Record) {
+            if self.nth(1) != T::Keyword(Kw::Record) {
+                self.poison_declared_type();
+                let span = self.peek().span;
+                let message = match kind {
+                    T::Keyword(Kw::Unique) => "`unique` marks a record, as in `unique record Token { … }`",
+                    _ => "`resource` marks a record, as in `resource record Txn { … }`",
+                };
+                self.error(codes::UNEXPECTED_TOKEN, span, message);
+                return Err(());
+            }
+            self.bump();
+        }
+        let decl = self.record_decl()?;
+        Ok(RecordDecl {
+            unique: kind == T::Keyword(Kw::Unique),
+            resource: kind == T::Keyword(Kw::Resource),
+            ..decl
+        })
+    }
+
     fn record_decl(&mut self) -> PResult<RecordDecl> {
         self.bump();
         let name = self.ident("a record name")?;
@@ -625,6 +654,9 @@ impl Parser<'_> {
     fn record_rest(&mut self, name: Ident) -> PResult<RecordDecl> {
         if self.at(T::LBracket) {
             return self.not_implemented("generic records", Planned::Phase(2));
+        }
+        if self.at(T::Keyword(Kw::Uses)) {
+            return self.not_implemented("the `uses` of a record", Planned::Phase(3));
         }
         let derives = self.derives()?;
         let open = self.expect(T::LBrace, "`{` and the record's fields")?;
@@ -653,7 +685,7 @@ impl Parser<'_> {
             }
         }
         let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
-        Ok(RecordDecl { name, unique: false, derives, fields, refinement })
+        Ok(RecordDecl { name, unique: false, resource: false, derives, fields, refinement })
     }
 
     /// `derives(Eq, Show)`, or nothing.
@@ -2331,11 +2363,6 @@ fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
     Some(match kw {
         Kw::Type => ("`type` declarations", Planned::Phase(2)),
         Kw::Distinct => ("distinct types", Planned::Phase(2)),
-        // `unique record` is implemented, so only a `unique` that starts no record gets here, and
-        // the parser reports it before asking.
-        Kw::Unique => ("`unique` declarations", Planned::Phase(2)),
-        Kw::Opaque => ("`opaque` records", Planned::Phase(2)),
-        Kw::Resource => ("`resource` records", Planned::Phase(2)),
         Kw::Test => ("`test` blocks", Planned::Phase(2)),
         Kw::Cap => ("capability declarations", Planned::Phase(3)),
         Kw::Effect => ("effect parameters", Planned::Phase(3)),

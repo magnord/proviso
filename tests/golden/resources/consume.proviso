@@ -151,8 +151,8 @@ fn branches(out: keep Out, which: Bool) {
 fn records(out: keep Out) {
     let pair = Pair(left: open(name: "left", out: out), right: open(name: "right", out: out), count: 2)
     say(out: out, line: f"{pair.count}: {peek(probe: pair.left)}")
-    pair.right.close()
     let Pair(left: l, ..) = pair
+    pair.right.close()
     l.close()
     let tuple = (open(name: "t1", out: out), 3, open(name: "t2", out: out))
     let (t1, _, t2) = tuple
