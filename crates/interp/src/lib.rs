@@ -801,9 +801,17 @@ impl Interp<'_> {
     ) -> Flow<(Vec<Value>, Vec<Inout>)> {
         let mut values = Vec::with_capacity(args.len() + 1);
         let mut places = Vec::new();
-        let Shape { inout_self, can_fail, f } = shape;
+        let Shape { inout_self, can_fail, f, method } = shape;
         // An `inout` that keeps partial changes is written back however the call ends.
         let partial = |p: &Program, i: Option<usize>| {
+            if let Some((iface, j, self_value, first)) = method {
+                // An interface's methods borrow or take `self`, and its parameters may name
+                // `Self`, the type of the value that gives it.
+                let Some(k) = i.and_then(|i| if first { i.checked_sub(1) } else { Some(i) }) else { return false };
+                let def = &p.decls.iface(iface).methods[j];
+                let ty = def.params[k].1.subst(std::slice::from_ref(p.ty(self_value)));
+                return def.modes[k] == ParamMode::InoutPartial || p.decls.is_resource(&ty);
+            }
             let Some(f) = f else { return false };
             let info = &p.fns[f];
             match i {
@@ -845,7 +853,12 @@ impl Interp<'_> {
     /// How function `f` takes its receiver and whether it can fail.
     fn shape(&self, f: FnId) -> Shape {
         let info = &self.p.fns[f];
-        Shape { inout_self: info.self_mode == ParamMode::Inout, can_fail: info.fails.is_some(), f: Some(f) }
+        Shape {
+            inout_self: info.self_mode == ParamMode::Inout,
+            can_fail: info.fails.is_some(),
+            f: Some(f),
+            method: None,
+        }
     }
 
     /// Notes a resource the running call now owns.
@@ -1262,9 +1275,11 @@ impl Interp<'_> {
                     Res::Fn(f) => self.shape(f),
                     // An interface's methods borrow `self`, and an implementation fails as its
                     // method is declared to.
-                    Res::Dispatch { iface, method, .. } => {
+                    Res::Dispatch { iface, method, qualified } => {
                         let can_fail = self.p.decls.iface(iface).methods[method].fails.is_some();
-                        Shape { inout_self: false, can_fail, f: None }
+                        let self_value = receiver.unwrap_or_else(|| args[0].value);
+                        let method = Some((iface, method, self_value, qualified));
+                        Shape { inout_self: false, can_fail, f: None, method }
                     }
                     _ => Shape::default(),
                 };
@@ -2062,13 +2077,16 @@ impl Step {
 }
 
 /// How a call takes its arguments: whether its receiver is `inout self`, and whether it can
-/// fail, so that its `inout` arguments are copied in rather than taken out, and the function
-/// it calls, if it is a declared one.
+/// fail, so that its `inout` arguments are copied in rather than taken out, and what it
+/// calls, if it is a declared function or an interface's method.
 #[derive(Clone, Copy, Default)]
 struct Shape {
     inout_self: bool,
     can_fail: bool,
     f: Option<FnId>,
+    /// An interface's method `j`, with the expression that gives `self` and whether that is
+    /// the call's first argument, as in `Iface.method(x)`.
+    method: Option<(IfaceId, usize, ExprId, bool)>,
 }
 
 /// An `inout` argument or receiver: the index of its value among a call's, and its place.
