@@ -30,3 +30,20 @@ close e1
 abandon e2
 abandon e3
 -- map loop
+close r0
+close e1
+close r-e1
+abandon r-e2
+abandon e2
+abandon e3
+-- reassigned in loop
+close r0
+close a
+close b
+abandon r1
+-- assigned in argument
+close deep a
+abandon deep b
+-- moved deep
+abandon gated
+-- moved unique

@@ -5,7 +5,10 @@
 // then, so it is abandoned before resources bound earlier. A resource a `match` arm bound
 // from a temporary is the arm's, a call that fails abandons its own before its caller
 // does, and `with` holds the record it copies while its arguments run. A consuming loop over
-// a map owns the entries it hasn't reached.
+// a map owns the entries it hasn't reached. A `var` given a new resource inside a consuming
+// loop, or inside a call's argument, keeps the loop's and the call's resources in place. A
+// base resource that a part of a field moved out of, at any depth and of any kind, abandons
+// the rest of its resource fields instead of calling its `abandon` (OPEN_QUESTIONS P5).
 use std.io { Out, IoError }
 use std.pool { Pool }
 
@@ -39,6 +42,39 @@ enum Box {
 
 enum Stop {
     Halt
+}
+
+record Two {
+    a: Probe
+    b: Probe
+}
+
+resource record Conn {
+    inner: Two
+}
+
+impl Abandon for Conn {
+    fn abandon(take self) {
+        say(out: self.inner.a.out, line: "abandon conn")
+        self.inner.b.abandon()
+        self.inner.a.abandon()
+    }
+}
+
+unique record Ticket {
+    n: Int
+}
+
+resource record Gate {
+    ticket: Ticket
+    probe: Probe
+}
+
+impl Abandon for Gate {
+    fn abandon(take self) {
+        say(out: self.probe.out, line: f"abandon gate {self.ticket.n}")
+        self.probe.abandon()
+    }
 }
 
 fn say(out: Out, line: Text) {
@@ -120,6 +156,51 @@ fn map_loop(out: keep Out) fails Stop {
     }
 }
 
+fn reassigned_in_loop(out: keep Out) fails Stop {
+    var r = p(name: "r0", out: out)
+    let list = [p(name: "e1", out: out), p(name: "e2", out: out), p(name: "e3", out: out)]
+    for e in take list {
+        r.close()
+        r = p(name: f"r-{e.name}", out: out)
+        if e.name == "e2" {
+            fail Stop.Halt
+        }
+        e.close()
+    }
+    r.close()
+}
+
+fn both(a: take Probe, b: take Probe) {
+    a.close()
+    b.close()
+}
+
+fn assigned_in_argument(out: keep Out, c: Bool) fails Stop {
+    var r = p(name: "r0", out: out)
+    r.close()
+    both(a: p(name: "a", out: out), b: if c {
+        r = p(name: "r1", out: out)
+        p(name: "b", out: out)
+    } else {
+        r = p(name: "r2", out: out)
+        p(name: "b2", out: out)
+    })
+    fail Stop.Halt
+}
+
+fn moved_deep(out: keep Out) fails Stop {
+    let c = Conn(inner: Two(a: p(name: "deep a", out: out), b: p(name: "deep b", out: out)))
+    let a = c.inner.a
+    a.close()
+    fail Stop.Halt
+}
+
+fn moved_unique(out: keep Out) fails Stop {
+    let g = Gate(ticket: Ticket(n: 1), probe: p(name: "gated", out: out))
+    let t = g.ticket
+    fail Stop.Halt
+}
+
 fn run(out: Out, name: Text, r: Result[Unit, Stop]) {
     say(out: out, line: f"-- {name}")
 }
@@ -133,4 +214,8 @@ pub fn main(sys: keep System) fails IoError {
     run(out: out, name: "outer", r: attempt outer(out: out))
     run(out: out, name: "with", r: attempt with_held(out: out))
     run(out: out, name: "map loop", r: attempt map_loop(out: out))
+    run(out: out, name: "reassigned in loop", r: attempt reassigned_in_loop(out: out))
+    run(out: out, name: "assigned in argument", r: attempt assigned_in_argument(out: out, c: true))
+    run(out: out, name: "moved deep", r: attempt moved_deep(out: out))
+    run(out: out, name: "moved unique", r: attempt moved_unique(out: out))
 }

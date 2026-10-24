@@ -458,6 +458,7 @@ fn on_interp_thread<'a, R: Send>(
                     generations: 0,
                     pools: 0,
                     owned: Vec::new(),
+                    acquired: 0,
                     base: 0,
                 };
                 run(&mut interp)
@@ -521,9 +522,13 @@ struct Interp<'a> {
     generations: u64,
     /// The last identity a pool took.
     pools: u64,
-    /// The resources the calls in progress own, oldest first, which a failure exit abandons
-    /// newest first (REFERENCE §10). Each call's come after its caller's.
-    owned: Vec<Owned>,
+    /// The resources the calls in progress own, each with when it was acquired, which a
+    /// failure exit abandons newest first (REFERENCE §10). Each call's come after its
+    /// caller's. An entry never moves, since a call, literal or loop keeps where its own
+    /// begin, so a local given a new value is acquired again in place.
+    owned: Vec<(u64, Owned)>,
+    /// The last acquisition the run made.
+    acquired: u64,
     /// Where the running call's resources begin in `owned`.
     base: usize,
 }
@@ -672,7 +677,7 @@ impl Interp<'_> {
         frame.resize(self.p.fns[f].locals, Value::Unit);
         let mark = self.owned.len();
         for &(local, span) in &self.p.fns[f].owned {
-            self.owned.push(Owned::Local(local, span));
+            self.acquire(Owned::Local(local, span));
         }
         let outer = std::mem::replace(&mut self.base, mark);
         self.depth += 1;
@@ -705,8 +710,10 @@ impl Interp<'_> {
     /// `unwind` leaves it. A defect in an `abandon` is reported and leaks its resource, and the
     /// first one replaces an error that began the exit (REFERENCE §10; OPEN_QUESTIONS T10).
     fn abandon_owned(&mut self, mark: usize, frame: &mut Frame, mut unwind: Unwind) -> Unwind {
-        while self.owned.len() > mark {
-            let (value, span) = match self.owned.pop().expect("there is one above the mark") {
+        let mut owned = self.owned.split_off(mark);
+        owned.sort_by_key(|(acquired, _)| *acquired);
+        while let Some((_, entry)) = owned.pop() {
+            let (value, span) = match entry {
                 Owned::Local(local, span) => (std::mem::replace(&mut frame[local.index()], Value::Unit), span),
                 Owned::Value(value, span) => (value, span),
                 Owned::Rest(mut rest, span) => {
@@ -721,8 +728,9 @@ impl Interp<'_> {
 
     /// Abandons the resources in `value`, which the binding or expression at `span` owned:
     /// the base resources it holds, at any depth, last first (REFERENCE §10 rule 4). A base
-    /// resource whose resource field moved out of it abandons the rest of its resource fields
-    /// instead, since its `abandon` would read the one that is gone (OPEN_QUESTIONS P5).
+    /// resource that a field, or a part of one, moved out of abandons the rest of its
+    /// resource fields instead, since its `abandon` would read the one that is gone
+    /// (OPEN_QUESTIONS P5).
     fn abandon(&mut self, value: Value, span: Span, mut unwind: Unwind) -> Unwind {
         let p = self.p;
         let decls = &p.decls;
@@ -731,12 +739,7 @@ impl Interp<'_> {
             match value {
                 Value::Adt(adt) => {
                     let def = decls.adt(adt.def);
-                    let partial = def.resource_base
-                        && def.variants[adt.variant.index()]
-                            .fields
-                            .iter()
-                            .zip(adt.fields.iter())
-                            .any(|(field, value)| matches!(value, Value::Unit) && decls.is_resource(&field.ty));
+                    let partial = def.resource_base && has_hole(decls, &adt);
                     if def.resource_base && !partial {
                         let f = decls.impl_method(IfaceId::ABANDON, ImplKey::Adt(adt.def), 0);
                         let f = f.expect("the checker found every resource's `abandon`");
@@ -845,12 +848,35 @@ impl Interp<'_> {
         Shape { inout_self: info.self_mode == ParamMode::Inout, can_fail: info.fails.is_some(), f: Some(f) }
     }
 
+    /// Notes a resource the running call now owns.
+    fn acquire(&mut self, owned: Owned) {
+        self.acquired += 1;
+        self.owned.push((self.acquired, owned));
+    }
+
+    /// Notes that `local`, which the running call owns, holds a new value, bound at `span`
+    /// when given, and returns whether it was owned already.
+    fn reacquire(&mut self, local: LocalId, span: Option<Span>) -> bool {
+        let base = self.base;
+        let Some((acquired, Owned::Local(_, at))) =
+            self.owned[base..].iter_mut().rev().find(|(_, o)| matches!(o, Owned::Local(l, _) if *l == local))
+        else {
+            return false;
+        };
+        self.acquired += 1;
+        *acquired = self.acquired;
+        if let Some(span) = span {
+            *at = span;
+        }
+        true
+    }
+
     /// The value of `e`, which the call, literal or `match` around it holds until it takes
     /// it, when it is a resource that moves there (REFERENCE §10).
     fn held(&mut self, e: ExprId, frame: &mut Frame) -> Flow<Value> {
         let value = self.expr(e, frame)?;
         if self.p.held.get(e).is_some() {
-            self.owned.push(Owned::Value(value.clone(), self.m.exprs[e].span));
+            self.acquire(Owned::Value(value.clone(), self.m.exprs[e].span));
         }
         Ok(value)
     }
@@ -862,12 +888,9 @@ impl Interp<'_> {
             PatKind::Bind(_) if self.p.owned_binds.get(pat).is_some() => {
                 let local = *self.p.pat_local.get(pat).expect("bindings are resolved");
                 // A local bound again owns only its new value, which is acquired now.
-                let base = self.base;
-                if let Some(i) = self.owned[base..].iter().rposition(|o| matches!(o, Owned::Local(l, _) if *l == local))
-                {
-                    self.owned.remove(base + i);
+                if !self.reacquire(local, Some(m.pats[pat].span)) {
+                    self.acquire(Owned::Local(local, m.pats[pat].span));
                 }
-                self.owned.push(Owned::Local(local, m.pats[pat].span));
             }
             PatKind::Tuple(parts) => {
                 for &part in parts {
@@ -993,13 +1016,7 @@ impl Interp<'_> {
                 let (root, path) = self.place(*target, frame)?;
                 // A local given a new resource acquires it now (REFERENCE §10 rule 3).
                 if path.is_empty() {
-                    let base = self.base;
-                    if let Some(i) =
-                        self.owned[base..].iter().position(|o| matches!(o, Owned::Local(l, _) if *l == root))
-                    {
-                        let entry = self.owned.remove(base + i);
-                        self.owned.push(entry);
-                    }
+                    self.reacquire(root, None);
                 }
                 let slot = slot(&mut frame[root.index()], &path)?;
                 *slot = match op.bin_op() {
@@ -1647,9 +1664,9 @@ impl Interp<'_> {
         };
         rest.reverse();
         let at = self.owned.len();
-        self.owned.push(Owned::Rest(rest, self.m.exprs[iter].span));
+        self.acquire(Owned::Rest(rest, self.m.exprs[iter].span));
         loop {
-            let Owned::Rest(rest, _) = &mut self.owned[at] else {
+            let (_, Owned::Rest(rest, _)) = &mut self.owned[at] else {
                 unreachable!("the loop's elements stay at its mark")
             };
             let Some(item) = rest.pop() else { break };
@@ -2503,6 +2520,20 @@ fn quote(text: &str, quote: char) -> String {
     }
     out.push(quote);
     out
+}
+
+/// Whether a field of the record or tuple `adt`, or a part of one, has moved out, which
+/// leaves `Unit` in its place. A tuple's element may be `Unit` itself, which counts too.
+fn has_hole(decls: &Decls, adt: &Adt) -> bool {
+    let def = decls.adt(adt.def);
+    if def.is_enum() || def.is_native() {
+        return false;
+    }
+    def.variants[adt.variant.index()].fields.iter().zip(adt.fields.iter()).any(|(field, value)| match value {
+        Value::Unit => def.params > 0 || field.ty != Ty::Unit,
+        Value::Adt(inner) => has_hole(decls, inner),
+        _ => false,
+    })
 }
 
 #[cfg(test)]
