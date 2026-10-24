@@ -4,5 +4,5 @@ defect[division_by_zero]: `/` by zero
 defect[assertion_failed]: assertion failed: not self.fragile
   at resources/leak_after_defect.proviso:24:9 (leak_after_defect.Probe.Abandon.abandon+3)
   called from resources/leak_after_defect.proviso:34:9 (leak_after_defect.work+3)
-leak[Probe]: this `Probe` leaked, since its `abandon` hit the defect above
+leak[Probe]: this `Probe` leaked, since its `abandon` hit a defect
   at resources/leak_after_defect.proviso:34:9 (leak_after_defect.work+3)

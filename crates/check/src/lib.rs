@@ -1532,7 +1532,7 @@ impl Checker<'_> {
                 let receiver = method.receiver.expect("the parser keeps only interface methods with `self`");
                 if !matches!(receiver.mode, ParamMode::Borrow | ParamMode::Take) {
                     let what = "interface methods that take `inout self`";
-                    self.not_implemented(receiver.span, what, Planned::Phase(2));
+                    self.not_implemented(receiver.span, what, Planned::Unscheduled);
                     incomplete = true;
                     continue;
                 }
@@ -6310,8 +6310,9 @@ fn later_collection_method(name: &str) -> Option<(&'static str, Planned)> {
         "map" | "filter" => ("operations that take a closure", Planned::Phase(3)),
         // STD.md declares none of them.
         "is_sorted" | "is_permutation_of" | "is_unique" => ("the predicates of §8.1", Planned::Unscheduled),
-        // `replace` returns a resource it would otherwise discard (REFERENCE §10 rule 5).
-        "replace" => ("operations on collections of resources", Planned::Phase(2)),
+        // `replace` returns a resource it would otherwise discard (REFERENCE §10 rule 5), but
+        // STD.md doesn't declare it yet.
+        "replace" => ("list operations that STD.md doesn't declare, such as `replace`,", Planned::Unscheduled),
         "swap" | "sort" => ("collection operations that STD.md doesn't declare", Planned::Unscheduled),
         _ => return None,
     })

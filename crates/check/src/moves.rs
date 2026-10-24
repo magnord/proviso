@@ -1016,7 +1016,7 @@ impl Walk<'_> {
             return;
         }
         if resource && !self.unrefined(local, &path) && self.read_by_refinement(local, &path) {
-            let what = "moving a resource out of a field that its record's refinement reads, which may run again,";
+            let what = "moves of a resource out of a field that its record's refinement reads, which may run again,";
             if self.reported.insert((codes::NOT_IMPLEMENTED.id, self.span(e))) {
                 self.unscheduled.push((self.span(e), what.to_string()));
             }

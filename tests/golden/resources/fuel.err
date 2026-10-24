@@ -3,9 +3,9 @@ defect[fuel_exhausted]: the example took more than 1000000 steps
   called from resources/fuel.proviso:38:9 (fuel)
 defect[fuel_exhausted]: the example took more than 1000000 steps
   at resources/fuel.proviso:28:9 (fuel.spin+2)
-leak[Tag]: this `Tag` leaked, since its `abandon` hit the defect above
+leak[Tag]: this `Tag` leaked, since its `abandon` hit a defect
   at resources/fuel.proviso:28:9 (fuel.spin+2)
 defect[fuel_exhausted]: the example took more than 1000000 steps
   at resources/fuel.proviso:28:9 (fuel.spin+2)
-leak[Tag]: this `Tag` leaked, since its `abandon` hit the defect above
+leak[Tag]: this `Tag` leaked, since its `abandon` hit a defect
   at resources/fuel.proviso:28:9 (fuel.spin+2)

@@ -8,7 +8,11 @@
 // consumed whole, and nor does an arm that takes one apart consume it. A `take self` method of the type's own consumes `self` only once it has
 // consumed the resources `self` holds (OPEN_QUESTIONS Q35). Each leaked resource is
 // reported once, at its binding. A failure exit abandons instead, so a scope may fail
-// holding resources, and a borrowed parameter is lent, so its caller consumes it.
+// holding resources, and a borrowed parameter is lent, so its caller consumes it. Nothing
+// takes all of a pool's elements out, so an owned pool of resources is left over even when
+// empty (OPEN_QUESTIONS §G).
+use std.pool { Pool }
+
 resource record Probe {
     name: Text
 }
@@ -192,4 +196,7 @@ fn released(o: take Option[Probe], r: take Result[Probe, Stop]) {
         Ok(p) => p.close()
         _ => {}
     }
+}
+
+fn pooled(pool: take Pool[Probe]) {                 // <- E0507
 }

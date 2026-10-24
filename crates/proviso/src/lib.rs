@@ -227,7 +227,7 @@ impl Compiled {
                     reports.extend(defect.cleanup.iter().rev());
                 }
                 Report::Leak { ty, span } => {
-                    let _ = writeln!(out, "leak[{ty}]: this `{ty}` leaked, since its `abandon` hit the defect above");
+                    let _ = writeln!(out, "leak[{ty}]: this `{ty}` leaked, since its `abandon` hit a defect");
                     let _ = writeln!(out, "  at {} ({})", self.location(*span), self.anchor(*span));
                 }
             }
