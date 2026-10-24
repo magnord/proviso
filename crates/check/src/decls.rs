@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use proviso_syntax::ast::{ExprId, ParamMode};
 
@@ -363,6 +363,9 @@ pub struct Pred {
     pub field: Option<FieldIdx>,
 }
 
+/// An argument list [`Decls::is_resource`] has answered for, kept alive with the answer.
+type Known = (Arc<[Ty]>, bool);
+
 pub struct Decls {
     adts: Vec<AdtDef>,
     ifaces: Vec<IfaceDef>,
@@ -375,6 +378,12 @@ pub struct Decls {
     /// `Int`. It may have given them methods and interfaces, so uses of those aren't
     /// reported. A record or enum keeps this in its [`AdtDef`].
     unknown: HashSet<ImplKey>,
+    /// Whether the module declares a resource, without which no type is one.
+    any_resource: bool,
+    /// The argument lists [`Decls::is_resource`] has answered for, by address, so a deep type
+    /// such as a list of lists costs each level once over the whole program. Each entry keeps
+    /// its list alive, so the address isn't reused.
+    resource_args: Mutex<HashMap<usize, Known>>,
 }
 
 impl Default for Decls {
@@ -436,7 +445,16 @@ impl Default for Decls {
         let adts = vec![system, option, result, parse_error, AdtDef::tuple(2), list, map, pool, handle];
         debug_assert_eq!(adts.len(), AdtId::BUILT_IN);
         let tuples = HashMap::from([(2, AdtId::PAIR)]);
-        Decls { adts, ifaces, impls: HashMap::new(), tuples, unknown_tuples: false, unknown: HashSet::new() }
+        Decls {
+            adts,
+            ifaces,
+            impls: HashMap::new(),
+            tuples,
+            unknown_tuples: false,
+            unknown: HashSet::new(),
+            any_resource: false,
+            resource_args: Mutex::default(),
+        }
     }
 }
 
@@ -714,16 +732,19 @@ impl Decls {
     /// one, such as `Option[File]` or `List[File]`. A type parameter isn't, since a resource
     /// can't be a type argument of a generic function yet (OPEN_QUESTIONS P5).
     pub fn is_resource(&self, ty: &Ty) -> bool {
-        self.is_resource_in(ty, &mut HashSet::new())
-    }
-
-    fn is_resource_in(&self, ty: &Ty, seen: &mut HashSet<usize>) -> bool {
         match ty {
+            _ if !self.any_resource => false,
             Ty::Adt(id, _) if self.adt(*id).resource => true,
             Ty::Adt(AdtId::HANDLE, _) => false,
             Ty::Adt(_, args) => {
-                seen.insert(Arc::as_ptr(args) as *const Ty as usize)
-                    && args.iter().any(|arg| self.is_resource_in(arg, seen))
+                let key = Arc::as_ptr(args) as *const Ty as usize;
+                let cache = || self.resource_args.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some((_, known)) = cache().get(&key) {
+                    return *known;
+                }
+                let known = args.iter().any(|arg| self.is_resource(arg));
+                cache().insert(key, (args.clone(), known));
+                known
             }
             _ => false,
         }
@@ -755,6 +776,7 @@ impl Decls {
                 resources.push(a);
             }
         }
+        self.any_resource = !resources.is_empty();
         for a in &resources {
             self.adts[*a].resource = true;
         }
