@@ -373,6 +373,19 @@ pub struct Defect {
     pub cleanup: Vec<Report>,
 }
 
+/// Drops the cleanup reports with a stack of their own, since a cleanup defect may carry its
+/// own to any depth.
+impl Drop for Defect {
+    fn drop(&mut self) {
+        let mut reports = std::mem::take(&mut self.cleanup);
+        while let Some(report) = reports.pop() {
+            if let Report::Defect(mut defect) = report {
+                reports.append(&mut defect.cleanup);
+            }
+        }
+    }
+}
+
 /// A report from the cleanup that follows a failure exit.
 #[derive(Debug)]
 pub enum Report {
