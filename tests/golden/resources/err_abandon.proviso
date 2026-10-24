@@ -1,0 +1,79 @@
+// phase: 2.8
+// expect-error: E0309
+// expect-error: E0316
+// expect-error: E0314
+// expect-error: E0709
+// Every resource type implements `Abandon` (REFERENCE §10), so a `resource record` needs an
+// `impl Abandon`, whose `abandon` takes `take self` and can't fail (STD.md). An aggregate
+// that holds a resource abandons what it holds, so only a `resource record` implements it.
+// An interface method that takes `take self` is implemented with `take self`. An error type
+// can't be a resource (§10 rule 5), whether it is one or holds one.
+resource record Probe {
+    name: Text
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+resource record Bare {                              // <- E0309
+    id: Int
+}
+
+record Plain {
+    id: Int
+}
+
+impl Abandon for Plain {                            // <- E0316
+    fn abandon(take self) {}
+}
+
+record Holder {
+    probe: Probe
+}
+
+impl Abandon for Holder {                           // <- E0316
+    fn abandon(take self) {
+        self.probe.abandon()
+    }
+}
+
+resource record Borrowing {
+    id: Int
+}
+
+impl Abandon for Borrowing {
+    fn abandon(self) {}                             // <- E0314
+}
+
+enum Stop {
+    Halt
+}
+
+resource record Failing {
+    id: Int
+}
+
+impl Abandon for Failing {
+    fn abandon(take self) fails Stop {}             // <- E0314
+}
+
+interface Closer {
+    fn finish(take self) -> Int
+}
+
+impl Closer for Probe {
+    fn finish(self) -> Int {                        // <- E0314
+        return 0
+    }
+}
+
+fn fails_with_probe() fails Probe {                 // <- E0709
+}
+
+fn fails_with_option() fails Option[Probe] {        // <- E0709
+}
+
+fn uses_bare(b: take Bare) {
+    let id = b.id
+}

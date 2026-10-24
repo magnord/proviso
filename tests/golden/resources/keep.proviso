@@ -1,0 +1,54 @@
+// phase: 2.8
+// A `keep` parameter may have any type, and a capability such as `Out` may be stored in a
+// record, a variant, a list or an `Option`, and called through there (OPEN_QUESTIONS P3).
+// Copies of it write to the same stream (REFERENCE §9.6). Phase 2 doesn't check retention,
+// which comes with phase 3 (§9.3).
+use std.io { Out, IoError }
+
+record Logger {
+    prefix: Text
+    out: Out
+}
+
+enum Sink {
+    Silent
+    Loud(out: Out)
+}
+
+fn make_logger(prefix: Text, out: keep Out) -> Logger {
+    return Logger(prefix: prefix, out: out)
+}
+
+fn log(logger: Logger, line: Text) fails IoError {
+    try logger.out.write_line(f"{logger.prefix}{line}")
+}
+
+fn count(outs: keep List[Out], logger: keep Logger) -> Int {
+    return outs.len()
+}
+
+fn sink_to(sink: Sink, line: Text) fails IoError {
+    match sink {
+        Loud(out) => try out.write_line(line)
+        Silent => {}
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let first = make_logger(prefix: "> ", out: sys.stdout)
+    try log(logger: first, line: "hello")
+    let copy = first
+    try log(logger: copy.with(prefix: ">> "), line: "again")
+    try first.out.write_line("direct")
+    try sink_to(sink: Sink.Loud(sys.stdout), line: "sink")
+    try sink_to(sink: Sink.Silent, line: "silent")
+    let outs = [sys.stdout, first.out]
+    for out in outs {
+        try out.write_line("each")
+    }
+    let maybe: Option[Out] = Some(sys.stdout)
+    if maybe is Some(out) {
+        try out.write_line("maybe")
+    }
+    try sys.stdout.write_line(f"{count(outs: outs, logger: first)}")
+}

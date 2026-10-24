@@ -1,0 +1,247 @@
+// phase: 2.8
+// A resource has one owner, and every normal exit leaves the resources its scope owns
+// consumed or transferred, on every path (REFERENCE §10 rules 1 and 2). A `take self` method
+// in the type's own `impl` consumes `self` when it returns, once it has consumed the
+// resources `self` holds (OPEN_QUESTIONS Q35), and `abandon` called by hand does too. A
+// `take` parameter transfers ownership, and a result hands it back. A record, tuple,
+// `Option`, `Result`, `List` or `Map` that holds a resource is a resource (§5.1), and is
+// consumed by moving each resource out of it, by a field, a pattern or a consuming loop. An
+// arm whose variant holds no resource has nothing left to consume, and nor has an arm after
+// those that took every variant that does. A borrowed or `inout` resource is lent, so the
+// callee reads it and an `inout self` method changes it. A `var` whose resource was
+// consumed may take a new one, and an element popped from a list is owned (Q35).
+use std.io { Out, IoError }
+
+resource record Probe {
+    name: Text
+    out: Out
+}
+
+impl Probe {
+    fn close(take self) {
+        say(out: self.out, line: f"close {self.name}")
+    }
+
+    fn label(self) -> Text {
+        return f"probe {self.name}"
+    }
+
+    fn rename(inout self, name: Text) {
+        self.name = name
+    }
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.name}")
+    }
+}
+
+resource record Conn {
+    id: Int
+    probe: Probe
+}
+
+impl Conn {
+    fn close(take self) {
+        self.probe.close()
+    }
+}
+
+impl Abandon for Conn {
+    fn abandon(take self) {
+        self.probe.abandon()
+    }
+}
+
+record Pair {
+    left: Probe
+    right: Probe
+    count: Int
+}
+
+enum Slot {
+    Empty
+    Full(probe: Probe)
+    Two(first: Probe, second: Probe)
+}
+
+enum Refused {
+    Closed(name: Text)
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)
+}
+
+fn open(name: Text, out: keep Out) -> Probe {
+    return Probe(name: name, out: out)
+}
+
+fn open_if(name: Text, out: keep Out, ok: Bool) -> Probe fails Refused {
+    if not ok {
+        fail Refused.Closed(name: name)
+    }
+    return open(name: name, out: out)
+}
+
+fn consume(probe: take Probe) {
+    probe.close()
+}
+
+fn pass_on(probe: take Probe) -> Probe {
+    let mine = probe
+    return mine
+}
+
+fn peek(probe: Probe) -> Text {
+    return probe.label()
+}
+
+fn renamed(probe: inout Probe) {
+    probe.rename(name: f"{probe.name}!")
+}
+
+fn singles(out: keep Out) {
+    let a = open(name: "a", out: out)
+    say(out: out, line: peek(probe: a))
+    consume(probe: a)
+    var b = pass_on(probe: open(name: "b", out: out))
+    renamed(probe: &b)
+    b.rename(name: f"{b.name}?")
+    b.close()
+    open(name: "c", out: out).close()
+    let d = open(name: "d", out: out)
+    d.abandon()
+    var e = open(name: "e", out: out)
+    e.close()
+    e = open(name: "e2", out: out)
+    e.close()
+    let conn = Conn(id: 1, probe: open(name: "conn", out: out))
+    say(out: out, line: f"conn {conn.id} holds {peek(probe: conn.probe)}")
+    conn.close()
+}
+
+fn branches(out: keep Out, which: Bool) {
+    let p = open(name: f"p {which}", out: out)
+    if which {
+        p.close()
+    } else {
+        consume(probe: p)
+    }
+    let chosen = if which { open(name: "then", out: out) } else { open(name: "else", out: out) }
+    chosen.close()
+    var n = 0
+    while n < 3 {
+        n += 1
+        let looped = open(name: f"turn {n}", out: out)
+        if n == 2 {
+            looped.close()
+            continue
+        }
+        consume(probe: looped)
+    }
+    loop {
+        let last = open(name: "last", out: out)
+        last.close()
+        break
+    }
+}
+
+fn records(out: keep Out) {
+    let pair = Pair(left: open(name: "left", out: out), right: open(name: "right", out: out), count: 2)
+    say(out: out, line: f"{pair.count}: {peek(probe: pair.left)}")
+    pair.right.close()
+    let Pair(left: l, ..) = pair
+    l.close()
+    let tuple = (open(name: "t1", out: out), 3, open(name: "t2", out: out))
+    let (t1, _, t2) = tuple
+    t2.close()
+    t1.close()
+    let nested = (Pair(left: open(name: "n1", out: out), right: open(name: "n2", out: out), count: 0), 4)
+    let (Pair(left: n1, right: n2, ..), _) = nested
+    consume(probe: n2)
+    consume(probe: n1)
+}
+
+fn variants(out: keep Out) {
+    let some: Option[Probe] = Some(open(name: "some", out: out))
+    match some {
+        Some(probe) => probe.close()
+        None => say(out: out, line: "none")
+    }
+    let none: Option[Probe] = None
+    if none is Some(probe) {
+        probe.close()
+    }
+    let opened = attempt open_if(name: "ok", out: out, ok: true)
+    match opened {
+        Ok(probe) => probe.close()
+        Err(_) => say(out: out, line: "refused")
+    }
+    let refused = attempt open_if(name: "no", out: out, ok: false)
+    match refused {
+        Ok(probe) => probe.close()
+        _ => say(out: out, line: "refused no")
+    }
+    let deep: Option[Option[Probe]] = Some(Some(open(name: "deep", out: out)))
+    match deep {
+        Some(Some(probe)) => probe.close()
+        Some(None) => {}
+        None => {}
+    }
+    let slots = [Slot.Full(open(name: "full", out: out)), Slot.Empty, Slot.Two(first: open(name: "first", out: out), second: open(name: "second", out: out))]
+    for slot in take slots {
+        match slot {
+            Full(probe) => probe.close()
+            Two(first, second) => {
+                second.close()
+                first.close()
+            }
+            Empty => say(out: out, line: "empty")
+        }
+    }
+}
+
+fn collections(out: keep Out) {
+    var probes: List[Probe] = [open(name: "x1", out: out), open(name: "x2", out: out)]
+    probes.push(open(name: "x3", out: out))
+    match probes.pop() {
+        Some(probe) => probe.close()
+        None => {}
+    }
+    for probe in probes {
+        say(out: out, line: peek(probe: probe))
+    }
+    say(out: out, line: peek(probe: probes[0]))
+    for probe in take probes {
+        probe.close()
+    }
+    var named: Map[Text, Probe] = ["m": open(name: "m1", out: out)]
+    let old = named.set(key: "m", value: open(name: "m2", out: out))
+    match old {
+        Some(probe) => probe.close()
+        None => {}
+    }
+    for (key, probe) in take named {
+        say(out: out, line: f"key {key}")
+        probe.close()
+    }
+    let nested: List[Option[Pair]] = [Some(Pair(left: open(name: "l", out: out), right: open(name: "r", out: out), count: 1)), None]
+    for maybe in take nested {
+        if maybe is Some(pair) {
+            pair.left.close()
+            pair.right.close()
+        }
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    singles(out: sys.stdout)
+    branches(out: sys.stdout, which: true)
+    branches(out: sys.stdout, which: false)
+    records(out: sys.stdout)
+    variants(out: sys.stdout)
+    collections(out: sys.stdout)
+    try sys.stdout.write_line("done")
+}

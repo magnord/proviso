@@ -1,0 +1,144 @@
+// phase: 2.8
+// expect-error: E0508
+// A resource can't be overwritten or discarded (REFERENCE §10 rule 5). Assigning to a place
+// that may still hold one is an error, and so is an element of a list, which may. So is a
+// resource an expression produces and nothing takes: a call used as a statement, `let _`,
+// a field or method read of one, one passed where it is only borrowed, and a field that
+// `with` replaces. A pattern on a value that moves takes all of it, so a part it leaves is
+// lost, and an `is` test moves what it binds whether or not it matches (OPEN_QUESTIONS P5),
+// so it loses a resource when the variants it fails on may hold one. A `break` out of a
+// consuming loop, or a `return` while a call is being built, would drop what is left. A
+// `with` after the replaced field moved, and a resource that `set` hands back, are fine.
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+
+    fn label(self) -> Text {
+        return self.name
+    }
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+record Pair {
+    left: Probe
+    right: Probe
+}
+
+enum Slot {
+    Empty
+    Full(probe: Probe)
+    Two(first: Probe, second: Probe)
+}
+
+fn open(name: Text) -> Probe {
+    return Probe(name: name)
+}
+
+fn make_pair() -> Pair {
+    return Pair(left: open(name: "l"), right: open(name: "r"))
+}
+
+fn peek(probe: Probe) -> Text {
+    return probe.name
+}
+
+fn width(pair: take Pair, n: Int) -> Int {
+    pair.left.close()
+    pair.right.close()
+    return n
+}
+
+fn statement() {
+    open(name: "p")                                 // <- E0508
+}
+
+fn underscore() {
+    let _ = open(name: "p")                         // <- E0508
+    let q = open(name: "q")
+    let _ = q                                       // <- E0508
+}
+
+fn overwritten(c: Bool) {
+    var p = open(name: "a")
+    p = open(name: "b")                             // <- E0508
+    if c {
+        p.close()
+    }
+    p = open(name: "c")                             // <- E0508
+    p.close()
+}
+
+fn element(probes: take List[Probe]) {
+    var list = probes
+    list[0] = open(name: "x")                       // <- E0508
+    for p in take list {
+        p.close()
+    }
+}
+
+fn temporaries() -> Text {
+    let name = open(name: "p").name                 // <- E0508
+    let label = open(name: "q").label()             // <- E0508
+    return peek(probe: open(name: "r"))             // <- E0508
+}
+
+fn replaced(pair: take Pair) {
+    let fresh = pair.with(left: open(name: "l"))    // <- E0508
+    fresh.left.close()
+    fresh.right.close()
+}
+
+fn replaced_after_move(pair: take Pair) {
+    pair.left.close()
+    let fresh = pair.with(left: open(name: "l"))
+    fresh.left.close()
+    fresh.right.close()
+}
+
+fn tested(t: take Slot) {
+    if t is Full(p) {                               // <- E0508
+        p.close()
+    }
+}
+
+fn temp_tested() -> Bool {
+    return Some(open(name: "p")) is None            // <- E0508
+}
+
+fn rest_of_variant(o: take Option[Pair]) {
+    match o {
+        Some(Pair(left: l, ..)) => l.close()        // <- E0508
+        None => {}
+    }
+}
+
+fn rest_of_temp() {
+    let Pair(left: l, ..) = make_pair()                  // <- E0508
+    l.close()
+}
+
+fn handed_back(m: inout Map[Text, Probe]) {
+    m.set(key: "k", value: open(name: "p"))         // <- E0508
+    let old = m.set(key: "k", value: open(name: "q"))
+    match old {
+        Some(p) => p.close()
+        None => {}
+    }
+}
+
+fn breaks_consuming(probes: take List[Probe]) {
+    for p in take probes {
+        p.close()
+        break                                       // <- E0508
+    }
+}
+
+fn returns_mid_call(c: Bool) -> Int {
+    return width(pair: Pair(left: open(name: "l"), right: open(name: "r")), n: if c { return 0 } else { 1 }) // <- E0508
+}

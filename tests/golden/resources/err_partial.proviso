@@ -1,0 +1,52 @@
+// phase: 2.8
+// expect-error: E0413
+// expect-error: E0506
+// A part of a refined value can't be passed as `inout(partial)`, since a failure would
+// leave it half updated (REFERENCE §5.4). That covers an `inout` of a resource, which is
+// partial whatever the parameter says. The whole refined value may be passed. An argument
+// for an `inout(partial)` parameter is marked with `&`, like any `inout` one (H5).
+resource record Probe {
+    name: Text
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+record Span {
+    lo: Int
+    hi: Int
+} where lo <= hi
+
+record Guarded {
+    probe: Probe
+    n: Int
+} where n > 0
+
+impl Guarded {
+    fn close(take self) {
+        self.probe.abandon()
+    }
+}
+
+fn set_ten(x: inout(partial) Int) {
+    x = 10
+}
+
+fn shift_span(span: inout(partial) Span) {
+    span.hi = 5
+}
+
+fn rename(probe: inout Probe) {
+    probe.name = "renamed"
+}
+
+fn calls() {
+    var span = Span(lo: 1, hi: 4)
+    set_ten(x: &span.lo)                            // <- E0413
+    shift_span(span: &span)
+    set_ten(x: span.hi)                             // <- E0506
+    var guarded = Guarded(probe: Probe(name: "p"), n: 1)
+    rename(probe: &guarded.probe)                   // <- E0413
+    guarded.close()
+}
