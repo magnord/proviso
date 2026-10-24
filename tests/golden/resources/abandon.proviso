@@ -95,7 +95,7 @@ fn locals(out: keep Out, consumed: Bool) fails Stop {
     }
     let third = open(name: "third", out: out)
     var n = 0
-    while n < 2 {
+    loop {
         n += 1
         let turn = open(name: f"turn {n}", out: out)
         if n == 2 {
@@ -103,8 +103,6 @@ fn locals(out: keep Out, consumed: Bool) fails Stop {
         }
         turn.close()
     }
-    third.close()
-    second.close()
 }
 
 fn propagated(out: keep Out) fails Stop {

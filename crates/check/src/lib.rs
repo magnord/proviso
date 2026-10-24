@@ -153,6 +153,9 @@ pub struct FnInfo {
     pub fails: Option<Ty>,
     /// Number of local slots, `self` and the parameters first.
     pub locals: usize,
+    /// The resource parameters it owns, which a failure exit abandons, with their spans:
+    /// `take` ones, and a `take self` other than an `abandon`'s, which can't abandon itself.
+    pub owned: Vec<(LocalId, Span)>,
     /// Its declaration was rejected, so its body isn't checked and its calls aren't reported
     /// (REFERENCE §15.1).
     pub rejected: bool,
@@ -227,6 +230,14 @@ pub struct Program {
     /// The `match` arms whose patterns move the whole local or field their scrutinee names,
     /// which leaves its place when the arm is chosen.
     pub arms_out: SideTable<Pat, ()>,
+    /// The expressions whose resource a call, construction, literal or `match` holds while
+    /// the rest of it runs, which a failure exit then abandons (REFERENCE §10).
+    pub held: SideTable<Expr, ()>,
+    /// The bindings that own a resource, which a failure exit abandons.
+    pub owned_binds: SideTable<Pat, ()>,
+    /// The resource parts each pattern moves out of the place its value is in, as paths of
+    /// fields from that place, which the interpreter takes out when the pattern matches.
+    pub parts_out: SideTable<Pat, Box<[Box<[FieldIdx]>]>>,
     /// The module's examples, in declaration order.
     pub examples: Vec<ExampleInfo>,
 }
@@ -1084,6 +1095,9 @@ impl Checker<'_> {
                     self.key_bound(&ty, span);
                     return;
                 }
+                if self.resource_targ(&ty, &callee, &param, span) {
+                    return;
+                }
                 if let Some(&iface) = ifaces.iter().find(|&&iface| !self.implements(&ty, iface)) {
                     let message = format!(
                         "`{}` does not implement `{}`, which `{callee}` needs of `{param}`",
@@ -1547,7 +1561,14 @@ impl Checker<'_> {
                     self.exposes(decl.name, vis, &fails.clone().unwrap_or(Ty::Never), at);
                 }
                 if cased && !duplicate {
-                    methods.push(IfaceMethod { name: text.into(), self_mode: receiver.mode, params, modes, ret, fails });
+                    methods.push(IfaceMethod {
+                        name: text.into(),
+                        self_mode: receiver.mode,
+                        params,
+                        modes,
+                        ret,
+                        fails,
+                    });
                 }
             }
             let def = self.p.decls.iface_mut(id);
@@ -1662,12 +1683,13 @@ impl Checker<'_> {
                     .collect();
                 self.f = state;
                 let mut preds = Vec::new();
+                let mut read = HashSet::new();
                 for (i, field) in kept.iter().enumerate() {
                     if let Some(expr) = field.refinement {
                         self.f.scopes = vec![vec![(field.name.sym, LocalId(i as u32))]];
                         self.check(expr, &Ty::Bool);
                         self.settle();
-                        self.predicate_moves(expr);
+                        read.extend(self.predicate_moves(expr));
                         preds.push(Pred { expr, field: Some(FieldIdx(i as u32)) });
                     }
                 }
@@ -1676,23 +1698,25 @@ impl Checker<'_> {
                     self.f.scopes = vec![all.collect()];
                     self.check(expr, &Ty::Bool);
                     self.settle();
-                    self.predicate_moves(expr);
+                    read.extend(self.predicate_moves(expr));
                     preds.push(Pred { expr, field: None });
                 }
                 let variant = &mut self.p.decls.adt_mut(id).variants[v];
                 variant.preds = preds;
                 variant.locals = self.f.locals.len();
+                variant.read_fields = (0..variant.fields.len()).map(|i| read.contains(&LocalId(i as u32))).collect();
             }
         }
     }
 
-    /// Checks what the refinement `expr` moves, which can't be the fields lent to it.
-    fn predicate_moves(&mut self, expr: ExprId) {
+    /// Checks what the refinement `expr` moves, which can't be the fields lent to it, and
+    /// returns the locals it reads.
+    fn predicate_moves(&mut self, expr: ExprId) -> HashSet<LocalId> {
         let m = self.m;
         let found =
             moves::Found { consumed: std::mem::take(&mut self.consumed), rejected: std::mem::take(&mut self.rejected) };
         let body = moves::Body::Predicate(expr);
-        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags);
+        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags)
     }
 
     fn signatures(&mut self) {
@@ -1736,6 +1760,7 @@ impl Checker<'_> {
                 ret: sig.ret,
                 fails: sig.fails,
                 locals: 0,
+                owned: Vec::new(),
                 rejected: sig.rejected,
             });
         }
@@ -1915,6 +1940,12 @@ impl Checker<'_> {
         }
         match IfaceId::prelude(text) {
             Some(iface @ (IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW | IfaceId::HASH | IfaceId::COPY)) => Some(iface),
+            // A type argument that is a resource waits for the reference (OPEN_QUESTIONS §G),
+            // and only a resource implements `Abandon`.
+            Some(IfaceId::ABANDON) => {
+                self.not_implemented(name.span, "`Abandon` constraints", Planned::Unscheduled);
+                None
+            }
             Some(_) => {
                 self.not_implemented(name.span, &format!("`{text}` constraints"), Planned::Phase(2));
                 None
@@ -2059,7 +2090,9 @@ impl Checker<'_> {
                     "`{target_text}` is a resource because it holds one, so abandoning it abandons what it holds; only a `resource record` implements `Abandon` (§10)"
                 )
             } else {
-                format!("`{target_text}` isn't a resource, so it has nothing to abandon; only a `resource record` implements `Abandon` (§10)")
+                format!(
+                    "`{target_text}` isn't a resource, so it has nothing to abandon; only a `resource record` implements `Abandon` (§10)"
+                )
             };
             self.error(codes::NOT_IMPLEMENTABLE, iface_name.span, message);
             self.declare_rejected(item, decl, &target);
@@ -2226,6 +2259,7 @@ impl Checker<'_> {
             ret: sig.ret,
             fails: sig.fails,
             locals: 0,
+            owned: Vec::new(),
             rejected: sig.rejected,
         });
         id
@@ -2576,7 +2610,41 @@ impl Checker<'_> {
         self.settle();
         let found =
             moves::Found { consumed: std::mem::take(&mut self.consumed), rejected: std::mem::take(&mut self.rejected) };
-        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, moves::Body::Fn(body), self.diags);
+        // The resources it owns from the start: its `take` parameters and a `take self`.
+        let info = &self.p.fns[id];
+        let decls = &self.p.decls;
+        let mut params: Vec<(LocalId, Span, String)> = Vec::new();
+        if let (Some(ty), Some(receiver)) = (&info.receiver, decl.receiver)
+            && info.self_mode == ParamMode::Take
+            && decls.is_resource(ty)
+        {
+            params.push((LocalId(0), receiver.span, "self".to_string()));
+        }
+        let first = usize::from(info.receiver.is_some());
+        for (i, (param, at)) in info.params.iter().zip(&decl.params).enumerate() {
+            if param.mode == ParamMode::Take && decls.is_resource(&param.ty) {
+                params.push((LocalId((first + i) as u32), at.span, m.text(param.name).to_string()));
+            }
+        }
+        // A `take self` method of a base resource consumes `self` when it returns, once it has
+        // consumed what `self` holds (OPEN_QUESTIONS Q35).
+        let consumes_self = info.self_mode == ParamMode::Take
+            && matches!(&info.receiver, Some(Ty::Adt(adt, _)) if decls.adt(*adt).resource_base);
+        // An `abandon` that hits a defect leaks `self`, rather than abandoning it again.
+        let abandon = consumes_self
+            && decls.impl_method(
+                IfaceId::ABANDON,
+                ImplKey::of(info.receiver.as_ref().expect("a method has a receiver")).expect("a record has a key"),
+                0,
+            ) == Some(id);
+        let owned = params
+            .iter()
+            .filter(|(local, ..)| !(abandon && *local == LocalId(0)))
+            .map(|(l, span, _)| (*l, *span))
+            .collect();
+        self.p.fns[id].owned = owned;
+        let body = moves::Body::Fn(moves::FnBody { block: body, params, consumes_self });
+        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags);
         self.p.fns[id].locals = self.f.locals.len();
         self.generic_scope.clear();
         self.param_names.clear();
@@ -4212,6 +4280,19 @@ impl Checker<'_> {
     /// arguments, and each must implement its parameter's constraints (REFERENCE §4.8;
     /// OPEN_QUESTIONS P5).
     #[allow(clippy::too_many_arguments)]
+    /// Reports a resource as the type argument for `param` of the generic function `callee`.
+    /// Its body may drop a value of a type parameter without `Copy`, which a resource can't
+    /// allow, and the reference doesn't say how a type parameter admits one (OPEN_QUESTIONS
+    /// §G). Returns whether it reported one.
+    fn resource_targ(&mut self, ty: &Ty, callee: &str, param: &str, span: Span) -> bool {
+        if !self.p.decls.is_resource(ty) {
+            return false;
+        }
+        let what = format!("resources, such as `{}`, as the type argument `{param}` of `{callee}`", self.show(ty));
+        self.not_implemented(span, &what, Planned::Unscheduled);
+        true
+    }
+
     fn fn_call(
         &mut self,
         e: ExprId,
@@ -4297,10 +4378,11 @@ impl Checker<'_> {
             // One with a variable in it is checked once the statement settles it, which
             // also walks a deep argument once rather than at each call around it.
             if self.vars.has_var(&ty) {
-                if !bounds.is_empty() {
-                    let (ifaces, callee, param) = (bounds.clone(), name.into(), param.clone());
-                    self.pending.push(Pending::Bound { ty: ty.clone(), ifaces, callee, param, span });
-                }
+                let (ifaces, callee, param) = (bounds.clone(), name.into(), param.clone());
+                self.pending.push(Pending::Bound { ty: ty.clone(), ifaces, callee, param, span });
+                continue;
+            }
+            if self.resource_targ(&ty, name, param, span) {
                 continue;
             }
             if let Some(&iface) = bounds.iter().find(|&&iface| !self.implements(&ty, iface)) {

@@ -331,13 +331,22 @@ pub struct VariantDef {
     pub preds: Vec<Pred>,
     /// The local slots its predicates need, fields first.
     pub locals: usize,
+    /// Whether its predicates read each field, by the field's index.
+    pub read_fields: Vec<bool>,
     /// Declared twice, so uses of it are not checked (REFERENCE §15.1).
     pub rejected: bool,
 }
 
 impl VariantDef {
     pub fn new(name: &str, fields: Vec<FieldDef>) -> VariantDef {
-        VariantDef { name: name.into(), locals: fields.len(), fields, preds: Vec::new(), rejected: false }
+        VariantDef {
+            name: name.into(),
+            locals: fields.len(),
+            read_fields: vec![false; fields.len()],
+            fields,
+            preds: Vec::new(),
+            rejected: false,
+        }
     }
 }
 
@@ -408,7 +417,9 @@ impl Default for Decls {
                     "Ord" => vec![method("cmp", vec![("other", Ty::Param(0))], Ty::Error)],
                     "Show" => vec![method("show", vec![], Ty::Text)],
                     // `abandon` takes `take self` and can't fail (STD.md).
-                    "Abandon" => vec![IfaceMethod { self_mode: ParamMode::Take, ..method("abandon", vec![], Ty::Unit) }],
+                    "Abandon" => {
+                        vec![IfaceMethod { self_mode: ParamMode::Take, ..method("abandon", vec![], Ty::Unit) }]
+                    }
                     _ => Vec::new(),
                 };
                 IfaceDef { name: name.into(), methods, incomplete: false }

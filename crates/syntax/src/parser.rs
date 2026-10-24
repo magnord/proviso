@@ -424,9 +424,7 @@ impl Parser<'_> {
             // An `opaque` record hides its fields from other modules (REFERENCE §9.2), and a
             // program is one module in phase 2, so it is a record like any other there
             // (OPEN_QUESTIONS P5).
-            T::Keyword(Kw::Opaque)
-                if matches!(self.nth(1), T::Keyword(Kw::Record | Kw::Unique | Kw::Resource)) =>
-            {
+            T::Keyword(Kw::Opaque) if matches!(self.nth(1), T::Keyword(Kw::Record | Kw::Unique | Kw::Resource)) => {
                 self.bump();
                 ItemKind::Record(self.kinded_record_decl()?)
             }
@@ -634,11 +632,7 @@ impl Parser<'_> {
             self.bump();
         }
         let decl = self.record_decl()?;
-        Ok(RecordDecl {
-            unique: kind == T::Keyword(Kw::Unique),
-            resource: kind == T::Keyword(Kw::Resource),
-            ..decl
-        })
+        Ok(RecordDecl { unique: kind == T::Keyword(Kw::Unique), resource: kind == T::Keyword(Kw::Resource), ..decl })
     }
 
     fn record_decl(&mut self) -> PResult<RecordDecl> {

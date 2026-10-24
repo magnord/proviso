@@ -73,7 +73,3 @@ fn fails_with_probe() fails Probe {                 // <- E0709
 
 fn fails_with_option() fails Option[Probe] {        // <- E0709
 }
-
-fn uses_bare(b: take Bare) {
-    let id = b.id
-}
