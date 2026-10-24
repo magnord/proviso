@@ -1110,7 +1110,7 @@ impl Walk<'_> {
                 self.expr(*init);
                 let ty = self.p.ty(*init).clone();
                 let gone = self.is_temp(*init) || self.consumed.contains(init);
-                if self.is_resource(&ty) && !self.tainted(*init) && self.lost(*pat, &ty, gone) {
+                if self.holds_resource(*init) && !self.tainted(*init) && self.lost(*pat, &ty, gone) {
                     let message = "this pattern leaves out a resource of the value it takes, which would drop it (§10)";
                     self.report(codes::RESOURCE_DISCARDED, m.pats[*pat].span, message.to_string());
                 }
@@ -1153,6 +1153,9 @@ impl Walk<'_> {
                             && let Some(state) = &mut self.state
                         {
                             state.release(local, path);
+                        } else if let Some(state) = &mut self.state {
+                            // A record released while empty holds what its part now does.
+                            state.unrelease(local, |p| is_prefix(p, &path));
                         }
                     }
                     Some((local, path)) => self.use_place(*target, local, &path),
@@ -1924,6 +1927,22 @@ impl Walk<'_> {
         }
     }
 
+    /// Notes that the place `e` may get a resource in place, as by `push`, an `&` argument or
+    /// an assignment to a part of it, so it, and what holds it, is no longer released.
+    fn filled(&mut self, e: ExprId) {
+        if !self.is_resource(self.p.ty(e)) {
+            return;
+        }
+        let mut at = e;
+        while let ExprKind::Index { base, .. } = self.m.exprs[at].kind {
+            at = base;
+        }
+        let Some((local, path)) = self.place(at) else { return };
+        if let Some(state) = &mut self.state {
+            state.unrelease(local, |p| is_prefix(p, &path) || is_prefix(&path, p));
+        }
+    }
+
     /// Records the access `e` makes for its call, and reports one it conflicts with. A lent
     /// or moved value matters only when its type is unique.
     fn note(&mut self, accesses: &mut Vec<CallAccess>, outer: usize, e: ExprId, access: Access) {
@@ -1932,6 +1951,7 @@ impl Walk<'_> {
         }
         if access == Access::Inout {
             self.change_lent(e, outer);
+            self.filled(e);
         }
         let Some((local, steps)) = self.access_path(e) else { return };
         if access == Access::Lent && !self.moves(self.p.ty(e)) {

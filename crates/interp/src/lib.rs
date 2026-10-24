@@ -760,7 +760,7 @@ impl Interp<'_> {
             match value {
                 Value::Adt(adt) => {
                     let def = decls.adt(adt.def);
-                    let partial = def.resource_base && has_hole(decls, &adt);
+                    let partial = def.resource_base && has_hole(decls, &adt, &[]);
                     if def.resource_base && !partial {
                         let f = decls.impl_method(IfaceId::ABANDON, ImplKey::Adt(adt.def), 0);
                         let f = f.expect("the checker found every resource's `abandon`");
@@ -2578,16 +2578,17 @@ fn quote(text: &str, quote: char) -> String {
     out
 }
 
-/// Whether a field of the record or tuple `adt`, or a part of one, has moved out, which
-/// leaves `Unit` in its place. A tuple's element may be `Unit` itself, which counts too.
-fn has_hole(decls: &Decls, adt: &Adt) -> bool {
+/// Whether a field of the record or tuple `adt`, whose type arguments are `args`, or a part
+/// of one, has moved out, which leaves `Unit` in a place whose type isn't `Unit`.
+fn has_hole(decls: &Decls, adt: &Adt, args: &[Ty]) -> bool {
     let def = decls.adt(adt.def);
     if def.is_enum() || def.is_native() {
         return false;
     }
-    def.variants[adt.variant.index()].fields.iter().zip(adt.fields.iter()).any(|(field, value)| match value {
-        Value::Unit => def.params > 0 || field.ty != Ty::Unit,
-        Value::Adt(inner) => has_hole(decls, inner),
+    let types = def.field_types(adt.variant, args);
+    types.iter().zip(adt.fields.iter()).any(|(ty, value)| match (value, ty) {
+        (Value::Unit, ty) => *ty != Ty::Unit,
+        (Value::Adt(inner), Ty::Adt(_, args)) => has_hole(decls, inner, args),
         _ => false,
     })
 }

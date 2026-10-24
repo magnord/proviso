@@ -8,7 +8,8 @@
 // a map owns the entries it hasn't reached. A `var` given a new resource inside a consuming
 // loop, or inside a call's argument, keeps the loop's and the call's resources in place. A
 // base resource that a part of a field moved out of, at any depth and of any kind, abandons
-// the rest of its resource fields instead of calling its `abandon` (OPEN_QUESTIONS P5).
+// the rest of its resource fields instead of calling its `abandon` (OPEN_QUESTIONS P5). A
+// `()` that a field holds is a value, not a part that moved out.
 use std.io { Out, IoError }
 use std.pool { Pool }
 
@@ -195,6 +196,23 @@ fn moved_deep(out: keep Out) fails Stop {
     fail Stop.Halt
 }
 
+resource record Tupled {
+    pair: (Probe, Unit)
+}
+
+impl Abandon for Tupled {
+    fn abandon(take self) {
+        let (probe, _) = self.pair
+        say(out: probe.out, line: "abandon tupled")
+        probe.abandon()
+    }
+}
+
+fn held_unit(out: keep Out) fails Stop {
+    let t = Tupled(pair: (p(name: "in tuple", out: out), ()))
+    fail Stop.Halt
+}
+
 fn moved_unique(out: keep Out) fails Stop {
     let g = Gate(ticket: Ticket(n: 1), probe: p(name: "gated", out: out))
     let t = g.ticket
@@ -218,4 +236,5 @@ pub fn main(sys: keep System) fails IoError {
     run(out: out, name: "assigned in argument", r: attempt assigned_in_argument(out: out, c: true))
     run(out: out, name: "moved deep", r: attempt moved_deep(out: out))
     run(out: out, name: "moved unique", r: attempt moved_unique(out: out))
+    run(out: out, name: "held unit", r: attempt held_unit(out: out))
 }

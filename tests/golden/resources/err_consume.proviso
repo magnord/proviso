@@ -10,7 +10,8 @@
 // reported once, at its binding. A failure exit abandons instead, so a scope may fail
 // holding resources, and a borrowed parameter is lent, so its caller consumes it. Nothing
 // takes all of a pool's elements out, so an owned pool of resources is left over even when
-// empty (OPEN_QUESTIONS §G).
+// empty (OPEN_QUESTIONS §G). A value bound while it holds no resource owns what is later put
+// in it in place, by a field, `push`, `set` or an `&` argument.
 use std.pool { Pool }
 
 resource record Probe {
@@ -199,4 +200,21 @@ fn released(o: take Option[Probe], r: take Result[Probe, Stop]) {
 }
 
 fn pooled(pool: take Pool[Probe]) {                 // <- E0507
+}
+
+record Spare {
+    probe: Option[Probe]
+}
+
+fn put(probes: inout List[Probe]) {
+    probes.push(open(name: "put"))
+}
+
+fn filled_later() {
+    var spare = Spare(probe: None)                  // <- E0507
+    spare.probe = Some(open(name: "field"))
+    var pushed: List[Probe] = []                    // <- E0507
+    pushed.push(open(name: "pushed"))
+    var given: List[Probe] = []                     // <- E0507
+    put(probes: &given)
 }

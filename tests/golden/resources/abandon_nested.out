@@ -47,3 +47,6 @@ abandon deep b
 -- moved deep
 abandon gated
 -- moved unique
+abandon tupled
+abandon in tuple
+-- held unit

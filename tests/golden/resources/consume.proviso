@@ -269,6 +269,8 @@ fn empties() {
     let pair: (Int, Option[Probe]) = (1, None)
     let none: List[Probe] = []
     let nothing: Map[Text, Probe] = [:]
+    let _ = Spare(probe: None)
+    let _: List[Probe] = []
     var cleared: List[Probe] = []
     cleared = []
     for probe in take cleared {

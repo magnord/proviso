@@ -287,6 +287,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         ifaces: Vec::new(),
         inherent: HashMap::new(),
         rejected_abandon: HashSet::new(),
+        rejected_abandon_for: HashSet::new(),
         unknown_tys: Vec::new(),
         f: FnState::new(Ty::Unit, None),
         in_chain: false,
@@ -538,6 +539,8 @@ struct Checker<'a> {
     /// The methods of a rejected `impl Abandon`, whose `self` isn't reported as left over,
     /// since its `abandon` was never going to be called (REFERENCE §15.1).
     rejected_abandon: HashSet<FnId>,
+    /// The types of those blocks, whose `Abandon.abandon(x)` may mean one of them.
+    rejected_abandon_for: HashSet<Ty>,
     /// Types without an [`ImplKey`], such as `Never` and `Out`, that a rejected `impl` block
     /// is for. They may have methods and interfaces that nothing records (REFERENCE §15.1).
     unknown_tys: Vec<Ty>,
@@ -2102,7 +2105,18 @@ impl Checker<'_> {
         // A `resource record` is a base resource, which its own `abandon` ends, and any other
         // resource abandons what it holds (REFERENCE §10 rule 4).
         if iface == IfaceId::ABANDON && !matches!(&target, Ty::Adt(id, _) if self.p.decls.adt(*id).resource_base) {
-            if self.p.decls.is_resource(&target) {
+            // A name declared twice may mean the other declaration, which is reported as such.
+            let twice = match &target {
+                Ty::Adt(id, _) => self
+                    .adts
+                    .iter()
+                    .find(|a| a.id == *id)
+                    .is_some_and(|found| self.adts.iter().filter(|a| a.name.sym == found.name.sym).count() > 1),
+                _ => false,
+            };
+            if twice {
+                // Reported at the second declaration.
+            } else if self.p.decls.is_resource(&target) {
                 let message = format!(
                     "`{target_text}` is a resource because it holds one, so it implements `Abandon` by itself, abandoning what it holds (§10)"
                 );
@@ -2114,6 +2128,7 @@ impl Checker<'_> {
             let first = self.p.fns.len();
             self.declare_rejected(item, decl, &target);
             self.rejected_abandon.extend(first..self.p.fns.len());
+            self.rejected_abandon_for.insert(target.clone());
             // A call of a method the block declares may mean it, so it isn't reported.
             if let Ty::Adt(adt, _) = target {
                 let entries = self.inherent.entry(adt).or_default();
@@ -3599,8 +3614,12 @@ impl Checker<'_> {
         }
         // A call that resolves to nothing, as on a receiver of an unknown type, is rejected
         // too, though its error was reported before it (REFERENCE §15.1).
-        let unresolved =
-            ty == Ty::Error && matches!(self.m.exprs[e].kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. });
+        let unresolved = ty == Ty::Error
+            && match self.m.exprs[e].kind {
+                ExprKind::Call { callee, .. } => self.p.res.get(callee).is_none(),
+                ExprKind::MethodCall { .. } => self.p.res.get(e).is_none(),
+                _ => false,
+            };
         if self.errors - before > self.inner_errors || unresolved {
             self.rejected.insert(e);
         }
@@ -4902,6 +4921,10 @@ impl Checker<'_> {
         }
         let receiver_ty = self.infer(first.value);
         let receiver_ty = self.force(&receiver_ty);
+        if iface == IfaceId::ABANDON && self.rejected_abandon_for.contains(&receiver_ty) {
+            self.rejected_args(rest);
+            return Ty::Error;
+        }
         if !receiver_ty.is_unknown() && !self.implements(&receiver_ty, iface) {
             let message = format!("`{}` does not implement `{iface_text}`", self.show(&receiver_ty));
             let at = self.span(first.value);

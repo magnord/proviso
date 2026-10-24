@@ -48,6 +48,7 @@ impl Abandon for Holder {                           // <- E0316
 fn rejected_calls(b: take Bare, p: Plain, h: take Holder) {
     b.abandon()
     p.abandon()
+    Abandon.abandon(p)
     h.abandon()
 }
 
@@ -96,5 +97,17 @@ resource record Twice {                             // <- E0202
 }
 
 impl Abandon for Twice {
+    fn abandon(take self) {}
+}
+
+record Mixed {
+    n: Int
+}
+
+resource record Mixed {                             // <- E0202
+    n: Int
+}
+
+impl Abandon for Mixed {
     fn abandon(take self) {}
 }
