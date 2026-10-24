@@ -682,9 +682,6 @@ impl Interp<'_> {
     /// which are its `inout` parameters, however the call ends. A failure exit abandons the
     /// resources the call still owns, newest first (REFERENCE §10).
     fn run(&mut self, f: FnId, args: Vec<Value>, site: Span, keep: &[usize]) -> (Flow<Value>, Vec<Value>) {
-        if let Err(unwind) = self.check_stack(site).and_then(|()| self.step(site)) {
-            return (Err(unwind), Vec::new());
-        }
         let body = self.p.decl(self.m, f).body.as_ref().expect("functions that run have bodies");
         let mut frame = args;
         frame.resize(self.p.fns[f].locals, Value::Unit);
@@ -693,9 +690,19 @@ impl Interp<'_> {
             self.acquire(Owned::Local(local, span));
         }
         let outer = std::mem::replace(&mut self.base, mark);
-        self.depth += 1;
-        let result = self.block(body, &mut frame);
-        self.depth -= 1;
+        // A call that can't start owns its arguments already, so it abandons them and hands
+        // its `inout` ones back as any other failure does.
+        let begun = self.check_stack(site).and_then(|()| self.step(site));
+        let started = begun.is_ok();
+        let result = match begun {
+            Ok(()) => {
+                self.depth += 1;
+                let result = self.block(body, &mut frame);
+                self.depth -= 1;
+                result
+            }
+            Err(unwind) => Err(unwind),
+        };
         self.base = outer;
         let result = match result {
             Ok(_) => Ok(Value::Unit),
@@ -708,7 +715,8 @@ impl Interp<'_> {
                 Ok(value)
             }
             Err(unwind) => match self.abandon_owned(mark, &mut frame, unwind) {
-                Unwind::Defect(mut defect) => {
+                // A defect at `site` itself, before the call began, isn't called from there.
+                Unwind::Defect(mut defect) if started => {
                     defect.callers.push(site);
                     Err(Unwind::Defect(defect))
                 }

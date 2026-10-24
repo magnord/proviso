@@ -1,0 +1,38 @@
+// phase: 2.8
+// run: test
+// expect-exit: 70
+// An example that runs out of fuel ends with a defect, which abandons what each frame owns
+// (REFERENCE §10 rule 3). A call that can't start owns its arguments already, so an `inout`
+// of a resource it was given goes back to its caller, which abandons it. No fuel is left for
+// `abandon`, so each resource is reported as leaked rather than lost (OPEN_QUESTIONS P5).
+resource record Tag {
+    name: Text
+}
+
+impl Tag {
+    fn close(take self) {}
+}
+
+impl Abandon for Tag {
+    fn abandon(take self) {}
+}
+
+enum Stop {
+    Halt
+}
+
+fn poke(ts: inout List[Tag]) fails Stop {
+}
+
+fn spin() -> Bool {
+    var ts = [Tag(name: "x"), Tag(name: "y")]
+    loop {
+        let _ = attempt poke(ts: &ts)
+    }
+    for t in take ts {
+        t.close()
+    }
+    return true
+}
+
+example spin() == true
