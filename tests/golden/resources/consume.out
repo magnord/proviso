@@ -31,6 +31,14 @@ close t2
 close t1
 close n2
 close n1
+close jr true
+close jl true
+close again r
+close again l
+close jl false
+close jr false
+close again r
+close again l
 close some
 close ok
 refused no

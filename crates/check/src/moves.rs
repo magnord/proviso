@@ -259,12 +259,22 @@ fn join(a: Option<State>, b: Option<State>) -> Option<State> {
                     moved.entry(key.clone()).or_insert_with(|| desc.clone());
                 }
             }
-            // Released on both paths, so it is released after either.
+            // Released on both paths, so it is released after either. A place released on
+            // one path is, on the other, when it or a place holding it is.
             if !a.released_in(&b) {
                 a.released = if b.released_in(&a) {
                     b.released
                 } else {
-                    Arc::new(a.released.intersection(&b.released).cloned().collect())
+                    let both = |x: &State, y: &State| {
+                        x.released
+                            .iter()
+                            .filter(|(l, path)| y.is_released(LocalId(*l), path))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    };
+                    let mut met: BTreeSet<(u32, Path)> = both(&a, &b).into_iter().collect();
+                    met.extend(both(&b, &a));
+                    Arc::new(met)
                 };
             }
             Some(a)
