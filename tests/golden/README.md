@@ -8,7 +8,7 @@ The golden tests of the implementation. `basics/` holds the phase-1 tests. The `
 - `fNN_<what>.out` is the expected stdout of `proviso run`, and `fNN_<what>.err` the expected stderr. A missing `.out` means no output on stdout. A missing `.err` means no output on stderr, except in a file with `expect-report`, whose stderr is then checked only for the expected reports. The §F files have no `.err`. They check runtime reports with `expect-report` instead (T10), so they don't depend on a report's message or call sites.
 - `fNN_<what>.sig` is the expected output of `proviso sig` for the symbol named by `// sig:`.
 
-- `basics/` holds the phase-1 tests of the implementation, `records/` the tests of slice 2.1, `enums/` those of slice 2.2, `option_result/` those of slice 2.3, `methods/` those of slice 2.4, `parse_user/` those of slice 2.5, and `collections/` those of slice 2.6. They follow the same format, except that their header has no `§F row` line, and their `.err` files fix the provisional defect output (OPEN_QUESTIONS P5). `inference/` follows the same format. It holds the tests of issues #10, #20, #22, #30 and #37, which check that inference doesn't depend on the order or spelling of operands, arguments and branches, that a literal has its settled type at run time, how unknown type arguments are reported, that a rejected value or an inferred error type causes no cascade, and that a method in a handler's chain leaves its error types to the handler.
+- `basics/` holds the phase-1 tests of the implementation, `records/` the tests of slice 2.1, `enums/` those of slice 2.2, `option_result/` those of slice 2.3, `methods/` those of slice 2.4, `parse_user/` those of slice 2.5, `collections/` those of slice 2.6, and `ownership/` those of slice 2.7. They follow the same format, except that their header has no `§F row` line, and their `.err` files fix the provisional defect output (OPEN_QUESTIONS P5). `inference/` follows the same format. It holds the tests of issues #10, #20, #22, #30 and #37, which check that inference doesn't depend on the order or spelling of operands, arguments and branches, that a literal has its settled type at run time, how unknown type arguments are reported, that a rejected value or an inferred error type causes no cascade, and that a method in a handler's chain leaves its error types to the handler.
 
 Error codes are in [../DIAGNOSTICS.md](../DIAGNOSTICS.md). The runner rejects an `expect-error` code that isn't in the catalog.
 
@@ -25,7 +25,7 @@ followed by any directives, each a full-line comment, then a comment explaining 
 
 `phase` is required. It is the P3 phase that must make the test pass. The runner skips a test whose phase is later than the implemented one and reports it as pending, after checking its header and markers. From that phase on, a failure is a regression. The runner walks `tests/golden/` recursively, so phase-specific tests can live in subdirectories.
 
-A phase delivered over several pull requests has slices, written `// phase: 2.1`, `// phase: 2.2` and so on, numbered from 1. Each pull request raises `IMPLEMENTED_PHASE` to its own slice, which turns on the tests that slice makes pass. `// phase: 2` still means the whole phase, so the §F rows stay pending until the last slice lands and the implemented phase becomes `2`. A whole phase sorts after its slices: `2.1 < 2.2 < 2 < 3.1`. The slices of phase 2 are:
+A phase delivered over several pull requests has slices, written `// phase: 2.1`, `// phase: 2.2` and so on, numbered from 1. Each pull request raises `IMPLEMENTED_PHASE` to its own slice, which turns on the tests that slice makes pass. `// phase: 2` still means the whole phase, so the §F rows stay pending until the last slice lands and the implemented phase becomes `2`. Rows 6 and 7 are the exception. They are slice 2.7's milestone, so they are written `// phase: 2.7`. A whole phase sorts after its slices: `2.1 < 2.2 < 2 < 3.1`. The slices of phase 2 are:
 
 | Slice | Scope |
 |---|---|
@@ -35,6 +35,7 @@ A phase delivered over several pull requests has slices, written `// phase: 2.1`
 | 2.4 | methods, interfaces and generic functions: `impl` blocks with `self` methods and associated functions, `Self` as a type, `interface` declarations and `impl I for T` for module types and prelude types such as `Int` and `Text`, hand-written `Eq` and `Show`, method resolution and `I.f(x)`, type parameters with constraints, inference and `::[…]`, interface-typed parameters, `Copy`, `derives(Ord, Hash)` |
 | 2.5 | the `parse_user` milestone of P3 (REFERENCE §17): tuples, their types and patterns, irrefutable patterns in `let`, the `else` forms and `it`, `check … else`, the `Text` methods of STD.md other than `lines`, `parse` on the integer types and `std.text`'s `ParseError`, `example` declarations, and `proviso test` with its fuel limit. Later than this slice are `impl` blocks for tuple types, the `Text` functions of §12.3 that STD.md doesn't declare, the conversions of §12.1, and `proviso check --examples` |
 | 2.6 | collections: `List` and `Map` from STD.md, list and map literals including the empty `[]` and `[:]`, indexing and assignment through an index, `for` over lists and maps with a pattern such as `(i, x)`, the `List` and `Map` methods of STD.md, of which `push`, `pop`, `set` and `remove` change a `var` or a part of one, `Text.lines`, and `Eq`, `Ord`, `Hash` and `Show` for both. Later than this slice are `Set`, which has no literal or constructor yet (OPEN_QUESTIONS Q37), `Array`, `in` tests and ranges outside `for` loops, consuming loops (`for x in take xs`), `inout` and `take` parameters and `&` arguments, the operations that take a closure, such as `map` and `filter`, and `replace`. STD.md declares no `swap`, no `sort`, and none of the predicates of §8.1, such as `is_sorted` |
+| 2.7 | kinds, moves and pools: `unique record` declarations, kinds and moves, use after move, `take` and `inout` parameters, `inout self` and `take self` methods, `&` arguments and the exclusivity of a call's arguments (§5.3), `inout` atomicity, consuming loops (`for x in take xs`), and `std.pool`'s `Pool` and `Handle`. §F rows 6 and 7 pass. Later than this slice are `resource` and `opaque` records, `Abandon`, `inout(partial)`, `keep` parameters of a type other than `System`, interface methods with `inout self` or `take self`, `Pool.update`, which takes a closure, aliases and `distinct` types |
 
 ## Directives
 
@@ -77,8 +78,8 @@ If an active file uses a directive the runner can't check yet, the file fails in
 | 3 | `f03_inout_part_reverifies_refinement` | 5 | E0412 |
 | 4 | `f04_observes_calls_effects` | 3 | E0601 |
 | 5 | `f05_closure_reach_not_admitted` | 3 | E0602 |
-| 6 | `f06_pool_used_after_move` | 2 | E0501 |
-| 7 | `f07_escaped_handle_is_stale` | 2 | runs; `.out` |
+| 6 | `f06_pool_used_after_move` | 2.7 | E0501 |
+| 7 | `f07_escaped_handle_is_stale` | 2.7 | runs; `.out` |
 | 8 | `f08_attempt_result_is_resource` | 2 | runs; `.out` |
 | 9 | `f09_abandon_defect_spares_the_rest` | 2 | exit 70, defect and leak reported; `.out` |
 | 10 | `f10_racing_writes_replay` | 6 | record and replay agree, overlap reported; `.out` |

@@ -1,11 +1,11 @@
 // phase: 2.4
 // expect-error: E0901
-// Receivers that mutate or take `self`, generic records and `impl` blocks, implementations
-// for generic types such as `Option[Int]`, a hand-written `Ord`, `Hash` or `Abandon`, `cmp`,
-// interface functions without `self`, generic interface methods, generic interfaces such
-// as `Index[Int]`, tag parameters, `Self` in expressions and patterns, and functions used
-// as values, such as `id::[Int]` without a call, come later. So do `take` and `inout`
-// parameters, implementations for `Never` and for capability types such as `Out`,
+// Generic records and `impl` blocks, implementations for generic types such as
+// `Option[Int]`, a hand-written `Ord`, `Hash` or `Abandon`, `cmp`, interface functions
+// without `self`, generic interface methods, generic interfaces such as `Index[Int]`, tag
+// parameters, `Self` in expressions and patterns, and functions used as values, such as
+// `id::[Int]` without a call, come later. So do implementations for `Never` and for
+// capability types such as `Out`,
 // capability interfaces in an `impl`, a constraint or a call, and calls of the methods of
 // `Abandon`, `Index` and the operator interfaces. Uses of what they declare aren't reported
 // again (REFERENCE §15.1), and an `impl` may declare the methods its interface couldn't.
@@ -16,11 +16,11 @@ record Counter {
 }
 
 impl Counter {
-    fn bump(inout self) {                           // <- E0901
+    fn bump(inout self) {
         self.n += 1
     }
 
-    fn close(take self) -> Int {                    // <- E0901
+    fn close(take self) -> Int {
         return self.n
     }
 
@@ -100,14 +100,13 @@ fn logged[T: Out](x: T) -> Int {                    // <- E0901
     return 0
 }
 
-fn consume[T](x: take T) -> T {                     // <- E0901
+fn consume[T](x: take T) -> T {
     let y = x
     return y
 }
 
-fn update[T](x: inout T) -> T {                     // <- E0901
-    let y = x
-    return y
+fn update[T](x: inout T, y: take T) {
+    x = y
 }
 
 impl Size for Option[Int] {                         // <- E0901

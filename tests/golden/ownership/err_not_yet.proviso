@@ -1,0 +1,82 @@
+// phase: 2.7
+// expect-error: E0901
+// Resources and `Abandon` come in a later slice of phase 2, and so do `opaque` records,
+// `inout(partial)`, `keep` parameters of a type other than `System`, interface methods that
+// take `inout self` or `take self`, and `Pool.update`, which takes a closure. Uses of what
+// they declare aren't reported again (REFERENCE §15.1). Two `&` arguments to elements of one
+// list are disjoint when a fact such as `i != j` is in scope (§5.3), and facts come with the
+// verifier in phase 5. Indices that are the same variable or literals need no fact.
+use std.pool { Pool, Handle }
+
+resource record Lock {                              // <- E0901
+    id: Int
+}
+
+opaque record Secret {                              // <- E0901
+    id: Int
+}
+
+unique record Token {
+    id: Int
+}
+
+fn later_uses(l: Lock, s: Secret) -> Int {
+    return l.id + s.id
+}
+
+fn partial(x: inout(partial) Int) {                 // <- E0901
+    x = 1
+}
+
+fn kept(p: keep Pool[Int]) -> Int {                 // <- E0901
+    return p.len()
+}
+
+fn partial_calls() {
+    var v = 1
+    partial(x: v)
+    partial(x: &v)
+}
+
+fn update(pool: inout Pool[Int], h: Handle[Int]) -> Bool {
+    return pool.update(handle: h, change: 1)        // <- E0901
+}
+
+interface Finish {
+    fn finish(take self) -> Int                     // <- E0901
+}
+
+interface Grow {
+    fn grow(inout self)                             // <- E0901
+}
+
+impl Finish for Token {
+    fn finish(take self) -> Int {
+        return self.id
+    }
+}
+
+impl Abandon for Token {                            // <- E0901
+    fn abandon(take self) {
+    }
+}
+
+fn finished(t: take Token) -> Int {
+    return t.finish()
+}
+
+fn both(a: inout Int, b: inout Int) {
+    a = b
+}
+
+fn elements(i: Int, j: Int) {
+    var xs = [1, 2, 3]
+    both(a: &xs[i], b: &xs[j])                      // <- E0901
+    both(a: &xs[0], b: &xs[i])                      // <- E0901
+    if i != j {
+        both(a: &xs[i], b: &xs[j])                  // <- E0901
+    }
+    var grid = [[1, 2], [3, 4]]
+    both(a: &grid[i][0], b: &grid[j][0])            // <- E0901
+    both(a: &xs[i + 1], b: &xs[i + 1])              // <- E0901
+}

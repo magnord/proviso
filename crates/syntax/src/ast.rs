@@ -188,6 +188,8 @@ pub enum ParamMode {
 /// `record Span derives(Eq) { lo: Int, hi: Int } where lo <= hi` (REFERENCE §4.4).
 pub struct RecordDecl {
     pub name: Ident,
+    /// Declared `unique record`, so its values move instead of being copied (REFERENCE §5.1).
+    pub unique: bool,
     /// The interfaces named in `derives(…)`, which the checker resolves.
     pub derives: Vec<Ident>,
     pub fields: Vec<FieldDecl>,
@@ -375,11 +377,13 @@ pub enum ExprKind {
         label: Option<Ident>,
         body: Block,
     },
-    /// `for pat in iter`, whose pattern matches every element (REFERENCE §6.5).
+    /// `for pat in iter`, whose pattern matches every element, or `for pat in take iter`,
+    /// which consumes the collection element by element (REFERENCE §6.5).
     For {
         label: Option<Ident>,
         pat: PatId,
         iter: ExprId,
+        consume: bool,
         body: Block,
     },
     Todo(Option<String>),

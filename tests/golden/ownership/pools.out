@@ -1,0 +1,7 @@
+2 ada none 2 stale cy bob false true true
+-1 -1 1 -1 -1 1 1
+kept 2
+-1 2 false
+second 2 true
+36 Person(name: "ada", age: 36) ada
+[1, 2] 2

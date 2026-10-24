@@ -1,0 +1,117 @@
+// phase: 2.7
+// Pools, moves and `inout` calls take time in proportion to the work. A million inserts,
+// reads and removes of one pool change it in place. Moving a pool to a new name and back
+// copies none of it, and neither does passing a list as `inout` to a function that can't
+// fail, so a loop of such calls stays linear (OPEN_QUESTIONS P5). A consuming loop owns
+// each element it takes, and a `match` arm owns what its pattern moves out of the
+// scrutinee. A field that moves out of its record and back is never copied either.
+use std.io { IoError }
+use std.pool { Pool, Handle }
+
+fn add_one(xs: inout List[Int], i: Int) {
+    xs.push(i)
+}
+
+fn inserts(n: Int) -> Int {
+    var pool: Pool[Int] = Pool.new()
+    var handles: List[Handle[Int]] = []
+    for i in 0..n {
+        handles.push(pool.insert(i))
+    }
+    var total = 0
+    for h in handles {
+        total += pool[h]
+    }
+    for h in handles {
+        let gone = pool.remove(h) else 0
+    }
+    return total + pool.len()
+}
+
+fn inout_calls(n: Int) -> Int {
+    var xs: List[Int] = []
+    for i in 0..n {
+        add_one(xs: &xs, i: i)
+    }
+    return xs.len()
+}
+
+fn moves(n: Int) -> Int {
+    var pool: Pool[Int] = Pool.new()
+    for i in 0..n {
+        var next = pool
+        next.insert(i)
+        pool = next
+    }
+    return pool.len()
+}
+
+fn consumed(n: Int) -> Int {
+    var pools: List[Pool[Int]] = []
+    for i in 0..n {
+        var p: Pool[Int] = Pool.new()
+        p.insert(i)
+        pools.push(p)
+    }
+    var total = 0
+    for p in take pools {
+        var mine = p
+        mine.insert(0)
+        total += mine.len()
+    }
+    return total
+}
+
+fn matched(n: Int) -> Int {
+    var slot: Option[Pool[Int]] = Some(Pool.new())
+    for i in 0..n {
+        slot = match slot {
+            Some(p) if i >= 0 => {
+                var mine = p
+                mine.insert(i)
+                Some(mine)
+            }
+            _ => None
+        }
+    }
+    return match slot {
+        Some(p) => p.len()
+        None => 0
+    }
+}
+
+record Shelf {
+    pool: Pool[Int]
+    slot: Option[Pool[Int]]
+}
+
+fn field_moves(n: Int) -> Int {
+    var shelf = Shelf(pool: Pool.new(), slot: Some(Pool.new()))
+    for i in 0..n {
+        var p = shelf.pool
+        p.insert(i)
+        shelf.pool = p
+        shelf.slot = match shelf.slot {
+            Some(q) => {
+                var mine = q
+                mine.insert(i)
+                Some(mine)
+            }
+            None => None
+        }
+    }
+    let rest = match shelf.slot {
+        Some(q) => q.len()
+        None => 0
+    }
+    return shelf.pool.len() + rest
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(f"{inserts(1_000_000)}")
+    try sys.stdout.write_line(f"{inout_calls(300_000)}")
+    try sys.stdout.write_line(f"{moves(300_000)}")
+    try sys.stdout.write_line(f"{consumed(100_000)}")
+    try sys.stdout.write_line(f"{matched(300_000)}")
+    try sys.stdout.write_line(f"{field_moves(300_000)}")
+}

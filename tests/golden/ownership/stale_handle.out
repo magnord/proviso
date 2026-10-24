@@ -1,0 +1,5 @@
+ownership/stale_handle.proviso:37:1: example failed: it hit a defect
+ownership/stale_handle.proviso:38:1: example failed: it hit a defect
+ownership/stale_handle.proviso:39:1: example failed: it hit a defect
+ownership/stale_handle.proviso:40:1: example passed
+4 examples: 1 passed, 3 failed

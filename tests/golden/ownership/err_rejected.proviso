@@ -1,0 +1,217 @@
+// phase: 2.7
+// expect-error: E0306
+// expect-error: E0305
+// expect-error: E0501
+// expect-error: E0201
+// expect-error: E0208
+// expect-error: E0207
+// expect-error: E0303
+// expect-error: E0504
+// expect-error: E0506
+// expect-error: E0301
+// expect-error: E0701
+// expect-error: E0106
+// expect-error: E0303
+// A rejected call moves and lends nothing, and a rejected argument moves or accesses
+// nothing, so no move or overlap that depends on them is reported (REFERENCE §15.1). The
+// suppression stops at the rejected construct. An error about one argument rejects only
+// that argument, so the call's other arguments still move, and a missing `try` rejects
+// nothing. A call whose result has the wrong type still takes what it is given. A valid
+// call inside a rejected one still moves what it takes. A value used after it moved is
+// reported once, as a use after move, and isn't lent to its index, a guard or a call.
+use std.pool { Pool, Handle }
+
+unique record Token {
+    id: Int
+}
+
+impl Token {
+    pub fn finish(take self) -> Int {
+        return self.id
+    }
+}
+
+fn both(a: inout Int, b: inout Int) {
+    a = b
+}
+
+fn both_pools(a: inout Pool[Int], b: inout Pool[Int]) {
+}
+
+fn grow(a: inout Int) {
+    a += 1
+}
+
+fn eat(t: take Token) -> Int {
+    return t.id
+}
+
+fn consume(p: take Pool[Int]) -> Int {
+    return p.len()
+}
+
+fn rejected_places(pool: inout Pool[Int], h: Handle[Int], k: Handle[Int]) {
+    var m: Map[Text, Int] = ["a": 1, "b": 2]
+    both(a: &m["a"], b: &m["b"])                    // <- E0306, E0306
+    both(a: &pool[h], b: &pool[k])                  // <- E0306, E0306
+    let fixed = 1
+    both(a: &fixed, b: &fixed)                      // <- E0305, E0305
+}
+
+fn moved_place() {
+    var p: Pool[Int] = Pool.new()
+    let q = p
+    both_pools(a: &p, b: &p)                        // <- E0501, E0501
+}
+
+fn rejected_calls() {
+    var n = 1
+    nope(x: &n, y: &n)                              // <- E0201
+    grow(a: &n, a: &n)                              // <- E0208
+}
+
+fn rejected_with(t: take Token) -> Int {
+    let u = t.with(nope: 1)                         // <- E0303
+    return t.id
+}
+
+fn rejected_take_self(t: take Token) -> Int {
+    let n = t.finish(1)                             // <- E0208
+    return t.id
+}
+
+fn rejected_label(t: take Token) -> Int {
+    let n = eat(x: t)                               // <- E0207
+    return t.id
+}
+
+fn rejected_arity(t: take Token) -> Int {
+    let n = eat(t, 1)                               // <- E0208
+    return t.id
+}
+
+fn rejected_marker() -> Int {
+    var p: Pool[Int] = Pool.new()
+    let n = consume(&p)                             // <- E0506
+    return p.len()
+}
+
+fn rejected_type(t: take Token) -> Int {
+    let n = consume(p: t)                           // <- E0301
+    return t.id
+}
+
+fn valid_inside_rejected() -> Int {
+    let p: Pool[Int] = Pool.new()
+    let n = nope(x: consume(p))                     // <- E0201
+    return p.len()                                  // <- E0501
+}
+
+fn unrelated_beside_rejected(t: take Token) -> Int {
+    let n = eat(t, 1)                               // <- E0208
+    let u = t
+    return t.id                                     // <- E0501
+}
+
+fn eat_with(t: take Token, n: Int) -> Int {
+    return t.id + n
+}
+
+fn rejected_argument(t: take Token) -> Int {
+    let n = eat_with(t: t, n: missing)              // <- E0201
+    return t.id                                     // <- E0501
+}
+
+fn eat_and_grow(t: take Token, n: inout Int) -> Int {
+    return t.id + n
+}
+
+fn eat_both(t: take Token, n: Int) -> Int {
+    return t.id + n
+}
+
+fn rejected_beside(t: take Token, u: take Token, v: take Token, w: take Token, y: take Token) -> Int {
+    var xs = [1, 2]
+    var k = 1
+    let fixed = 1
+    let f = eat_both(t: y, n: &k)                   // <- E0506
+    let a = eat_and_grow(t: t, n: &xs.nope)         // <- E0303
+    let b = eat_and_grow(t: u, n: &3)               // <- E0106
+    let d = eat_and_grow(t: v, n: &fixed)           // <- E0305
+    let e = eat_both(t: w, n: "one")                // <- E0301
+    return t.id + u.id + v.id + w.id + y.id         // <- E0501, E0501, E0501, E0501, E0501
+}
+
+record Oops {
+    n: Int
+}
+
+fn eat_or_fail(t: take Token) -> Int fails Oops {
+    return t.id
+}
+
+fn unmarked(t: take Token) -> Int fails Oops {
+    let n = eat_or_fail(t)                          // <- E0701
+    return t.id                                     // <- E0501
+}
+
+fn eat_pools(xs: take List[Pool[Int]]) -> Int {
+    return xs.len()
+}
+
+fn grows(p: inout Pool[Int]) -> Bool {
+    let h = p.insert(1)
+    return true
+}
+
+record Bin {
+    pool: Pool[Int]
+}
+
+fn moved_base(c: Bool) -> Int {
+    var xs: List[Pool[Int]] = [Pool.new(), Pool.new()]
+    let ys = xs
+    let a = xs[eat_pools(xs) - 2].len()             // <- E0501, E0501
+    var zs: List[Pool[Int]] = [Pool.new()]
+    let ws = zs
+    let b = zs[if c {                               // <- E0501
+        zs = [Pool.new()]
+        0
+    } else {
+        0
+    }].len()
+    return a + b
+}
+
+fn moved_scrutinee(b: take Bin) -> Int {
+    var bin = b
+    let other = bin
+    match bin {                                     // <- E0501
+        Bin(pool: p) if grows(p: &bin.pool) => return 1 // <- E0501
+        _ => return 0
+    }
+}
+
+fn moved_scrutinee_assigned(b: take Bin, c: Bool) -> Int {
+    var bin = b
+    let other = bin
+    match bin {                                     // <- E0501
+        Bin(pool: p) if if c {
+            bin = Bin(pool: Pool.new())
+            true
+        } else {
+            false
+        } => return 1
+        _ => return 0
+    }
+}
+
+fn mismatched_result(t: take Token, u: take Token) -> Int {
+    let s: Text = eat(t)                            // <- E0301
+    let n = eat(eat(u))                             // <- E0301
+    return t.id + u.id                              // <- E0501, E0501
+}
+
+fn mismatched_lent(t: Token) -> Text {
+    return eat(t)                                   // <- E0301, E0504
+}

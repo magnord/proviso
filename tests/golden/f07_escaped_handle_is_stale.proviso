@@ -1,5 +1,5 @@
 // §F row 7: a handle that escapes a failed call is stale afterwards
-// phase: 2
+// phase: 2.7
 //
 // `add_then_fail` inserts through `inout Pool` and fails with the new handle.
 // The failure rolls back the pool's contents but not its generation counters

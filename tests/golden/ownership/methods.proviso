@@ -1,0 +1,105 @@
+// phase: 2.7
+// A method may take `inout self`, which changes its receiver, or `take self`, which owns
+// it (REFERENCE §5.2). An `inout self` method is called without `&` on a `var` or an
+// `inout` parameter, or on a field or element of one, and its changes reach the receiver
+// only if it succeeds (§5.4). It may assign `self` a whole new value. A `take self` method
+// may move its receiver or its parts, and `with` on a unique record consumes it (§4.4).
+// Calling one on a copyable value copies the value, so the caller keeps its own.
+use std.io { IoError }
+use std.pool { Pool }
+
+enum Full derives(Show) {
+    Over(limit: Int)
+}
+
+record Counter derives(Show) {
+    n: Int
+    limit: Int
+} where n <= limit
+
+impl Counter {
+    pub fn bump(inout self) {
+        self.n += 1
+    }
+
+    pub fn bump_by(inout self, k: Int) fails Full {
+        self.n += 1
+        check self.n + k <= self.limit else fail Full.Over(limit: self.limit)
+        self.n += k
+    }
+
+    pub fn reset(inout self) {
+        self = Counter(n: 0, limit: self.limit)
+    }
+
+    pub fn total(take self) -> Int {
+        return self.n + self.limit
+    }
+}
+
+unique record Bag {
+    pool: Pool[Text]
+    label: Text
+}
+
+impl Bag {
+    pub fn add(inout self, item: Text) {
+        self.pool.insert(item)
+    }
+
+    pub fn size(self) -> Int {
+        return self.pool.len()
+    }
+
+    pub fn into_pool(take self) -> Pool[Text] {
+        return self.pool
+    }
+
+    pub fn relabel(take self, label: Text) -> Bag {
+        return self.with(label: label)
+    }
+}
+
+record Holder {
+    counter: Counter
+}
+
+fn outcome(r: Result[Unit, Full]) -> Text {
+    return match r {
+        Ok(_) => "ok"
+        Err(Over(limit)) => f"over {limit}"
+    }
+}
+
+fn twice(c: inout Counter) {
+    c.bump()
+    c.bump()
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var c = Counter(n: 0, limit: 5)
+    c.bump()
+    twice(c: &c)
+    let over = outcome(attempt c.bump_by(10))
+    let fine = outcome(attempt c.bump_by(1))
+    try sys.stdout.write_line(f"{c} {over} {fine}")
+
+    let total = c.total()
+    c.reset()
+    try sys.stdout.write_line(f"{total} {c}")
+
+    var h = Holder(counter: Counter(n: 1, limit: 9))
+    h.counter.bump()
+    var counters = [Counter(n: 2, limit: 9)]
+    counters[0].bump()
+    try sys.stdout.write_line(f"{h.counter.n} {counters[0].n}")
+
+    var b = Bag(pool: Pool.new(), label: "b")
+    b.add("x")
+    b.add(item: "y")
+    let size = b.size()
+    let renamed = b.relabel("c")
+    let label = renamed.label
+    let pool = renamed.into_pool()
+    try sys.stdout.write_line(f"{size} {label} {pool.len()}")
+}

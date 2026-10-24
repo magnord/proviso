@@ -229,7 +229,7 @@ impl[T: Copy] Pool[T] {
 }
 ```
 
-`pool[h]` reads the element and needs `T: Copy`. A stale or wrong-pool handle is a `stale_handle` defect.
+`pool[h]` borrows the element, as `xs[i]` does, so only copying it needs `T: Copy`. A stale or wrong-pool handle is a `stale_handle` defect.
 
 ## std.text
 

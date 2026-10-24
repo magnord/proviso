@@ -422,6 +422,16 @@ impl Parser<'_> {
             }
             T::Keyword(Kw::Use) => ItemKind::Use(self.use_decl()?),
             T::Keyword(Kw::Record) => ItemKind::Record(self.record_decl()?),
+            T::Keyword(Kw::Unique) if self.nth(1) == T::Keyword(Kw::Record) => {
+                self.bump();
+                ItemKind::Record(RecordDecl { unique: true, ..self.record_decl()? })
+            }
+            T::Keyword(Kw::Unique) => {
+                self.poison_declared_type();
+                let span = self.peek().span;
+                self.error(codes::UNEXPECTED_TOKEN, span, "`unique` marks a record, as in `unique record Token { … }`");
+                return Err(());
+            }
             T::Keyword(Kw::Enum) => ItemKind::Enum(self.enum_decl()?),
             T::Keyword(Kw::Impl) => {
                 // The block is kept, so its methods are still checked.
@@ -643,7 +653,7 @@ impl Parser<'_> {
             }
         }
         let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
-        Ok(RecordDecl { name, derives, fields, refinement })
+        Ok(RecordDecl { name, unique: false, derives, fields, refinement })
     }
 
     /// `derives(Eq, Show)`, or nothing.
@@ -2290,13 +2300,11 @@ impl Parser<'_> {
                     self.pattern()?
                 };
                 self.expect(T::Keyword(Kw::In), "`in`")?;
-                if self.at_kw(Kw::Take) {
-                    return self.not_implemented("consuming loops (`for … in take`)", Planned::Phase(2));
-                }
+                let consume = self.eat(T::Keyword(Kw::Take));
                 let iter = self.nested(Self::logical)?;
                 self.no_invariant()?;
                 let body = self.block()?;
-                ExprKind::For { label, pat, iter, body }
+                ExprKind::For { label, pat, iter, consume, body }
             }
             _ => return self.unexpected("`for`, `while` or `loop`"),
         };
@@ -2323,7 +2331,11 @@ fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
     Some(match kw {
         Kw::Type => ("`type` declarations", Planned::Phase(2)),
         Kw::Distinct => ("distinct types", Planned::Phase(2)),
-        Kw::Unique | Kw::Opaque | Kw::Resource => ("`unique`, `opaque` and `resource` records", Planned::Phase(2)),
+        // `unique record` is implemented, so only a `unique` that starts no record gets here, and
+        // the parser reports it before asking.
+        Kw::Unique => ("`unique` declarations", Planned::Phase(2)),
+        Kw::Opaque => ("`opaque` records", Planned::Phase(2)),
+        Kw::Resource => ("`resource` records", Planned::Phase(2)),
         Kw::Test => ("`test` blocks", Planned::Phase(2)),
         Kw::Cap => ("capability declarations", Planned::Phase(3)),
         Kw::Effect => ("effect parameters", Planned::Phase(3)),

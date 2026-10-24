@@ -27,9 +27,13 @@ impl AdtId {
     pub const LIST: AdtId = AdtId(5);
     /// `Map[K, V]` (STD.md).
     pub const MAP: AdtId = AdtId(6);
+    /// `std.pool`'s `Pool[T]` (STD.md).
+    pub const POOL: AdtId = AdtId(7);
+    /// `std.pool`'s `Handle[T]` (STD.md).
+    pub const HANDLE: AdtId = AdtId(8);
 
     /// How many records and enums are declared before the module's own.
-    const BUILT_IN: usize = 7;
+    const BUILT_IN: usize = 9;
 
     pub fn index(self) -> usize {
         self.0 as usize
@@ -174,9 +178,10 @@ impl VariantIdx {
 pub enum AdtKind {
     Record,
     Enum,
-    /// A prelude collection, `List` or `Map`, whose values the toolchain builds. It has no
-    /// variants, and every one has values, as an empty collection does.
-    Collection,
+    /// A standard library type whose values the toolchain builds: the prelude's `List` and
+    /// `Map`, and `std.pool`'s `Pool` and `Handle`. It has no variants or fields, and every
+    /// one has values, as an empty collection does.
+    Native,
 }
 
 pub struct AdtDef {
@@ -205,6 +210,10 @@ pub struct AdtDef {
     /// A tuple, whose one variant has a field per element, named by its position. It is
     /// written `(A, B)`, and so are its values and patterns (OPEN_QUESTIONS P5).
     pub tuple: bool,
+    /// Its values move instead of being copied (REFERENCE §5.1): it is declared `unique`, is
+    /// `Pool`, or holds a unique value. A generic type's depends on its type arguments, so
+    /// [`Decls::moves`] asks about those.
+    pub unique: bool,
 }
 
 impl AdtDef {
@@ -231,6 +240,7 @@ impl AdtDef {
             unknown_methods: false,
             unknown_variants: false,
             tuple: false,
+            unique: false,
         }
     }
 
@@ -245,11 +255,11 @@ impl AdtDef {
         def
     }
 
-    /// A prelude collection, which implements what its type arguments do (STD.md).
-    fn collection(name: &str, params: usize) -> AdtDef {
-        let mut def = AdtDef::new(name, AdtKind::Collection);
+    /// A type the toolchain builds with `params` type parameters, which derives `derives`.
+    fn native(name: &str, params: usize, derives: Vec<IfaceId>) -> AdtDef {
+        let mut def = AdtDef::new(name, AdtKind::Native);
         def.params = params;
-        def.derives = vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW, IfaceId::HASH];
+        def.derives = derives;
         def
     }
 
@@ -257,8 +267,8 @@ impl AdtDef {
         self.kind == AdtKind::Enum
     }
 
-    pub fn is_collection(&self) -> bool {
-        self.kind == AdtKind::Collection
+    pub fn is_native(&self) -> bool {
+        self.kind == AdtKind::Native
     }
 
     /// The one variant of a record.
@@ -289,7 +299,7 @@ impl AdtDef {
     /// and `Some` for one of the prelude's. A tuple has no name.
     pub fn ctor_name(&self, variant: VariantIdx) -> String {
         match self.kind {
-            AdtKind::Record | AdtKind::Collection => self.name.to_string(),
+            AdtKind::Record | AdtKind::Native => self.name.to_string(),
             AdtKind::Enum if self.bare_variants => self.variants[variant.index()].name.to_string(),
             AdtKind::Enum => format!("{}.{}", self.name, self.variants[variant.index()].name),
         }
@@ -389,8 +399,15 @@ impl Default for Decls {
                 IfaceDef { name: name.into(), methods, incomplete: false }
             })
             .collect();
-        let (list, map) = (AdtDef::collection("List", 1), AdtDef::collection("Map", 2));
-        let adts = vec![system, option, result, parse_error, AdtDef::tuple(2), list, map];
+        // A list and a map implement what their type arguments do (STD.md).
+        let all = || vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW, IfaceId::HASH];
+        let (list, map) = (AdtDef::native("List", 1, all()), AdtDef::native("Map", 2, all()));
+        // A pool implements nothing and is unique, and a handle implements `Eq` and `Hash`
+        // whatever its element type (STD.md, REFERENCE §5.5).
+        let mut pool = AdtDef::native("Pool", 1, Vec::new());
+        pool.unique = true;
+        let handle = AdtDef::native("Handle", 1, vec![IfaceId::EQ, IfaceId::HASH]);
+        let adts = vec![system, option, result, parse_error, AdtDef::tuple(2), list, map, pool, handle];
         debug_assert_eq!(adts.len(), AdtId::BUILT_IN);
         let tuples = HashMap::from([(2, AdtId::PAIR)]);
         Decls { adts, ifaces, impls: HashMap::new(), tuples, unknown_tuples: false, unknown: HashSet::new() }
@@ -587,6 +604,8 @@ impl Decls {
             Ty::Param(i) => params.get(*i as usize).is_some_and(|bounds| bounds.contains(&iface)),
             // A rejected `impl` block may have given it this interface for any type arguments.
             Ty::Adt(id, _) if self.adt(*id).unknown_interfaces => true,
+            // A handle holds no element, so its element type doesn't decide (STD.md).
+            Ty::Adt(AdtId::HANDLE, _) => matches!(iface, IfaceId::EQ | IfaceId::HASH),
             // A map's keys implement `Eq` and `Hash` wherever its type is checked (REFERENCE
             // §4.2), so only its values decide, and a rejected key type isn't reported again.
             Ty::Adt(AdtId::MAP, args) if matches!(iface, IfaceId::EQ | IfaceId::HASH) => {
@@ -611,17 +630,106 @@ impl Decls {
         }
     }
 
+    /// Whether values of `ty` move instead of being copied (REFERENCE §5.1): it is unique, or
+    /// holds a unique value, or is a type parameter that `params` doesn't give `Copy`, which
+    /// may stand for a unique type (§4.8). An aggregate takes the strongest kind of its
+    /// parts, so a generic one moves when one of its type arguments does.
+    /// Whether `ty` moves only because a type parameter in it may lack `Copy`, so it would
+    /// be copyable if each were `Copy` (REFERENCE §4.8).
+    pub fn moves_by_param(&self, ty: &Ty, params: &[Vec<IfaceId>]) -> bool {
+        let copy: Vec<Vec<IfaceId>> =
+            params.iter().map(|bounds| bounds.iter().copied().chain([IfaceId::COPY]).collect()).collect();
+        self.moves(ty, params) && !self.moves(ty, &copy)
+    }
+
+    /// [`Decls::moves`], where `memo` holds what each argument list already walked gave, by
+    /// its address, so a walk over many types that share parts costs each part once. The
+    /// types must outlive `memo`.
+    pub fn moves_memo(&self, ty: &Ty, params: &[Vec<IfaceId>], memo: &mut HashMap<usize, bool>) -> bool {
+        match ty {
+            Ty::Param(i) => !params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)),
+            Ty::Adt(id, _) if self.adt(*id).unique => true,
+            Ty::Adt(AdtId::HANDLE, _) => false,
+            Ty::Adt(_, args) => {
+                let key = Arc::as_ptr(args) as *const Ty as usize;
+                if let Some(&moves) = memo.get(&key) {
+                    return moves;
+                }
+                let moves = args.iter().any(|arg| self.moves_memo(arg, params, memo));
+                memo.insert(key, moves);
+                moves
+            }
+            _ => false,
+        }
+    }
+
+    pub fn moves(&self, ty: &Ty, params: &[Vec<IfaceId>]) -> bool {
+        self.moves_in(ty, params, &mut HashSet::new())
+    }
+
+    /// [`Decls::moves`], where `seen` holds the addresses of the argument lists already found
+    /// not to move, so a type that shares a part, as `(t, t)` does, costs each part once.
+    fn moves_in(&self, ty: &Ty, params: &[Vec<IfaceId>], seen: &mut HashSet<usize>) -> bool {
+        match ty {
+            Ty::Param(i) => !params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)),
+            Ty::Adt(id, _) if self.adt(*id).unique => true,
+            Ty::Adt(AdtId::HANDLE, _) => false,
+            // A module's record or enum takes no type arguments, so `unique` says it all, and
+            // a generic prelude type mentions each of its type parameters in a field.
+            Ty::Adt(_, args) => {
+                seen.insert(Arc::as_ptr(args) as *const Ty as usize)
+                    && args.iter().any(|arg| self.moves_in(arg, params, seen))
+            }
+            _ => false,
+        }
+    }
+
+    /// Marks each record and enum that holds a unique value as unique itself (REFERENCE
+    /// §5.1), once every field's type is known. The module's types take no type arguments,
+    /// so a field's kind doesn't depend on a use.
+    pub fn settle_kinds(&mut self) {
+        // Which records and enums hold each one, and those that are unique already: those
+        // declared so, and those with a field that moves without them, such as a pool.
+        let mut held_by: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut found = Vec::new();
+        for a in AdtId::BUILT_IN..self.adts.len() {
+            let fields = self.adts[a].variants.iter().flat_map(|v| &v.fields);
+            let mut parts = Vec::new();
+            for field in fields.clone() {
+                mentioned(&field.ty, &mut parts);
+            }
+            for part in parts {
+                held_by.entry(part).or_default().push(a);
+            }
+            let def = &self.adts[a];
+            if def.unique || fields.clone().any(|f| self.moves(&f.ty, &[])) {
+                found.push(a);
+            }
+        }
+        while let Some(a) = found.pop() {
+            self.adts[a].unique = true;
+            for &holder in held_by.get(&a).map_or(&[][..], Vec::as_slice) {
+                if !self.adts[holder].unique {
+                    self.adts[holder].unique = true;
+                    found.push(holder);
+                }
+            }
+        }
+    }
+
     /// Whether `ty` is `Copy`: copyable with no reach, which a capability has (REFERENCE
-    /// §5.1). A record or enum is when its fields are; one already being asked about in
-    /// `seen` is taken to be, since only its other fields can decide.
+    /// §5.1). A unique type isn't copyable. A record or enum is when its fields are; one
+    /// already being asked about in `seen` is taken to be, since only its other fields can
+    /// decide.
     fn copyable(&self, ty: &Ty, params: &[Vec<IfaceId>], seen: &mut Vec<AdtId>) -> bool {
         match ty {
             Ty::Cap(_) => false,
             Ty::Param(i) => params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)),
+            Ty::Adt(id, _) if self.adt(*id).unique => false,
+            // A handle holds no element (STD.md).
+            Ty::Adt(AdtId::HANDLE, _) => true,
             // A collection holds values of its type arguments (REFERENCE §5.1).
-            Ty::Adt(id, args) if self.adt(*id).is_collection() => {
-                args.iter().all(|arg| self.copyable(arg, params, seen))
-            }
+            Ty::Adt(id, args) if self.adt(*id).is_native() => args.iter().all(|arg| self.copyable(arg, params, seen)),
             Ty::Adt(id, args) => {
                 if args.is_empty() && seen.contains(id) {
                     return true;
@@ -678,7 +786,12 @@ impl Decls {
             if let Ty::Adt(id, args) = ty
                 && !args.is_empty()
             {
-                write!(f, "{}[", self.adt(*id).name)?;
+                let name = match *id {
+                    AdtId::POOL => std("Pool", "std.pool.Pool"),
+                    AdtId::HANDLE => std("Handle", "std.pool.Handle"),
+                    _ => &self.adt(*id).name,
+                };
+                write!(f, "{name}[")?;
                 for (i, arg) in args.iter().enumerate() {
                     let sep = if i == 0 { "" } else { ", " };
                     write!(f, "{sep}{}", self.display_in(arg, names))?;
@@ -710,6 +823,19 @@ impl Decls {
     }
 }
 
+/// Pushes the index of each record and enum that a value of `ty` holds, at any depth, to
+/// `found`. A handle holds no element (STD.md).
+fn mentioned(ty: &Ty, found: &mut Vec<usize>) {
+    if let Ty::Adt(id, args) = ty
+        && *id != AdtId::HANDLE
+    {
+        found.push(id.index());
+        for arg in args.iter() {
+            mentioned(arg, found);
+        }
+    }
+}
+
 /// Which types have values (see [`Decls::inhabited`]).
 pub struct Inhabited {
     adts: Vec<bool>,
@@ -726,8 +852,8 @@ impl Inhabited {
     pub fn has_values(&self, decls: &Decls, ty: &Ty) -> bool {
         match ty {
             Ty::Never => false,
-            // An empty collection is a value whatever its type arguments.
-            Ty::Adt(id, _) if decls.adt(*id).is_collection() => true,
+            // An empty collection is a value whatever its type arguments, and so is a handle.
+            Ty::Adt(id, _) if decls.adt(*id).is_native() => true,
             Ty::Adt(id, args) if !args.is_empty() => {
                 let key = (*id, Arc::as_ptr(args) as *const Ty as usize);
                 if let Some((_, answer)) = self.applied.borrow().get(&key) {
@@ -834,7 +960,7 @@ impl Graph {
     fn requirement(&mut self, decls: &Decls, ty: &Ty) -> Requirement {
         match ty {
             Ty::Never => Requirement::Unmet,
-            Ty::Adt(id, _) if decls.adt(*id).is_collection() => Requirement::Met,
+            Ty::Adt(id, _) if decls.adt(*id).is_native() => Requirement::Met,
             Ty::Adt(id, args) if !args.is_empty() => {
                 let def = decls.adt(*id);
                 let variants = (0..def.variants.len())

@@ -1,0 +1,19 @@
+defect[refinement_failed]: Span(lo: 9, hi: 4) breaks `Span`'s refinement `lo <= hi`
+  at ownership/inout_refinement.proviso:52:5 (inout_refinement.shift+3)
+  called from ownership/inout_refinement.proviso:87:9 (inout_refinement)
+defect[refinement_failed]: Span(lo: 0, hi: -1) breaks `Span`'s refinement `lo <= hi`
+  at ownership/inout_refinement.proviso:58:5 (inout_refinement.deep+3)
+  called from ownership/inout_refinement.proviso:89:9 (inout_refinement)
+defect[refinement_failed]: Window(span: Span(lo: 0, hi: 12), label: "w") breaks `Window`'s refinement `span.hi < 10`
+  at ownership/inout_refinement.proviso:58:5 (inout_refinement.deep+3)
+  called from ownership/inout_refinement.proviso:90:9 (inout_refinement)
+defect[refinement_failed]: `Window.label` is "", which breaks its refinement `not label.is_empty()`
+  at ownership/inout_refinement.proviso:76:5 (inout_refinement.cleared+3)
+  called from ownership/inout_refinement.proviso:93:9 (inout_refinement)
+defect[refinement_failed]: Window(span: Span(lo: 0, hi: 21), label: "w") breaks `Window`'s refinement `span.hi < 10`
+  at ownership/inout_refinement.proviso:82:5 (inout_refinement.widened+3)
+  called from ownership/inout_refinement.proviso:95:9 (inout_refinement)
+defect[refinement_failed]: Span(lo: 0, hi: -4) breaks `Span`'s refinement `lo <= hi`
+  at ownership/inout_refinement.proviso:28:9 (inout_refinement.Span.widen+2)
+  called from ownership/inout_refinement.proviso:82:5 (inout_refinement.widened+3)
+  called from ownership/inout_refinement.proviso:96:9 (inout_refinement)

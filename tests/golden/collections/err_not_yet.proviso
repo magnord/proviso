@@ -2,9 +2,8 @@
 // expect-error: E0901
 // What collections still lack is reported as not implemented, and what it would have
 // given isn't reported again (§15.1). `Set` has no literal or constructor yet (OPEN_QUESTIONS
-// Q37), and `Array` comes later in phase 2. Consuming loops wait for moves, the operations
-// that take a closure for effect variables (STD.md), `inout` parameters and `&` arguments
-// for `inout` atomicity, and implementations for generic types such as `List[Int]` for the
+// Q37), and `Array` comes later in phase 2. The operations that take a closure wait for
+// effect variables (STD.md), and implementations for generic types such as `List[Int]` for the
 // rest of phase 2, so a method or interface such an implementation may give isn't reported
 // missing (§15.1). STD.md declares no `swap` (§5.3) and none of the predicates of §8.1, and
 // `split` is one of the `Text` functions of §12.3 it doesn't declare.
@@ -24,8 +23,6 @@ fn built(xs: List[Int]) -> Int {
 }
 
 fn later(xs: List[Int], t: Text) -> Int {
-    for x in take xs {                              // <- E0901
-    }
     let doubled = xs.map(f: 2)                      // <- E0901
     let kept = xs.filter(f: 1)                      // <- E0901
     let sorted = xs.is_sorted()                     // <- E0901
@@ -49,13 +46,4 @@ fn named(xs: List[Int]) -> Text {
     let n = xs.name()
     let m = Named.name(xs)
     return n
-}
-
-fn bump(counts: inout Map[Text, Int]) {             // <- E0901
-    counts.set(key: "a", value: 1)
-}
-
-fn caller() {
-    var c: Map[Text, Int] = [:]
-    bump(counts: &c)                                // <- E0901
 }

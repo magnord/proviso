@@ -1,0 +1,9 @@
+defect[stale_handle]: this handle's element was removed from the pool
+  at ownership/stale_handle.proviso:13:12 (stale_handle.removed+5)
+  called from ownership/stale_handle.proviso:37:9 (stale_handle)
+defect[stale_handle]: this handle belongs to another pool
+  at ownership/stale_handle.proviso:21:12 (stale_handle.elsewhere+6)
+  called from ownership/stale_handle.proviso:38:9 (stale_handle)
+defect[stale_handle]: this handle belongs to another pool
+  at ownership/stale_handle.proviso:28:12 (stale_handle.duplicated+5)
+  called from ownership/stale_handle.proviso:39:9 (stale_handle)

@@ -1,0 +1,201 @@
+// phase: 2.7
+// A value that moved may be used again once it is assigned a new value. A move on a path
+// that then leaves by `return` or a diverging fallback moves nothing for the code after it,
+// and one followed by `break` moves nothing for the loop's next turn (REFERENCE §5.1). A
+// binding declared in a loop body is a new value on each turn. Moving a field leaves the
+// record's other fields usable, and assigning the field makes the record whole again.
+// Copyable values, handles among them, are copied, so they never move, and neither does a
+// value of a type parameter with `Copy` (§4.8). A handle is copied whatever its element type.
+// Borrowing a value, as a method's receiver or a borrowed argument, doesn't move it, and a
+// `_` inside a pattern moves nothing (§6.4). A loop that doesn't consume its list goes over
+// a snapshot, so its body may still change the list.
+use std.pool { Pool, Handle }
+
+record Holder {
+    pool: Pool[Int]
+    n: Int
+}
+
+enum Slot {
+    Empty
+    Full(pool: Pool[Int])
+}
+
+fn fresh() -> Pool[Int] {
+    return Pool.new()
+}
+
+fn consume(pool: take Pool[Int]) -> Int {
+    return pool.len()
+}
+
+fn look(pool: Pool[Int]) -> Int {
+    return pool.len()
+}
+
+fn reassigned() -> Int {
+    var a = fresh()
+    let b = a
+    a = fresh()
+    return a.len() + b.len()
+}
+
+fn reassigned_after_both(c: Bool) -> Int {
+    var a = fresh()
+    if c {
+        let b = a
+    } else {
+        let n = consume(a)
+    }
+    a = fresh()
+    return a.len()
+}
+
+fn reassigned_in_branch(c: Bool) -> Int {
+    var a = fresh()
+    if c {
+        let b = a
+        a = fresh()
+    }
+    return a.len()
+}
+
+fn moved_then_returned(c: Bool) -> Pool[Int] {
+    let a = fresh()
+    if c {
+        return a
+    }
+    let b = a
+    return b
+}
+
+fn loop_with_break() -> Int {
+    let a = fresh()
+    var n = 0
+    loop {
+        n = consume(a)
+        break
+    }
+    return n
+}
+
+fn loop_reassigns(n: Int) -> Int {
+    var a = fresh()
+    var total = 0
+    for i in 0..n {
+        total += consume(a)
+        a = fresh()
+    }
+    return total + a.len()
+}
+
+fn declared_in_loop(n: Int) -> Int {
+    var total = 0
+    for i in 0..n {
+        let a = fresh()
+        total += consume(a)
+    }
+    return total
+}
+
+fn moved_in_while_then_returns(n: Int) -> Int {
+    let a = fresh()
+    var i = 0
+    while i < n {
+        if i == 3 {
+            return consume(a)
+        }
+        i += 1
+    }
+    return a.len()
+}
+
+fn fallback_leaves(o: take Option[Pool[Int]]) -> Int {
+    let a = fresh()
+    let p = o else {
+        let n = consume(a)
+        return n
+    }
+    return a.len() + p.len()
+}
+
+fn other_fields() -> Int {
+    var h = Holder(pool: fresh(), n: 2)
+    let p = h.pool
+    let k = h.n
+    h.pool = fresh()
+    let g = h
+    return p.len() + k + g.n
+}
+
+fn parts(pair: take (Pool[Int], Int)) -> Int {
+    let (p, n) = pair
+    return p.len() + n
+}
+
+fn in_one_arm(s: take Slot) -> Int {
+    match s {
+        Full(pool) => return consume(pool)
+        Empty => {}
+    }
+    return 0
+}
+
+fn wildcard_parts(h: take Holder) -> Int {
+    let Holder(pool: _, n: k) = h
+    return h.pool.len() + k
+}
+
+fn changed_in_loop() -> Int {
+    var pools = [fresh(), fresh()]
+    for p in pools {
+        pools.push(fresh())
+    }
+    return pools.len()
+}
+
+fn borrowed_many_times() -> Int {
+    let a = fresh()
+    let n = look(a) + look(pool: a)
+    return n + a.len() + look(a)
+}
+
+fn copied_values(h: Handle[Int]) -> Int {
+    let n = 1
+    let m = n
+    let t = "text"
+    let u = t
+    let xs = [1, 2]
+    let ys = xs
+    let g = h
+    let k = h
+    let same = g == k
+    return n + m + xs.len() + ys.len()
+}
+
+fn handles(pool: inout Pool[Int]) -> Int {
+    let h = pool.insert(1)
+    let g = h
+    let found = pool.get(h) else 0
+    let again = pool.get(g) else 0
+    return found + again
+}
+
+fn copy_bound[T: Copy](x: take T) -> (T, T) {
+    let y = x
+    return (x, y)
+}
+
+fn moved_generic[T](x: take T) -> T {
+    let y = x
+    return y
+}
+
+fn same_handle[T](h: Handle[T]) -> Handle[T] {
+    return h
+}
+
+fn handle_pair[T](h: Handle[T]) -> (Handle[T], Handle[T]) {
+    let a = h
+    return (h, a)
+}

@@ -1,0 +1,12 @@
+ownership/inout_refinement.proviso:86:1: example passed
+ownership/inout_refinement.proviso:87:1: example failed: it hit a defect
+ownership/inout_refinement.proviso:88:1: example passed
+ownership/inout_refinement.proviso:89:1: example failed: it hit a defect
+ownership/inout_refinement.proviso:90:1: example failed: it hit a defect
+ownership/inout_refinement.proviso:91:1: example passed
+ownership/inout_refinement.proviso:92:1: example passed
+ownership/inout_refinement.proviso:93:1: example failed: it hit a defect
+ownership/inout_refinement.proviso:94:1: example passed
+ownership/inout_refinement.proviso:95:1: example failed: it hit a defect
+ownership/inout_refinement.proviso:96:1: example failed: it hit a defect
+11 examples: 5 passed, 6 failed

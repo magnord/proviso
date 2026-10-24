@@ -1,0 +1,137 @@
+// phase: 2.7
+// An `inout` parameter gives the callee exclusive access to the caller's variable, which
+// the caller marks with `&` (REFERENCE §5.2, H5). The callee's changes reach the caller
+// only if the call succeeds (§5.4). When it fails, the variable keeps the value it had
+// before the call, whether the failure is handled by `attempt` or `else`, and also when the
+// callee changed it through a successful call of its own before failing. A field or an
+// element of a variable can be passed, and so can a `take` value into an `inout` one in
+// generic code. `bump` is §1's example.
+use std.io { IoError }
+
+enum Stop derives(Show) {
+    Halt(at: Int)
+}
+
+record Counter {
+    n: Int
+    log: List[Text]
+}
+
+record Pair {
+    left: Int
+    right: Int
+}
+
+fn bump_by(counter: inout Counter, by: Int) {
+    counter.n += by
+    counter.log.push(f"+{by}")
+}
+
+fn bump_then_fail(counter: inout Counter) fails Stop {
+    counter.n += 100
+    counter.log.push("lost")
+    fail Stop.Halt(at: counter.n)
+}
+
+fn nested(counter: inout Counter) fails Stop {
+    bump_by(counter: &counter, by: 1)
+    try bump_then_fail(counter: &counter)
+}
+
+fn add(x: inout Int, n: Int) {
+    x += n
+}
+
+fn add_twice(x: inout Int) {
+    add(x: &x, n: 1)
+    add(x: &x, n: 1)
+}
+
+fn set_ten(x: inout Int) fails Stop {
+    x = 10
+    fail Stop.Halt(at: x)
+}
+
+fn set_checked(x: inout Int, to: Int) -> Int fails Stop {
+    x = to
+    if to > 3 {
+        fail Stop.Halt(at: to)
+    }
+    return to
+}
+
+fn swap_texts(a: inout Text, b: inout Text) {
+    let t = a
+    a = b
+    b = t
+}
+
+fn grow(xs: inout List[Int], n: Int) {
+    for i in 0..n {
+        xs.push(i)
+    }
+}
+
+fn grow_then_fail(xs: inout List[Int]) fails Stop {
+    xs.push(99)
+    xs[0] = -1
+    fail Stop.Halt(at: xs.len())
+}
+
+fn bump(counts: inout Map[Text, Int], key: Text) {
+    let n = counts.get(key) else 0
+    counts.set(key: key, value: n + 1)
+}
+
+fn replace[T](x: inout T, with_value: take T) {
+    x = with_value
+}
+
+fn outcome(r: Result[Unit, Stop]) -> Text {
+    return match r {
+        Ok(_) => "ok"
+        Err(Halt(at)) => f"halt {at}"
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var c = Counter(n: 0, log: [])
+    bump_by(counter: &c, by: 2)
+    let failed = outcome(attempt bump_then_fail(counter: &c))
+    try sys.stdout.write_line(f"{c.n} {c.log} {failed}")
+
+    let nested_failed = outcome(attempt nested(counter: &c))
+    try sys.stdout.write_line(f"{c.n} {c.log} {nested_failed}")
+
+    var p = Pair(left: 1, right: 2)
+    add(x: &p.left, n: 5)
+    let ten = outcome(attempt set_ten(x: &p.right))
+    add_twice(x: &p.right)
+    try sys.stdout.write_line(f"{p.left} {p.right} {ten}")
+
+    var xs = [1, 2, 3]
+    add(x: &xs[1], n: 10)
+    grow(xs: &xs, n: 2)
+    let grown = outcome(attempt grow_then_fail(xs: &xs))
+    try sys.stdout.write_line(f"{xs} {grown}")
+
+    var n = 1
+    let kept = set_checked(x: &n, to: 5) else -1
+    let set = set_checked(x: &n, to: 2) else -1
+    try sys.stdout.write_line(f"{kept} {n} {set}")
+
+    var a = "a"
+    var b = "b"
+    swap_texts(a: &a, b: &b)
+    var counters = [Counter(n: 7, log: [])]
+    bump_by(counter: &counters[0], by: 3)
+    try sys.stdout.write_line(f"{a} {b} {counters[0].n} {counters[0].log}")
+
+    var counts: Map[Text, Int] = [:]
+    bump(counts: &counts, key: "a")
+    bump(counts: &counts, key: "b")
+    bump(counts: &counts, key: "a")
+    var word = "old"
+    replace(x: &word, with_value: "new")
+    try sys.stdout.write_line(f"{counts} {word}")
+}

@@ -68,8 +68,8 @@ pub fn uncovered(decls: &Decls, inhabited: &Inhabited, ty: &Ty, rows: &[Space]) 
 /// to have none, so that nothing about it is reported (REFERENCE §15.1).
 fn constructors(decls: &Decls, inhabited: &Inhabited, ty: &Ty) -> Option<Vec<(Ctor, Vec<Ty>)>> {
     match ty {
-        // A collection's values are too many to list, as text's are.
-        Ty::Adt(id, _) if decls.adt(*id).is_collection() => None,
+        // The values of a collection or a handle are too many to list, as text's are.
+        Ty::Adt(id, _) if decls.adt(*id).is_native() => None,
         Ty::Adt(id, args) => {
             let def = decls.adt(*id);
             if def.unknown_variants {
