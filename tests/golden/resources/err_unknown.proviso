@@ -1,0 +1,32 @@
+// phase: 2.8
+// expect-error: E0307
+// expect-error: E0201
+// expect-error: E0508
+// A call that resolves to nothing, as a method of a value of an unknown type or a function
+// that doesn't exist, is rejected, so a resource it was given isn't reported as only borrowed
+// and then lost (REFERENCE §15.1). A resource dropped beside it still is.
+resource record Probe {
+    name: Text
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+fn open(name: Text) -> Probe {
+    return Probe(name: name)
+}
+
+fn unknown_receiver(x: Nope) {                      // <- E0307
+    x.store(p: open(name: "a"))
+}
+
+fn unknown_result() {
+    let y = nope_fn()                               // <- E0201
+    y.store(p: open(name: "b"))
+    open(name: "c")                                 // <- E0508
+}
+
+fn unknown_function() {
+    unknown_fn(p: open(name: "d"))                  // <- E0201
+}

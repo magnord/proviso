@@ -4,8 +4,8 @@
 // expect-error: E0306
 // expect-error: E0301
 // A resource is never copied (REFERENCE §10 rule 1), so it isn't `Copy`, and what copies an
-// element, such as `get`, `xs[i]` bound to a name, `enumerate` or `duplicate`, needs one
-// (E0309). What such a copy is bound to isn't reported again as left over, and nor is what a
+// element needs one (E0309): `get`, `enumerate`, `duplicate`, and `xs[i]` or a part of it
+// bound to a name or taken by a `take self` method or `with`. What such a copy is bound to isn't reported again as left over, and nor is what a
 // guard tried to consume, or the values of an example that can't compare them, or a value
 // whose construction has a type error (§15.1).
 use std.pool { Pool, Handle }
@@ -37,6 +37,26 @@ fn copies(xs: List[Probe], pool: Pool[Probe], h: Handle[Probe]) {
     let c = pool.get(h)                             // <- E0309
     let d = pool.duplicate()                        // <- E0309
     let e = xs.enumerate()                          // <- E0309
+}
+
+record Holder {
+    probe: Probe
+}
+
+fn taken(xs: inout List[Probe], hs: inout List[Holder], pool: inout Pool[Probe], h: Handle[Probe]) {
+    xs[0].close()                                   // <- E0309
+    xs[0].abandon()                                 // <- E0309
+    Abandon.abandon(xs[0])                          // <- E0309
+    hs[0].probe.close()                             // <- E0309
+    pool[h].close()                                 // <- E0309
+}
+
+unique record Ticket {
+    n: Int
+}
+
+fn changed(ts: List[Ticket]) {
+    let t = ts[0].with(n: 2)                        // <- E0309
 }
 
 fn guard(o: take Option[Probe]) {

@@ -3349,12 +3349,19 @@ impl Checker<'_> {
         }
     }
 
-    /// Reports a map's key type that doesn't implement `Eq` and `Hash` (REFERENCE §4.2),
-    /// and returns whether it does.
+    /// Reports a map's key type that doesn't implement `Eq` and `Hash` (REFERENCE §4.2), or
+    /// is a resource, and returns whether it is fine.
     fn key_bound(&mut self, key: &Ty, span: Span) -> bool {
         let key = self.vars.zonk(key);
         if key.is_unknown() || self.vars.has_open(&key) || self.unknown_interfaces(&key) {
             return true;
+        }
+        // `set` keeps the key it has and drops the equal one it is given, which can't drop a
+        // resource (§10 rule 5).
+        if self.p.decls.is_resource(&key) {
+            let what = format!("resources, such as `{}`, as map keys", self.show(&key));
+            self.not_implemented(span, &what, Planned::Unscheduled);
+            return false;
         }
         let Some(iface) = [IfaceId::EQ, IfaceId::HASH].into_iter().find(|&iface| !self.implements(&key, iface)) else {
             return true;
@@ -3408,6 +3415,20 @@ impl Checker<'_> {
             self.show(&ty)
         );
         self.error(codes::MISSING_IMPLEMENTATION, span, message);
+    }
+
+    /// Reports a receiver that a method takes, when it is an element of a list or pool or a
+    /// part of one, which stays where it is, so taking it copies it (STD.md, §10 rule 1).
+    fn element_taken(&mut self, receiver: ExprId, ty: &Ty) {
+        match self.m.exprs[receiver].kind {
+            ExprKind::Index { base, .. } => {
+                let pool = matches!(self.vars.resolve(self.p.ty(base)), Ty::Adt(AdtId::POOL, _));
+                let span = self.span(receiver);
+                self.needs(ty.clone(), IfaceId::COPY, if pool { "pool[h]" } else { "xs[i]" }, "T", span);
+            }
+            ExprKind::Field { base, .. } if self.in_element(base) => self.element_part_copied(receiver, ty),
+            _ => {}
+        }
     }
 
     /// `xs[i]`, which reads element `i` of a list (STD.md). The element stays in the list, so
@@ -3560,7 +3581,11 @@ impl Checker<'_> {
             self.copied(e, &ty);
             self.consumed.insert(e);
         }
-        if self.errors - before > self.inner_errors {
+        // A call that resolves to nothing, as on a receiver of an unknown type, is rejected
+        // too, though its error was reported before it (REFERENCE §15.1).
+        let unresolved =
+            ty == Ty::Error && matches!(self.m.exprs[e].kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. });
+        if self.errors - before > self.inner_errors || unresolved {
             self.rejected.insert(e);
         }
         self.inner_errors = outer + (self.errors - before);
@@ -4516,6 +4541,7 @@ impl Checker<'_> {
             // (REFERENCE §4.4).
             if self.p.decls.adt(*id).unique {
                 self.consumed.insert(receiver);
+                self.element_taken(receiver, &receiver_ty);
             }
             self.with_args(e, *id, args, span);
             return receiver_ty;
@@ -4576,6 +4602,7 @@ impl Checker<'_> {
                     ParamMode::Inout => self.changes(receiver, name),
                     ParamMode::Take => {
                         self.consumed.insert(receiver);
+                        self.element_taken(receiver, &receiver_ty);
                     }
                     _ => {}
                 }
@@ -4881,10 +4908,11 @@ impl Checker<'_> {
     ) -> Ty {
         let name = self.m.text(method.sym);
         self.no_targs(targs, name, span);
-        let def = &self.p.decls.iface(iface).methods[j];
-        if def.self_mode == ParamMode::Take {
+        if self.p.decls.iface(iface).methods[j].self_mode == ParamMode::Take {
             self.consumed.insert(receiver);
+            self.element_taken(receiver, receiver_ty);
         }
+        let def = &self.p.decls.iface(iface).methods[j];
         let receiver = [receiver_ty.clone()];
         let params: Vec<(Box<str>, Ty)> = def.params.iter().map(|(n, t)| (n.clone(), t.subst(&receiver))).collect();
         let modes = def.modes.clone();
@@ -6124,7 +6152,8 @@ fn without_bad_keys(decls: &Decls, ty: &Ty, bounds: &[Vec<IfaceId>], unknown: &[
         let keyed = key.is_unknown()
             || unknown.contains(key)
             || decls.unknown_interfaces(key)
-            || [IfaceId::EQ, IfaceId::HASH].iter().all(|&iface| decls.implements(key, iface, bounds));
+            || (!decls.is_resource(key)
+                && [IfaceId::EQ, IfaceId::HASH].iter().all(|&iface| decls.implements(key, iface, bounds)));
         if !keyed {
             return Ty::Error;
         }

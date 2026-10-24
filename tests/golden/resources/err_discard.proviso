@@ -5,7 +5,7 @@
 // resource an expression produces and nothing takes: a call used as a statement, `let _`,
 // a field or method read of one, one passed where it is only borrowed, and a field that
 // `with` replaces. A pattern on a value that moves takes all of it, so a part it leaves is
-// lost, and an `is` test moves what it binds whether or not it matches (OPEN_QUESTIONS P5),
+// lost, and a base resource it takes apart is lost whole. An `is` test moves what it binds whether or not it matches (OPEN_QUESTIONS P5),
 // so it loses a resource when the variants it fails on may hold one. A `break` out of a
 // consuming loop, or a `return` while a call is being built, would drop what is left, and
 // an example drops both values it compares. A `with` after the replaced field moved, and a
@@ -150,6 +150,16 @@ resource record Tag derives(Eq) {
 
 impl Abandon for Tag {
     fn abandon(take self) {}
+}
+
+fn taken_apart() {
+    let Probe(name: n) = open(name: "let")          // <- E0508
+    match open(name: "match") {
+        Probe(name: m) => {}                        // <- E0508
+    }
+    if open(name: "is") is Probe(name: k) {         // <- E0508
+    }
+    let (Probe(name: t), _) = (open(name: "tuple"), 1) // <- E0508
 }
 
 fn make_tag(id: Int) -> Tag {

@@ -684,6 +684,10 @@ impl Walk<'_> {
                 let (Some(ctor), Some((_, args))) = (self.p.pat_ctor.get(pat), self.adt_of(ty)) else {
                     return self.is_resource(ty);
                 };
+                // A base resource holds itself, whatever its fields are.
+                if self.p.decls.adt(ctor.adt).resource_base {
+                    return true;
+                }
                 let types = self.p.decls.adt(ctor.adt).field_types(ctor.variant, args);
                 let written = fields.iter().flatten().zip(ctor.fields.iter());
                 let left_out = (0..types.len())
@@ -749,7 +753,8 @@ impl Walk<'_> {
     }
 
     /// Whether matching `pat` against a value of type `ty` drops a resource part of it: one
-    /// the pattern leaves out of a value that doesn't stay in its place (`gone`). A binding
+    /// the pattern leaves out of a value that doesn't stay in its place (`gone`), or a base
+    /// resource it takes apart there. A binding
     /// inside an enum's variant moves the whole value, so what the rest leaves out goes
     /// with it (OPEN_QUESTIONS P5).
     fn lost(&self, pat: PatId, ty: &Ty, gone: bool) -> bool {
@@ -779,7 +784,8 @@ impl Walk<'_> {
                 let left_out = (0..types.len())
                     .filter(|i| !ctor.fields.iter().any(|f| f.index() == *i))
                     .any(|i| self.is_resource(&types[i]));
-                lost || (gone && left_out)
+                // A pattern can't take a base resource apart, so one that goes is dropped.
+                lost || (gone && (left_out || def.resource_base))
             }
         }
     }

@@ -5,7 +5,7 @@
 // local, a `take` parameter and what a pattern binds are owned, and so is what is left in
 // a record after some of its fields moved, and a value an arm matched without moving it,
 // when its variant may hold a resource. A base resource whose field moved out can't be
-// consumed whole. A `take self` method of the type's own consumes `self` only once it has
+// consumed whole, and nor does an arm that takes one apart consume it. A `take self` method of the type's own consumes `self` only once it has
 // consumed the resources `self` holds (OPEN_QUESTIONS Q35). Each leaked resource is
 // reported once, at its binding. A failure exit abandons instead, so a scope may fail
 // holding resources, and a borrowed parameter is lent, so its caller consumes it.
@@ -71,6 +71,17 @@ fn crossed(c: Bool) {
         a.close()
     } else {
         b.close()
+    }
+}
+
+fn matched_apart(o: take Option[Probe]) {           // <- E0507
+    let p = open(name: "p")                         // <- E0507
+    match p {
+        Probe(name: n) => {}
+    }
+    match o {
+        Some(Probe(name: n)) => {}
+        None => {}
     }
 }
 
