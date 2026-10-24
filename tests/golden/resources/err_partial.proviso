@@ -3,7 +3,9 @@
 // expect-error: E0506
 // A part of a refined value can't be passed as `inout(partial)`, since a failure would
 // leave it half updated (REFERENCE §5.4). That covers an `inout` of a resource, which is
-// partial whatever the parameter says. The whole refined value may be passed. An argument
+// partial whatever the parameter says, and the receiver of an `inout self` method of a
+// resource. A built-in method can't fail, so a list's `push` may change a part. The whole
+// refined value may be passed. An argument
 // for an `inout(partial)` parameter is marked with `&`, like any `inout` one (H5).
 resource record Probe {
     name: Text
@@ -18,14 +20,24 @@ record Span {
     hi: Int
 } where lo <= hi
 
+impl Probe {
+    fn rename_self(inout self) {
+        self.name = "renamed"
+    }
+}
+
 record Guarded {
     probe: Probe
+    probes: List[Probe]
     n: Int
 } where n > 0
 
 impl Guarded {
     fn close(take self) {
         self.probe.abandon()
+        for probe in take self.probes {
+            probe.abandon()
+        }
     }
 }
 
@@ -46,7 +58,9 @@ fn calls() {
     set_ten(x: &span.lo)                            // <- E0413
     shift_span(span: &span)
     set_ten(x: span.hi)                             // <- E0506
-    var guarded = Guarded(probe: Probe(name: "p"), n: 1)
+    var guarded = Guarded(probe: Probe(name: "p"), probes: [], n: 1)
     rename(probe: &guarded.probe)                   // <- E0413
+    guarded.probe.rename_self()                     // <- E0413
+    guarded.probes.push(Probe(name: "q"))
     guarded.close()
 }

@@ -4599,7 +4599,14 @@ impl Checker<'_> {
                 // An `inout self` method changes its receiver, and a `take self` one owns it
                 // (REFERENCE §5.2).
                 match self.p.fns[f].self_mode {
-                    ParamMode::Inout => self.changes(receiver, name),
+                    ParamMode::Inout => {
+                        self.changes(receiver, name);
+                        // The receiver of a resource is partial, as an `&` of one is (§5.4).
+                        if self.p.decls.is_resource(&receiver_ty) && self.refined_part(receiver) {
+                            let message = "this is a part of a refined value, which a failure could leave breaking its refinement, so it can't be the receiver of an `inout self` method of a resource, which keeps partial changes (§5.4)";
+                            self.error(codes::PARTIAL_INOUT_OF_REFINED_PART, self.span(receiver), message);
+                        }
+                    }
                     ParamMode::Take => {
                         self.consumed.insert(receiver);
                         self.element_taken(receiver, &receiver_ty);
