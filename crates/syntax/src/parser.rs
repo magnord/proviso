@@ -51,6 +51,7 @@ pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> M
         poisoned: HashSet::new(),
         impls: HashSet::new(),
         tuple_impls: false,
+        everywhere: HashSet::new(),
     };
     let mut parser = Parser {
         file,
@@ -378,7 +379,12 @@ impl Parser<'_> {
                     // An item whose block was never closed ends right before the next item.
                     if !matches!(self.kind(), T::Newline | T::Eof | T::DocComment) && !self.starts_item() {
                         let _ = self.unexpected::<()>("end of line after the item");
-                        self.recover(start, Stop::Item);
+                        // Another item on the same line is parsed, so its name stays declared
+                        // (§15.1).
+                        let item_at = |kind| matches!(kind, T::Keyword(kw) if item_keyword(kw));
+                        if !(item_at(self.kind()) || self.at_kw(Kw::Pub) && item_at(self.nth(1))) {
+                            self.recover(start, Stop::Item);
+                        }
                     }
                 }
                 Ok(None) => {}
@@ -474,7 +480,7 @@ impl Parser<'_> {
             }
             T::Keyword(kw) => match planned_item(kw) {
                 Some((what, planned)) => {
-                    self.poison_declared_type();
+                    self.poison_declared_name();
                     return self.not_implemented(what, planned);
                 }
                 None => return self.unexpected("an item such as `fn` or `use`"),
@@ -563,40 +569,42 @@ impl Parser<'_> {
         }
     }
 
+    /// Marks the name a later phase's item declares, such as `LIMIT` in `let LIMIT: Int = 3`,
+    /// `crc` in `extern "C" fn crc(…)` or `Logger` in `cap interface Logger`, so that its uses
+    /// aren't reported as unknown names. It is the first name after the item's keywords.
+    fn poison_declared_name(&mut self) {
+        let mut i = self.pos;
+        while self.tokens.get(i).is_some_and(|t| matches!(t.kind, T::Keyword(_) | T::Text)) {
+            i += 1;
+        }
+        if let Some(token) = self.tokens.get(i).filter(|t| t.kind == T::Ident) {
+            let name = self.intern(token.span);
+            self.m.poisoned.insert(name.sym);
+        }
+    }
+
     /// Notes the type a rejected `impl` block, whose keyword is token `at`, is for: `Point`
     /// in `impl Point` and in `impl Show for Point`, or any tuple type in `impl Show for (A, B)`.
     fn note_impl_target(&mut self, at: usize) {
-        let mut i = at + 1;
-        let mut target = None;
-        while let Some(token) = self.tokens.get(i) {
+        // The target is the last name outside brackets before the block, or, in a header
+        // whose `[` is never closed, as in `impl[T Point {`, the last name inside it.
+        let (mut target, mut last) = (None, None);
+        let mut depth = 0usize;
+        for token in &self.tokens[at + 1..] {
             match token.kind {
-                T::Ident => target = Some(token.span),
-                T::Keyword(Kw::For) => {}
-                T::LParen => {
+                T::LParen if depth == 0 => {
                     self.m.tuple_impls = true;
                     return;
                 }
-                T::LBracket => {
-                    // Skips type parameters and arguments, such as `impl[T] Show for Box[T]`.
-                    let mut depth = 0;
-                    while let Some(token) = self.tokens.get(i) {
-                        match token.kind {
-                            T::LBracket => depth += 1,
-                            T::RBracket => depth -= 1,
-                            T::Newline | T::LBrace | T::Eof => break,
-                            _ => {}
-                        }
-                        if depth == 0 {
-                            break;
-                        }
-                        i += 1;
-                    }
-                }
-                _ => break,
+                T::LBracket => depth += 1,
+                T::RBracket => depth = depth.saturating_sub(1),
+                T::Ident if depth == 0 => target = Some(token.span),
+                T::Ident => last = Some(token.span),
+                T::LBrace | T::Newline | T::Eof => break,
+                _ => {}
             }
-            i += 1;
         }
-        if let Some(span) = target {
+        if let Some(span) = target.or(if depth > 0 { last } else { None }) {
             let name = self.intern(span);
             self.m.impls.insert(name.sym);
         }
@@ -698,6 +706,7 @@ impl Parser<'_> {
             }
         }
         let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
+        let derives = self.late_derives(derives, "before the record's fields, as in `record R derives(Eq) { … }`")?;
         Ok(RecordDecl { name, generics, unique: false, resource: false, derives, fields, refinement, distinct: false })
     }
 
@@ -713,6 +722,17 @@ impl Parser<'_> {
                 }
             }
             self.close(&open, T::RParen, "`,` or `)`")?;
+        }
+        Ok(derives)
+    }
+
+    /// A `derives` after the declaration it belongs to, reported once and kept, so the type
+    /// still derives what it names (§15.1). `place` says where it goes instead.
+    fn late_derives(&mut self, mut derives: Vec<Ident>, place: &str) -> PResult<Vec<Ident>> {
+        if self.at_kw(Kw::Derives) {
+            let span = self.peek().span;
+            self.error(codes::UNEXPECTED_TOKEN, span, format!("`derives` goes {place}"));
+            derives.extend(self.derives()?);
         }
         Ok(derives)
     }
@@ -753,6 +773,7 @@ impl Parser<'_> {
                 break;
             }
         }
+        let derives = self.late_derives(derives, "before the enum's variants, as in `enum E derives(Eq) { … }`")?;
         Ok(EnumDecl { name, generics, derives, variants })
     }
 
@@ -845,6 +866,9 @@ impl Parser<'_> {
         if let TypeExprKind::Named(name) = self.m.types[target].kind
             && generics.iter().any(|g| g.name.sym == name.sym)
         {
+            if let Some(iface) = iface {
+                self.m.everywhere.insert(iface.sym);
+            }
             let span = self.m.types[target].span;
             self.diags.not_implemented(
                 span,
@@ -1007,6 +1031,8 @@ impl Parser<'_> {
         }
         let derives = self.derives()?;
         let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
+        let derives =
+            self.late_derives(derives, "before `where`, as in `type Id = distinct Int derives(Eq) where self > 0`")?;
         let value = Ident { sym: self.m.interner.intern("value"), span: self.m.types[target].span };
         Ok(ItemKind::Record(RecordDecl {
             name,

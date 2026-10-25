@@ -337,6 +337,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         rejected_abandon: HashSet::new(),
         rejected_abandon_for: HashSet::new(),
         unknown_tys: Vec::new(),
+        operators: Vec::new(),
         f: FnState::new(Ty::Unit, None),
         in_chain: false,
         markers: Vec::new(),
@@ -381,6 +382,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     checker.adt_derives();
     checker.signatures();
     checker.impls();
+    checker.operator_derives();
     checker.abandon_impls();
     checker.written_keys();
     checker.collisions();
@@ -671,6 +673,9 @@ struct Checker<'a> {
     /// Types without an [`ImplKey`], such as `Never` and `Out`, that a rejected `impl` block
     /// is for. They may have methods and interfaces that nothing records (REFERENCE §15.1).
     unknown_tys: Vec<Ty>,
+    /// The operators distinct types derive, with the name of each, which
+    /// [`Checker::operator_derives`] checks once every `impl` block is known.
+    operators: Vec<(AdtId, IfaceId, Ident)>,
     /// What `Self` means here: the type of an `impl` block, or `Param(0)` in an interface.
     self_ty: Option<Ty>,
     /// The type parameters in scope, by name, with their indices; `None` for one whose
@@ -2052,6 +2057,12 @@ impl Checker<'_> {
                 self.unknown_target(sym);
             }
         }
+        for &sym in &m.everywhere {
+            let iface = self.iface_names.get(&sym).copied().or_else(|| IfaceId::prelude(m.text(sym)));
+            if let Some(iface) = iface {
+                self.p.decls.mark_everywhere(iface);
+            }
+        }
     }
 
     /// Notes that a rejected `impl` block is for the type `sym` names, if any.
@@ -2220,17 +2231,25 @@ impl Checker<'_> {
             def.derives = derives;
             def.unknown_interfaces |= unknown;
         }
+        self.operators = operators;
+    }
+
+    /// Checks each operator a distinct type derives against the type it wraps, once every
+    /// `impl` block is known, so one rejected for the wrapped type may have given it.
+    fn operator_derives(&mut self) {
+        let m = self.m;
         // Each is checked against the derives as written, so one that wraps a distinct type
         // whose own derive is rejected isn't reported again (REFERENCE §15.1).
-        let missing: Vec<_> = operators
+        let missing: Vec<_> = std::mem::take(&mut self.operators)
             .into_iter()
             .filter(|&(id, iface, _)| {
                 let wrapped = &self.p.decls.adt(id).variant().fields[0].ty;
-                // A distinct type whose own derives are rejected may have meant this one. A record
-                // or enum can't derive an operator, so its rejected derives can't have meant it.
+                // A distinct type whose own derives are rejected may have meant this one, and so
+                // may a rejected `impl` block for any record or enum (issue #55). A record or
+                // enum can't derive an operator, so its rejected derives can't have meant it.
                 if let Ty::Adt(of, _) = wrapped
-                    && self.p.decls.adt(*of).distinct
-                    && self.p.decls.adt(*of).unknown_interfaces
+                    && (self.p.decls.adt(*of).distinct && self.p.decls.adt(*of).unknown_interfaces
+                        || self.p.decls.adt(*of).unknown_methods)
                 {
                     return false;
                 }
@@ -2860,6 +2879,9 @@ impl Checker<'_> {
         {
             let message = format!("`{target_text}` derives `{iface_text}`, so it implements it already");
             self.error(codes::DUPLICATE_IMPLEMENTATION, header, message);
+            // The block was meant to give its target the interface, which the derive alone
+            // may not for these type arguments (§15.1).
+            self.p.decls.mark_taken(iface, key, target.clone(), self.impl_generics.len());
             self.declare_rejected(item, decl, &target);
             return;
         }
@@ -3138,7 +3160,9 @@ impl Checker<'_> {
 
     fn check_main(&mut self) {
         let Some(id) = self.p.main else {
-            if self.opts.needs_main {
+            // A `main` that failed to parse has been reported (§15.1).
+            let lost = self.poisoned.iter().any(|&sym| self.m.text(sym) == "main");
+            if self.opts.needs_main && !lost {
                 self.error(
                     codes::INVALID_MAIN,
                     Span::default(),

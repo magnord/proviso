@@ -528,6 +528,9 @@ pub struct Decls {
     /// have been meant for the types it matches, with other constraints than the accepted
     /// one, so their uses aren't reported (§15.1).
     taken: HashMap<(IfaceId, ImplKey), Vec<(Ty, usize)>>,
+    /// Interfaces that a rejected `impl` block for every type, as `impl[T] I for T`, may have
+    /// given every type, so their uses aren't reported (§15.1).
+    everywhere: HashSet<IfaceId>,
     /// Whether the module declares a resource, without which no type is one.
     any_resource: bool,
     /// The argument lists [`Decls::is_resource`] has answered for, by address, so a deep type
@@ -634,6 +637,7 @@ impl Default for Decls {
             unknown_tuples: false,
             unknown: HashSet::new(),
             taken: HashMap::new(),
+            everywhere: HashSet::new(),
             any_resource: false,
             resource_args: Mutex::default(),
         }
@@ -762,6 +766,11 @@ impl Decls {
         self.taken.entry((iface, key)).or_default().push((target, params));
     }
 
+    /// Notes that a rejected `impl` block for every type implements `iface`.
+    pub fn mark_everywhere(&mut self, iface: IfaceId) {
+        self.everywhere.insert(iface);
+    }
+
     /// Notes that a rejected `impl` block names `key`, so it may have methods and interfaces
     /// that nothing records.
     pub fn mark_unknown(&mut self, key: ImplKey) {
@@ -849,7 +858,7 @@ impl Decls {
         }
         // Every resource type implements `Abandon`: a base resource by its `impl`, which
         // E0309 asks for, and an aggregate by abandoning what it holds (REFERENCE §10).
-        if iface == IfaceId::ABANDON && self.is_resource(ty) {
+        if iface == IfaceId::ABANDON && self.is_resource(ty) || self.everywhere.contains(&iface) {
             return true;
         }
         match ty {
@@ -873,9 +882,11 @@ impl Decls {
                 // A derived interface holds when the type arguments the type holds implement
                 // it (STD.md; OPEN_QUESTIONS P5). `Never` has no values, so it implements
                 // everything as an argument.
+                // A rejected `impl` block may give it for the arguments the derive doesn't.
                 let known = if self.adt(*id).derives.contains(&iface) {
                     self.held_args(*id, args)
                         .all(|arg| *arg == Ty::Never || self.implements_in(arg, iface, params, memo))
+                        || self.by_impl(ty, iface, params, memo)
                 } else {
                     self.by_impl(ty, iface, params, memo)
                 };
@@ -904,18 +915,19 @@ impl Decls {
     /// rejected `impl` block for it may have been one.
     fn by_impl(&self, ty: &Ty, iface: IfaceId, params: &[Vec<IfaceId>], memo: &mut Memo) -> bool {
         let Some(key) = ImplKey::of(ty) else { return false };
-        if self.unknown.contains(&key) {
+        let taken = self.taken.get(&(iface, key)).map_or(&[][..], |targets| targets.as_slice());
+        if self.unknown.contains(&key)
+            || taken.iter().any(|(target, params)| matches_target(target, ty, &mut vec![None; *params]))
+        {
             return true;
         }
         let Some(def) = self.impls.get(&(iface, key)) else { return false };
         let mut binds = vec![None; def.bounds.len()];
-        let applies = matches_target(&def.target, ty, &mut binds)
+        matches_target(&def.target, ty, &mut binds)
             && binds.iter().zip(&def.bounds).all(|(bind, bounds)| match bind {
                 Some(Ty::Never | Ty::Var(_) | Ty::Error) | None => true,
                 Some(arg) => bounds.iter().all(|&b| self.implements_in(arg, b, params, memo)),
-            });
-        let taken = self.taken.get(&(iface, key)).map_or(&[][..], |targets| targets.as_slice());
-        applies || taken.iter().any(|(target, params)| matches_target(target, ty, &mut vec![None; *params]))
+            })
     }
 
     /// The `impl` of `iface` for `ty`'s name, whose target `ty` matches, with the type

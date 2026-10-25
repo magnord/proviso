@@ -29,6 +29,9 @@ pub struct Module {
     /// Whether a rejected `impl` block was for a tuple type, which has no name to note in
     /// `impls`. Every tuple type may then have methods and interfaces we don't know.
     pub tuple_impls: bool,
+    /// Interfaces named by a rejected `impl` block for every type, such as `Show` in
+    /// `impl[T] Show for T`. The block may have given every type the interface.
+    pub everywhere: HashSet<Symbol>,
 }
 
 impl Module {

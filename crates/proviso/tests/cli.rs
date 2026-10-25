@@ -52,6 +52,21 @@ fn run_needs_a_main() {
 
 /// Golden files check only codes, so the wording that tells std's `ParseError` from a
 /// module's, and an example from a function, is checked here (OPEN_QUESTIONS P5).
+/// A `main` whose declaration doesn't parse is reported once, not also as missing (§15.1;
+/// issue #55).
+#[test]
+fn a_main_that_fails_to_parse_is_not_missing() {
+    for header in ["pub fn main(sys: keep System fails IoError {", "pub fn main(sys: keep System) -> {"] {
+        let text = format!("use std.io {{ IoError }}\n\n{header}\n    try sys.stdout.write_line(\"x\")\n}}\n");
+        let file = source("broken_main.proviso", &text);
+        let output = run(&["run"], &file);
+        let errors = stderr(&output);
+        assert_eq!(output.status.code(), Some(65), "{header}: {errors}");
+        assert_eq!(errors.matches("error[").count(), 1, "{header}: {errors}");
+        assert!(errors.contains("error[E0101]"), "{header}: {errors}");
+    }
+}
+
 #[test]
 fn messages_name_what_they_mean() {
     let file = source(
