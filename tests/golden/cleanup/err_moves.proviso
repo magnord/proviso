@@ -1,0 +1,100 @@
+// phase: 2
+// expect-error: E0201
+// expect-error: E0301
+// expect-error: E0320
+// expect-error: E0507
+// expect-error: E0508
+// The move pass excuses only what an error makes unknown (REFERENCE §15.1). A `let` known
+// to hold no resource loses none when it is discarded, whole or by a field, while a `var`
+// may get one later (issue #46). A call of a function gives a value of its result type
+// whatever its arguments are, so an error in an argument doesn't hide the resource it
+// gives, whether it is bound, discarded, matched or assigned over a place that holds one
+// (issue #46). An error at the callee or in a construction does. A method used as a value,
+// as in `p.close`, was meant to be called, so its receiver isn't reported as left over,
+// inside a closure or outside one, and nor is a field it is read from (issue #50).
+
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+record Spare {
+    probe: Option[Probe]
+}
+
+record Pair {
+    left: Probe
+    right: Probe
+}
+
+fn open(name: Text) -> Probe {
+    return Probe(name: name)
+}
+
+fn spare_dropped() {
+    let s = Spare(probe: None)
+    let _ = s
+}
+
+fn spare_field_dropped() {
+    let s = Spare(probe: None)
+    let _ = s.probe
+}
+
+fn spare_some() {
+    let s = Spare(probe: Some(open(name: "a")))
+    let _ = s                                       // <- E0508
+}
+
+fn spare_var() {
+    var s = Spare(probe: None)
+    let _ = s                                       // <- E0508
+}
+
+fn mistyped_bound() {
+    let p = open(name: 5)                           // <- E0507, E0301
+}
+
+fn mistyped_discarded() {
+    open(name: 5)                                   // <- E0508, E0301
+    let _ = open(name: 6)                           // <- E0508, E0301
+    match open(name: 7) {                           // <- E0301
+        _ => {}                                     // <- E0508
+    }
+}
+
+fn mistyped_assigned() {
+    var q = open(name: "a")
+    q = open(name: 8)                               // <- E0508, E0301
+    q.close()
+}
+
+fn unknown_callee() {
+    let p = nosuch(name: 5)                         // <- E0201
+    let s = Spare(probe: Some(nosuch))              // <- E0201
+}
+
+fn method_value() {
+    let p = open(name: "a")
+    let c = p.close                                 // <- E0320
+}
+
+fn method_value_closure() {
+    let p = open(name: "a")
+    let f = |x: Int| {
+        let c = p.close                             // <- E0320
+        x
+    }
+}
+
+fn method_value_field(pair: take Pair) {
+    let c = pair.left.close                         // <- E0320
+    pair.right.close()
+}
