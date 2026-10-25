@@ -4,7 +4,7 @@ This file lists the standard library items that phases 1 and 2 implement (OPEN_Q
 
 - **Phase 1** already has `System.stdout`, `Out.write_line` and `IoError`. Everything else here is phase 2.
 - **Contracts.** An `ensures` clause is listed where the verifier will need it (phase 5). The other items get theirs when `sig` exists (phase 4, T11). The toolchain implements these items natively and trusts them to meet their contracts, so the v1 profile doesn't check std contracts at runtime.
-- **Later phases.** `map`, `filter` and the other operations that take a closure that may fail need effect variables (§9.5), which arrive in phase 3. Files, `Dir` and `In`'s operations also arrive in phase 3 (Q6).
+- **Later phases.** `map`, `filter` and the other operations that take a closure that may fail need effect variables (§9.5), which arrive in phase 3. `Dir` and `In`'s operations also arrive in phase 3 (Q6). `File` and `Dir.sub` are not yet scheduled (Q6, Q36).
 
 ## The prelude
 
