@@ -18,7 +18,8 @@ fn bump(n: inout Int) {
 fn doubled(a: Bool, b: Bool) -> Bool {
     var v = 1
     bump(n: &&v)                                    // <- E0001
-    return a && b                                   // <- E0001
+    let c = a && b                                  // <- E0001
+    return (a) && c                                 // <- E0001
 }
 
 enum Shape {
