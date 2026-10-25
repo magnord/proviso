@@ -7,6 +7,7 @@
 // expect-error: E0208
 // expect-error: E0301
 // expect-error: E0303
+// expect-error: E0305
 // expect-error: E0306
 // expect-error: E0307
 // expect-error: E0312
@@ -171,6 +172,22 @@ fn unknown_param(f: fn(Nope) -> Int) -> Int {       // <- E0307
 
 fn unknown_expected() -> Int {
     return unknown_param(f: |x| x.byte_len())
+}
+
+fn unmarked_body(n: Int) -> Int {
+    let c = || half(n)                              // <- E0701
+    let a = c() else 0
+    let b = (|| half(n))() else 0                   // <- E0701
+    return a + b
+}
+
+fn assigned_let(k: Int) {
+    let c = || k
+    c = || 2                                        // <- E0305
+}
+
+fn builtin_method(xs: List[Int]) {
+    let l = xs.len                                  // <- E0320
 }
 
 fn same[T: Copy](x: T) -> T {

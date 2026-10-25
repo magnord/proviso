@@ -124,3 +124,11 @@ fn once(f: fn(Int) -> Int) {
         f
     }
 }
+
+fn same_eq[T: Eq](x: T) -> Bool {
+    return x == x
+}
+
+fn bound_after(f: fn(Int) -> Int) -> Bool {
+    return same_eq(x: Some(f))                      // <- E0509
+}

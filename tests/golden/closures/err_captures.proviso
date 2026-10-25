@@ -214,3 +214,13 @@ fn lent_then_taken() {
     let p = Probe(name: "p")
     look_then_take(a: p, b: p)                      // <- E0505
 }
+
+fn read_both(f: fn() -> Int, g: inout fn() -> Int) -> Int {
+    return f()
+}
+
+fn held_var_lent() -> Int {
+    var n = 1
+    var g = || n
+    return read_both(f: || g(), g: &g)              // <- E0505
+}
