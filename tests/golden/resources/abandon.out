@@ -48,8 +48,10 @@ abandon x2
 abandon x1
 -- literal
 abandon first k
-failing: entry
 abandon second k
+failing: entry
+abandon third k
+abandon j
 -- duplicate key
 close c1
 abandon c2

@@ -1611,38 +1611,38 @@ impl Interp<'_> {
     /// place and its last value.
     #[inline(never)]
     fn map(&mut self, entries: &[(ExprId, ExprId)], frame: &mut Frame, span: Span) -> Flow<Value> {
-        // The map so far is owned as one value, and each key and value is held until the map
-        // takes it, so a failure abandons each resource once.
-        let at = self.owned.len();
-        self.acquire(Owned::Value(Value::Map(Arc::default()), span));
+        let mark = self.owned.len();
+        let mut map = MapValue::default();
+        // Where in `owned` the value of each of the map's entries is held, if it is.
+        let mut held_at: Vec<Option<usize>> = Vec::new();
         for &(key, value) in entries {
             let key = self.held(key, frame)?;
             let place = self.m.exprs[value].span;
+            let held = self.p.held.get(value).is_some();
             let value = self.held(value, frame)?;
-            let (_, Owned::Value(Value::Map(entry), _)) = &mut self.owned[at] else {
-                unreachable!("the literal's map stays at its mark")
-            };
-            let mut map = std::mem::take(entry);
-            let replaced = self.set(Arc::make_mut(&mut map), key, value, span);
-            let (_, Owned::Value(Value::Map(entry), _)) = &mut self.owned[at] else {
-                unreachable!("the literal's map stays at its mark")
-            };
-            *entry = map;
-            // A key named again replaces its value, which can't be dropped, so a resource it
-            // held is abandoned now (REFERENCE §10 rules 4 and 5; OPEN_QUESTIONS P5).
-            if let Some(old) = replaced? {
-                self.owned.truncate(at + 1);
-                if let unwind @ Unwind::Defect(_) = self.abandon(old, place, Unwind::Return(Value::Unit)) {
-                    return Err(unwind);
+            let at = held.then(|| self.owned.len() - 1);
+            let hash = hash_value(&key, &self.p.decls);
+            match map.find(&key, hash, &mut |a, b| self.equal(a, b, span))? {
+                // A key named again replaces its value, which can't be dropped, so a resource
+                // it held is abandoned now, and isn't held any more (REFERENCE §10 rules 4
+                // and 5; OPEN_QUESTIONS P5).
+                Some(slot) => {
+                    let old = map.replace(slot, value);
+                    if let Some(i) = std::mem::replace(&mut held_at[slot], at) {
+                        self.owned[i].1 = Owned::Value(Value::Unit, place);
+                    }
+                    if let unwind @ Unwind::Defect(_) = self.abandon(old, place, Unwind::Return(Value::Unit)) {
+                        return Err(unwind);
+                    }
+                }
+                None => {
+                    map.insert(hash, key, value);
+                    held_at.push(at);
                 }
             }
-            self.owned.truncate(at + 1);
         }
-        let Some((_, Owned::Value(map, _))) = self.owned.pop() else {
-            unreachable!("the literal's map stays at its mark")
-        };
-        self.owned.truncate(at);
-        Ok(map)
+        self.owned.truncate(mark);
+        Ok(Value::Map(Arc::new(map)))
     }
 
     /// A call of `builtin`, which changes its receiver, a place, in place.

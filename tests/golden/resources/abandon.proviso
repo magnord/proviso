@@ -11,7 +11,8 @@
 // elements a consuming loop hasn't reached, after its loop variable. A base resource whose
 // own `take self` method fails is abandoned, unless a resource field of it has moved out,
 // when only the rest of its resource fields are (OPEN_QUESTIONS P5). A map literal that names
-// a key again abandons the value it replaces then, and once only.
+// a key again abandons the value it replaces then, and once only, and the values it holds
+// keep their order.
 use std.io { Out, IoError }
 
 resource record Probe {
@@ -171,7 +172,7 @@ fn literal(out: keep Out) fails Stop {
 }
 
 fn duplicate_key(out: keep Out) fails Stop {
-    let probes = ["k": open(name: "first k", out: out), "k": open(name: "second k", out: out), "j": try stop(out: out, why: "entry")]
+    let probes = ["k": open(name: "first k", out: out), "k": open(name: "second k", out: out), "j": open(name: "j", out: out), "k": open(name: "third k", out: out), "z": try stop(out: out, why: "entry")]
     for (key, probe) in take probes {
         probe.close()
     }
