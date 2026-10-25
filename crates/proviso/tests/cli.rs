@@ -233,9 +233,10 @@ fn h() {{
     }
 }
 
-/// A closure bound to a local may call the ones bound before it. Checking what each reads
-/// and reading what each captures again at a call take time in proportion to the chain,
-/// though each closure calls the two before it (OPEN_QUESTIONS P5, Closures at run time).
+/// A closure bound to a local may call the ones bound before it. When the closures capture
+/// only each other, checking what each reads and reading what each captures again at a call
+/// take time in proportion to the chain, though each closure calls the two before it
+/// (OPEN_QUESTIONS P5, Closures at run time).
 #[test]
 fn a_chain_of_closures_checks_and_runs_in_linear_time() {
     let mut text = String::from(

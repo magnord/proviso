@@ -1241,8 +1241,9 @@ impl Walk<'_> {
     }
 
     /// `reads`, with each local listed in [`Walk::fn_reads`] replaced by what it reads, each
-    /// local once. Those lists are expanded already, so a chain of closures as long as the
-    /// function costs time in proportion to its length.
+    /// local once. Those lists are expanded already, so a chain of closures doesn't expand
+    /// again at each link. Each list still holds what the links before it read, so a chain
+    /// of n closures that each capture a local of their own costs time in n squared.
     fn expand(&mut self, reads: Reads) -> Reads {
         if self.listed.len() < self.locals.len() {
             self.listed.resize(self.locals.len(), 0);
