@@ -10,7 +10,9 @@
 // value built from a type parameter without `Copy` can't be copied out of a borrow (§4.8).
 // A function type can't be a type argument of a generic type, whether written or inferred
 // (§6.7, OPEN_QUESTIONS Q34). A type argument gives reach even when no field holds a value
-// of it, so `Phantom[Out]` isn't `Copy`, though a handle is whatever its element (§5.1).
+// of it, so `Phantom[Out]` isn't `Copy`, nor is a record with a field of that type, though
+// a handle is whatever its element (§5.1). A borrowed `Phantom[T]` can't be copied unless
+// `T: Copy`, since `T` may have reach.
 use std.io { Out }
 use std.pool { Pool, Handle }
 
@@ -114,4 +116,55 @@ fn phantoms(p: Phantom[Out], q: Phantom[Option[Out]], h: Handle[Out], r: Ref[Out
 fn phantom_params[T, U: Copy](p: Phantom[T], q: Phantom[U]) {
     let a = dup(x: p)                               // <- E0309
     let b = dup(x: q)
+}
+
+// A record or enum with a field whose type argument gives reach has that reach too, at any
+// depth and for a type declared later, but not through a handle.
+record Keeps {
+    item: Phantom[System]
+}
+
+enum MaybeKeeps {
+    Kept(p: Phantom[Out])
+    Nothing
+}
+
+record KeepsKeeps {
+    k: Option[Keeps]
+}
+
+record KeepsLater {
+    item: Phantom[Later]
+}
+
+record Later {
+    out: Out
+}
+
+record Points {
+    h: Handle[Out]
+}
+
+fn containers(k: Keeps, m: MaybeKeeps, kk: KeepsKeeps, l: KeepsLater, p: Points) {
+    let a = dup(x: k)                               // <- E0309
+    let b = dup(x: m)                               // <- E0309
+    let c = dup(x: kk)                              // <- E0309
+    let d = dup(x: l)                               // <- E0309
+    let e = dup(x: p)
+}
+
+// A borrowed value that may have reach through a type parameter can't be copied out of the
+// borrow unless the parameter is `Copy`, as one that may hold a unique value can't (§4.8).
+fn phantom_copies[T, U: Copy](p: Phantom[T], r: Ref[T], h: Handle[T], q: Phantom[U]) -> Phantom[T] {
+    let a = p                                       // <- E0503
+    let b = r                                       // <- E0503
+    let c = h
+    let d = q
+    return p                                        // <- E0503
+}
+
+impl[T] Phantom[T] {
+    fn twice(self) -> (Phantom[T], Phantom[T]) {
+        return (self, self)                         // <- E0503, E0503
+    }
 }

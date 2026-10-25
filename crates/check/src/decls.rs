@@ -882,12 +882,15 @@ impl Decls {
         matches_target(&def.target, ty, &mut binds).then_some((def, binds))
     }
 
-    /// Whether `ty` moves only because a type parameter in it may lack `Copy`, so it would
-    /// be copyable if each were `Copy` (REFERENCE §4.8).
-    pub fn moves_by_param(&self, ty: &Ty, params: &[Vec<IfaceId>]) -> bool {
+    /// Whether copying a value of `ty` needs a type parameter in it to be `Copy` (REFERENCE
+    /// §4.8): it moves, or isn't `Copy`, only because one may lack `Copy`. So `Box[T]`, which
+    /// may hold a unique value, and `Phantom[T]`, which may have reach through `T`, both need
+    /// `T: Copy`.
+    pub fn copy_needs_param(&self, ty: &Ty, params: &[Vec<IfaceId>]) -> bool {
         let copy: Vec<Vec<IfaceId>> =
             params.iter().map(|bounds| bounds.iter().copied().chain([IfaceId::COPY]).collect()).collect();
-        self.moves(ty, params) && !self.moves(ty, &copy)
+        (self.moves(ty, params) && !self.moves(ty, &copy))
+            || (!self.implements(ty, IfaceId::COPY, params) && self.implements(ty, IfaceId::COPY, &copy))
     }
 
     /// [`Decls::moves`], where `memo` holds what each type argument list already walked gave,
@@ -1059,6 +1062,10 @@ impl Decls {
                 for (i, arg) in args.iter().enumerate() {
                     if def.held.get(i).copied().unwrap_or(false) {
                         kind = kind.or(self.base_kind(arg, held));
+                    } else if *id != AdtId::HANDLE {
+                        // A type argument it doesn't hold still gives it reach (REFERENCE §5.1),
+                        // but a handle's never does (STD.md).
+                        kind.reach |= self.base_kind(arg, &mut []).reach;
                     }
                 }
                 kind

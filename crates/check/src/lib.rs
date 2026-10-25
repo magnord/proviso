@@ -4167,7 +4167,7 @@ impl Checker<'_> {
         let ty = &self.vars.zonk(ty);
         // A type that moves whatever its parameters are, such as `Pool[T]`, is a move of a
         // lent value, which the move pass reports (E0504).
-        if !self.p.decls.moves_by_param(ty, &self.f.bounds) {
+        if !self.p.decls.copy_needs_param(ty, &self.f.bounds) {
             return;
         }
         let Some(param) = self.uncopyable(ty) else { return };
