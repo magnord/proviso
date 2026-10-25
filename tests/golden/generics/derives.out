@@ -1,0 +1,6 @@
+true false true Pair(first: 1, second: "b") Pair(first: 2, second: "a")
+3 Some(4) None
+true true Tree.Node(left: Tree.Leaf, value: "x", right: Tree.Leaf)
+Some("none") Some("one")
+false true Phantom(n: 2)
+true Pair(first: Pair(first: 1, second: 2), second: Tree.Node(left: Tree.Leaf, value: [1, 2], right: Tree.Leaf))

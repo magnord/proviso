@@ -250,6 +250,8 @@ pub mod codes {
             "Expressions and blocks nest at most 1,000 levels deep in this implementation (OPEN_QUESTIONS P5).";
         MATCH_TOO_COMPLEX = "E0903", "match_too_complex",
             "A `match` whose exhaustiveness takes too many steps to check (OPEN_QUESTIONS P5).";
+        EXPANDING_TYPE = "E0904", "expanding_type",
+            "A generic type that recurses through a growing type argument of itself (OPEN_QUESTIONS P5).";
     }
 
     pub fn find(id: &str) -> Option<Code> {

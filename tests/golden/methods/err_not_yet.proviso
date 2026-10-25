@@ -1,13 +1,12 @@
 // phase: 2.4
 // expect-error: E0901
-// Generic records and `impl` blocks, implementations for generic types such as
-// `Option[Int]`, a hand-written `Ord` or `Hash`, `cmp`, interface functions
-// without `self`, generic interface methods, generic interfaces such as `Index[Int]`, tag
-// parameters, and `Self` in expressions and patterns come later. So do implementations for `Never` and for
-// capability types such as `Out`,
-// capability interfaces in an `impl`, a constraint or a call, and calls of the methods of
-// `Index` and the operator interfaces. Uses of what they declare aren't reported
-// again (REFERENCE §15.1), and an `impl` may declare the methods its interface couldn't.
+// A hand-written `Ord` or `Hash`, `cmp`, interface functions without `self`, generic
+// interface methods, generic interfaces such as `Index[Int]`, tag parameters, and `Self` in
+// expressions and patterns come later. So do implementations for `Never` and for capability
+// types such as `Out`, capability interfaces in an `impl`, a constraint or a call, and calls
+// of the methods of `Index` and the operator interfaces. Uses of what they declare aren't
+// reported again (REFERENCE §15.1), and an `impl` may declare the methods its interface
+// couldn't.
 use std.io { IoError, Out }
 
 record Counter {
@@ -36,17 +35,6 @@ impl Counter {
 
     fn zeroed(self) -> Bool {
         return self is Self(n: 0)                   // <- E0901
-    }
-}
-
-record Pair[A, B] {                                 // <- E0901
-    first: A
-    second: B
-}
-
-impl[T] Pair[T, T] {                                // <- E0901
-    fn swap(self) -> Int {
-        return 0
     }
 }
 
@@ -108,12 +96,6 @@ fn update[T](x: inout T, y: take T) {
     x = y
 }
 
-impl Size for Option[Int] {                         // <- E0901
-    fn size(self) -> Int {
-        return 1
-    }
-}
-
 impl Size for Counter {
     fn size(self) -> Int {
         return self.n
@@ -133,10 +115,10 @@ impl Ord for Counter {                              // <- E0901
 impl Hash for Counter {                             // <- E0901
 }
 
-fn calls(c: Counter, o: Option[Int], p: Pair) -> Int {
+fn calls(c: Counter) -> Int {
     var d = c
     d.bump()
-    let e = c.close() + o.size() + p.swap() + Counter.fresh().n + c.size()
+    let e = c.close() + Counter.fresh().n + c.size()
     let f = c < c
     let g = c.n.cmp(2)                              // <- E0901
     let i = c.get(i: 0) + first(x: c) + scaled(x: 1) + id(x: 2)

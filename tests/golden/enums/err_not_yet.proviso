@@ -1,25 +1,15 @@
 // phase: 2.2
 // expect-error: E0901
-// Generic enums and `cmp` come in later slices of phase 2, and units of measure after
-// v1. Uses of what they declare aren't reported again (REFERENCE §15.1).
-enum Maybe[T] {                                     // <- E0901
-    Just(value: T)
-    Nothing
-}
-
+// `cmp` comes in a later slice of phase 2, and units of measure after v1. Uses of what they declare aren't reported again (REFERENCE §15.1).
 enum Ranked derives(Eq, Ord) {
     Low
     High
 }
 
-fn later(m: Maybe, r: Ranked) -> Int {
-    let a = Maybe.Just(value: 1)
+fn later(r: Ranked) -> Int {
     let b = r < Ranked.High
     let d = r.cmp(Ranked.High)                      // <- E0901
-    let e = match m {
-        Just(v) => v
-        Nothing => 0
-    }
+    let e = 0
     let h = match 2.5 {
         0.0[m]..1.0[m] => 1                         // <- E0901
         _ => 2

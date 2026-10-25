@@ -1,0 +1,66 @@
+// phase: 2.10
+// expect-error: E0301
+// expect-error: E0311
+// A `match` on a generic enum needs an arm for each variant, and its patterns match the
+// fields with the enum's type arguments in place (REFERENCE §4.5, §6.3). A variant whose
+// field has no values needs no arm, so whether one does can depend on the type arguments:
+// `Either[Int, Void]` has no `Right`. A generic enum built only from itself, as `Stream`,
+// has no values whatever its type argument is (OPEN_QUESTIONS P5).
+enum Tree[T] {
+    Leaf
+    Node(left: Tree[T], value: T, right: Tree[T])
+}
+
+enum Either[L, R] {
+    Left(value: L)
+    Right(value: R)
+}
+
+enum Stream[T] {
+    More(head: T, rest: Stream[T])
+}
+
+record Box[T] {
+    item: T
+}
+
+enum Void {}
+
+fn arms(t: Tree[Int], e: Either[Int, Text], v: Either[Int, Void], w: Either[Box[Void], Int]) -> Int {
+    let a = match t {                               // <- E0311
+        Leaf => 0
+    }
+    let b = match e {                               // <- E0311
+        Left(n) => n
+        Right("x") => 1
+    }
+    let c = match v {
+        Left(n) => n
+    }
+    let d = match w {
+        Right(n) => n
+    }
+    let f = match e {
+        Left("a") => 0                              // <- E0301
+        _ => 1
+    }
+    let g = match t {                               // <- E0311
+        Node(_, Node(_, 1, _), _) => 1
+        Node(_, Leaf, _) => 2
+        Leaf => 3
+    }
+    let h = match Box(item: e) {
+        Box(item: Left(n)) => n
+        Box(item: Right(s)) => s.len()
+    }
+    let i = match Box(item: Box(item: 2.5)) {
+        Box(item: Box(item: "x")) => 1              // <- E0301
+        _ => 2
+    }
+    return a + b + c + d + f + g + h + i
+}
+
+fn none(s: Stream[Int], u: Stream[Stream[Text]]) -> Int {
+    let a = match s {}
+    return match u {}
+}

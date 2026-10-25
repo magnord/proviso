@@ -1,0 +1,22 @@
+// phase: 2.10
+// expect-exit: 70
+// expect-report: defect refinement_failed
+// A generic record's refinements are checked whatever its type arguments are, also when a
+// generic function builds the record with `with` or assigns a field (REFERENCE §4.4, §8.3).
+record Tagged[T] {
+    lo: Int
+    hi: Int
+    label: T
+} where lo <= hi
+
+fn shift[T: Copy](t: Tagged[T], by: Int) -> Tagged[T] {
+    var u = t.with(hi: t.hi + by)
+    u.lo = u.lo + by
+    return u
+}
+
+pub fn main(sys: keep System) {
+    let a = Tagged(lo: 1, hi: 4, label: "a")
+    let b = shift(t: a, by: 2)
+    let c = shift(t: Tagged(lo: 0, hi: 0, label: Tagged(lo: 1, hi: 1, label: 'x')), by: -1)
+}

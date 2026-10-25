@@ -1,0 +1,90 @@
+// phase: 2.10
+// expect-error: E0309
+// expect-error: E0501
+// expect-error: E0503
+// expect-error: E0507
+// expect-error: E0509
+// A generic record or enum that holds a unique value moves, and one that holds a resource
+// must be consumed, as any aggregate (REFERENCE §5.1, §10). Neither meets a `Copy`
+// constraint, at any depth, and nor does a `unique record` whatever its type arguments. A
+// value built from a type parameter without `Copy` can't be copied out of a borrow (§4.8).
+// A function type can't be a type argument of a generic type, whether written or inferred
+// (§6.7, OPEN_QUESTIONS Q34).
+use std.pool { Pool, Handle }
+
+unique record Token {
+    id: Int
+}
+
+resource record Probe {
+    id: Int
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+    }
+}
+
+record Box[T] {
+    item: T
+}
+
+unique record Cell[T] {
+    value: T
+}
+
+record Ref[T] {
+    h: Handle[T]
+}
+
+enum Slot[T] {
+    Full(value: T)
+    Vacant
+}
+
+record Holder {
+    f: Box[fn(Int) -> Int]                          // <- E0509
+}
+
+fn dup[T: Copy](x: T) -> T {
+    return x
+}
+
+fn moves(t: take Token, u: take Token) -> Int {
+    let a = Box(item: t)
+    let b = a
+    let c = a.item.id                               // <- E0501
+    let m = Cell(value: 1)
+    let n = m
+    let o = m.value                                 // <- E0501
+    let s = Slot.Full(u)
+    let v = s
+    let w = s is Vacant                             // <- E0501
+    return b.item.id + n.value
+}
+
+fn copies(pool: Pool[Token], h: Handle[Token]) {
+    let a = dup(x: Box(item: 1))
+    let b = dup(x: Cell(value: 1))                  // <- E0309
+    let c = dup(x: Box(item: Token(id: 1)))         // <- E0309
+    let d = dup(x: Slot.Full(Box(item: Token(id: 2)))) // <- E0309
+    let e = dup(x: Box(item: Ref(h: h)))
+}
+
+fn leaks(p: take Probe, q: take Probe) {
+    let b = Box(item: p)                            // <- E0507
+    let s = Slot.Full(Box(item: q))                 // <- E0507
+}
+
+fn lent[T](x: Box[T], y: Slot[T]) -> Box[T] {
+    let z = y                                       // <- E0503
+    return x                                        // <- E0503
+}
+
+fn functions(f: fn(Int) -> Int) {
+    let b = Box(item: f)                            // <- E0509
+    let s = Slot.Full(f)                            // <- E0509
+    let n = Box(item: Box(item: f))                 // <- E0509
+}
+
+fn written(b: Box[fn()], s: Slot[Option[fn()]]) {}  // <- E0509, E0509

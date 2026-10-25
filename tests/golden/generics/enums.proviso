@@ -1,0 +1,79 @@
+// phase: 2.10
+// An enum may take type parameters, as `enum Tree[T]`, and recurse through itself with the
+// same type arguments (REFERENCE §4.5, §4.8). A variant takes its type arguments from its
+// fields and its expected type together, so `Tree.Leaf` needs one and `Tree.Node(…)` with a
+// `Tree[Int]` field gets one. Patterns bind fields with the enum's type arguments in place,
+// and a `match` needs an arm for each variant whatever the type arguments are. A generic
+// function may build and take apart a generic enum of its own type parameters.
+use std.io { IoError }
+
+enum Tree[T] derives(Eq, Show) {
+    Leaf
+    Node(left: Tree[T], value: T, right: Tree[T])
+}
+
+enum Either[L, R] derives(Show) {
+    Left(value: L)
+    Right(value: R)
+}
+
+fn single[T](value: take T) -> Tree[T] {
+    return Tree.Node(left: Tree.Leaf, value: value, right: Tree.Leaf)
+}
+
+fn size[T](t: Tree[T]) -> Int {
+    return match t {
+        Leaf => 0
+        Node(left, _, right) => size(t: left) + 1 + size(t: right)
+    }
+}
+
+fn insert(t: Tree[Int], x: Int) -> Tree[Int] {
+    return match t {
+        Leaf => single(value: x)
+        Node(left, value, right) if x < value => Tree.Node(left: insert(t: left, x: x), value: value, right: right)
+        Node(left, value, right) => Tree.Node(left: left, value: value, right: insert(t: right, x: x))
+    }
+}
+
+fn total(t: Tree[Int]) -> Int {
+    return match t {
+        Leaf => 0
+        Node(left, value, right) => total(t: left) + value + total(t: right)
+    }
+}
+
+fn flip[L: Copy, R: Copy](e: Either[L, R]) -> Either[R, L] {
+    return match e {
+        Left(v) => Either.Right(v)
+        Right(v) => Either.Left(v)
+    }
+}
+
+fn describe(e: Either[Int, Either[Text, Bool]]) -> Text {
+    return match e {
+        Left(n) => f"number {n}"
+        Right(Left(t)) => f"text {t}"
+        Right(Right(b)) => f"bool {b}"
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var t: Tree[Int] = Tree.Leaf
+    for x in [5, 2, 8, 1] {
+        t = insert(t: t, x: x)
+    }
+    try sys.stdout.write_line(f"{size(t: t)} {total(t: t)} {single(value: "a")}")
+    try sys.stdout.write_line(f"{t == insert(t: t, x: 9)} {single(value: 1) == single(value: 1)}")
+    let e: Either[Int8, Text] = Either.Left(3)
+    let words = single(value: [Either.Left(1), Either.Right("x")])
+    try sys.stdout.write_line(f"{e} {flip(e: e)} {words}")
+    try sys.stdout.write_line(describe(e: Either.Right(Either.Left("hi"))))
+    try sys.stdout.write_line(describe(e: Either.Right(Either.Right(true))))
+    let deep: Tree[Tree[Either[Int, Bool]]] = single(value: single(value: Either.Left(1)))
+    let n = match deep {
+        Node(_, Node(_, Left(v), _), _) => v + 0
+        _ => 0
+    }
+    try sys.stdout.write_line(f"{n} {deep is Node(value: Leaf, ..)}")
+}

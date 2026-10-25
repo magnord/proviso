@@ -1,0 +1,5 @@
+45 Duo(a: None, b: Some(7)) Duo(a: Some(7), b: None) Duo(a: (7, None), b: (1, Some("x"))) 8
+Tree.Node(left: Tree.Leaf, value: 1, right: Tree.Node(left: Tree.Leaf, value: 7, right: Tree.Leaf)) Tree.Node(left: Tree.Node(left: Tree.Leaf, value: 7, right: Tree.Leaf), value: 1, right: Tree.Leaf) Tree.Leaf Tree.Leaf false
+25 Pair(first: None, second: 1) Tree.Node(left: Tree.Leaf, value: 7, right: Tree.Leaf) Tree.Node(left: Tree.Leaf, value: 7, right: Tree.Leaf) false false Duo(a: None, b: None)
+25 Pair(first: Some("x"), second: 7) Tree.Node(left: Tree.Leaf, value: 7, right: Tree.Leaf) Tree.Node(left: Tree.Leaf, value: 7, right: Tree.Leaf) false false Duo(a: None, b: None)
+127 Pair(first: None, second: Tree.Leaf) Some(Duo(a: 1, b: 2)) [Tree.Leaf] Pair(first: Duo(a: None, b: Some(1)), second: 3)

@@ -1,12 +1,6 @@
 // phase: 2.1
 // expect-error: E0901
-// Generic records, a record's generated validator and distinct types come in later slices
-// of phase 2, and capability declarations and the rest of `System` in phase 3. Uses of what they declare aren't reported again (REFERENCE §15.1).
-record Pair[A, B] {                                 // <- E0901
-    first: A
-    second: B
-}
-
+// A record's generated validator and distinct types come in later slices of phase 2, and capability declarations and the rest of `System` in phase 3. Uses of what they declare aren't reported again (REFERENCE §15.1).
 unique record Token {
     id: Int
 }
@@ -21,7 +15,7 @@ fn validated(lo: Int, hi: Int) -> Int {
     return 0
 }
 
-fn later_types(t: Token, p: Pair, q: Pair[Int, Int]) -> Int {
+fn later_types(t: Token) -> Int {
     return 0
 }
 

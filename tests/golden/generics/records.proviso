@@ -1,0 +1,52 @@
+// phase: 2.10
+// A record may take type parameters, as `record Pair[A, B]` (REFERENCE §4.4, §4.8). A
+// construction takes its type arguments from its fields and its expected type together, so
+// `Pair(first: 1, second: "a")` is a `Pair[Int, Text]` and `Pair(first: 1, second: None)`
+// is a `Pair[Int8, Option[Text]]` where one is expected. Reading a field gives the field's
+// type with the record's type arguments in place, and `with` keeps them. Derived interfaces
+// work as for any record, and a generic function may build and take apart a generic record
+// of its own type parameters (OPEN_QUESTIONS P5).
+use std.io { IoError }
+
+record Pair[A, B] derives(Eq, Show) {
+    first: A
+    second: B
+}
+
+record Named[T] derives(Show) {
+    name: Text
+    value: T
+}
+
+fn swap[A: Copy, B: Copy](p: Pair[A, B]) -> Pair[B, A] {
+    return Pair(first: p.second, second: p.first)
+}
+
+fn both[T: Copy](x: T) -> Pair[T, T] {
+    return Pair(first: x, second: x)
+}
+
+fn named[T](name: Text, value: take T) -> Named[T] {
+    return Named(name: name, value: value)
+}
+
+fn small_pair(p: Pair[Int8, Option[Text]]) -> Int8 {
+    return p.first
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let p = Pair(first: 1, second: "a")
+    let q: Pair[Int8, Option[Text]] = Pair(first: 1, second: None)
+    let r = Pair(first: p, second: Some(2.5))
+    let s = p.with(second: "b")
+    let t = r.with(first: s)
+    try sys.stdout.write_line(f"{p} {q} {small_pair(q) + 1}")
+    try sys.stdout.write_line(f"{r.first.second} {r.second} {t}")
+    try sys.stdout.write_line(f"{swap(p: p)} {both(x: 'c')} {swap(p: r).first}")
+    try sys.stdout.write_line(f"{p == s} {p == s.with(second: "a")} {t.first == s}")
+    let n = named(name: "xs", value: [1, 2, 3])
+    let m = Named(name: "deep", value: Named(name: "inner", value: both(x: true)))
+    try sys.stdout.write_line(f"{n} {n.value.len()} {m.value.value.second}")
+    let Pair(first: a, second: b) = swap(p: p)
+    try sys.stdout.write_line(f"{a} {b}")
+}
