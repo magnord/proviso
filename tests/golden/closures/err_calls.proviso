@@ -7,6 +7,7 @@
 // expect-error: E0301
 // expect-error: E0303
 // expect-error: E0306
+// expect-error: E0307
 // expect-error: E0312
 // expect-error: E0506
 // expect-error: E0701
@@ -21,7 +22,9 @@
 // `continue` can't leave a closure. Function values implement no interface, so they can't
 // be compared or interpolated. A variant with fields is not a function value, and nor is a
 // method or an associated function. Each is written with its arguments, and a closure can
-// wrap it. A closure or a function value alone is not a statement (Q33).
+// wrap it. A closure or a function value alone is not a statement (Q33). A closure where a
+// value of another type is expected is a mismatch, and one passed to a rejected call, or
+// as a rejected function type, reports nothing more.
 enum Stop {
     Halt
 }
@@ -134,6 +137,26 @@ fn methods(c: Counter) {
     let b = c.pick::[Int]                           // <- E0208
     let d = Counter.fresh                           // <- E0201
     let e = |x: Int| c.pick(x)
+}
+
+fn rejected_contexts(p: Int) {
+    let a = nothing(f: |x| x.byte_len())            // <- E0201
+    let b = p.nothing(f: |x| x.byte_len())          // <- E0303
+    let c = p(|x| x.byte_len())                     // <- E0301
+    let d = apply(f: |x| x.byte_len(), x: 1, y: 2)  // <- E0208
+    let t: Text = |x| x.byte_len()                  // <- E0301
+    let stopper = || {
+        fail Stop.Halt
+    }
+    let n: Int = stopper                            // <- E0301
+}
+
+fn unknown_param(f: fn(Nope) -> Int) -> Int {       // <- E0307
+    return f(1)
+}
+
+fn unknown_expected() -> Int {
+    return unknown_param(f: |x| x.byte_len())
 }
 
 fn same[T: Copy](x: T) -> T {

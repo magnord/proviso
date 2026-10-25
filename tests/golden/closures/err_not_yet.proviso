@@ -46,6 +46,16 @@ fn reach(out: Out, sink: Sink) {
     })
 }
 
+fn takes_out(o: Out) {}
+
+fn reach_late(o: Out) {
+    let f = |p| {
+        run(f: || debug(p))                         // <- E0901
+        takes_out(o: p)
+    }
+    f(o)
+}
+
 fn mapped(xs: List[Int]) {
     let ys = xs.map(f: |x| x + 1)                   // <- E0901
     let zs = xs.filter(f: |x| x > 1)                // <- E0901

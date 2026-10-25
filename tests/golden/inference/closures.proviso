@@ -2,8 +2,11 @@
 // A closure's parameter types may come from a generic call's other arguments, and its
 // result and error types become type arguments of the call. The order of the arguments
 // doesn't change the result: the arguments that aren't closures go first, then each
-// closure whose parameter types are known, until none is left (OPEN_QUESTIONS P5). Each
-// group is one call and its rewrites with the parameters in another order. `small` is an
+// closure whose parameter types are written or known, until none is left (OPEN_QUESTIONS
+// P5). A closure that an `if` or `match` gives waits as one does, and calling a function
+// value leaves the parts of its type open. A body that always leaves gives `Never`, however
+// it leaves (Q33). Each group is one call and its rewrites with the parameters in another
+// order. `small` is an
 // `Int8`, so a closure that gave its own type, or a literal's default, would show as an
 // overflow or a mismatch.
 use std.io { IoError }
@@ -46,6 +49,18 @@ fn run_or[T: Copy, E](f: fn() -> T fails E, fallback: T) -> T {
 
 fn run_or_back[T: Copy, E](fallback: T, f: fn() -> T fails E) -> T {
     return f() else fallback
+}
+
+fn first_of[T, R](f: fn(T) -> R, g: fn(T) -> R) -> Text {
+    return "first"
+}
+
+fn on_identity[T: Copy](f: fn(fn(T) -> T) -> T) -> T {
+    return f(|t| t)
+}
+
+fn stop() -> Never {
+    loop {}
 }
 
 fn half(x: Int8) -> Int8 fails Stop {
@@ -91,6 +106,28 @@ fn failing() -> Text {
     return f"{a} {b} {c} {d} {e}"
 }
 
+fn wrapped(flag: Bool) -> Text {
+    let a = apply_to(x: small(), f: if flag { |n| n + 20 } else { |n| n })
+    let b = apply_from(f: if flag { |n| n + 20 } else { |n| n }, x: small())
+    let c = apply_from(f: match flag {
+        true => |n| n + 20,
+        false => |n| n,
+    }, x: small())
+    let d = first_of(f: |n| n.byte_len(), g: |t: Text| 1)
+    let e = first_of(f: |t: Text| 1, g: |n| n.byte_len())
+    let g = on_identity(f: |h| h(small()) + 20)
+    return f"{a} {b} {c} {d} {e} {g}"
+}
+
+fn never_called(flag: Bool) -> Int {
+    if flag {
+        return apply_from(f: |n: Int8| unreachable, x: small())
+    }
+    return apply_to(x: small(), f: |n| {
+        loop {}
+    })
+}
+
 fn expected() -> Text {
     let f: fn(Int8) -> Int8 = |n| n + 20
     let g: fn(Int8) -> Text = |n| f"{n + 20}"
@@ -102,5 +139,6 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(chained())
     try sys.stdout.write_line(made())
     try sys.stdout.write_line(failing())
+    try sys.stdout.write_line(wrapped(flag: true))
     try sys.stdout.write_line(expected())
 }

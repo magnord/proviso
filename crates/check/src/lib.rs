@@ -472,6 +472,9 @@ struct FnState {
     anonymous: Vec<Option<(Box<str>, Box<str>)>>,
     /// The closures of the body, in the order they were checked.
     closures: Vec<ExprId>,
+    /// The captures whose type wasn't known when they were captured, each with where, which
+    /// are checked for reach once it is.
+    late_captures: Vec<(LocalId, Span)>,
     /// How many of the function's locals, counted from the first, a closure, or a local that
     /// holds one, needs to stay alive: one more than the last local it captures, at any
     /// depth. A block can't yield a function value that needs one it declares.
@@ -494,6 +497,7 @@ impl FnState {
             bounds: Vec::new(),
             anonymous: Vec::new(),
             closures: Vec::new(),
+            late_captures: Vec::new(),
             needs: HashMap::new(),
             local_needs: HashMap::new(),
         }
@@ -1227,6 +1231,11 @@ impl Checker<'_> {
         }
         for local in &mut self.f.locals {
             local.ty = self.vars.zonk(&local.ty);
+        }
+        for (id, span) in std::mem::take(&mut self.f.late_captures) {
+            if self.p.decls.has_reach(&self.f.locals[id.index()].ty) {
+                self.reaching_capture(span);
+            }
         }
         self.vars.clear();
         // A closure owns its `take` parameters of a resource type, which a failure abandons.
@@ -3703,7 +3712,11 @@ impl Checker<'_> {
     /// Infers the type of `e`, a part of an expression that was rejected, which was the one
     /// to give the type arguments `e` leaves open, so they are not reported again (§15.1).
     fn rejected_value(&mut self, e: ExprId) -> Ty {
-        let ty = self.infer(e);
+        // A closure has no function type to take its parameters' types from.
+        let ty = match self.m.exprs[e].kind {
+            ExprKind::Closure(_) => self.expr(e, Some(&Ty::Error)),
+            _ => self.infer(e),
+        };
         self.vars.quiet(&ty);
         ty
     }
@@ -4538,11 +4551,23 @@ impl Checker<'_> {
         let m = self.m;
         let span = self.span(e);
         let expected = expected.map(|ty| self.vars.resolve(ty));
+        let mut rejected = false;
+        // Where the call it is passed to was rejected, or a value of another type is expected,
+        // its parameters' types are unknown and not reported (§15.1).
+        let quiet = match &expected {
+            Some(Ty::Error) => true,
+            Some(ty) if ty.fn_parts().is_none() && !matches!(ty, Ty::Var(_)) => {
+                let message = format!("expected `{}`, found a closure", self.show(ty));
+                self.error(codes::TYPE_MISMATCH, span, message);
+                rejected = true;
+                true
+            }
+            _ => false,
+        };
         let mut expected = expected
             .as_ref()
             .and_then(Ty::fn_parts)
             .map(|(modes, ret, fails, params)| (modes.to_vec(), ret.clone(), fails.clone(), params.to_vec()));
-        let mut rejected = false;
         if let Some((_, _, _, params)) = &expected
             && params.len() != closure.params.len()
         {
@@ -4578,7 +4603,7 @@ impl Checker<'_> {
                     ty
                 }
                 (None, Some((_, given))) => given,
-                (None, None) if rejected => self.vars.rejected(),
+                (None, None) if rejected || quiet => self.vars.rejected(),
                 (None, None) => {
                     self.vars.fresh(Kind::Any, Origin::Closure { name: param.name.sym, span: param.name.span })
                 }
@@ -4613,7 +4638,10 @@ impl Checker<'_> {
             locals.push(self.declare(param.name, ty.clone(), mutable, "parameter", *mode != ParamMode::Take));
         }
         let body = self.block_value(&closure.body, Some(&ret), true);
-        if !diverges_ty(&body) && body != Ty::Error {
+        // A body that always leaves gives `Never`, however it leaves (OPEN_QUESTIONS Q33).
+        if diverges_ty(&body) {
+            let _ = self.vars.subsume(&ret, &Ty::Never);
+        } else if body != Ty::Error {
             let _ = self.vars.subsume(&ret, &body);
         }
         // A body that never fails gives the error type `Never`, as a call of a function
@@ -4696,13 +4724,19 @@ impl Checker<'_> {
                 first = true;
             }
         }
-        if first && self.p.decls.has_reach(&self.vars.zonk(&self.f.locals[id.index()].ty)) {
-            self.not_implemented(
-                span,
-                "closures that capture a capability or a value that holds one",
-                Planned::Phase(3),
-            );
+        if !first {
+            return;
         }
+        let ty = self.vars.zonk(&self.f.locals[id.index()].ty);
+        if self.vars.has_open(&ty) {
+            self.f.late_captures.push((id, span));
+        } else if self.p.decls.has_reach(&ty) {
+            self.reaching_capture(span);
+        }
+    }
+
+    fn reaching_capture(&mut self, span: Span) {
+        self.not_implemented(span, "closures that capture a capability or a value that holds one", Planned::Phase(3));
     }
 
     /// Whether local `id` is one the innermost closure being checked captures, which it may
@@ -4756,7 +4790,12 @@ impl Checker<'_> {
     ) -> Ty {
         let m = self.m;
         let ty = self.infer(callee);
-        let ty = self.force(&ty);
+        // Only the callee's own type must be known now. Its parts may still be settled by
+        // the arguments or later code.
+        let ty = match self.vars.resolve(&ty) {
+            ty @ Ty::Var(_) => self.force(&ty),
+            ty => ty,
+        };
         let name = match m.exprs[callee].kind {
             ExprKind::Name(name) => m.text(name.sym).to_string(),
             _ => "this function value".to_string(),
@@ -5620,15 +5659,17 @@ impl Checker<'_> {
             }
         }
         // A closure's parameters take their types from the others, so the others go first,
-        // then each closure whose parameter types they settled, so the order of the arguments
-        // doesn't change the types (OPEN_QUESTIONS Q33).
-        let closure = |i: &usize| matches!(m.exprs[args[*i].value].kind, ExprKind::Closure(_));
-        let mut closures: Vec<usize> = (0..args.len()).filter(closure).collect();
-        for i in (0..args.len()).filter(|i| !closure(i)) {
+        // then each closure whose parameter types are written or settled, so the order of the
+        // arguments doesn't change the types (OPEN_QUESTIONS Q33). A closure that an `if`,
+        // `match` or `else` gives waits as one does.
+        let (mut closures, others): (Vec<usize>, Vec<usize>) =
+            (0..args.len()).partition(|&i| self.gives_closure(args[i].value));
+        for i in others {
             self.generic_arg(callee, i, &args[i], (params[i].0.as_ref(), &params[i].1), targs, modes);
         }
         while !closures.is_empty() {
-            let ready = closures.iter().position(|&i| self.closure_ready(&params[i].1, targs)).unwrap_or(0);
+            let ready =
+                closures.iter().position(|&i| self.closure_ready(args[i].value, &params[i].1, targs)).unwrap_or(0);
             let i = closures.remove(ready);
             self.generic_arg(callee, i, &args[i], (params[i].0.as_ref(), &params[i].1), targs, modes);
         }
@@ -5672,12 +5713,43 @@ impl Checker<'_> {
         self.check(arg.value, &ty);
     }
 
-    /// Whether a closure passed as a parameter of type `ty` would find its parameters' types
-    /// known.
-    fn closure_ready(&mut self, ty: &Ty, targs: &[Ty]) -> bool {
+    /// Whether the closure `arg`, passed as a parameter of type `ty`, would find its
+    /// parameters' types known, from its annotations or from `ty`.
+    fn closure_ready(&mut self, arg: ExprId, ty: &Ty, targs: &[Ty]) -> bool {
         let ty = if mentions_targ(ty, targs) { ty.subst(targs) } else { ty.clone() };
         let ty = self.vars.resolve(&ty);
-        ty.fn_parts().is_some_and(|(_, _, _, params)| params.iter().all(|param| !self.vars.has_open(param)))
+        let written = |j: usize| match &self.m.exprs[arg].kind {
+            ExprKind::Closure(closure) => closure.params.get(j).is_some_and(|param| param.ty.is_some()),
+            _ => false,
+        };
+        ty.fn_parts().is_some_and(|(_, _, _, params)| {
+            params.iter().enumerate().all(|(j, param)| written(j) || !self.vars.has_open(param))
+        })
+    }
+
+    /// Whether `e` is a closure, or an `if`, `match` or `else` that may give one.
+    fn gives_closure(&self, e: ExprId) -> bool {
+        let tail = |block: &Block| self.tail(block).is_some_and(|e| self.gives_closure(e));
+        match &self.m.exprs[e].kind {
+            ExprKind::Closure(_) => true,
+            ExprKind::If { then_block, else_branch, .. } => {
+                tail(then_block)
+                    || match else_branch {
+                        Some(ElseBranch::Block(block)) => tail(block),
+                        Some(ElseBranch::If(nested)) => self.gives_closure(*nested),
+                        None => false,
+                    }
+            }
+            ExprKind::Match { arms, .. } => arms.iter().any(|arm| tail(&arm.body)),
+            ExprKind::Else { value, fallback } => {
+                self.gives_closure(*value)
+                    || match fallback {
+                        Fallback::Value(value) => self.gives_closure(*value),
+                        Fallback::Block(block) => tail(block),
+                    }
+            }
+            _ => false,
+        }
     }
 
     /// Checks an `&` argument, which a failure may leave half changed when it is `partial`.

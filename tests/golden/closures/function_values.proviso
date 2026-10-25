@@ -115,7 +115,10 @@ fn failing() -> Text fails Stop {
 
 fn debugged() {
     let f = same::[Text]
-    debug(double, add, bump, f, half, nothing, length)
+    let stopper = || {
+        fail Stop.Halt
+    }
+    debug(double, add, bump, f, half, nothing, length, stopper)
 }
 
 pub fn main(sys: keep System) fails IoError {
