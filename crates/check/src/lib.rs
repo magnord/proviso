@@ -505,6 +505,8 @@ struct FnState {
     params: usize,
     /// Whether this is a refinement, whose locals are the fields it looks at.
     refinement: bool,
+    /// Whether it is a distinct type's, which names its value `self`.
+    distinct: bool,
     loops: Vec<LoopState>,
     /// False in a refinement, an example or a test, which have no function to return from or
     /// fail.
@@ -542,6 +544,7 @@ impl FnState {
             locals: Vec::new(),
             params: 0,
             refinement: false,
+            distinct: false,
             loops: Vec::new(),
             returns: true,
             place: Place::Where,
@@ -1539,6 +1542,7 @@ impl Checker<'_> {
             // A resource moves as a unique value does, and must also be consumed (§5.1, §10).
             def.resource_base = matches!(&item.kind, ItemKind::Record(decl) if decl.resource);
             def.unique = def.resource_base || matches!(&item.kind, ItemKind::Record(decl) if decl.unique);
+            def.distinct = matches!(&item.kind, ItemKind::Record(decl) if decl.distinct);
             def.params = generics.len();
             let id = self.p.decls.push(def);
             self.adts.push(AdtSrc { id, name, vis: item.vis, generics, derives, variants, refinement });
@@ -2030,8 +2034,34 @@ impl Checker<'_> {
                     continue;
                 }
                 seen.push(text);
+                let distinct = self.p.decls.adt(id).distinct;
                 match IfaceId::prelude(text) {
                     Some(iface) if iface.derivable() => derives.push(iface),
+                    // A distinct type derives an operator of the type it wraps (REFERENCE §4.6).
+                    Some(iface) if distinct && op_iface(iface).is_some() => {
+                        let wrapped = self.p.decls.adt(id).variant().fields[0].ty.clone();
+                        let has = match op_iface(iface) {
+                            Some(None) => matches!(&wrapped, Ty::Int(it) if it.is_signed())
+                                || matches!(wrapped, Ty::Float(_)),
+                            Some(Some(op)) => self.has_arithmetic(op, &wrapped),
+                            None => unreachable!("matched above"),
+                        };
+                        if has || wrapped.is_unknown() {
+                            derives.push(iface);
+                        } else {
+                            unknown = true;
+                            let name_of = &self.p.decls.adt(id).name;
+                            let message = format!(
+                                "`{name_of}` wraps `{}`, which has no {}, so it can't derive `{text}`",
+                                self.show(&wrapped),
+                                match op_iface(iface) {
+                                    Some(Some(op)) => format!("`{}`", op.symbol()),
+                                    _ => "unary `-`".to_string(),
+                                }
+                            );
+                            self.error(codes::MISSING_IMPLEMENTATION, name.span, message);
+                        }
+                    }
                     Some(_) => {
                         unknown = true;
                         self.error(
@@ -2077,7 +2107,7 @@ impl Checker<'_> {
             let def = self.p.decls.adt(adt.id);
             let mut missing = Vec::new();
             self.param_names = adt.generics.iter().map(|g| m.text(g.name.sym).into()).collect();
-            for &iface in &def.derives {
+            for &iface in def.derives.iter().filter(|iface| iface.derivable()) {
                 // A generic type derives it for the type arguments that implement it, so each
                 // type parameter is taken to (OPEN_QUESTIONS P5).
                 let params = vec![vec![iface]; def.params];
@@ -2139,8 +2169,13 @@ impl Checker<'_> {
                     }
                 }
                 if let Some(expr) = self.adts[k].refinement {
-                    let all = kept.iter().enumerate().map(|(i, f)| (f.name.sym, LocalId(i as u32)));
-                    self.f.scopes = vec![all.collect()];
+                    // A distinct type's `where` names its value `self` (REFERENCE §4.6).
+                    self.f.distinct = self.p.decls.adt(id).distinct;
+                    self.f.scopes = if self.f.distinct {
+                        vec![m.interner.lookup("self").map(|sym| (sym, LocalId(0))).into_iter().collect()]
+                    } else {
+                        vec![kept.iter().enumerate().map(|(i, f)| (f.name.sym, LocalId(i as u32))).collect()]
+                    };
                     self.check(expr, &Ty::Bool);
                     self.settle();
                     read.extend(self.predicate_moves(expr));
@@ -3770,7 +3805,7 @@ impl Checker<'_> {
         self.copying = true;
         let value_ty = self.check(value, &ty);
         if let Some(bin) = op.bin_op()
-            && !arithmetic_defined(bin, &ty)
+            && !self.has_arithmetic(bin, &ty)
         {
             let symbol = bin.symbol();
             self.error(
@@ -4887,6 +4922,7 @@ impl Checker<'_> {
         match ty {
             Ty::Int(it) if it.is_signed() => true,
             Ty::Float(_) | Ty::Error | Ty::Never => true,
+            Ty::Adt(id, _) if self.p.decls.adt(*id).derives.contains(&IfaceId::NEG) => true,
             // A rejected `impl` block may have been the type's `impl Neg` (§15.1).
             _ if self.unknown_interfaces(ty) => false,
             _ => {
@@ -4940,7 +4976,7 @@ impl Checker<'_> {
                     true
                 }
             },
-            ty => arithmetic_defined(op, ty),
+            ty => self.has_arithmetic(op, ty),
         };
         // A rejected `impl` block may have been the type's `impl Add` (§15.1).
         if !defined && !self.unknown_interfaces(ty) {
@@ -4948,6 +4984,24 @@ impl Checker<'_> {
             self.error(codes::UNSUPPORTED_OPERATOR, span, message);
         }
         defined
+    }
+
+    /// Whether operands of type `ty` have arithmetic operator `op`: built in, or derived by a
+    /// distinct type (REFERENCE §4.6).
+    fn has_arithmetic(&self, op: BinOp, ty: &Ty) -> bool {
+        match ty {
+            Ty::Adt(id, _) => {
+                let iface = match op {
+                    BinOp::Add => IfaceId::ADD,
+                    BinOp::Sub => IfaceId::SUB,
+                    BinOp::Mul => IfaceId::MUL,
+                    BinOp::Div => IfaceId::DIV,
+                    _ => return false,
+                };
+                self.p.decls.adt(*id).derives.contains(&iface)
+            }
+            ty => arithmetic_defined(op, ty),
+        }
     }
 
     fn binary(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
@@ -5011,6 +5065,9 @@ impl Checker<'_> {
             self.error(codes::UNKNOWN_NAME, name.span, format!("`{text}` is a type or module, not a value"));
         } else if text == "self" {
             self.error(codes::UNKNOWN_NAME, name.span, "`self` exists only in a method, which takes it first");
+        } else if self.f.distinct && text == "value" {
+            let message = "a distinct type's `where` names its value `self`, as in `where self > 0` (§4.6)";
+            self.error(codes::UNKNOWN_NAME, name.span, message);
         } else {
             self.error(codes::UNKNOWN_NAME, name.span, format!("unknown name `{text}`"));
         }
@@ -5818,6 +5875,7 @@ impl Checker<'_> {
         if let (Ty::Adt(id, _), "with") = (&receiver_ty, name)
             && self.p.decls.adt(*id).kind == AdtKind::Record
             && !self.p.decls.adt(*id).tuple
+            && !self.p.decls.adt(*id).distinct
         {
             self.no_targs(targs, name, span);
             self.p.res.insert(e, Res::With);
@@ -7677,6 +7735,19 @@ fn holds_fn(ty: &Ty) -> bool {
 /// stands for might diverge.
 fn diverges_ty(ty: &Ty) -> bool {
     matches!(ty, Ty::Never | Ty::Error)
+}
+
+/// The operator a prelude operator interface stands for, which a distinct type may derive:
+/// a binary one, or `None` for unary `-`. `None` for any other interface.
+fn op_iface(iface: IfaceId) -> Option<Option<BinOp>> {
+    Some(match iface {
+        IfaceId::ADD => Some(BinOp::Add),
+        IfaceId::SUB => Some(BinOp::Sub),
+        IfaceId::MUL => Some(BinOp::Mul),
+        IfaceId::DIV => Some(BinOp::Div),
+        IfaceId::NEG => None,
+        _ => return None,
+    })
 }
 
 fn arithmetic_defined(op: BinOp, ty: &Ty) -> bool {

@@ -1,0 +1,15 @@
+types/distinct_refinement.proviso:61:1: example passed
+types/distinct_refinement.proviso:62:1: example failed: it hit a defect
+types/distinct_refinement.proviso:63:1: example passed
+types/distinct_refinement.proviso:64:1: example failed: it hit a defect
+types/distinct_refinement.proviso:65:1: example passed
+types/distinct_refinement.proviso:66:1: example failed: it hit a defect
+types/distinct_refinement.proviso:67:1: example failed: it hit a defect
+types/distinct_refinement.proviso:68:1: example passed
+types/distinct_refinement.proviso:69:1: example failed: it hit a defect
+types/distinct_refinement.proviso:70:1: example passed
+types/distinct_refinement.proviso:71:1: example failed: it hit a defect
+types/distinct_refinement.proviso:72:1: example passed
+types/distinct_refinement.proviso:73:1: example failed: it hit a defect
+types/distinct_refinement.proviso:74:1: example failed: it hit a defect
+14 examples: 6 passed, 8 failed

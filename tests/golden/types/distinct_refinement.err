@@ -1,0 +1,24 @@
+defect[refinement_failed]: Percent(101) breaks `Percent`'s refinement `0 <= self and self <= 100`
+  at types/distinct_refinement.proviso:24:12 (distinct_refinement.build+2)
+  called from types/distinct_refinement.proviso:62:9 (distinct_refinement)
+defect[refinement_failed]: Percent(-1) breaks `Percent`'s refinement `0 <= self and self <= 100`
+  at types/distinct_refinement.proviso:29:5 (distinct_refinement.assigned+3)
+  called from types/distinct_refinement.proviso:64:9 (distinct_refinement)
+defect[refinement_failed]: Percent(101) breaks `Percent`'s refinement `0 <= self and self <= 100`
+  at types/distinct_refinement.proviso:35:5 (distinct_refinement.bumped+3)
+  called from types/distinct_refinement.proviso:66:9 (distinct_refinement)
+defect[refinement_failed]: Percent(200) breaks `Percent`'s refinement `0 <= self and self <= 100`
+  at types/distinct_refinement.proviso:41:5 (distinct_refinement.lent+3)
+  called from types/distinct_refinement.proviso:67:9 (distinct_refinement)
+defect[refinement_failed]: Percent(101) breaks `Percent`'s refinement `0 <= self and self <= 100`
+  at types/distinct_refinement.proviso:46:12 (distinct_refinement.added+2)
+  called from types/distinct_refinement.proviso:69:9 (distinct_refinement)
+defect[refinement_failed]: Short([1, 2, 3]) breaks `Short`'s refinement `self.len() < 3`
+  at types/distinct_refinement.proviso:51:5 (distinct_refinement.pushed+3)
+  called from types/distinct_refinement.proviso:71:9 (distinct_refinement)
+defect[refinement_failed]: Spanned(Span(lo: 0, hi: 10)) breaks `Spanned`'s refinement `self.hi < 10`
+  at types/distinct_refinement.proviso:57:5 (distinct_refinement.widened+3)
+  called from types/distinct_refinement.proviso:73:9 (distinct_refinement)
+defect[refinement_failed]: Span(lo: 0, hi: -1) breaks `Span`'s refinement `lo <= hi`
+  at types/distinct_refinement.proviso:57:5 (distinct_refinement.widened+3)
+  called from types/distinct_refinement.proviso:74:9 (distinct_refinement)

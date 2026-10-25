@@ -1578,22 +1578,8 @@ impl Interp<'_> {
                     // The checker treats `-128` as one literal, so it never overflows here.
                     return Ok(Value::Int(-(value as i128), self.int_ty(e)));
                 }
-                match self.expr(*operand, frame)? {
-                    Value::Int(x, it) => {
-                        let negated = -x;
-                        if !it.contains(negated) {
-                            return Err(defect(
-                                DefectKind::IntegerOverflow,
-                                format!("`{}` negation overflowed", it.name()),
-                                span,
-                            ));
-                        }
-                        Value::Int(negated, it)
-                    }
-                    Value::F64(x) => Value::F64(-x),
-                    Value::F32(x) => Value::F32(-x),
-                    other => unreachable!("cannot negate {other:?}"),
-                }
+                let value = self.expr(*operand, frame)?;
+                return self.negate(value, span);
             }
             ExprKind::Binary { op: BinOp::And, lhs, rhs } => {
                 Value::Bool(self.bool(*lhs, frame)? && self.bool(*rhs, frame)?)
@@ -2032,7 +2018,41 @@ impl Interp<'_> {
                 BinOp::Div => x / y,
                 _ => unreachable!("floats have no `{}`", op.symbol()),
             }),
+            // A distinct type's operator works on the values it wraps, and the result is
+            // checked against its refinement (REFERENCE §4.6; OPEN_QUESTIONS P5).
+            (Value::Adt(a), Value::Adt(b)) => {
+                let value = self.arithmetic(op, a.fields[0].clone(), b.fields[0].clone(), span)?;
+                let wrapped = Value::Adt(Adt { def: a.def, variant: a.variant, fields: Arc::from([value]) });
+                self.refine(&wrapped, span)?;
+                wrapped
+            }
             (a, b) => unreachable!("no arithmetic on {a:?} and {b:?}"),
+        })
+    }
+
+    /// Unary `-`.
+    fn negate(&mut self, value: Value, span: Span) -> Flow<Value> {
+        Ok(match value {
+            Value::Int(x, it) => {
+                let negated = -x;
+                if !it.contains(negated) {
+                    return Err(defect(
+                        DefectKind::IntegerOverflow,
+                        format!("`{}` negation overflowed", it.name()),
+                        span,
+                    ));
+                }
+                Value::Int(negated, it)
+            }
+            Value::F64(x) => Value::F64(-x),
+            Value::F32(x) => Value::F32(-x),
+            Value::Adt(a) => {
+                let value = self.negate(a.fields[0].clone(), span)?;
+                let wrapped = Value::Adt(Adt { def: a.def, variant: a.variant, fields: Arc::from([value]) });
+                self.refine(&wrapped, span)?;
+                wrapped
+            }
+            other => unreachable!("cannot negate {other:?}"),
         })
     }
 
@@ -2732,8 +2752,9 @@ fn write_value<E>(
                 out.push('(');
                 // Pushed in reverse, so they are written in order.
                 parts.push(Part::Text(")"));
-                // `Some(3)` and `Err(e)` are written in literal form, without a label (STD.md).
-                if def.bare_variants {
+                // `Some(3)`, `Err(e)` and `UserId(7)` are written in literal form, without a
+                // label (STD.md, REFERENCE §4.6).
+                if def.bare_variants || def.distinct {
                     parts.push(Part::Value(&adt.fields[0], true));
                     continue;
                 }

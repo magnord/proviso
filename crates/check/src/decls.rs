@@ -55,6 +55,12 @@ impl IfaceId {
     pub const COPY: IfaceId = IfaceId(5);
     /// Ends a resource on a failure exit (REFERENCE §10, STD.md).
     pub const ABANDON: IfaceId = IfaceId(6);
+    /// The operator interfaces, which only a distinct type derives (REFERENCE §4.6).
+    pub const ADD: IfaceId = IfaceId(8);
+    pub const SUB: IfaceId = IfaceId(9);
+    pub const MUL: IfaceId = IfaceId(10);
+    pub const DIV: IfaceId = IfaceId(11);
+    pub const NEG: IfaceId = IfaceId(12);
 
     /// The interfaces declared before the module's, in id order: the prelude's (REFERENCE §3),
     /// and `std.io`'s `Out`.
@@ -247,6 +253,9 @@ pub struct AdtDef {
     /// resource is also [`AdtDef::unique`]. A generic type's depends on its type arguments,
     /// so [`Decls::is_resource`] asks about those.
     pub resource: bool,
+    /// Declared `type Name = distinct T`: a record whose one field, `value`, holds a `T`,
+    /// written `Name(v)` (REFERENCE §4.6). It may derive the operators of `T`.
+    pub distinct: bool,
 }
 
 impl AdtDef {
@@ -278,6 +287,7 @@ impl AdtDef {
             unique: false,
             resource_base: false,
             resource: false,
+            distinct: false,
         }
     }
 
