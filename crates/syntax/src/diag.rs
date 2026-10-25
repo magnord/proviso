@@ -125,6 +125,8 @@ pub mod codes {
             "`todo` holes are accepted only with `--incomplete` (REFERENCE §15.2, Q25).";
         MISPLACED_RETURN = "E0108", "misplaced_return",
             "`return` outside a function body, such as in a `where` clause.";
+        MISPLACED_EXPECT = "E0109", "misplaced_expect",
+            "`expect` outside the body of a `test`, such as in a function or in a closure inside a test (REFERENCE §14; OPEN_QUESTIONS P5).";
 
         UNKNOWN_NAME = "E0201", "unknown_name",
             "A name that resolves to no local, function or import, a variant used without its enum (REFERENCE §4.5), a type that has no constructor, such as `Pool(…)` or an enum, or an `it` outside the fallback of an `else` form on a call that can fail (Q33).";
@@ -193,6 +195,8 @@ pub mod codes {
             "A method or associated function named without a call, as in `x.len` or `Counter.fresh`. Neither is a function value, so it is called with its arguments, and a closure can wrap it, as in `|| x.len()` (OPEN_QUESTIONS P5).";
         IMPLEMENTATION_HEAD_TAKEN = "E0321", "implementation_head_taken",
             "A second `impl` of an interface for a generic type with other type arguments, as `impl I for Pair[Text, Text]` beside `impl I for Pair[Int, Int]`. A generic type has one `impl` of each interface (OPEN_QUESTIONS P5).";
+        ALIAS_CYCLE = "E0322", "alias_cycle",
+            "An alias that names itself, directly or through other aliases, as `type Loop = List[Loop]`. An alias is the type it names, so a cycle names no type. A recursive type is a record or enum (REFERENCE §4.6; OPEN_QUESTIONS P5).";
 
         // E0412, E0414, E0601 and E0602 are reserved for later phases: the §F
         // goldens already expect them.
@@ -242,7 +246,7 @@ pub mod codes {
         NOTHING_TO_UNWRAP = "E0707", "nothing_to_unwrap",
             "An `else` form whose left side is neither an `Option` nor a call that can fail (REFERENCE §6.6).";
         EXAMPLE_CANNOT_FAIL = "E0708", "example_cannot_fail",
-            "An `example … fails P` whose call can't fail (REFERENCE §14).";
+            "An `example … fails P` or `expect … fails P` whose call can't fail (REFERENCE §14).";
         RESOURCE_ERROR_TYPE = "E0709", "resource_error_type",
             "A `fails` type cannot be a resource or hold one (REFERENCE §10).";
 

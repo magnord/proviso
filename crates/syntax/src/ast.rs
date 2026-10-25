@@ -86,7 +86,8 @@ impl Item {
             ItemKind::Record(decl) => Some(decl.name),
             ItemKind::Enum(decl) => Some(decl.name),
             ItemKind::Interface(decl) => Some(decl.name),
-            ItemKind::Use(_) | ItemKind::Impl(_) | ItemKind::Example(_) => None,
+            ItemKind::Alias(decl) => Some(decl.name),
+            ItemKind::Use(_) | ItemKind::Impl(_) | ItemKind::Example(_) | ItemKind::Test(_) => None,
         }
     }
 }
@@ -100,6 +101,24 @@ pub enum ItemKind {
     Interface(InterfaceDecl),
     /// `example f(…) == v` or `example f(…) fails P`, run by `proviso test` (REFERENCE §14).
     Example(ExampleDecl),
+    /// `type Name = Text`, a transparent alias (REFERENCE §4.6). A distinct type is a
+    /// [`RecordDecl`] instead.
+    Alias(AliasDecl),
+    /// `test "name" { … }`, run by `proviso test` (REFERENCE §14).
+    Test(TestDecl),
+}
+
+pub struct AliasDecl {
+    pub name: Ident,
+    pub target: TypeId,
+}
+
+pub struct TestDecl {
+    /// The text of its name, without quotes.
+    pub name: String,
+    /// Where its name is written.
+    pub name_span: Span,
+    pub body: Block,
 }
 
 pub struct ExampleDecl {
@@ -202,6 +221,9 @@ pub struct RecordDecl {
     pub fields: Vec<FieldDecl>,
     /// The record-level `where` predicate, which sees every field.
     pub refinement: Option<ExprId>,
+    /// Declared `type Name = distinct T`: its one field is `value`, of type `T`, and its
+    /// `where` names that value as `self` (REFERENCE §4.6).
+    pub distinct: bool,
 }
 
 /// `enum Shape derives(Show) { Circle(radius: Float), Empty }` (REFERENCE §4.5).
@@ -293,6 +315,12 @@ pub enum StmtKind {
     Check {
         cond: ExprId,
         fallback: Fallback,
+    },
+    /// `expect cond`, or with `expect`, `expect value == v` or `expect value fails P`, in a
+    /// test (REFERENCE §14).
+    Expect {
+        value: ExprId,
+        expect: Option<Expectation>,
     },
 }
 

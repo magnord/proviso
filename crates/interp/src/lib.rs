@@ -1199,6 +1199,7 @@ impl Interp<'_> {
                 self.take_parts(*init, *pat, frame);
                 self.own_bindings(*pat);
             }
+            StmtKind::Expect { .. } => todo!("expect"),
             StmtKind::Check { cond, fallback } => {
                 if !self.bool(*cond, frame)? {
                     // The checker proved that the fallback leaves.

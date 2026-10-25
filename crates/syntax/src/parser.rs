@@ -457,6 +457,21 @@ impl Parser<'_> {
                 }
                 ItemKind::Example(self.example_decl()?)
             }
+            T::Keyword(Kw::Type) => self.type_decl()?,
+            T::Keyword(Kw::Distinct) => {
+                self.poison_declared_type();
+                let span = self.peek().span;
+                self.error(codes::UNEXPECTED_TOKEN, span, "`distinct` follows `=`, as in `type UserId = distinct Int`");
+                return Err(());
+            }
+            T::Keyword(Kw::Test) => {
+                // The test is kept, so it is still checked.
+                if vis != Visibility::Private && written {
+                    let span = start.to(self.prev_span());
+                    self.error(codes::UNEXPECTED_TOKEN, span, "a test is never exported, so it has no visibility");
+                }
+                ItemKind::Test(self.test_decl()?)
+            }
             T::Keyword(kw) => match planned_item(kw) {
                 Some((what, planned)) => {
                     self.poison_declared_type();
@@ -683,7 +698,7 @@ impl Parser<'_> {
             }
         }
         let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
-        Ok(RecordDecl { name, generics, unique: false, resource: false, derives, fields, refinement })
+        Ok(RecordDecl { name, generics, unique: false, resource: false, derives, fields, refinement, distinct: false })
     }
 
     /// `derives(Eq, Show)`, or nothing.
@@ -962,6 +977,64 @@ impl Parser<'_> {
         Ok(ExampleDecl { call, expect })
     }
 
+    /// `type Name = Text`, an alias, or `type UserId = distinct Int derives(Eq) where self > 0`,
+    /// a distinct type, which is a record whose one field is `value` (REFERENCE §4.6).
+    fn type_decl(&mut self) -> PResult<ItemKind> {
+        self.bump();
+        let name = self.ident("a type name")?;
+        let decl = self.type_rest(name);
+        if decl.is_err() {
+            self.m.poisoned.insert(name.sym);
+        }
+        decl
+    }
+
+    fn type_rest(&mut self, name: Ident) -> PResult<ItemKind> {
+        if self.at(T::LBracket) {
+            return self.not_implemented("generic aliases and distinct types", Planned::Unscheduled);
+        }
+        self.expect(T::Eq, "`=` and the type it names")?;
+        let distinct = self.eat(T::Keyword(Kw::Distinct));
+        let target = self.type_expr()?;
+        if !distinct {
+            if self.at_kw(Kw::Derives) || self.at_kw(Kw::Where) {
+                let span = self.peek().span;
+                let message =
+                    "an alias is the type it names, so only a distinct type derives or has a `where`, as in `type Id = distinct Int derives(Eq)`";
+                self.error(codes::UNEXPECTED_TOKEN, span, message);
+                return Err(());
+            }
+            return Ok(ItemKind::Alias(AliasDecl { name, target }));
+        }
+        let derives = self.derives()?;
+        let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
+        let value = Ident { sym: self.m.interner.intern("value"), span: self.m.types[target].span };
+        Ok(ItemKind::Record(RecordDecl {
+            name,
+            generics: Vec::new(),
+            unique: false,
+            resource: false,
+            derives,
+            fields: vec![FieldDecl { name: value, ty: target, refinement: None }],
+            refinement,
+            distinct: true,
+        }))
+    }
+
+    /// `test "name" { … }` (REFERENCE §14).
+    fn test_decl(&mut self) -> PResult<TestDecl> {
+        self.bump();
+        if !self.at(T::Text) {
+            let span = self.peek().span;
+            self.error(codes::UNEXPECTED_TOKEN, span, "a test is named by a text literal, as in `test \"parses\" { … }`");
+            return Err(());
+        }
+        let token = self.bump();
+        let TokenValue::Text(name) = token.value else { unreachable!("text literals carry their text") };
+        let body = self.block()?;
+        Ok(TestDecl { name, name_span: token.span, body })
+    }
+
     /// `interface Shape { fn area(self) -> Int }` (REFERENCE §4.9).
     fn interface_decl(&mut self) -> PResult<InterfaceDecl> {
         self.bump();
@@ -1038,17 +1111,20 @@ impl Parser<'_> {
         Ok(params)
     }
 
-    /// `self`, `inout self` or `take self` at the start of a parameter list.
+    /// `self`, `inout self`, `inout(partial) self`, `take self` or `keep self` at the start of
+    /// a parameter list.
     fn receiver(&mut self, kind: FnKind) -> PResult<Option<Receiver>> {
         let start = self.peek().span;
-        let mode = match (self.kind(), self.nth(1)) {
-            (T::Keyword(Kw::SelfValue), _) => ParamMode::Borrow,
-            (T::Keyword(Kw::Inout), T::Keyword(Kw::SelfValue)) => ParamMode::Inout,
-            (T::Keyword(Kw::Take), T::Keyword(Kw::SelfValue)) => ParamMode::Take,
+        let partial = self.nth(1) == T::LParen && self.nth(4) == T::Keyword(Kw::SelfValue);
+        let moded = match (self.kind(), self.nth(1)) {
+            (T::Keyword(Kw::SelfValue), _) => false,
+            (T::Keyword(Kw::Inout | Kw::Take | Kw::Keep), T::Keyword(Kw::SelfValue)) => true,
+            (T::Keyword(Kw::Inout), _) if partial => true,
             _ => return Ok(None),
         };
-        if mode != ParamMode::Borrow {
-            self.bump();
+        let mode = if moded { self.mode() } else { ParamMode::Borrow };
+        if !self.at_kw(Kw::SelfValue) {
+            return self.unexpected("`self`");
         }
         self.bump();
         let span = start.to(self.prev_span());
@@ -1541,7 +1617,18 @@ impl Parser<'_> {
                 }
                 StmtKind::Check { cond, fallback: self.fallback()? }
             }
-            T::Keyword(Kw::Expect) => return self.not_implemented("`expect` statements", Planned::Phase(2)),
+            T::Keyword(Kw::Expect) => {
+                self.bump();
+                let value = self.expr()?;
+                // `expect v == w` compares as an example does, and reports both values.
+                if self.eat(T::Keyword(Kw::Fails)) {
+                    StmtKind::Expect { value, expect: Some(Expectation::Fails(self.pattern()?)) }
+                } else if let ExprKind::Binary { op: BinOp::Eq, lhs, rhs } = self.m.exprs[value].kind {
+                    StmtKind::Expect { value: lhs, expect: Some(Expectation::Equals(rhs)) }
+                } else {
+                    StmtKind::Expect { value, expect: None }
+                }
+            }
             T::Ident
                 if self.nth(1) == T::Colon && matches!(self.nth(2), T::Keyword(Kw::For | Kw::While | Kw::Loop)) =>
             {
@@ -1744,7 +1831,7 @@ impl Parser<'_> {
             T::Gt => BinOp::Gt,
             T::Ge => BinOp::Ge,
             T::Keyword(Kw::Is) => return Ok(Some(None)),
-            T::Keyword(Kw::In) => return self.not_implemented("`in` tests", Planned::Phase(2)),
+            T::Keyword(Kw::In) => return self.not_implemented("`in` tests", Planned::Phase(4)),
             _ => return Ok(None),
         })))
     }
@@ -2473,15 +2560,15 @@ fn item_keyword(kw: Kw) -> bool {
             | Kw::Impl
             | Kw::Interface
             | Kw::Example
+            | Kw::Type
+            | Kw::Distinct
+            | Kw::Test
     ) || (kw != Kw::Let && planned_item(kw).is_some())
 }
 
 /// Item keywords that belong to later phases, with what to call them.
 fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
     Some(match kw {
-        Kw::Type => ("`type` declarations", Planned::Phase(2)),
-        Kw::Distinct => ("distinct types", Planned::Phase(2)),
-        Kw::Test => ("`test` blocks", Planned::Phase(2)),
         Kw::Cap => ("capability declarations", Planned::Phase(3)),
         Kw::Effect => ("effect parameters", Planned::Phase(3)),
         Kw::Pred => ("`pred` functions", Planned::Phase(5)),

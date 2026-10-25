@@ -51,6 +51,11 @@ impl Point {
     }
 }
 
+impl Lease {
+    fn close(take self) {
+    }
+}
+
 fn say(out: Out, line: Name) {
     let _ = attempt out.write_line(line)
 }
@@ -79,6 +84,7 @@ fn pass_on(bag: take Bag) -> Holder {
 
 fn release(lock: take Lease) {
     say(out: lock.out, line: f"release {lock.label}")
+    lock.close()
 }
 
 pub fn main(sys: keep Sys) fails IoError {

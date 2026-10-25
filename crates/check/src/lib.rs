@@ -309,6 +309,9 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         fn_names: HashMap::new(),
         imports: HashMap::new(),
         adt_names: HashMap::new(),
+        aliases: HashMap::new(),
+        alias_stack: Vec::new(),
+        alias_cycles: HashSet::new(),
         poisoned: m.poisoned.clone(),
         adts: Vec::new(),
         iface_names: HashMap::new(),
@@ -352,6 +355,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     checker.iface_names();
     checker.unknown_impl_targets();
     checker.adt_generics();
+    checker.resolve_aliases();
     checker.adt_fields();
     checker.expanding_types();
     checker.p.decls.settle_kinds();
@@ -398,6 +402,14 @@ enum Import {
     Type(Ty),
     /// `use a.b` makes `b` usable as a qualifier.
     Module,
+}
+
+/// An alias, by how far it is resolved.
+enum Alias {
+    /// Declared with this type and name.
+    Pending(TypeId, Ident),
+    Resolving(Ident),
+    Done(Ty),
 }
 
 /// A record or enum declaration, with the parts the checker reads the same way for both.
@@ -460,6 +472,24 @@ struct Signature {
     rejected: bool,
 }
 
+/// Code with no function around it (see [`FnState::returns`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Where,
+    Example,
+    Test,
+}
+
+impl Place {
+    fn describe(self) -> &'static str {
+        match self {
+            Place::Where => "a `where` clause",
+            Place::Example => "an example",
+            Place::Test => "a test",
+        }
+    }
+}
+
 struct LoopState {
     expr: ExprId,
     label: Option<Symbol>,
@@ -476,11 +506,11 @@ struct FnState {
     /// Whether this is a refinement, whose locals are the fields it looks at.
     refinement: bool,
     loops: Vec<LoopState>,
-    /// False in a refinement or an example, which are expressions with no function to return
-    /// from or fail.
+    /// False in a refinement, an example or a test, which have no function to return from or
+    /// fail.
     returns: bool,
-    /// Set in an example, so diagnostics name it.
-    example: bool,
+    /// What is being checked when it isn't a function, so diagnostics name it.
+    place: Place,
     /// The interfaces each of the function's type parameters implements.
     bounds: Vec<Vec<IfaceId>>,
     /// Whether each of the function's type parameters has a rejected declaration or
@@ -514,7 +544,7 @@ impl FnState {
             refinement: false,
             loops: Vec::new(),
             returns: true,
-            example: false,
+            place: Place::Where,
             bounds: Vec::new(),
             anonymous: Vec::new(),
             rejected: Vec::new(),
@@ -590,6 +620,12 @@ struct Checker<'a> {
     imports: HashMap<Symbol, Import>,
     /// The module's records and enums.
     adt_names: HashMap<Symbol, AdtId>,
+    /// The module's aliases, as far as they are resolved (REFERENCE §4.6).
+    aliases: HashMap<Symbol, Alias>,
+    /// The aliases being resolved, innermost last, which a cycle runs through.
+    alias_stack: Vec<Symbol>,
+    /// The aliases found in a cycle (E0322), which resolve to an unknown type.
+    alias_cycles: HashSet<Symbol>,
     /// Names whose declarations were rejected, so their uses aren't reported again: those the
     /// parser rejected, and records and enums whose names the checker rejects.
     poisoned: HashSet<Symbol>,
@@ -1358,7 +1394,8 @@ impl Checker<'_> {
             ItemKind::Record(decl) => vec![decl.name],
             ItemKind::Enum(decl) => vec![decl.name],
             ItemKind::Interface(decl) => vec![decl.name],
-            ItemKind::Impl(_) | ItemKind::Example(_) => vec![],
+            ItemKind::Alias(decl) => vec![decl.name],
+            ItemKind::Impl(_) | ItemKind::Example(_) | ItemKind::Test(_) => vec![],
             ItemKind::Use(decl) if decl.names.is_empty() => vec![decl.path[decl.path.len() - 1]],
             ItemKind::Use(decl) => decl
                 .names
@@ -1456,6 +1493,10 @@ impl Checker<'_> {
     fn adt_names(&mut self) {
         let m = self.m;
         for item in &m.items {
+            if let ItemKind::Alias(decl) = &item.kind {
+                self.alias_name(decl);
+                continue;
+            }
             let (name, generics, derives, refinement, kind) = match &item.kind {
                 ItemKind::Record(decl) => {
                     (decl.name, &decl.generics[..], &decl.derives[..], decl.refinement, AdtKind::Record)
@@ -1511,6 +1552,10 @@ impl Checker<'_> {
                 self.poisoned.insert(name.sym);
             } else if self.adt_names.contains_key(&name.sym) || self.imports.contains_key(&name.sym) {
                 self.error(codes::DUPLICATE_ITEM, name.span, format!("`{text}` is defined twice in this module"));
+            } else if self.aliases.contains_key(&name.sym) {
+                // Which one a use means is unclear, so its uses aren't checked.
+                self.error(codes::DUPLICATE_ITEM, name.span, format!("`{text}` is defined twice in this module"));
+                self.poisoned.insert(name.sym);
             } else {
                 self.adt_names.insert(name.sym, id);
             }
@@ -1520,6 +1565,111 @@ impl Checker<'_> {
                 def.unknown_methods = true;
             }
         }
+    }
+
+    /// Declares an alias, whose type is resolved once every type has a name. A rejected name
+    /// is reported once, and its uses are not (REFERENCE §15.1). An alias that clashes with
+    /// another item may have been meant by any use of the name, so none is checked.
+    fn alias_name(&mut self, decl: &AliasDecl) {
+        let name = decl.name;
+        let text = self.m.text(name.sym);
+        let cased = self.pascal_case(name, "type");
+        if !cased || prelude_type(text) {
+            if cased {
+                let message = format!("this alias would shadow the prelude name `{text}` (H4)");
+                self.error(codes::SHADOWING, name.span, message);
+            }
+            self.poisoned.insert(name.sym);
+        } else if self.adt_names.contains_key(&name.sym)
+            || self.imports.contains_key(&name.sym)
+            || self.aliases.contains_key(&name.sym)
+        {
+            self.error(codes::DUPLICATE_ITEM, name.span, format!("`{text}` is defined twice in this module"));
+            self.poisoned.insert(name.sym);
+        } else {
+            self.aliases.insert(name.sym, Alias::Pending(decl.target, name));
+        }
+    }
+
+    /// Resolves every alias, in declaration order, once every type has a name, so an alias
+    /// may name a type or alias declared later. Visibility is checked on the type an alias
+    /// names, so a `pub` alias may not name a private type (REFERENCE §3).
+    fn resolve_aliases(&mut self) {
+        let m = self.m;
+        for item in &m.items {
+            let ItemKind::Alias(decl) = &item.kind else { continue };
+            if self.poisoned.contains(&decl.name.sym) {
+                continue;
+            }
+            let ty = self.alias_type(decl.name.sym);
+            self.exposes(decl.name, item.vis, &ty, decl.target);
+            // A rejected `impl` block for the alias was for the type it names.
+            if m.impls.contains(&decl.name.sym)
+                && let Some(key) = ImplKey::of(&ty)
+            {
+                self.p.decls.mark_unknown(key);
+            }
+        }
+    }
+
+    /// The type alias `sym` names, resolved on first use. One that names itself is reported
+    /// once, at the first alias of its cycle, and every alias of the cycle is unknown.
+    fn alias_type(&mut self, sym: Symbol) -> Ty {
+        match self.aliases.get(&sym) {
+            Some(Alias::Done(ty)) => ty.clone(),
+            Some(&Alias::Resolving(_)) => {
+                let at = self.alias_stack.iter().position(|&s| s == sym).expect("an alias being resolved is on the stack");
+                let cycle: Vec<Ident> = self.alias_stack[at..]
+                    .iter()
+                    .map(|s| match self.aliases[s] {
+                        Alias::Resolving(name) => name,
+                        _ => unreachable!("the aliases on the stack are being resolved"),
+                    })
+                    .collect();
+                let first = cycle.iter().min_by_key(|name| name.span.lo).expect("a cycle has an alias");
+                let names: Vec<String> = cycle.iter().map(|name| format!("`{}`", self.m.text(name.sym))).collect();
+                let message = match names.as_slice() {
+                    [one] => format!("alias {one} names itself, so it names no type; a recursive type is a record or enum (§4.6)"),
+                    _ => format!(
+                        "aliases {} name each other in a cycle, so they name no type; a recursive type is a record or enum (§4.6)",
+                        names.join(" and ")
+                    ),
+                };
+                self.error(codes::ALIAS_CYCLE, first.span, message);
+                self.alias_cycles.extend(cycle.iter().map(|name| name.sym));
+                Ty::Error
+            }
+            Some(&Alias::Pending(target, name)) => {
+                self.aliases.insert(sym, Alias::Resolving(name));
+                self.alias_stack.push(sym);
+                // An alias has no type parameters, and is not in an `impl` block.
+                let scope = std::mem::take(&mut self.generic_scope);
+                let names = std::mem::take(&mut self.param_names);
+                let bounds = std::mem::take(&mut self.f.bounds);
+                let self_ty = self.self_ty.take();
+                let ty = self.resolve_type(target);
+                (self.generic_scope, self.param_names, self.f.bounds, self.self_ty) = (scope, names, bounds, self_ty);
+                self.alias_stack.pop();
+                let ty = if self.alias_cycles.contains(&sym) { Ty::Error } else { ty };
+                if ty == Ty::Error {
+                    self.poisoned.insert(sym);
+                }
+                self.aliases.insert(sym, Alias::Done(ty.clone()));
+                ty
+            }
+            None => unreachable!("only a declared alias is resolved"),
+        }
+    }
+
+    /// How to tell a use of alias `name` as a value or pattern what to write instead: aliases
+    /// name types only (REFERENCE §4.6).
+    fn alias_value(&mut self, name: Ident) {
+        let text = self.m.text(name.sym);
+        let Some(Alias::Done(ty)) = self.aliases.get(&name.sym) else { return };
+        let shown = self.show(&ty.clone());
+        let message =
+            format!("`{text}` is an alias of the type `{shown}`, and an alias names a type only; write `{shown}` here");
+        self.error(codes::UNKNOWN_NAME, name.span, message);
     }
 
     /// Checks the type parameters of each generic record and enum, once every type has a
@@ -2225,6 +2375,7 @@ impl Checker<'_> {
     fn names_type(&self, sym: Symbol) -> bool {
         prelude_type(self.m.text(sym))
             || self.adt_names.contains_key(&sym)
+            || self.aliases.contains_key(&sym)
             || matches!(self.imports.get(&sym), Some(Import::Type(_)))
             || self.iface_names.contains_key(&sym)
     }
@@ -2884,6 +3035,7 @@ impl Checker<'_> {
                     return Ty::applied(id, tys);
                 }
                 if self.adt_names.contains_key(&name.sym)
+                    || self.aliases.contains_key(&name.sym)
                     || matches!(self.imports.get(&name.sym), Some(Import::Type(_)))
                 {
                     self.error(codes::UNKNOWN_TYPE, te.span, format!("`{text}` takes no type arguments"));
@@ -2940,6 +3092,9 @@ impl Checker<'_> {
         }
         if let Some(ty) = builtin_type(text) {
             return ty;
+        }
+        if self.aliases.contains_key(&name.sym) {
+            return self.alias_type(name.sym);
         }
         if let Some(id) = self.generic_adt(name.sym) {
             let message =
@@ -3126,10 +3281,20 @@ impl Checker<'_> {
     /// for its error (OPEN_QUESTIONS P5).
     fn examples(&mut self) {
         let m = self.m;
+        let mut names: HashSet<&str> = HashSet::new();
         for (index, item) in m.items.iter().enumerate() {
+            if let ItemKind::Test(decl) = &item.kind {
+                // A second test of a name is checked, but its output would be ambiguous.
+                if !names.insert(&decl.name) {
+                    let message = format!("a test named \"{}\" is declared twice in this module", decl.name);
+                    self.error(codes::DUPLICATE_ITEM, decl.name_span, message);
+                }
+                self.test(index, decl);
+                continue;
+            }
             let ItemKind::Example(decl) = &item.kind else { continue };
             let mut state = FnState::new(Ty::Unit, None);
-            (state.returns, state.example) = (false, true);
+            (state.returns, state.place) = (false, Place::Example);
             state.scopes.push(Vec::new());
             self.f = state;
             if self.names_construction(decl.call) {
@@ -3153,17 +3318,39 @@ impl Checker<'_> {
         }
     }
 
-    /// Checks one example. `call == v` reads its operands as `==` does, so either may give
-    /// the other its type (OPEN_QUESTIONS P5; issue #10).
+    /// Checks a `test "name" { … }` (REFERENCE §14). Its body is statements, with no function
+    /// to return from or fail, and `expect` may be used in it.
+    fn test(&mut self, index: usize, decl: &TestDecl) {
+        let m = self.m;
+        let mut state = FnState::new(Ty::Unit, None);
+        (state.returns, state.place) = (false, Place::Test);
+        state.scopes.push(Vec::new());
+        self.f = state;
+        let start = self.diags.iter().count();
+        self.stmts(&decl.body.stmts);
+        self.settle();
+        let found = self.found(start);
+        moves::check(m, &mut self.p, &self.f.locals, &[], &found, moves::Body::Test(&decl.body), self.diags);
+        self.p.examples.push(ExampleInfo { item: index, locals: self.f.locals.len() });
+    }
+
+    /// Checks one example.
     fn example(&mut self, decl: &ExampleDecl) {
-        self.markers.push(Marker { handler: Some(decl.call), errors: Vec::new(), target: None });
+        self.expectation(decl.call, &decl.expect, "an example");
+    }
+
+    /// Checks what an example or an `expect` asserts about `call`, whose fallible calls it
+    /// marks. `call == v` reads its operands as `==` does, so either may give the other its
+    /// type (OPEN_QUESTIONS P5; issue #10).
+    fn expectation(&mut self, call: ExprId, expect: &Expectation, what: &str) {
+        self.markers.push(Marker { handler: Some(call), errors: Vec::new(), target: None });
         self.in_chain = true;
-        let ty = self.expr(decl.call, None);
+        let ty = self.expr(call, None);
         let errors = self.pop_marker();
-        let span = self.span(decl.call);
+        let span = self.span(call);
         let hole = self.met_hole(&errors);
-        let err = self.one_error(errors, span, "example", "an example expects one error type");
-        match &decl.expect {
+        let err = self.one_error(errors, span, what, &format!("{what} expects one error type"));
+        match expect {
             Expectation::Equals(value) => {
                 // A call that was rejected has nothing to compare with (§15.1).
                 if ty == Ty::Error {
@@ -3186,8 +3373,7 @@ impl Checker<'_> {
                 };
                 let defined = matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::EQ);
                 if !defined && !ty.is_unknown() && !holds_fn(&ty) {
-                    let message =
-                        format!("`==` is not defined for `{}`, so an example can't compare it", self.show(&ty));
+                    let message = format!("`==` is not defined for `{}`, so {what} can't compare it", self.show(&ty));
                     let at = span.to(self.span(*value));
                     self.error(codes::UNSUPPORTED_OPERATOR, at, message);
                 }
@@ -3439,10 +3625,10 @@ impl Checker<'_> {
                 self.error(
                     codes::MISPLACED_RETURN,
                     stmt.span,
-                    if self.f.example {
-                        "`return` outside a function body; an example is an expression"
-                    } else {
-                        "`return` outside a function body; a `where` clause is an expression"
+                    match self.f.place {
+                        Place::Example => "`return` outside a function body; an example is an expression",
+                        Place::Test => "`return` outside a function body; a test has no function to return from",
+                        Place::Where => "`return` outside a function body; a `where` clause is an expression",
                     },
                 );
                 Flow::Leaves
@@ -3473,6 +3659,32 @@ impl Checker<'_> {
             StmtKind::Assert(cond) => {
                 let ty = self.check(*cond, &Ty::Bool);
                 self.flow(&ty)
+            }
+            StmtKind::Expect { value, expect } => {
+                // A closure in a test runs when it is called, which may be after the test.
+                if self.f.place != Place::Test || !self.closure_scopes.is_empty() {
+                    let message = if self.f.place == Place::Test {
+                        "`expect` in a closure; it belongs to the test's own body, which reports it (§14)"
+                    } else {
+                        "`expect` exists only in the body of a `test`; a function asserts with `assert` (§14)"
+                    };
+                    self.error(codes::MISPLACED_EXPECT, stmt.span, message);
+                    self.rejected_value(*value);
+                    if let Some(Expectation::Equals(other)) = expect {
+                        self.rejected_value(*other);
+                    }
+                    return Flow::Finishes;
+                }
+                match expect {
+                    None => {
+                        let ty = self.check(*value, &Ty::Bool);
+                        self.flow(&ty)
+                    }
+                    Some(expect) => {
+                        self.expectation(*value, expect, "an `expect`");
+                        Flow::Finishes
+                    }
+                }
             }
         }
     }
@@ -4356,10 +4568,8 @@ impl Checker<'_> {
                             "`fail` in a closure whose function type has no `fails`; the type it is passed as must have one, as in `fn(Int) -> Int fails E`"
                         } else if self.f.returns {
                             "`fail` needs a `fails` clause, and this function declares none"
-                        } else if self.f.example {
-                            "`fail` in an example, which has no function to fail"
                         } else {
-                            "`fail` in a `where` clause, which has no function to fail"
+                            &format!("`fail` in {}, which has no function to fail", self.f.place.describe())
                         };
                         self.error(codes::FAIL_WITHOUT_FAILS, span, message);
                     }
@@ -4791,6 +5001,8 @@ impl Checker<'_> {
         if let Some(&f) = self.fn_names.get(&name.sym) {
             return self.fn_value(e, f, None, name.span);
         } else if self.unqualified_variant(name) || self.poisoned.contains(&name.sym) {
+        } else if self.aliases.contains_key(&name.sym) {
+            self.alias_value(name);
         } else if self.imports.contains_key(&name.sym)
             || self.adt_named(name.sym).is_some()
             || self.iface_names.contains_key(&name.sym)
@@ -4870,6 +5082,7 @@ impl Checker<'_> {
             }
             ExprKind::Name(name) if self.unqualified_variant(name) => {}
             ExprKind::Name(name) if self.poisoned.contains(&name.sym) => {}
+            ExprKind::Name(name) if self.aliases.contains_key(&name.sym) => self.alias_value(name),
             // Phase 3 gives `System` the rest of its fields (REFERENCE §9.1).
             ExprKind::Name(name) if m.text(name.sym) == "System" => {
                 self.not_implemented(callee_span, "constructions of `System`", Planned::Phase(3))
@@ -6555,7 +6768,7 @@ impl Checker<'_> {
                 let err = self.show(err);
                 format!("`try` propagates `{err}`, but this function does not declare `fails {err}`")
             } else {
-                let place = if self.f.example { "an example" } else { "a `where` clause" };
+                let place = self.f.place.describe();
                 format!("`try` in {place}, which has no function to propagate `{}` to", self.show(err))
             };
             self.error(codes::TRY_ERROR_MISMATCH, span, message);
@@ -7139,6 +7352,10 @@ impl Checker<'_> {
         if let Some(q) = qualifier {
             let q_text = m.text(q.sym);
             let def = self.p.decls.adt(id);
+            if self.aliases.contains_key(&q.sym) && !self.poisoned.contains(&q.sym) {
+                self.alias_value(q);
+                return self.unknown_parts(fields);
+            }
             let problem = match self.adt_named(q.sym) {
                 _ if self.poisoned.contains(&q.sym) => None,
                 Some(other) if other == id && def.is_enum() => None,
@@ -7180,6 +7397,8 @@ impl Checker<'_> {
         };
         let Some(v) = found else {
             if self.poisoned.contains(&name.sym) {
+            } else if qualifier.is_none() && self.aliases.contains_key(&name.sym) {
+                self.alias_value(name);
             } else if let Some(&other) =
                 self.adt_names.get(&name.sym).filter(|&&other| !def.is_enum() || !self.p.decls.adt(other).is_enum())
             {

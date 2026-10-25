@@ -62,6 +62,8 @@ pub(crate) enum Body<'a> {
     Predicate(ExprId),
     /// An example's call and the value it is compared with, which it drops.
     Example { call: ExprId, expected: Option<ExprId> },
+    /// A test's body.
+    Test(&'a Block),
 }
 
 /// A function's body, with what it owns from the start.
@@ -134,6 +136,11 @@ pub(crate) fn check(
             walk.close_scope("the end of the function");
         }
         Body::Predicate(e) => walk.expr(e),
+        Body::Test(block) => {
+            walk.scopes.push(Vec::new());
+            walk.block(block);
+            walk.close_scope("the end of the test");
+        }
         Body::Example { call, expected } => {
             for e in std::iter::once(call).chain(expected) {
                 walk.expr(e);
@@ -1470,6 +1477,22 @@ impl Walk<'_> {
                 self.discarded(*e, "this statement drops");
             }
             StmtKind::Assert(e) => self.expr(*e),
+            StmtKind::Expect { value, expect } => {
+                self.expr(*value);
+                let expected = match expect {
+                    Some(Expectation::Equals(other)) => Some(*other),
+                    _ => None,
+                };
+                if let Some(other) = expected {
+                    self.expr(other);
+                }
+                // What it compares, or the call whose error it matches, it drops (REFERENCE §10).
+                if expect.is_some() && self.checked.is_empty() {
+                    for e in std::iter::once(*value).chain(expected) {
+                        self.discarded(e, "the `expect` drops once it has compared it");
+                    }
+                }
+            }
             StmtKind::Return(value) => {
                 if let Some(value) = value {
                     self.expr(*value);
