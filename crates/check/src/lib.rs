@@ -2225,8 +2225,10 @@ impl Checker<'_> {
             .into_iter()
             .filter(|&(id, iface, _)| {
                 let wrapped = &self.p.decls.adt(id).variant().fields[0].ty;
-                // A distinct type whose own derives are rejected may have meant this one.
+                // A distinct type whose own derives are rejected may have meant this one. A record
+                // or enum can't derive an operator, so its rejected derives can't have meant it.
                 if let Ty::Adt(of, _) = wrapped
+                    && self.p.decls.adt(*of).distinct
                     && self.p.decls.adt(*of).unknown_interfaces
                 {
                     return false;

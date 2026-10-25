@@ -16,9 +16,10 @@
 // (§2), its operators need `derives`, and it has neither the wrapped type's methods nor
 // `with`. It derives an operator only when the wrapped type has it, wherever that type is
 // declared, and never `Copy`. One that wraps a distinct type whose derive is rejected isn't
-// reported again. Its `where` names the value as `self`, not as `value`. A distinct type
-// defined twice is E0202, as a record is, and its uses are checked against the first
-// declaration (issue #19). Distinct types take no type parameters yet.
+// reported again. One that wraps a record or enum is, since neither can derive an
+// operator. Its `where` names the value as `self`, not as `value`. A distinct type defined
+// twice is E0202, as a record is, and its uses are checked against the first declaration
+// (issue #19). Distinct types take no type parameters yet.
 type UserId = distinct Int derives(Eq, Show)
 type Plain = distinct Int
 type Words = distinct List[Text]
@@ -29,6 +30,8 @@ type Late = distinct Int
 type Outer = distinct Name derives(Add)
 type Typo = distinct Int derives(Ad)                // <- E0307
 type AboveTypo = distinct Typo derives(Add, Neg)
+type OverRecord = distinct Misspelled derives(Add)  // <- E0309
+type OverEnum = distinct Mistyped derives(Neg)      // <- E0309
 type Copied = distinct Int derives(Copy)            // <- E0310
 type Ratio = distinct Int derives(Div)
 type Positive = distinct Int where value > 0        // <- E0201
@@ -71,4 +74,12 @@ fn members(w: Words, u: UserId) -> Int {
 fn rejected(t: Twice) -> Int {
     let x = Twice(1)
     return t.value
+}
+
+record Misspelled derives(Eqq) {                    // <- E0307
+    n: Int
+}
+
+enum Mistyped derives(Shw) {                        // <- E0307
+    One
 }
