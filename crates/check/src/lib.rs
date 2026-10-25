@@ -6875,21 +6875,37 @@ impl Checker<'_> {
         // then each closure whose parameter types are written or settled, so the order of the
         // arguments doesn't change the types (OPEN_QUESTIONS Q33). A closure that an `if`,
         // `match` or `else` gives waits as one does.
+        // Where a label is wrong, each argument is checked against the parameter its label
+        // names, so the label isn't reported again as a mismatched type (§15.1; issue #51).
+        // An argument whose label names a parameter another argument has is checked as written.
+        let to = if labels_reported && !unnamed {
+            label_order(m, args, params)
+        } else {
+            (0..args.len()).map(Some).collect()
+        };
         let (mut closures, others): (Vec<usize>, Vec<usize>) =
             (0..args.len()).partition(|&i| self.gives_closure(args[i].value));
         for i in others {
-            self.generic_arg(callee, i, &args[i], (params[i].0.as_ref(), &params[i].1), targs, modes);
+            match to[i] {
+                Some(j) => self.generic_arg(callee, j, &args[i], (params[j].0.as_ref(), &params[j].1), targs, modes),
+                None => self.rejected_args(std::slice::from_ref(&args[i])),
+            }
         }
         while !closures.is_empty() {
-            let ready =
-                closures.iter().position(|&i| self.closure_ready(args[i].value, &params[i].1, targs)).unwrap_or(0);
+            let ready = closures
+                .iter()
+                .position(|&i| to[i].is_none_or(|j| self.closure_ready(args[i].value, &params[j].1, targs)))
+                .unwrap_or(0);
             let i = closures.remove(ready);
-            self.generic_arg(callee, i, &args[i], (params[i].0.as_ref(), &params[i].1), targs, modes);
+            match to[i] {
+                Some(j) => self.generic_arg(callee, j, &args[i], (params[j].0.as_ref(), &params[j].1), targs, modes),
+                None => self.rejected_args(std::slice::from_ref(&args[i])),
+            }
         }
         true
     }
 
-    /// Checks argument `i` of a call against parameter `param` of type `ty`.
+    /// Checks the argument for parameter `i` of a call against parameter `param` of type `ty`.
     fn generic_arg(&mut self, callee: &str, i: usize, arg: &Arg, (param, ty): (&str, &Ty), targs: &[Ty], modes: Modes) {
         let mode = match modes {
             Modes::Borrow => ParamMode::Borrow,
@@ -7845,6 +7861,12 @@ impl Checker<'_> {
         }
         if let Some((code, span, message)) = problem {
             self.error(code, span, message);
+            // A pattern whose fields are only out of order still takes each one apart, so
+            // what it binds and moves is known (§15.1; issue #46).
+            let distinct = targets.iter().collect::<HashSet<_>>().len();
+            if code == codes::WRONG_LABEL && targets.len() == fields.len() && distinct == targets.len() {
+                self.p.pat_ctor.insert(pat, CtorPat { adt: id, variant: v, fields: targets.into() });
+            }
             return Space::Error;
         }
         self.p.pat_ctor.insert(pat, CtorPat { adt: id, variant: v, fields: targets.into() });
@@ -8035,6 +8057,32 @@ fn without_bad_keys(decls: &Decls, ty: &Ty, bounds: &[Vec<IfaceId>], unknown: &[
 }
 
 /// Whether `ty` mentions one of the type parameters `targs` stands for.
+/// The parameter each argument of a call whose labels are wrong is checked against: the one
+/// its label names, or its own or the first that no argument names when its label names
+/// none. An argument whose label names a parameter an earlier one has gets none.
+fn label_order<S: AsRef<str>>(m: &Module, args: &[Arg], params: &[(S, Ty)]) -> Vec<Option<usize>> {
+    let named: Vec<Option<usize>> = args
+        .iter()
+        .map(|arg| arg.label.and_then(|label| params.iter().position(|(param, _)| param.as_ref() == m.text(label.sym))))
+        .collect();
+    let mut taken = vec![false; params.len()];
+    let mut to: Vec<Option<usize>> = vec![None; args.len()];
+    for (i, &j) in named.iter().enumerate() {
+        if let Some(j) = j.filter(|&j| !taken[j]) {
+            (to[i], taken[j]) = (Some(j), true);
+        }
+    }
+    for i in 0..args.len() {
+        if named[i].is_none() {
+            let free = if taken[i] { taken.iter().position(|t| !t) } else { Some(i) };
+            if let Some(j) = free {
+                (to[i], taken[j]) = (Some(j), true);
+            }
+        }
+    }
+    to
+}
+
 fn mentions_targ(ty: &Ty, targs: &[Ty]) -> bool {
     match ty {
         Ty::Param(i) => (*i as usize) < targs.len(),
