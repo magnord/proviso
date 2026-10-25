@@ -219,7 +219,7 @@ pub mod codes {
         RESOURCE_DISCARDED = "E0508", "resource_discarded",
             "A resource is overwritten or discarded: assigned over, or produced by an expression that nothing consumes (REFERENCE §10).";
         FUNCTION_VALUE_ESCAPES = "E0509", "function_value_escapes",
-            "A function value is put where it could outlive what it captures: a field, a result, an error, an element, a type argument, an assignment to a `var`, or the value of a block, branch or arm that declares a local it captures (REFERENCE §6.7; OPEN_QUESTIONS P5).";
+            "A function value is put where it could outlive what it captures, such as a field, a result, an error, an element, a type argument, an assignment to a `var`, or the value of a block, branch or arm that declares a local it captures (REFERENCE §6.7; OPEN_QUESTIONS P5).";
         EFFECTS_CALL_IN_OBSERVES = "E0601", "effects_call_in_observes",
             "An operation that needs only `observes` permissions calls an `effects` operation (REFERENCE §9.2).";
         REACH_NOT_ADMITTED = "E0602", "reach_not_admitted",

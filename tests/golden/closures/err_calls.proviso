@@ -104,6 +104,11 @@ fn jumps() {
             break                                   // <- E0105
         })
     }
+    outer: while true {
+        run(f: || {
+            continue outer                          // <- E0105
+        })
+    }
 }
 
 fn operators(f: fn(Int) -> Int, g: fn(Int) -> Int) -> Bool {

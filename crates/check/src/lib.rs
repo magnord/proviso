@@ -518,6 +518,8 @@ struct ClosureScope {
     /// Whether its body has a call without the marker it needs, whose failure its error type
     /// would have taken.
     unmarked: bool,
+    /// The labels of the loops around it, which its body can't leave.
+    labels: Vec<Symbol>,
 }
 
 /// An enclosing `try`, `attempt`, `else` form or example, and the error types of the
@@ -3387,7 +3389,14 @@ impl Checker<'_> {
                 Some(index) => index,
                 None => {
                     let text = self.m.text(label.sym);
-                    self.error(codes::MISPLACED_JUMP, label.span, format!("no enclosing loop is labelled `{text}`"));
+                    let message = if self.closure_scopes.iter().any(|scope| scope.labels.contains(&label.sym)) {
+                        format!(
+                            "`{keyword} {text}` can't leave a closure; its body ends with its value or a `return` (OPEN_QUESTIONS Q33)"
+                        )
+                    } else {
+                        format!("no enclosing loop is labelled `{text}`")
+                    };
+                    self.error(codes::MISPLACED_JUMP, label.span, message);
                     return;
                 }
             },
@@ -4678,7 +4687,8 @@ impl Checker<'_> {
             std::mem::replace(&mut self.f.returns, true),
             std::mem::take(&mut self.markers),
         );
-        self.closure_scopes.push(ClosureScope { base, captures: Vec::new(), unmarked: false });
+        let labels = outer.2.iter().filter_map(|l| l.label).collect();
+        self.closure_scopes.push(ClosureScope { base, captures: Vec::new(), unmarked: false, labels });
         self.f.scopes.push(Vec::new());
         let mut locals = Vec::new();
         for ((param, ty), mode) in closure.params.iter().zip(&params).zip(&modes) {

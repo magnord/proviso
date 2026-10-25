@@ -1,7 +1,7 @@
 // phase: 2.9
 // A closure's parameter types may come from a generic call's other arguments, and its
 // result and error types become type arguments of the call. The order of the arguments
-// doesn't change the result: the arguments that aren't closures go first, then each
+// doesn't change the result. The arguments that aren't closures go first, then each
 // closure whose parameter types are written or known, until none is left (OPEN_QUESTIONS
 // P5). A closure that an `if` or `match` gives waits as one does, and calling a function
 // value leaves the parts of its type open. A body that always leaves gives `Never`, however
