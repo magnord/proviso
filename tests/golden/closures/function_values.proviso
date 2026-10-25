@@ -1,0 +1,119 @@
+// phase: 2.9
+// A function type is written `fn(A, B) -> R`, with `-> R` left out for `Unit`. It may give
+// its parameters modes, and an error type with `fails E` (REFERENCE §9.4). A module function
+// is a value, and so is a generic one, with its type arguments given by the expected type
+// or by `::[…]` (§4.8). A function value is called without labels (§3), with `&` for an
+// `inout` parameter (§5.2), and a call through a type with `fails E` is marked like any
+// call that can fail (§7.2). A function that can't fail, or fails with `Never`, is a value
+// of the type that adds `fails E` (OPEN_QUESTIONS P5). `debug` writes a function value as
+// its type.
+use std.io { IoError }
+
+enum Stop derives(Show) {
+    Halt
+}
+
+fn double(x: Int) -> Int {
+    return x * 2
+}
+
+fn add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+fn bump(n: inout Int) {
+    n = n + 1
+}
+
+fn length(xs: take List[Int]) -> Int {
+    return xs.len()
+}
+
+fn same[T: Copy](x: T) -> T {
+    return x
+}
+
+fn nothing() {}
+
+fn half(x: Int) -> Int fails Stop {
+    if x % 2 == 1 {
+        fail Stop.Halt
+    }
+    return x / 2
+}
+
+fn apply(f: fn(Int) -> Int, x: Int) -> Int {
+    return f(x)
+}
+
+fn apply_two(f: fn(Int, Int) -> Int) -> Int {
+    return f(3, 4)
+}
+
+fn twice(f: fn(inout Int), n: Int) -> Int {
+    var m = n
+    f(&m)
+    f(&m)
+    return m
+}
+
+fn consume_with(f: fn(take List[Int]) -> Int) -> Int {
+    let xs = [1, 2, 3]
+    return f(xs)
+}
+
+fn run(f: fn()) {
+    f()
+}
+
+fn halve(f: fn(Int) -> Int fails Stop, x: Int) -> Int fails Stop {
+    return try f(x)
+}
+
+fn guarded(f: fn(Int) -> Int fails Stop, x: Int) -> Text {
+    let r = f(x) else -1
+    return f"{r}"
+}
+
+fn locals() -> Text {
+    let f = double
+    let g: fn(Int, Int) -> Int = add
+    let h = same::[Int]
+    let k: fn(Text) -> Text = same
+    return f"{f(1)} {g(2, 3)} {h(4)} {k("t")} {apply(f: f, x: 5)} {apply(f: same, x: 6)}"
+}
+
+fn from_param(f: fn(Int) -> Int) -> Int {
+    let g = f
+    return apply(f: g, x: 7)
+}
+
+fn branches(flag: Bool) -> Int {
+    let f = if flag { double } else { same::[Int] }
+    return f(10)
+}
+
+fn modes() -> Text {
+    run(f: nothing)
+    return f"{apply_two(f: add)} {twice(f: bump, n: 1)} {consume_with(f: length)}"
+}
+
+fn failing() -> Text fails Stop {
+    let a = try halve(f: half, x: 8)
+    let b = try halve(f: double, x: 8)
+    return f"{a} {b} {guarded(f: half, x: 3)} {guarded(f: half, x: 6)}"
+}
+
+fn debugged() {
+    let f = same::[Text]
+    debug(double, add, bump, f, half, nothing, length)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    debugged()
+    try sys.stdout.write_line(locals())
+    try sys.stdout.write_line(f"{from_param(f: double)} {branches(flag: true)} {branches(flag: false)}")
+    try sys.stdout.write_line(modes())
+    let shown = failing() else "failed"
+    try sys.stdout.write_line(shown)
+}

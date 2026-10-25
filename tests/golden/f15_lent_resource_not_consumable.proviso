@@ -1,5 +1,5 @@
 // §F row 15: a callback lent a resource cannot consume it
-// phase: 2
+// phase: 2.9
 // expect-error: E0502
 //
 // `transaction` owns `tx` and lends it to `body` as `inout Txn`. A lent

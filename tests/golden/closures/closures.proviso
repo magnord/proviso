@@ -1,0 +1,164 @@
+// phase: 2.9
+// A closure is written `|x| expr`, `|a: Int, b: Int| -> Int { … }` or `|| expr` (REFERENCE
+// §6.7). Its parameters take their types from its annotations or from the function type
+// it is passed as, and their modes from that type. Its result and error types come from its
+// body. An unbraced body extends as far as an expression can, a braced body yields its
+// final expression, and `return` returns from the closure (OPEN_QUESTIONS Q33). A closure
+// lives until the call it is passed to returns, and captures the locals it uses by
+// reference, so it reads a unique or resource value without moving it. A closure bound to a
+// local lives as long as the local, and sees a `var` it reads as it is when it is called
+// (Q34, P5). Closures nest, and one closure may call another it captures.
+use std.io { IoError }
+
+unique record Token {
+    id: Int
+}
+
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+enum Stop derives(Show) {
+    Halt
+}
+
+fn apply(f: fn(Int) -> Int, x: Int) -> Int {
+    return f(x)
+}
+
+fn combine(f: fn(Int, Int) -> Int) -> Int {
+    return f(3, 4)
+}
+
+fn call(f: fn() -> Text) -> Text {
+    return f()
+}
+
+fn twice(f: fn(inout Int)) -> Int {
+    var n = 1
+    f(&n)
+    f(&n)
+    return n
+}
+
+fn owned(f: fn(take Token) -> Int) -> Int {
+    return f(Token(id: 9))
+}
+
+fn guarded(f: fn(Int) -> Int fails Stop) -> Text {
+    let r = f(1) else -1
+    let s = f(2) else -1
+    return f"{r} {s}"
+}
+
+fn half(x: Int) -> Int fails Stop {
+    if x % 2 == 1 {
+        fail Stop.Halt
+    }
+    return x / 2
+}
+
+fn body_forms() -> Text {
+    let a = apply(f: |x| x + 1, x: 1)
+    let b = combine(f: |left: Int, right: Int| -> Int { return left * right })
+    let c = apply(f: |x| {
+        if x > 5 {
+            return 0
+        }
+        x * 10
+    }, x: 3)
+    let d = apply(f: |x| {
+        if x > 5 {
+            return 0
+        }
+        x * 10
+    }, x: 6)
+    let e = call(f: || "unit")
+    let g = twice(f: |n| {
+        n = n * 3
+    })
+    let h = owned(f: |t| t.id)
+    let i = apply(f: |x| x * 2 + 1, x: 4)
+    return f"{a} {b} {c} {d} {e} {g} {h} {i}"
+}
+
+fn failing() -> Text {
+    let a = guarded(f: |x| {
+        if x == 2 {
+            fail Stop.Halt
+        }
+        x
+    })
+    let b = guarded(f: |x| try half(x))
+    let c = guarded(f: |x| half(x) else 7)
+    return f"{a} / {b} / {c}"
+}
+
+fn captures(token: Token, probe: Probe, n: inout Int) -> Text {
+    let base = 10
+    let a = apply(f: |x| x + base, x: 1)
+    let b = apply(f: |x| x + token.id, x: 1)
+    let c = call(f: || probe.name)
+    let d = apply(f: |x| x + n, x: 1)
+    return f"{a} {b} {c} {d}"
+}
+
+fn owned_captures() -> Text {
+    let token = Token(id: 3)
+    let probe = Probe(name: "p")
+    let n = apply(f: |x| x * token.id, x: 2)
+    let name = call(f: || f"{probe.name}{token.id}")
+    probe.close()
+    let moved = token
+    return f"{n} {name} {moved.id}"
+}
+
+fn bound() -> Text {
+    let step = 2
+    let inc = |x: Int| x + step
+    let mul: fn(Int) -> Int = |x| x * step
+    let hello = || "hi"
+    let guess = |x| x + 1
+    return f"{inc(1)} {mul(4)} {apply(f: inc, x: 5)} {hello()} {call(f: hello)} {guess(2)}"
+}
+
+fn current() -> Text {
+    var count = 1
+    let read = || count
+    let before = read()
+    count = 5
+    return f"{before} {read()}"
+}
+
+fn nested() -> Text {
+    let k = 3
+    let a = apply(f: |x| apply(f: |y| y + k + x, x: 1), x: 2)
+    let add_k = |x: Int| x + k
+    let b = apply(f: |x| add_k(x) * 2, x: 1)
+    let c = call(f: || {
+        let inner = || "in"
+        f"{inner()}{k}"
+    })
+    return f"{a} {b} {c}"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(body_forms())
+    try sys.stdout.write_line(failing())
+    let probe = Probe(name: "q")
+    var n = 4
+    try sys.stdout.write_line(captures(token: Token(id: 5), probe: probe, n: &n))
+    probe.close()
+    try sys.stdout.write_line(owned_captures())
+    try sys.stdout.write_line(bound())
+    try sys.stdout.write_line(current())
+    try sys.stdout.write_line(nested())
+}

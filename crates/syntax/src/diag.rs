@@ -216,6 +216,8 @@ pub mod codes {
             "A resource the scope owns is neither consumed nor transferred on a path to a normal exit: the end of its block, `return`, `break` or `continue` (REFERENCE §10).";
         RESOURCE_DISCARDED = "E0508", "resource_discarded",
             "A resource is overwritten or discarded: assigned over, or produced by an expression that nothing consumes (REFERENCE §10).";
+        FUNCTION_VALUE_ESCAPES = "E0509", "function_value_escapes",
+            "A function value is put where it could outlive what it captures: a field, a result, an element, a type argument or an assignment (REFERENCE §6.7).";
         EFFECTS_CALL_IN_OBSERVES = "E0601", "effects_call_in_observes",
             "An operation that needs only `observes` permissions calls an `effects` operation (REFERENCE §9.2).";
         REACH_NOT_ADMITTED = "E0602", "reach_not_admitted",

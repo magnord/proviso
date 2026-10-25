@@ -1,0 +1,127 @@
+// phase: 2.9
+// expect-error: E0105
+// expect-error: E0201
+// expect-error: E0207
+// expect-error: E0208
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0306
+// expect-error: E0312
+// expect-error: E0506
+// expect-error: E0701
+// expect-error: E0702
+// expect-error: E0705
+// A function value is called without labels and with one argument per parameter, `&` on
+// each `inout` one (REFERENCE §3, §5.2), and a call through `fails E` is marked (§7.2). A
+// closure has the parameters, result and error type that the expected function type gives,
+// and a function value matches a function type only if its modes match and it fails with
+// the same error type or none (OPEN_QUESTIONS P5). A closure's parameter needs a type from
+// its annotation, the expected type or its body, and its `let` fixes it there. `break` and
+// `continue` can't leave a closure. Function values implement no interface, so they can't
+// be compared or interpolated. A variant with fields is not a function value, and nor is a
+// method or an associated function. Each is written with its arguments, and a closure can
+// wrap it.
+enum Stop {
+    Halt
+}
+
+enum Shape {
+    Circle(radius: Int)
+    Empty
+}
+
+fn apply(f: fn(Int) -> Int, x: Int) -> Int {
+    return f(x)
+}
+
+fn run(f: fn()) {
+    f()
+}
+
+fn bump(n: inout Int) {
+    n = n + 1
+}
+
+fn half(x: Int) -> Int fails Stop {
+    return x / 2
+}
+
+fn length(t: Text) -> Int {
+    return 1
+}
+
+fn calls(f: fn(Int) -> Int, g: fn(inout Int), h: fn(Int) -> Int fails Stop) -> Int fails Stop {
+    let a = f(x: 1)                                 // <- E0207
+    let b = f(1, 2)                                 // <- E0208
+    let c = f("one")                                // <- E0301
+    var n = 1
+    g(n)                                            // <- E0506
+    let d = f(&n)                                   // <- E0506
+    let e = h(1)                                    // <- E0701
+    let ok = try h(2)
+    return a
+}
+
+fn values() {
+    let a = apply(f: length, x: 1)                  // <- E0301
+    let b = apply(f: half, x: 1)                    // <- E0301
+    run(f: bump)                                    // <- E0301
+    let c = apply(f: |x: Text| 1, x: 1)             // <- E0301
+    let d = apply(f: |x, y| x, x: 1)                // <- E0208
+    let e = apply(f: |x| "t", x: 1)                 // <- E0301
+    let g = apply(f: |x| {
+        return "t"                                  // <- E0301
+    }, x: 1)
+    let h = apply(f: |x| {
+        fail Stop.Halt                              // <- E0705
+    }, x: 1)
+    let i = apply(f: |x| try half(x), x: 1)         // <- E0702
+    let k = |x| x                                   // <- E0312
+}
+
+fn jumps() {
+    while true {
+        run(f: || {
+            break                                   // <- E0105
+        })
+    }
+}
+
+fn operators(f: fn(Int) -> Int, g: fn(Int) -> Int) -> Bool {
+    let t = f"{f}"                                  // <- E0306
+    let n = f + 1                                   // <- E0306
+    return f == g                                   // <- E0306
+}
+
+fn variants() {
+    let s = Shape.Circle                            // <- E0208
+    let o = Some                                    // <- E0208
+    let wrapped = |r: Int| Shape.Circle(radius: r)
+    let made = wrapped(2)
+    let none = Shape.Empty
+}
+
+record Counter {
+    n: Int
+}
+
+impl Counter {
+    fn get(self) -> Int {
+        return self.n
+    }
+
+    fn pick[T](self, x: T) -> Int {
+        return self.n
+    }
+
+    fn fresh() -> Counter {
+        return Counter(n: 0)
+    }
+}
+
+fn methods(c: Counter) {
+    let a = c.get                                   // <- E0303
+    let b = c.pick::[Int]                           // <- E0208
+    let d = Counter.fresh                           // <- E0201
+    let e = |x: Int| c.pick(x)
+}

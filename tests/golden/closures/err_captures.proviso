@@ -1,0 +1,144 @@
+// phase: 2.9
+// expect-error: E0501
+// expect-error: E0502
+// expect-error: E0504
+// expect-error: E0505
+// A closure borrows what it captures, whether a local or a parameter of any mode (REFERENCE
+// §6.7). So it can't move a captured unique value or consume a captured resource (§5.1,
+// §10 rule 6), in any body form. It can't capture a value that has moved, and a value it
+// captures can't move while the closure may still be called, since a call of the closure
+// uses what it captures. A closure argument reads every local it captures, so it overlaps
+// an `&` argument or an `inout self` receiver on the same local in the same call (§5.3,
+// OPEN_QUESTIONS P5).
+use std.pool { Pool, Handle }
+
+unique record Token {
+    id: Int
+}
+
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+fn run(f: fn()) {
+    f()
+}
+
+fn read(f: fn() -> Int) -> Int {
+    return f()
+}
+
+fn give(f: fn() -> Probe) {
+    let p = f()
+    p.close()
+}
+
+fn change(n: inout Int, f: fn() -> Int) {
+    n = f()
+}
+
+fn change_after(f: fn() -> Int, n: inout Int) {
+    n = f()
+}
+
+fn take_token(t: take Token) {}
+
+fn moved_local() {
+    let token = Token(id: 1)
+    run(f: || take_token(t: token))                 // <- E0504
+}
+
+fn moved_param(token: take Token, lent: Token, held: inout Token) {
+    run(f: || take_token(t: token))                 // <- E0504
+    run(f: || take_token(t: lent))                  // <- E0504
+    run(f: || {
+        let t = held                                // <- E0504
+    })
+    let n = read(f: || {
+        if token.id > 0 {
+            return token.id
+        }
+        let t = token                               // <- E0504
+        0
+    })
+}
+
+fn consumed_local() {
+    let probe = Probe(name: "p")
+    run(f: || probe.close())                        // <- E0502
+    give(f: || probe)                               // <- E0502
+    run(f: || {
+        let q = probe                               // <- E0502
+    })
+    probe.close()
+}
+
+fn consumed_param(probe: Probe, held: inout Probe) {
+    run(f: || probe.close())                        // <- E0502
+    run(f: || held.close())                         // <- E0502
+}
+
+fn moved_before() {
+    let token = Token(id: 1)
+    take_token(t: token)
+    let n = read(f: || token.id)                    // <- E0501
+}
+
+fn moved_while_held() {
+    let token = Token(id: 1)
+    let f = || token.id
+    take_token(t: token)
+    let n = f()                                     // <- E0501
+}
+
+fn moved_while_held_twice() {
+    let token = Token(id: 1)
+    let f = || token.id
+    let g = || f() + 1
+    take_token(t: token)
+    let n = read(f: g)                              // <- E0501
+}
+
+fn moved_after_last_use() {
+    let token = Token(id: 1)
+    let f = || token.id
+    let n = f()
+    take_token(t: token)
+}
+
+fn overlap() {
+    var n = 1
+    change(n: &n, f: || n)                          // <- E0505
+    change_after(f: || n + 1, n: &n)                // <- E0505
+    var m = 2
+    change(n: &m, f: || n)
+}
+
+fn overlap_bound() {
+    var n = 1
+    let f = || n
+    change(n: &n, f: f)                             // <- E0505
+}
+
+fn pool_overlap(pool: inout Pool[Int], h: Handle[Int]) -> Bool {
+    return pool.update(handle: h, change: |x| x + pool.len())  // <- E0505
+}
+
+fn read_then_take(f: fn() -> Int, t: take Token) {}
+
+fn take_then_read(t: take Token, f: fn() -> Int) {}
+
+fn moved_in_call() {
+    let a = Token(id: 1)
+    read_then_take(f: || a.id, t: a)                // <- E0505
+    let b = Token(id: 2)
+    take_then_read(t: b, f: || b.id)                // <- E0501
+}

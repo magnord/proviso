@@ -1,0 +1,74 @@
+// phase: 2.9
+// expect-error: E0509
+// A closure lives only until the call it is passed to returns, or as long as the local it
+// is bound to (REFERENCE §6.7, OPEN_QUESTIONS Q34). So a function value may be a parameter,
+// a local, an argument or the value of a branch, but nothing that can outlive what it
+// captures. It can't be a field, a result, an error, an element, a type argument or a part
+// of a tuple, whether the type is written or inferred. A function type's own result can't
+// be a function either, and a `var` can't be given a new function value. A block can't
+// yield a closure that captures a local declared inside it. `keep fn` will lift parts of
+// this (OPEN_QUESTIONS P5).
+use std.pool { Pool }
+
+record Holder {
+    f: fn(Int) -> Int                               // <- E0509
+}
+
+enum Stop {
+    Halt
+}
+
+fn make() -> fn(Int) -> Int {                       // <- E0509
+    unreachable
+}
+
+fn fails_with() fails fn() {                        // <- E0509
+    unreachable
+}
+
+fn listed(xs: List[fn()]) {}                        // <- E0509
+
+fn optional(o: Option[fn()]) {}                     // <- E0509
+
+fn tupled(t: (fn(), Int)) {}                        // <- E0509
+
+fn curried(f: fn() -> fn()) {}                      // <- E0509
+
+fn higher(f: fn(fn(Int) -> Int) -> Int) -> Int {
+    return f(|x| x)
+}
+
+fn generic[T](x: take T) -> T {
+    return x
+}
+
+fn inferred(f: fn(Int) -> Int) {
+    let xs = [f]                                    // <- E0509
+    let o = Some(f)                                 // <- E0509
+    let t = (f, 1)                                  // <- E0509
+    let g = generic(x: f)                           // <- E0509
+    let m = ["k": f]                                // <- E0509
+    let p = Pool.new::[fn()]()                      // <- E0509
+    let k = || f                                    // <- E0509
+    var h = f
+    h = f                                           // <- E0509
+    let ok = f
+}
+
+fn escape_block(flag: Bool) -> Int {
+    let base = 1
+    let f = if flag {
+        let local = 2
+        |x: Int| x + local                          // <- E0509
+    } else {
+        |x: Int| x + base
+    }
+    let g = if flag {
+        let inner = 3
+        let add = |x: Int| x + inner
+        add                                         // <- E0509
+    } else {
+        |x: Int| x
+    }
+    return f(1) + g(2)
+}

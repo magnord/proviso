@@ -1,0 +1,39 @@
+// phase: 2.9
+// expect-error: E0302
+// expect-error: E0312
+// A closure parameter whose type nothing gives, neither an annotation, the expected type,
+// the call's other arguments nor its body, can't be inferred, in any order of the
+// arguments. A binding fixes its closure's types, so a later call doesn't give them
+// (OPEN_QUESTIONS P5). A literal in a closure's body meets the parameter type that another
+// argument gives, in any order.
+fn apply_to[T, R](x: T, f: fn(T) -> R) -> R {
+    return f(x)
+}
+
+fn apply_from[T, R](f: fn(T) -> R, x: T) -> R {
+    return f(x)
+}
+
+fn ignore[T](f: fn(T) -> Int) -> Int {
+    return 0
+}
+
+fn pair[T](f: fn(T) -> Int, g: fn(T) -> Int) -> Int {
+    return 0
+}
+
+fn small() -> Int8 {
+    return 100
+}
+
+fn unknown() {
+    let a = ignore(f: |x| 1)                        // <- E0312
+    let b = pair(f: |x| 1, g: |y| 2)                // <- E0312
+    let f = |x| x                                   // <- E0312
+    let g = || []                                   // <- E0312
+}
+
+fn ranges() {
+    let a = apply_to(x: small(), f: |n| n + 200)    // <- E0302
+    let b = apply_from(f: |n| n + 200, x: small())  // <- E0302
+}

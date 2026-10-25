@@ -1,0 +1,52 @@
+// phase: 2.9
+// expect-error: E0901
+// Reach comes with phase 3: `uses C` and `with E` on a function type, effect variables,
+// `scoped fn` and `keep fn` parameters, and closures that capture a capability or a value
+// that holds one (REFERENCE §9.4, §6.7). So do closures that change a `var` they capture
+// (§5.3), and the operations of `List` and `Map` that take a closure, such as `map` and
+// `filter`.
+use std.io { Out }
+
+record Sink {
+    out: Out
+}
+
+fn run(f: fn()) {
+    f()
+}
+
+fn bump(n: inout Int) {
+    n = n + 1
+}
+
+fn effectful(f: fn() uses Out) {}                   // <- E0901
+
+fn effect_var(f: fn() with E) {}                    // <- E0901
+
+fn scoped_param(f: scoped fn()) {}                  // <- E0901
+
+fn keep_param(f: keep fn()) {}                      // <- E0901
+
+fn mutate() {
+    var n = 1
+    run(f: || {
+        n = 2                                       // <- E0901
+    })
+    var xs = [1]
+    run(f: || xs.push(2))                           // <- E0901
+    run(f: || bump(n: &n))                          // <- E0901
+}
+
+fn reach(out: Out, sink: Sink) {
+    run(f: || {
+        let _ = attempt out.write_line("x")         // <- E0901
+    })
+    run(f: || {
+        let s = sink                                // <- E0901
+    })
+}
+
+fn mapped(xs: List[Int]) {
+    let ys = xs.map(f: |x| x + 1)                   // <- E0901
+    let zs = xs.filter(f: |x| x > 1)                // <- E0901
+}

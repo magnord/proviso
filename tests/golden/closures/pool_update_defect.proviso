@@ -1,0 +1,53 @@
+// phase: 2.9
+// expect-exit: 70
+// expect-report: defect assertion_failed
+// A defect in `change` leaves the element's slot empty, as `remove` would. `change` owns
+// the element it takes, so its frame abandons it as the defect leaves, and the pool, which
+// is `inout`, keeps the elements it still holds for its owner to abandon, last slot first
+// (REFERENCE §5.4, §10 rule 3, OPEN_QUESTIONS P5).
+use std.io { Out }
+use std.pool { Pool, Handle }
+
+resource record Probe {
+    name: Text
+    out: Out
+}
+
+impl Probe {
+    fn close(take self) {
+        say(out: self.out, line: f"close {self.name}")
+    }
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.name}")
+    }
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)
+}
+
+fn renamed(p: take Probe, name: Text) -> Probe {
+    let q = Probe(name: name, out: p.out)
+    p.close()
+    return q
+}
+
+fn change_all(probes: inout Pool[Probe], a: Handle[Probe], b: Handle[Probe]) {
+    let first = probes.update(handle: a, change: |p| renamed(p: p, name: "a2"))
+    let second = probes.update(handle: b, change: |p| {
+        assert p.name == "b2"
+        p
+    })
+}
+
+pub fn main(sys: keep System) {
+    var probes: Pool[Probe] = Pool.new()
+    let a = probes.insert(Probe(name: "a", out: sys.stdout))
+    let b = probes.insert(Probe(name: "b", out: sys.stdout))
+    let c = probes.insert(Probe(name: "c", out: sys.stdout))
+    change_all(probes: &probes, a: a, b: b)
+    unreachable
+}

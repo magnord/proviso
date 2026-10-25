@@ -1,14 +1,8 @@
 // phase: 2.7
 // expect-error: E0901
-// Interface methods that take `inout self` come in a later slice of phase 2, and so does
-// `Pool.update`, which takes a closure. Two `&` arguments to elements of one list are
+// Interface methods that take `inout self` come in a later slice of phase 2. Two `&` arguments to elements of one list are
 // disjoint when a fact such as `i != j` is in scope (§5.3), and facts come with the
 // verifier in phase 5. Indices that are the same variable or literals need no fact.
-use std.pool { Pool, Handle }
-
-fn update(pool: inout Pool[Int], h: Handle[Int]) -> Bool {
-    return pool.update(handle: h, change: 1)        // <- E0901
-}
 
 interface Grow {
     fn grow(inout self)                             // <- E0901
