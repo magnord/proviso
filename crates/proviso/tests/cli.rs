@@ -618,3 +618,69 @@ fn alias_and_expect_messages_read_right() {
         assert!(errors.contains(&format!("{nameless}, and an alias names a type only\n")), "{errors}");
     }
 }
+
+/// Two types that share their parts within each but not with each other, as two doubling
+/// chains built apart do, are compared, joined and listed in time linear in their sources
+/// (issue #53).
+#[test]
+fn types_built_apart_join_in_linear_time() {
+    let mut text = String::from("fn f() {\n    let a0 = 1\n    let b0 = 2\n");
+    for i in 1..=40 {
+        text += &format!("    let a{i} = (a{0}, a{0})\n    let b{i} = (b{0}, b{0})\n", i - 1);
+    }
+    text += "    let c = a40 == b40\n    let d = if c { a40 } else { b40 }\n    let e = [a40, b40]\n}\n";
+    let file = source("built_apart.proviso", &text);
+    let output = check_within(&file, 20);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+/// A doubling alias in a signature keeps its shared parts through the checks of the
+/// signature and of each call, so its uses check in linear time (issue #55).
+#[test]
+fn a_doubling_alias_in_calls_checks_in_linear_time() {
+    let mut text = String::from("type A0 = Int\n");
+    for i in 1..=60 {
+        text += &format!("type A{i} = (A{0}, A{0})\n", i - 1);
+    }
+    text += "fn f(x: A60) -> A60 {\n    return x\n}\n\nfn g(y: A60) -> Bool {\n    let z = f(x: y)\n    let w = if true { z } else { y }\n    let v = [z, w, y]\n    return z == w\n}\n";
+    let file = source("doubling_calls.proviso", &text);
+    let output = check_within(&file, 20);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+/// A program gets a defect after 10,000 nested calls, so the 10,000th still runs its body
+/// (OPEN_QUESTIONS P5, Stack exhaustion; issue #25). `main` is the first.
+#[test]
+fn the_last_nested_call_allowed_runs() {
+    for (n, code) in [(9998, 0), (9999, 70)] {
+        let text = format!(
+            "use std.io {{ IoError }}\n\nfn rec(n: Int) -> Int {{\n    if n == 0 {{\n        return 0\n    }}\n    return rec(n: n - 1) + 1\n}}\n\npub fn main(sys: keep System) fails IoError {{\n    try sys.stdout.write_line(f\"{{rec(n: {n})}}\")\n}}\n"
+        );
+        let file = source("last_call.proviso", &text);
+        let output = run(&["run"], &file);
+        assert_eq!(output.status.code(), Some(code), "{n}: {}", stderr(&output));
+        if code == 0 {
+            assert_eq!(String::from_utf8_lossy(&output.stdout), format!("{n}\n"));
+        } else {
+            assert!(stderr(&output).contains("exhausted after 10000 nested calls"), "{}", stderr(&output));
+        }
+    }
+}
+
+/// Code nested past the limit is reported once, and recovering from it takes time linear in
+/// the depth (issue #27).
+#[test]
+fn recovery_from_deep_nesting_is_linear() {
+    let depth = 64_000;
+    let text = format!(
+        "fn f(n: Int) -> Int {{\n{}    debug(n)\n{}    return n\n}}\n",
+        "    if n > 0 {\n".repeat(depth),
+        "    }\n".repeat(depth)
+    );
+    let file = source("deep_recovery.proviso", &text);
+    let output = check_within(&file, 20);
+    let errors = stderr(&output);
+    assert_eq!(output.status.code(), Some(65), "{errors}");
+    assert_eq!(errors.matches("error[").count(), 1, "{errors}");
+    assert!(errors.contains("error[E0902]"), "{errors}");
+}

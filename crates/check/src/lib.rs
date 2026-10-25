@@ -8097,26 +8097,51 @@ impl Checker<'_> {
 /// `ty` with each map whose key type doesn't implement `Eq` and `Hash` an error, where type
 /// parameter `i` implements `bounds[i]`, and `unknown` may implement anything.
 fn without_bad_keys(decls: &Decls, ty: &Ty, bounds: &[Vec<IfaceId>], unknown: &[Ty]) -> Ty {
-    let Ty::Adt(id, args) = ty else { return ty.clone() };
+    without_bad_keys_in(decls, ty, bounds, unknown, &mut HashMap::new()).unwrap_or_else(|| ty.clone())
+}
+
+/// [`without_bad_keys`], or `None` where nothing changes, so the type keeps its shared parts.
+/// A type argument list in `seen`, by address, was looked at already, so a type that shares
+/// its parts, as a doubling alias does, costs each part once (issue #55).
+fn without_bad_keys_in(
+    decls: &Decls,
+    ty: &Ty,
+    bounds: &[Vec<IfaceId>],
+    unknown: &[Ty],
+    seen: &mut HashMap<(AdtId, usize), Option<Ty>>,
+) -> Option<Ty> {
+    let Ty::Adt(id, args) = ty else { return None };
     if args.is_empty() {
-        return ty.clone();
+        return None;
     }
-    let args: Vec<Ty> = args.iter().map(|arg| without_bad_keys(decls, arg, bounds, unknown)).collect();
-    if *id == AdtId::MAP {
+    let key = (*id, Arc::as_ptr(args) as *const Ty as usize);
+    if let Some(done) = seen.get(&key) {
+        return done.clone();
+    }
+    let parts: Vec<Option<Ty>> =
+        args.iter().map(|arg| without_bad_keys_in(decls, arg, bounds, unknown, seen)).collect();
+    let changed = parts.iter().any(Option::is_some) || args.contains(&Ty::Error);
+    let args: Vec<Ty> =
+        parts.into_iter().zip(args.iter()).map(|(part, arg)| part.unwrap_or_else(|| arg.clone())).collect();
+    let keyed = || {
         let key = &args[0];
-        let keyed = key.is_unknown()
+        key.is_unknown()
             || unknown.contains(key)
             || decls.unknown_interfaces(key)
             || (!decls.is_resource(key)
-                && [IfaceId::EQ, IfaceId::HASH].iter().all(|&iface| decls.implements(key, iface, bounds)));
-        if !keyed {
-            return Ty::Error;
-        }
-    }
-    Ty::applied(*id, args)
+                && [IfaceId::EQ, IfaceId::HASH].iter().all(|&iface| decls.implements(key, iface, bounds)))
+    };
+    let done = if *id == AdtId::MAP && !keyed() {
+        Some(Ty::Error)
+    } else if changed {
+        Some(Ty::applied(*id, args))
+    } else {
+        None
+    };
+    seen.insert(key, done.clone());
+    done
 }
 
-/// Whether `ty` mentions one of the type parameters `targs` stands for.
 /// The parameter each argument of a call whose labels are wrong is checked against: the one
 /// its label names, or its own or the first that no argument names when its label names
 /// none. An argument whose label names a parameter an earlier one has gets none.
@@ -8143,11 +8168,19 @@ fn label_order<S: AsRef<str>>(m: &Module, args: &[Arg], params: &[(S, Ty)]) -> V
     to
 }
 
+/// Whether `ty` mentions one of the type parameters `targs` stands for. Each shared part is
+/// walked once (issue #55).
 fn mentions_targ(ty: &Ty, targs: &[Ty]) -> bool {
-    match ty {
-        Ty::Param(i) => (*i as usize) < targs.len(),
-        ty => ty.parts().is_some_and(|parts| parts.iter().any(|part| mentions_targ(part, targs))),
+    fn walk(ty: &Ty, targs: &[Ty], seen: &mut HashSet<usize>) -> bool {
+        match ty {
+            Ty::Param(i) => (*i as usize) < targs.len(),
+            ty => ty.parts().is_some_and(|parts| {
+                seen.insert(Arc::as_ptr(parts) as *const Ty as usize)
+                    && parts.iter().any(|part| walk(part, targs, seen))
+            }),
+        }
     }
+    walk(ty, targs, &mut HashSet::new())
 }
 
 /// Whether `ty` holds a function value where one can't be: in a record, enum, tuple or

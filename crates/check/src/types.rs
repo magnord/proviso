@@ -1,5 +1,6 @@
 //! The types the checker assigns.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use proviso_syntax::ast::ParamMode;
@@ -178,10 +179,35 @@ impl Ty {
 
     /// The type with each parameter replaced by its argument in `args`.
     pub fn subst(&self, args: &[Ty]) -> Ty {
+        self.subst_in(args, &mut HashMap::new()).unwrap_or_else(|| self.clone())
+    }
+
+    /// [`Ty::subst`], or `None` where nothing changes, so the type keeps its shared parts. A
+    /// list of parts in `seen`, by address, was replaced already, so a type that shares its
+    /// parts, as a doubling alias does, costs each part once (issue #55). A list of parts
+    /// belongs to one type, so its address names that type.
+    fn subst_in(&self, args: &[Ty], seen: &mut HashMap<usize, Option<Ty>>) -> Option<Ty> {
         match self {
-            Ty::Param(i) => args[*i as usize].clone(),
-            ty if let Some(parts) = ty.parts() => ty.with_parts(parts.iter().map(|t| t.subst(args)).collect()),
-            ty => ty.clone(),
+            Ty::Param(i) => Some(args[*i as usize].clone()),
+            ty if let Some(parts) = ty.parts() => {
+                let key = Arc::as_ptr(parts) as *const Ty as usize;
+                if let Some(done) = seen.get(&key) {
+                    return done.clone();
+                }
+                let new: Vec<Option<Ty>> = parts.iter().map(|part| part.subst_in(args, seen)).collect();
+                // A part with an error makes the whole type one, as `with_parts` does.
+                let done = (new.iter().any(Option::is_some) || parts.contains(&Ty::Error)).then(|| {
+                    ty.with_parts(
+                        new.into_iter()
+                            .zip(parts.iter())
+                            .map(|(new, part)| new.unwrap_or_else(|| part.clone()))
+                            .collect(),
+                    )
+                });
+                seen.insert(key, done.clone());
+                done
+            }
+            _ => None,
         }
     }
 

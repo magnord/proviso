@@ -104,6 +104,33 @@ pub struct Vars {
 type Shapes = HashMap<usize, (Arc<[Ty]>, Shape), BuildHasherDefault<AddressHasher>>;
 type Depths = HashMap<usize, (Arc<[Ty]>, u32, bool), BuildHasherDefault<AddressHasher>>;
 
+/// The pairs of type argument lists that one [`Vars::subsume`] or [`Vars::join`] has walked,
+/// by address, with the join of each. It holds the lists, so no address is reused while it
+/// lives. Two types that share their parts within each but not with each other, as two
+/// doubling chains built apart do, then cost each pair of parts once (issue #53).
+#[derive(Default)]
+struct Pairs {
+    done: HashMap<(usize, usize), Option<Ty>>,
+    held: Vec<Arc<[Ty]>>,
+}
+
+impl Pairs {
+    fn key(a: &Arc<[Ty]>, b: &Arc<[Ty]>) -> (usize, usize) {
+        (Arc::as_ptr(a) as *const Ty as usize, Arc::as_ptr(b) as *const Ty as usize)
+    }
+
+    /// What `a` and `b` gave when they were walked, if they were: `Some(None)` for a
+    /// subsumption, which is recorded only once it holds.
+    fn get(&self, a: &Arc<[Ty]>, b: &Arc<[Ty]>) -> Option<&Option<Ty>> {
+        self.done.get(&Self::key(a, b))
+    }
+
+    fn insert(&mut self, a: &Arc<[Ty]>, b: &Arc<[Ty]>, joined: Option<Ty>) {
+        self.done.insert(Self::key(a, b), joined);
+        self.held.extend([a.clone(), b.clone()]);
+    }
+}
+
 /// Hashes an address with one multiply, which is all a key that is already unique needs.
 #[derive(Default)]
 struct AddressHasher(u64);
@@ -708,6 +735,11 @@ impl Vars {
     /// variables so that it may. `Never` is a subtype of every type, also as a type argument
     /// (REFERENCE §9.2), and an error fits everything, so it is reported once.
     pub fn subsume(&mut self, expected: &Ty, actual: &Ty) -> bool {
+        self.subsume_in(expected, actual, &mut Pairs::default())
+    }
+
+    /// [`Vars::subsume`], where `pairs` holds the pairs of parts that already fit.
+    fn subsume_in(&mut self, expected: &Ty, actual: &Ty, pairs: &mut Pairs) -> bool {
         let (expected, actual) = (self.resolve(expected), self.resolve(actual));
         match (&expected, &actual) {
             (_, Ty::Error) => {
@@ -725,17 +757,30 @@ impl Vars {
             (Ty::Adt(id, args), Ty::Adt(other, actual_args)) if id == other && args.len() == actual_args.len() => {
                 // Shared parts are the same type, so an expected type built from the
                 // argument's own isn't walked again, and `Some(Some(…))` stays linear.
-                Arc::ptr_eq(args, actual_args)
-                    || args.iter().zip(actual_args.iter()).all(|(arg, actual)| self.subsume(arg, actual))
+                if Arc::ptr_eq(args, actual_args) || pairs.get(args, actual_args).is_some() {
+                    return true;
+                }
+                let fits = args.iter().zip(actual_args.iter()).all(|(arg, actual)| self.subsume_in(arg, actual, pairs));
+                if fits {
+                    pairs.insert(args, actual_args, None);
+                }
+                fits
             }
             // A function value fits a function type whose parameters it accepts, with the
             // same modes, whose result it gives, and whose error it fails with, if any
             // (OPEN_QUESTIONS P5).
             (Ty::Fn(modes, parts), Ty::Fn(actual_modes, actual_parts)) if modes == actual_modes => {
-                Arc::ptr_eq(parts, actual_parts)
-                    || (self.subsume(&parts[0], &actual_parts[0])
-                        && self.subsume(&parts[1], &actual_parts[1])
-                        && parts[2..].iter().zip(&actual_parts[2..]).all(|(param, actual)| self.subsume(actual, param)))
+                if Arc::ptr_eq(parts, actual_parts) || pairs.get(parts, actual_parts).is_some() {
+                    return true;
+                }
+                let fits = self.subsume_in(&parts[0], &actual_parts[0], pairs)
+                    && self.subsume_in(&parts[1], &actual_parts[1], pairs)
+                    && (parts[2..].iter().zip(&actual_parts[2..]))
+                        .all(|(param, actual)| self.subsume_in(actual, param, pairs));
+                if fits {
+                    pairs.insert(parts, actual_parts, None);
+                }
+                fits
             }
             (expected, actual) => expected == actual,
         }
@@ -745,6 +790,11 @@ impl Vars {
     /// is one. `Never` gives way to the other side, also as a type argument, so
     /// `Option[Never]` and `Option[Int]` join to `Option[Int]`. `None` when there is none.
     pub fn join(&mut self, a: &Ty, b: &Ty) -> Option<Ty> {
+        self.join_in(a, b, &mut Pairs::default())
+    }
+
+    /// [`Vars::join`], where `pairs` holds the joins of the pairs of parts already joined.
+    fn join_in(&mut self, a: &Ty, b: &Ty, pairs: &mut Pairs) -> Option<Ty> {
         let (a, b) = (self.resolve(a), self.resolve(b));
         match (&a, &b) {
             (Ty::Error, other) | (other, Ty::Error) => {
@@ -761,9 +811,15 @@ impl Vars {
                 if Arc::ptr_eq(args, other_args) {
                     return Some(a.clone());
                 }
-                let joined =
-                    args.iter().zip(other_args.iter()).map(|(x, y)| self.join(x, y)).collect::<Option<Vec<_>>>()?;
-                Some(Ty::applied(*id, joined))
+                if let Some(Some(joined)) = pairs.get(args, other_args) {
+                    return Some(joined.clone());
+                }
+                let joined = (args.iter().zip(other_args.iter()))
+                    .map(|(x, y)| self.join_in(x, y, pairs))
+                    .collect::<Option<Vec<_>>>()?;
+                let joined = Ty::applied(*id, joined);
+                pairs.insert(args, other_args, Some(joined.clone()));
+                Some(joined)
             }
             // Two function values join when their parameters are the same types: their
             // results and errors join, as a branch's value would.
@@ -771,14 +827,22 @@ impl Vars {
                 if Arc::ptr_eq(parts, other_parts) {
                     return Some(a.clone());
                 }
+                if let Some(Some(joined)) = pairs.get(parts, other_parts) {
+                    return Some(joined.clone());
+                }
                 for (x, y) in parts[2..].iter().zip(&other_parts[2..]) {
                     if !(self.subsume(x, y) && self.subsume(y, x)) {
                         return None;
                     }
                 }
-                let mut joined = vec![self.join(&parts[0], &other_parts[0])?, self.join(&parts[1], &other_parts[1])?];
+                let mut joined = vec![
+                    self.join_in(&parts[0], &other_parts[0], pairs)?,
+                    self.join_in(&parts[1], &other_parts[1], pairs)?,
+                ];
                 joined.extend(parts[2..].iter().cloned());
-                Some(a.with_parts(joined))
+                let joined = a.with_parts(joined);
+                pairs.insert(parts, other_parts, Some(joined.clone()));
+                Some(joined)
             }
             (x, y) => (x == y).then(|| a.clone()),
         }

@@ -649,9 +649,11 @@ impl Interp<'_> {
         }
     }
 
-    /// Stops with a defect when the stack is nearly used up.
-    fn check_stack(&self, span: Span) -> Flow<()> {
-        if self.depth >= MAX_CALL_DEPTH || stack_address() < self.stack_limit {
+    /// Stops with a defect when the stack is nearly used up, or when a call would begin past
+    /// `MAX_CALL_DEPTH` nested calls. The last call allowed still runs its body (OPEN_QUESTIONS
+    /// P5; issue #25).
+    fn check_stack(&self, span: Span, call: bool) -> Flow<()> {
+        if (call && self.depth >= MAX_CALL_DEPTH) || stack_address() < self.stack_limit {
             let depth = self.depth;
             return Err(defect(
                 DefectKind::StackExhausted,
@@ -803,7 +805,7 @@ impl Interp<'_> {
         let outer_frame = std::mem::replace(&mut self.frame, self.frames);
         // A call that can't start owns its arguments already, so it abandons them and hands
         // its `inout` ones back as any other failure does.
-        let begun = self.check_stack(site).and_then(|()| self.step(site));
+        let begun = self.check_stack(site, true).and_then(|()| self.step(site));
         let started = begun.is_ok();
         let result = match begun {
             Ok(()) => {
@@ -1423,7 +1425,7 @@ impl Interp<'_> {
     fn expr(&mut self, e: ExprId, frame: &mut Frame) -> Flow<Value> {
         let m = self.m;
         let span = m.exprs[e].span;
-        self.check_stack(span)?;
+        self.check_stack(span, false)?;
         Ok(match &m.exprs[e].kind {
             ExprKind::Int(value) => Value::Int(*value as i128, self.int_ty(e)),
             ExprKind::Float(text) => match self.p.ty(e) {
