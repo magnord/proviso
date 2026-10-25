@@ -1,0 +1,6 @@
+defect[division_by_zero]: `/` by zero
+  at resources/leak_replaced.proviso:25:41 (leak_replaced.Probe.Abandon.abandon+5)
+  called from resources/leak_replaced.proviso:48:19 (leak_replaced.f+2)
+  called from resources/leak_replaced.proviso:56:21 (leak_replaced.main+3)
+leak[Probe]: this `Probe` leaked, since its `abandon` hit a defect
+  at resources/leak_replaced.proviso:48:19 (leak_replaced.f+2)

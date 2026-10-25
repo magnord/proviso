@@ -1628,11 +1628,17 @@ impl Interp<'_> {
                 // and 5; OPEN_QUESTIONS P5).
                 Some(slot) => {
                     let old = map.replace(slot, value);
+                    // Only a value held as a resource has anything to abandon, under the span
+                    // of the expression that gave it.
                     if let Some(i) = std::mem::replace(&mut held_at[slot], at) {
-                        self.owned[i].1 = Owned::Value(Value::Unit, place);
-                    }
-                    if let unwind @ Unwind::Defect(_) = self.abandon(old, place, Unwind::Return(Value::Unit)) {
-                        return Err(unwind);
+                        let Owned::Value(_, owner) =
+                            std::mem::replace(&mut self.owned[i].1, Owned::Value(Value::Unit, place))
+                        else {
+                            unreachable!("a literal holds its values")
+                        };
+                        if let unwind @ Unwind::Defect(_) = self.abandon(old, owner, Unwind::Return(Value::Unit)) {
+                            return Err(unwind);
+                        }
                     }
                 }
                 None => {
