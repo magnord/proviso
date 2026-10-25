@@ -532,21 +532,24 @@ fn long_alias_chains_check_once() {
         + &format!("type A0 = Int\n\nfn f(x: A{n}) -> Int {{\n    return x + 1\n}}\n");
     let cycle = chain(&|i| format!("C{i}"), &|i| format!("C{}", if i == n { 1 } else { i + 1 }));
     let deep = 10_000;
-    let nested = |rev: bool| {
+    // Signatures alone, which no expression's type reaches, or a body that returns one.
+    let nested = |rev: bool, body: &str| {
         let mut lines: Vec<String> = (1..=deep).map(|i| format!("type L{i} = List[L{}]\n", i - 1)).collect();
         if rev {
             lines.reverse();
         }
         lines.concat()
             + &format!(
-                "type L0 = Int\n\nrecord R {{\n    f: L{deep}\n}}\n\nfn g(x: L{deep}, y: L9000) -> L{deep} {{\n    return x\n}}\n\nfn h(x: L4000) -> L4000 {{\n    return x\n}}\n"
+                "type L0 = Int\n\nrecord R {{\n    f: L{deep}\n}}\n\nfn g(x: L{deep}, y: L9000) -> L{deep} {{\n{body}}}\n\nfn h(x: L4000) -> L4000 {{\n    return x\n}}\n"
             )
     };
     let cases = [
         ("alias_reversed", reversed, 0, None),
         ("alias_cycle", cycle, 65, Some(("E0322", 1))),
-        ("alias_nested", nested(false), 65, Some(("E0905", 1))),
-        ("alias_nested_reversed", nested(true), 65, Some(("E0905", 1))),
+        ("alias_nested", nested(false, "    return x\n"), 65, Some(("E0905", 1))),
+        ("alias_nested_reversed", nested(true, "    return x\n"), 65, Some(("E0905", 1))),
+        ("alias_nested_unused", nested(false, "    return R(f: x).f\n"), 65, Some(("E0905", 1))),
+        ("alias_signatures", nested(true, "    loop {\n    }\n"), 65, Some(("E0905", 1))),
     ];
     for (name, text, code, errors) in cases {
         let file = source(&format!("{name}.proviso"), &text);
@@ -556,6 +559,10 @@ fn long_alias_chains_check_once() {
         if let Some((error, count)) = errors {
             assert_eq!(shown.matches("error[").count(), count, "{name}: {}", &shown[..shown.len().min(2_000)]);
             assert!(shown.contains(&format!("error[{error}]")), "{name}: {}", &shown[..shown.len().min(2_000)]);
+            // A deep alias is reported where it is declared, not where it is used.
+            if error == "E0905" {
+                assert!(shown.contains("`L5000` names a type that nests"), "{name}: {shown}");
+            }
         }
     }
 }
