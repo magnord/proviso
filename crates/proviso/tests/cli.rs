@@ -649,14 +649,15 @@ fn types_built_apart_join_in_linear_time() {
 }
 
 /// A doubling alias in a signature keeps its shared parts through the checks of the
-/// signature and of each call, so its uses check in linear time (issue #55).
+/// signature and of each call, so its uses check in linear time (issue #55). So does one in
+/// a record's field and a variant's, whose kinds and values are settled for the module.
 #[test]
 fn a_doubling_alias_in_calls_checks_in_linear_time() {
     let mut text = String::from("type A0 = Int\n");
     for i in 1..=60 {
         text += &format!("type A{i} = (A{0}, A{0})\n", i - 1);
     }
-    text += "fn f(x: A60) -> A60 {\n    return x\n}\n\nfn g(y: A60) -> Bool {\n    let z = f(x: y)\n    let w = if true { z } else { y }\n    let v = [z, w, y]\n    return z == w\n}\n";
+    text += "fn f(x: A60) -> A60 {\n    return x\n}\n\nfn g(y: A60) -> Bool {\n    let z = f(x: y)\n    let w = if true { z } else { y }\n    let v = [z, w, y]\n    return z == w\n}\n\nrecord H {\n    f: A60\n}\n\nenum E {\n    V(x: A60)\n}\n";
     let file = source("doubling_calls.proviso", &text);
     let output = check_within(&file, 20);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
