@@ -769,7 +769,9 @@ impl Decls {
             // A rejected `impl` block may have given it this interface for any type arguments.
             Ty::Adt(id, _) if self.adt(*id).unknown_interfaces => true,
             // A handle holds no element, so its element type doesn't decide (STD.md).
-            Ty::Adt(AdtId::HANDLE, _) => matches!(iface, IfaceId::EQ | IfaceId::HASH),
+            Ty::Adt(AdtId::HANDLE, _) => {
+                matches!(iface, IfaceId::EQ | IfaceId::HASH) || self.by_impl(ty, iface, params, memo)
+            }
             // A map's keys implement `Eq` and `Hash` wherever its type is checked (REFERENCE
             // §4.2), so only its values decide, and a rejected key type isn't reported again.
             Ty::Adt(AdtId::MAP, args) if matches!(iface, IfaceId::EQ | IfaceId::HASH) => {

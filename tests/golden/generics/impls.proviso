@@ -3,7 +3,8 @@
 // Pair[A, A]` (REFERENCE §4.8, §4.9). Its methods apply to the values whose type matches
 // the target, so `swap` is a method of `Pair[Int, Int]` and not of `Pair[Int, Text]`, and
 // the block's constraints must hold for the matching type arguments. A target may also be a
-// type with given type arguments, as `Pair[Int, Text]` or `Option[Int]`, or a tuple type.
+// type with given type arguments, as `Pair[Int, Text]`, `Option[Int]` or `Handle[Int]`, or a
+// tuple type.
 // An interface implemented by a generic `impl` holds for the types its target matches, so
 // `Box[Int]` is `Describe` because `Int` is `Show`, and a generic function's parameter
 // meets a constraint through the block's own. `::[…]` on such a method gives only the
@@ -11,6 +12,7 @@
 // from its arguments and its expected type. Each value runs the implementation for its own
 // type (OPEN_QUESTIONS P5).
 use std.io { IoError }
+use std.pool { Pool, Handle }
 
 interface Describe {
     fn describe(self) -> Text
@@ -114,6 +116,18 @@ impl Describe for List[Int] {
     }
 }
 
+impl Describe for Handle[Int] {
+    fn describe(self) -> Text {
+        return "handle"
+    }
+}
+
+impl Describe for Map[Text, Int] {
+    fn describe(self) -> Text {
+        return f"{self.len()} entries"
+    }
+}
+
 impl[A: Show, B: Show] Describe for (A, B) {
     fn describe(self) -> Text {
         let (a, b) = self
@@ -166,4 +180,8 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(f"{(4, 5).total()} {total_of(x: (6, 7))}")
     let e: Tree[Text] = Tree.empty()
     try sys.stdout.write_line(f"{e.size()} {Box.wrap(item: 5).describe()} {Box.wrap(item: Some('c')).describe()}")
+    var pool: Pool[Int] = Pool.new()
+    let h = pool.insert(5)
+    let m: Map[Text, Int] = ["a": 1]
+    try sys.stdout.write_line(f"{h.describe()} {describe_all(x: h)} {m.describe()} {describe_all(x: m)}")
 }
