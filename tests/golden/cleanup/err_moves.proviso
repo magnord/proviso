@@ -8,10 +8,11 @@
 // to hold no resource loses none when it is discarded, whole or by a field, while a `var`
 // may get one later (issue #46). A call of a function gives a value of its result type
 // whatever its arguments are, so an error in an argument doesn't hide the resource it
-// gives, whether it is bound, discarded, matched or assigned over a place that holds one
-// (issue #46). An error at the callee or in a construction does. A method used as a value,
-// as in `p.close`, was meant to be called, so its receiver isn't reported as left over,
-// inside a closure or outside one, and nor is a field it is read from (issue #50).
+// gives, whether it is bound, discarded, matched, tested or assigned over a place that
+// holds one (issue #46). An error at the callee or in a construction does. A method used
+// as a value, as in `p.close`, was meant to be called, so its receiver isn't reported as
+// left over, inside a closure or outside one, and nor is a field it is read from (issue
+// #50).
 
 resource record Probe {
     name: Text
@@ -68,11 +69,13 @@ fn mistyped_discarded() {
     match open(name: 7) {                           // <- E0301
         _ => {}                                     // <- E0508
     }
+    if open(name: 8) is Probe(name: n) {            // <- E0508, E0301
+    }
 }
 
 fn mistyped_assigned() {
     var q = open(name: "a")
-    q = open(name: 8)                               // <- E0508, E0301
+    q = open(name: 9)                               // <- E0508, E0301
     q.close()
 }
 

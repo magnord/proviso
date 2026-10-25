@@ -6750,9 +6750,7 @@ impl Checker<'_> {
                 let message = format!(
                     "`{text}` is a method, which is called with its arguments; it isn't a function value, but a closure can wrap a call of it, as in `|| x.{text}()`"
                 );
-                // The move pass reads it as a rejected call, which may have consumed its
-                // receiver (issue #50).
-                self.error_of(e, codes::METHOD_VALUE, name.span, message);
+                self.error(codes::METHOD_VALUE, name.span, message);
                 Ty::Error
             }
             (ty, _) => {

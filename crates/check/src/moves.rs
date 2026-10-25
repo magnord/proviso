@@ -517,12 +517,11 @@ impl Walk<'_> {
 
     /// Whether what `e` gives is unknown, since the checker rejected it or reported an error
     /// inside it. A call of a function gives a value of its result type whatever its
-    /// arguments are, so only an error at the call or its callee makes that unknown (issue
-    /// #46).
+    /// arguments are, so only an error at the call makes that unknown (issue #46).
     fn gives_unknown(&self, e: ExprId) -> bool {
         match self.m.exprs[e].kind {
             ExprKind::Call { callee, .. } if matches!(self.p.res(callee), Some(Res::Fn(_))) => {
-                self.rejected.contains(&e) || self.tainted(callee)
+                self.rejected.contains(&e)
             }
             _ => self.tainted(e),
         }
