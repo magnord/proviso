@@ -6,3 +6,4 @@ true true false
 some int 7 no int some int 8
 2 ints 1 and one Pair(first: 1, second: 2) and 2.5
 9 13
+0 box of 5 box of Some('c')

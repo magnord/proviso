@@ -9,18 +9,21 @@
 // expect-error: E0313
 // expect-error: E0314
 // expect-error: E0315
+// expect-error: E0317
 // expect-error: E0901
 // A generic `impl`'s methods apply only to values whose type matches its target, and its
 // constraints must hold for the type arguments (REFERENCE §4.8, §4.9). Each of its type
-// parameters must appear in the target, which it can't name otherwise. A type implements
-// an interface with one `impl`, so two blocks for one interface and one generic type clash
+// parameters must appear in the target, which it can't name otherwise. A type implements an
+// interface with one `impl`, so two blocks for one interface and one generic type clash
 // even when no type matches both, and a type's methods have distinct names across all of
 // its blocks (OPEN_QUESTIONS §G, P5). An `impl` lives in the module of the interface or of
 // the type, and a type's module is that of its outermost type, so `impl Show for
 // Option[Point]` is an orphan, and a tuple belongs to no module. An `impl` for every type,
-// `impl[T] I for T`, isn't scheduled. A resource as a type argument of a generic `impl`'s
-// method waits for the answer that generic functions do (§G). Rejected blocks still give
-// their methods, so calls of them aren't reported again (§15.1).
+// `impl[T] I for T`, isn't scheduled. `::[…]` can't give a block's type parameters, which
+// an associated function takes from its arguments and its expected type. A resource as a
+// type argument of a generic `impl`'s method waits for the answer that generic functions do
+// (§G). Rejected blocks still give their methods, so calls of them aren't reported again
+// (§15.1).
 interface Describe {
     fn describe(self) -> Text
     fn same(self, other: Self) -> Bool
@@ -72,6 +75,10 @@ impl[A: Copy] Pair[A, A] {
 
     fn left(self) -> A {
         return self.first
+    }
+
+    fn same(x: A) -> Pair[A, A] {
+        return Pair(first: x, second: x)
     }
 }
 
@@ -170,6 +177,12 @@ impl[T, T] Pair[T, T] {                             // <- E0210
     }
 }
 
+impl[T] Box[T] {
+    fn empty() -> Box[List[T]] {
+        return Box(item: [])
+    }
+}
+
 interface Anything {
     fn whatever(self) -> Int
 }
@@ -200,6 +213,8 @@ fn calls() -> Int {
     let h = counted(x: p) + counted(x: Slot.Full(Token(id: 3))) + p.count()
     let i = counted(x: Pair(first: 1, second: "x")) // <- E0309
     let j = Pair(first: 'a', second: 'b').count()   // <- E0303
+    let k = Box.empty()                             // <- E0312
+    let l = Pair.same::[Int](x: 1)                  // <- E0317
     return a + h
 }
 

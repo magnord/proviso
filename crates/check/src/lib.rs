@@ -1131,20 +1131,26 @@ impl Checker<'_> {
                 Origin::Call { f, span, .. } => {
                     let info = &self.p.fns[f];
                     let name = self.m.text(info.name);
-                    let missing: Vec<String> = (unknown.iter())
+                    let params: Vec<usize> = (unknown.iter())
                         .filter_map(|o| match o {
-                            Origin::Call { param, span: s, .. } if *s == span => {
-                                Some(format!("`{}`", info.generics[*param].name))
-                            }
+                            Origin::Call { param, span: s, .. } if *s == span => Some(*param),
                             _ => None,
                         })
                         .collect();
+                    let missing: Vec<String> =
+                        params.iter().map(|&param| format!("`{}`", info.generics[param].name)).collect();
                     let noun = if missing.len() == 1 { "type argument" } else { "type arguments" };
+                    // `::[…]` gives only the function's own type parameters, not its `impl`'s.
+                    let fix = if params.iter().all(|&param| param < info.impl_params) {
+                        String::new()
+                    } else {
+                        format!(", or write `{name}::[…](…)`")
+                    };
                     reported.push(span);
                     (
                         span,
                         format!(
-                            "the {noun} {} of `{name}` can't be inferred; give the binding a type, or write `{name}::[…](…)`",
+                            "the {noun} {} of `{name}` can't be inferred; give the binding a type{fix}",
                             missing.join(", ")
                         ),
                     )
@@ -5338,6 +5344,9 @@ impl Checker<'_> {
                     _ => span,
                 };
                 let message = match (declared, tys.len() < fewest) {
+                    (0, _) if own > 0 => format!(
+                        "`{name}` takes no type arguments of its own, and its `impl`'s come from its receiver, its arguments or the type it is expected to have"
+                    ),
                     (0, _) => format!("`{name}` takes no type arguments"),
                     (n, short) => {
                         let verb = if tys.len() == 1 { "was" } else { "were" };

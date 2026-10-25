@@ -7,8 +7,9 @@
 // An interface implemented by a generic `impl` holds for the types its target matches, so
 // `Box[Int]` is `Describe` because `Int` is `Show`, and a generic function's parameter
 // meets a constraint through the block's own. `::[…]` on such a method gives only the
-// method's own type parameters, and each value runs the implementation for its own type
-// (OPEN_QUESTIONS P5).
+// method's own type parameters, and an associated function of the block takes the block's
+// from its arguments and its expected type. Each value runs the implementation for its own
+// type (OPEN_QUESTIONS P5).
 use std.io { IoError }
 
 interface Describe {
@@ -50,11 +51,21 @@ impl Pair[Int, Text] {
 }
 
 impl[T] Tree[T] {
+    fn empty() -> Tree[T] {
+        return Tree.Leaf
+    }
+
     fn size(self) -> Int {
         return match self {
             Leaf => 0
             Node(left, value: _, right) => left.size() + 1 + right.size()
         }
+    }
+}
+
+impl[T] Box[T] {
+    fn wrap(item: take T) -> Box[T] {
+        return Box(item: item)
     }
 }
 
@@ -152,4 +163,6 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(f"{Some(7).describe()} {describe_all(x: none)} {Describe.describe(Some(8))}")
     try sys.stdout.write_line(f"{[1, 2].describe()} {(1, "one").describe()} {describe_all(x: (p, 2.5))}")
     try sys.stdout.write_line(f"{(4, 5).total()} {total_of(x: (6, 7))}")
+    let e: Tree[Text] = Tree.empty()
+    try sys.stdout.write_line(f"{e.size()} {Box.wrap(item: 5).describe()} {Box.wrap(item: Some('c')).describe()}")
 }
