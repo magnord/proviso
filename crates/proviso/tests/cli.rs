@@ -587,7 +587,7 @@ fn a_doubling_pub_alias_checks_in_linear_time() {
 fn alias_and_expect_messages_read_right() {
     let file = source(
         "alias_messages.proviso",
-        "record Pair[A, B] {\n    first: A\n    second: B\n}\n\ntype P = Pair[Int, Text]\ntype Opt = Option[Int]\ntype Two = (Int, Int)\n\nfn f(t: Two) {\n    let p = P(first: 1, second: \"x\")\n    let o = Opt.Some(1)\n    let w = Two(1, 2)\n}\n\nrecord Box {\n    n: Int\n}\n\nimpl Box {\n    fn give(self) -> Box fails Text {\n        fail \"x\"\n    }\n\n    fn count(self) -> Int fails Int {\n        fail 1\n    }\n}\n\nexample Box(n: 1).give().count() fails _\n\ntest \"t\" {\n    expect Box(n: 1).give().count() fails _\n}\n",
+        "record Pair[A, B] {\n    first: A\n    second: B\n}\n\ntype P = Pair[Int, Text]\ntype Opt = Option[Int]\ntype Two = (Int, Int)\ntype Nothing = Unit\n\nfn f(t: Two) {\n    let u = Nothing()\n    let p = P(first: 1, second: \"x\")\n    let o = Opt.Some(1)\n    let w = Two(1, 2)\n}\n\nrecord Box {\n    n: Int\n}\n\nimpl Box {\n    fn give(self) -> Box fails Text {\n        fail \"x\"\n    }\n\n    fn count(self) -> Int fails Int {\n        fail 1\n    }\n}\n\nexample Box(n: 1).give().count() fails _\n\ntest \"t\" {\n    expect Box(n: 1).give().count() fails _\n}\n",
     );
     let errors = stderr(&run(&["check"], &file));
     for expected in [
@@ -599,8 +599,7 @@ fn alias_and_expect_messages_read_right() {
     ] {
         assert!(errors.contains(expected), "missing {expected:?} in:\n{errors}");
     }
-    assert!(
-        !errors.contains("`Two` is an alias of the type `(Int, Int)`, and an alias names a type only; write"),
-        "{errors}"
-    );
+    for nameless in ["`Two` is an alias of the type `(Int, Int)`", "`Nothing` is an alias of the type `Unit`"] {
+        assert!(errors.contains(&format!("{nameless}, and an alias names a type only\n")), "{errors}");
+    }
 }

@@ -1658,6 +1658,12 @@ impl Checker<'_> {
         self.aliases.insert(sym, Alias::Resolving(target, name));
         let mut stack = vec![(sym, self.aliases_in(target), 0)];
         while let Some((top, names, next)) = stack.last_mut() {
+            // An alias of a cycle already reported is done, and what else it names is
+            // resolved when an alias of its own needs it.
+            if let Some(Alias::Done(_)) = self.aliases.get(top) {
+                stack.pop();
+                continue;
+            }
             if let Some(&named) = names.get(*next) {
                 *next += 1;
                 match self.aliases.get(&named) {
@@ -1768,10 +1774,11 @@ impl Checker<'_> {
         // An expression writes a generic type by its name alone, and a tuple or function type
         // by none (REFERENCE §4.8).
         let write = match &ty {
-            Ty::Fn(..) => None,
             _ if self.p.decls.is_tuple(&ty) => None,
             Ty::Adt(id, args) if !args.is_empty() => Some(self.p.decls.adt(*id).name.to_string()),
-            _ => Some(shown.clone()),
+            // A number has its own functions and conversions, as `Int.parse(…)` and `Int64(x)`.
+            Ty::Adt(..) | Ty::Int(_) | Ty::Float(_) => Some(shown.clone()),
+            _ => None,
         };
         let mut message = format!("`{text}` is an alias of the type `{shown}`, and an alias names a type only");
         if let Some(write) = write {
@@ -2218,6 +2225,12 @@ impl Checker<'_> {
             .into_iter()
             .filter(|&(id, iface, _)| {
                 let wrapped = &self.p.decls.adt(id).variant().fields[0].ty;
+                // A distinct type whose own derives are rejected may have meant this one.
+                if let Ty::Adt(of, _) = wrapped
+                    && self.p.decls.adt(*of).unknown_interfaces
+                {
+                    return false;
+                }
                 let has = match op_iface(iface) {
                     Some(Some(op)) => self.has_arithmetic(op, wrapped),
                     _ => match wrapped {

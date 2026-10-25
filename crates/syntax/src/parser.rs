@@ -1639,7 +1639,17 @@ impl Parser<'_> {
                         ExprKind::Else { value: compared, .. } => compared,
                         _ => value,
                     };
+                    // A comparison in parentheses is a plain condition. Its span takes in the
+                    // parentheses, so it is wider than its operands.
+                    let bare = match self.m.exprs[compared].kind {
+                        ExprKind::Binary { lhs, rhs, .. } => {
+                            let span = self.span_of(compared);
+                            span.lo == self.span_of(lhs).lo && span.hi == self.span_of(rhs).hi
+                        }
+                        _ => false,
+                    };
                     match self.m.exprs[compared].kind {
+                        _ if !bare => StmtKind::Expect { value, expect: None },
                         ExprKind::Binary { op: BinOp::Eq, lhs, rhs } if compared == value => {
                             StmtKind::Expect { value: lhs, expect: Some(Expectation::Equals(rhs)) }
                         }
