@@ -89,7 +89,7 @@ fn jumps() {
 
 fn operators(f: fn(Int) -> Int, g: fn(Int) -> Int) -> Bool {
     let t = f"{f}"                                  // <- E0306
-    let n = f + 1                                   // <- E0306
+    let n = f + g                                   // <- E0306
     return f == g                                   // <- E0306
 }
 

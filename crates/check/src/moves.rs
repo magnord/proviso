@@ -1400,6 +1400,8 @@ impl Walk<'_> {
             | ExprKind::Name(_)
             | ExprKind::It
             | ExprKind::Todo(_)
+            | ExprKind::Applied { .. }
+            | ExprKind::Closure(_)
             | ExprKind::Unreachable => {}
             // Code that failed to parse may have consumed what the scopes own, so none of it
             // is reported as left over or assigned over (§15.1).

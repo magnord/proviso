@@ -825,6 +825,11 @@ impl Parser<'_> {
             self.diags.not_implemented(span, "implementations for tuple types", Planned::Phase(2));
             return Err(());
         }
+        if let TypeExprKind::Fn { .. } = self.m.types[target].kind {
+            let span = self.m.types[target].span;
+            self.diags.not_implemented(span, "implementations for function types", Planned::Unscheduled);
+            return Err(());
+        }
         if let TypeExprKind::Applied { args: Some(_), .. } = self.m.types[target].kind {
             let span = self.m.types[target].span;
             self.diags.not_implemented(
@@ -1133,7 +1138,18 @@ impl Parser<'_> {
         }
         let name = self.ident("a parameter name")?;
         self.expect(T::Colon, "`:` and the parameter's type")?;
-        let mode = match self.kind() {
+        let mode = self.mode();
+        if mode == ParamMode::Keep && self.at_kw(Kw::Fn) {
+            return self.not_implemented("`keep` function parameters", Planned::Phase(3));
+        }
+        let ty = self.type_expr()?;
+        let span = name.span.to(self.prev_span());
+        Ok(Param { name, mode, ty, span })
+    }
+
+    /// A parameter's mode, before its type, which is a borrow when none is written.
+    fn mode(&mut self) -> ParamMode {
+        match self.kind() {
             T::Keyword(Kw::Inout) => {
                 self.bump();
                 let partial = self.at(T::LParen)
@@ -1158,10 +1174,42 @@ impl Parser<'_> {
                 ParamMode::Keep
             }
             _ => ParamMode::Borrow,
-        };
-        let ty = self.type_expr()?;
-        let span = name.span.to(self.prev_span());
-        Ok(Param { name, mode, ty, span })
+        }
+    }
+
+    /// `fn(A, inout B) -> R fails E` (REFERENCE §9.4). `-> R` may be left out for `Unit`.
+    fn fn_type(&mut self) -> PResult<TypeExprKind> {
+        self.bump();
+        let open = self.expect(T::LParen, "`(` and the function type's parameters")?;
+        let mut params = Vec::new();
+        while !self.at(T::RParen) {
+            let start = self.peek().span;
+            let mode = self.mode();
+            match mode {
+                ParamMode::Keep => {
+                    let span = start.to(self.prev_span());
+                    self.diags.not_implemented(span, "`keep` parameters of function types", Planned::Phase(3));
+                    return Err(());
+                }
+                ParamMode::InoutPartial => {
+                    let span = start.to(self.prev_span());
+                    self.diags.not_implemented(span, "`inout(partial)` parameters of function types", Planned::Unscheduled);
+                    return Err(());
+                }
+                _ => {}
+            }
+            params.push((mode, self.nested(Self::type_expr)?));
+            if !self.eat(T::Comma) {
+                break;
+            }
+        }
+        self.close(&open, T::RParen, "`,` or `)`")?;
+        let ret = if self.eat(T::Arrow) { Some(self.type_expr()?) } else { None };
+        let fails = if self.eat(T::Keyword(Kw::Fails)) { Some(self.type_expr()?) } else { None };
+        if matches!(self.kind(), T::Keyword(Kw::Uses | Kw::With)) {
+            return self.not_implemented("`uses` and `with` on function types", Planned::Phase(3));
+        }
+        Ok(TypeExprKind::Fn { params, ret, fails })
     }
 
     fn type_expr(&mut self) -> PResult<TypeId> {
@@ -1183,7 +1231,7 @@ impl Parser<'_> {
                     TypeExprKind::Named(name)
                 }
             }
-            T::Keyword(Kw::Fn) => return self.not_implemented("function types", Planned::Phase(2)),
+            T::Keyword(Kw::Fn) => self.fn_type()?,
             T::Keyword(Kw::Scoped) => return self.not_implemented("`scoped` function types", Planned::Phase(3)),
             T::Keyword(Kw::Any) => return self.not_implemented("`any` types", Planned::PastV1),
             T::Keyword(Kw::SelfType) => {
@@ -1804,16 +1852,27 @@ impl Parser<'_> {
                 }
                 T::ColonColon => {
                     self.deeper()?;
-                    let targs = Some(self.explicit_type_args()?);
+                    let targs = self.explicit_type_args()?;
+                    let span = self.span_of(e).to(self.prev_span());
+                    if !self.at(T::LParen) {
+                        e = self.alloc(ExprKind::Applied { callee: e, targs }, span);
+                        continue;
+                    }
                     let args = self.args()?;
                     let span = self.span_of(e).to(self.prev_span());
-                    e = self.alloc(ExprKind::Call { callee: e, targs, args }, span);
+                    e = self.alloc(ExprKind::Call { callee: e, targs: Some(targs), args }, span);
                 }
                 T::Dot => {
                     self.bump();
                     let name = self.member_name("a field or method name")?;
                     let targs = if self.at(T::ColonColon) { Some(self.explicit_type_args()?) } else { None };
-                    if self.at(T::LParen) || targs.is_some() {
+                    if let Some(targs) = targs.clone().filter(|_| !self.at(T::LParen)) {
+                        // A method isn't a value, which the checker reports.
+                        let span = self.span_of(e).to(name.span);
+                        let field = self.alloc(ExprKind::Field { base: e, name }, span);
+                        let span = self.span_of(e).to(self.prev_span());
+                        e = self.alloc(ExprKind::Applied { callee: field, targs }, span);
+                    } else if self.at(T::LParen) || targs.is_some() {
                         let args = self.args()?;
                         let span = self.span_of(e).to(self.prev_span());
                         e = self.alloc(ExprKind::MethodCall { receiver: e, method: name, targs, args }, span);
@@ -1841,20 +1900,13 @@ impl Parser<'_> {
     }
 
     /// `::[Int, Text]` before a call's arguments (REFERENCE §4.8). Without a call, as in
-    /// `let f = max::[Int]`, it names a function as a value, which comes later.
+    /// `let f = max::[Int]`, it names a function as a value.
     fn explicit_type_args(&mut self) -> PResult<Vec<TypeId>> {
-        let start = self.peek().span;
         self.bump();
         if !self.at(T::LBracket) {
             return self.unexpected("`[` and type arguments after `::`");
         }
-        let targs = self.type_args()?;
-        if !self.at(T::LParen) {
-            let span = start.to(self.prev_span());
-            self.diags.not_implemented(span, "functions used as values", Planned::Phase(2));
-            return Err(());
-        }
-        Ok(targs)
+        self.type_args()
     }
 
     fn args(&mut self) -> PResult<Vec<Arg>> {
@@ -1951,7 +2003,7 @@ impl Parser<'_> {
                 ExprKind::Debug(values)
             }
             T::LBracket => return self.collection(),
-            T::Pipe => return self.not_implemented("closures", Planned::Phase(2)),
+            T::Pipe => return self.closure(),
             T::Keyword(Kw::Match) => return self.match_expr(),
             T::Keyword(Kw::Scope) => return self.not_implemented("`scope` blocks", Planned::Phase(6)),
             // As the operand of `try` or `attempt`, which covers only its own chain.
@@ -1978,6 +2030,48 @@ impl Parser<'_> {
         };
         let span = start.to(self.prev_span());
         Ok(self.alloc(kind, span))
+    }
+
+    /// `|x| expr`, `|a: Int, b: Int| -> Int { … }` or `|| expr` (REFERENCE §6.7). An
+    /// unbraced body extends as far as an expression can (Q33), and a closure that declares
+    /// its result has a braced one. `||` is two `|` tokens.
+    fn closure(&mut self) -> PResult<ExprId> {
+        let start = self.bump().span;
+        let mut params = Vec::new();
+        while !self.at(T::Pipe) {
+            let name = self.ident("a parameter name")?;
+            let ty = if self.eat(T::Colon) {
+                if matches!(self.kind(), T::Keyword(Kw::Inout | Kw::Take | Kw::Keep)) {
+                    let span = self.peek().span;
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        span,
+                        "a closure's parameter takes its mode from the function type it is passed as",
+                    );
+                    return Err(());
+                }
+                Some(self.nested(Self::type_expr)?)
+            } else {
+                None
+            };
+            params.push(ClosureParam { name, ty });
+            if !self.eat(T::Comma) {
+                break;
+            }
+        }
+        self.expect(T::Pipe, "`,` or `|` after the closure's parameters")?;
+        let ret = if self.eat(T::Arrow) { Some(self.type_expr()?) } else { None };
+        let braced = self.at(T::LBrace) || ret.is_some();
+        let body = if braced {
+            self.block()?
+        } else {
+            let value = self.nested(Self::expr)?;
+            let span = self.span_of(value);
+            let stmt = self.m.stmts.alloc(Stmt { kind: StmtKind::Expr(value), span });
+            Block { stmts: vec![stmt], span, unclosed: false, lost: false }
+        };
+        let span = start.to(self.prev_span());
+        Ok(self.alloc(ExprKind::Closure(Closure { params, ret, body, braced }), span))
     }
 
     /// `[a, b]`, `["k": v]`, `[]` or `[:]` (REFERENCE §2). The first element says which: a

@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
+use proviso_syntax::intern::Symbol;
 use proviso_syntax::source::Span;
 
 use crate::FnId;
@@ -34,6 +35,8 @@ pub enum Origin {
     Variant { adt: AdtId, span: Span },
     /// Type parameter `param` of function `f`, called at `span`.
     Call { f: FnId, param: usize, span: Span },
+    /// Parameter `name` of a closure, declared at `span` without a type.
+    Closure { name: Symbol, span: Span },
     /// A literal, or a `Never` the expected type gave, which have defaults.
     Defaulted,
 }
@@ -164,7 +167,7 @@ impl Vars {
         match ty {
             Ty::Var(_) => Shape { var: true, never: false },
             Ty::Never => Shape { var: false, never: true },
-            Ty::Adt(_, args) if !args.is_empty() => {
+            _ if let Some(args) = ty.parts() => {
                 let key = Arc::as_ptr(args) as *const Ty as usize;
                 if let Some((_, shape)) = self.shapes.borrow().get(&key) {
                     return *shape;
@@ -273,7 +276,9 @@ impl Vars {
                     Some(ty)
                 }
             },
-            Ty::Adt(id, args) if self.has_var(ty) => {
+            _ if self.has_var(ty)
+                && let Some(args) = ty.parts() =>
+            {
                 let key = Arc::as_ptr(args) as *const Ty as usize;
                 if let Some(done) = seen.get(&key) {
                     return done.clone();
@@ -284,7 +289,7 @@ impl Vars {
                 } else {
                     let args =
                         parts.into_iter().zip(args.iter()).map(|(part, arg)| part.unwrap_or_else(|| arg.clone()));
-                    Some(Ty::applied(*id, args.collect()))
+                    Some(ty.with_parts(args.collect()))
                 };
                 seen.insert(key, done.clone());
                 done
@@ -308,15 +313,16 @@ impl Vars {
                 Some(Kind::Float) => Ty::Float(FloatTy::F64),
                 _ => Ty::Never,
             },
-            ty @ Ty::Adt(..) if !self.has_var(&ty) => ty,
-            Ty::Adt(id, args) => {
-                let key = Arc::as_ptr(&args) as *const Ty as usize;
+            ty if !self.has_var(&ty) => ty,
+            ty if ty.parts().is_some() => {
+                let args = ty.parts().expect("checked above");
+                let key = Arc::as_ptr(args) as *const Ty as usize;
                 if let Some(ty) = seen.get(&key) {
                     return ty.clone();
                 }
-                let ty = Ty::applied(id, args.iter().map(|arg| self.as_never_part(arg, seen)).collect());
-                seen.insert(key, ty.clone());
-                ty
+                let done = ty.with_parts(args.iter().map(|arg| self.as_never_part(arg, seen)).collect());
+                seen.insert(key, done.clone());
+                done
             }
             ty => ty,
         }
@@ -331,8 +337,9 @@ impl Vars {
                 Some(Kind::Float) => Ty::Float(FloatTy::F64),
                 _ => Ty::Var(self.root(v)),
             },
-            Ty::Adt(id, args) if self.has_var(ty) => {
-                Ty::applied(id, args.iter().map(|arg| self.defaulted(arg)).collect())
+            ty if self.has_var(&ty) && ty.parts().is_some() => {
+                let args = ty.parts().expect("checked above");
+                ty.with_parts(args.iter().map(|arg| self.defaulted(arg)).collect())
             }
             ty => ty,
         }
@@ -368,7 +375,7 @@ impl Vars {
                     open
                 }
             },
-            Ty::Adt(_, args) => {
+            _ if let Some(args) = ty.parts() => {
                 let key = Arc::as_ptr(args) as *const Ty as usize;
                 if let Some(&open) = seen.get(&key) {
                     return open;
@@ -489,7 +496,9 @@ impl Vars {
                     }
                 }
             },
-            Ty::Adt(_, args) if seen.1.insert(Arc::as_ptr(args) as *const Ty as usize) => {
+            _ if let Some(args) = ty.parts()
+                && seen.1.insert(Arc::as_ptr(args) as *const Ty as usize) =>
+            {
                 args.iter().for_each(|arg| self.each_open(arg, found, seen));
             }
             _ => {}
@@ -543,7 +552,7 @@ impl Vars {
                 State::Open(_) => *w == v,
                 State::Bound(next) => self.ground_of(*w).is_none() && self.occurs(v, next),
             },
-            Ty::Adt(_, args) => args.iter().any(|arg| self.occurs(v, arg)),
+            _ if let Some(args) = ty.parts() => args.iter().any(|arg| self.occurs(v, arg)),
             _ => false,
         }
     }
@@ -658,6 +667,15 @@ impl Vars {
                 Arc::ptr_eq(args, actual_args)
                     || args.iter().zip(actual_args.iter()).all(|(arg, actual)| self.subsume(arg, actual))
             }
+            // A function value fits a function type whose parameters it accepts, with the
+            // same modes, whose result it gives, and whose error it fails with, if any
+            // (OPEN_QUESTIONS P5).
+            (Ty::Fn(modes, parts), Ty::Fn(actual_modes, actual_parts)) if modes == actual_modes => {
+                Arc::ptr_eq(parts, actual_parts)
+                    || (self.subsume(&parts[0], &actual_parts[0])
+                        && self.subsume(&parts[1], &actual_parts[1])
+                        && parts[2..].iter().zip(&actual_parts[2..]).all(|(param, actual)| self.subsume(actual, param)))
+            }
             (expected, actual) => expected == actual,
         }
     }
@@ -685,6 +703,21 @@ impl Vars {
                 let joined =
                     args.iter().zip(other_args.iter()).map(|(x, y)| self.join(x, y)).collect::<Option<Vec<_>>>()?;
                 Some(Ty::applied(*id, joined))
+            }
+            // Two function values join when their parameters are the same types: their
+            // results and errors join, as a branch's value would.
+            (Ty::Fn(modes, parts), Ty::Fn(other_modes, other_parts)) if modes == other_modes => {
+                if Arc::ptr_eq(parts, other_parts) {
+                    return Some(a.clone());
+                }
+                for (x, y) in parts[2..].iter().zip(&other_parts[2..]) {
+                    if !(self.subsume(x, y) && self.subsume(y, x)) {
+                        return None;
+                    }
+                }
+                let mut joined = vec![self.join(&parts[0], &other_parts[0])?, self.join(&parts[1], &other_parts[1])?];
+                joined.extend(parts[2..].iter().cloned());
+                Some(a.with_parts(joined))
             }
             (x, y) => (x == y).then(|| a.clone()),
         }

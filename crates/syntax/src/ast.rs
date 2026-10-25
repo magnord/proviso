@@ -176,7 +176,7 @@ pub struct Param {
     pub span: Span,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ParamMode {
     Borrow,
     Inout,
@@ -246,6 +246,12 @@ pub enum TypeExprKind {
     SelfType,
     /// `(A, B)`, with at least two elements.
     Tuple(Vec<TypeId>),
+    /// `fn(A, inout B) -> R fails E` (REFERENCE §9.4). Without `-> R`, the result is `Unit`.
+    Fn {
+        params: Vec<(ParamMode, TypeId)>,
+        ret: Option<TypeId>,
+        fails: Option<TypeId>,
+    },
 }
 
 pub struct Block {
@@ -418,8 +424,30 @@ pub enum ExprKind {
     },
     /// `it`, the error in the fallback of an `else` form (Q33).
     It,
+    /// `f::[Int]` without a call, which names a generic function as a value (REFERENCE §4.8).
+    Applied {
+        callee: ExprId,
+        targs: Vec<TypeId>,
+    },
+    /// `|x| expr`, `|a: Int| -> Int { … }` or `|| expr` (REFERENCE §6.7).
+    Closure(Closure),
     /// Stands in for code that failed to parse, which is already reported.
     Error,
+}
+
+/// A closure's parameters, its declared result, and its body. An unbraced body is a block
+/// of one expression statement, whose value is the closure's.
+pub struct Closure {
+    pub params: Vec<ClosureParam>,
+    pub ret: Option<TypeId>,
+    pub body: Block,
+    pub braced: bool,
+}
+
+/// A closure's parameter, whose type may come from the function type it is passed as.
+pub struct ClosureParam {
+    pub name: Ident,
+    pub ty: Option<TypeId>,
 }
 
 /// What an `else` form or a `check` falls back to: a value, or a block.

@@ -1227,6 +1227,7 @@ impl Interp<'_> {
             ExprKind::Char(c) => Value::Char(*c),
             ExprKind::Text(text) => Value::Text(Arc::from(text.as_str())),
             ExprKind::Unit => Value::Unit,
+            ExprKind::Applied { .. } | ExprKind::Closure(_) => todo!("function values"),
             ExprKind::FText(parts) => {
                 let mut out = String::new();
                 for part in parts {

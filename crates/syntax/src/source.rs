@@ -17,6 +17,11 @@ impl Span {
         Span { lo: self.lo.min(other.lo), hi: self.hi.max(other.hi) }
     }
 
+    /// Whether `other` lies within this span.
+    pub fn contains(self, other: Span) -> bool {
+        self.lo <= other.lo && other.hi <= self.hi
+    }
+
     /// The last byte of the span, such as a block's closing brace.
     pub fn end(self) -> Span {
         Span { lo: self.hi.saturating_sub(1).max(self.lo), hi: self.hi }

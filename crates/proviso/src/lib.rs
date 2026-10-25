@@ -158,8 +158,9 @@ impl Compiled {
             let ty = match &m.types[decl.target].kind {
                 TypeExprKind::Named(name) | TypeExprKind::Applied { name, .. } => m.text(name.sym),
                 TypeExprKind::SelfType => "Self",
-                // The parser rejects implementations for tuples.
+                // The parser rejects implementations for tuples and function types.
                 TypeExprKind::Tuple(_) => "(…)",
+                TypeExprKind::Fn { .. } => "fn",
             };
             let owner = match &decl.iface {
                 Some(iface) => format!("{}.{ty}.{}", m.name, m.text(iface.sym)),

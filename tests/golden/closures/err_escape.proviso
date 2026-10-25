@@ -48,7 +48,7 @@ fn inferred(f: fn(Int) -> Int) {
     let t = (f, 1)                                  // <- E0509
     let g = generic(x: f)                           // <- E0509
     let m = ["k": f]                                // <- E0509
-    let p = Pool.new::[fn()]()                      // <- E0509
+    let p: Pool[fn()] = Pool.new()                  // <- E0509
     let k = || f                                    // <- E0509
     var h = f
     h = f                                           // <- E0509

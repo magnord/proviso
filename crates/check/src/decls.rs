@@ -675,7 +675,8 @@ impl Decls {
             Ty::Bool => matches!(iface, IfaceId::EQ | IfaceId::SHOW | IfaceId::HASH) || by_impl(),
             Ty::Unit => matches!(iface, IfaceId::EQ | IfaceId::HASH) || by_impl(),
             Ty::IoError => iface == IfaceId::SHOW || by_impl(),
-            Ty::Cap(_) | Ty::Never | Ty::Error | Ty::Var(_) => false,
+            // A function value implements nothing, so it isn't compared or shown (OPEN_QUESTIONS P5).
+            Ty::Cap(_) | Ty::Fn(..) | Ty::Never | Ty::Error | Ty::Var(_) => false,
         }
     }
 
@@ -750,6 +751,27 @@ impl Decls {
                 let known = args.iter().any(|arg| self.is_resource(arg));
                 cache().insert(key, (args.clone(), known));
                 known
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a value of `ty` has reach (REFERENCE §9.4): it is a capability, or holds one,
+    /// as `System` and a record with an `Out` field do. A handle refers to its pool's element
+    /// without holding it.
+    pub fn has_reach(&self, ty: &Ty) -> bool {
+        self.reach_in(ty, &mut HashSet::new())
+    }
+
+    fn reach_in(&self, ty: &Ty, seen: &mut HashSet<(AdtId, usize)>) -> bool {
+        match ty {
+            Ty::Cap(_) => true,
+            Ty::Adt(AdtId::HANDLE, _) => false,
+            Ty::Adt(id, args) => {
+                seen.insert((*id, Arc::as_ptr(args) as *const Ty as usize))
+                    && (args.iter().any(|arg| self.reach_in(arg, seen))
+                        || (self.adt(*id).variants.iter())
+                            .any(|v| v.fields.iter().any(|f| self.reach_in(&f.ty, seen))))
             }
             _ => false,
         }
@@ -886,6 +908,28 @@ impl Decls {
                 }
                 return f.write_str("]");
             }
+            if let Some((modes, ret, fails, params)) = ty.fn_parts() {
+                f.write_str("fn(")?;
+                for (i, (mode, param)) in modes.iter().zip(params).enumerate() {
+                    let sep = if i == 0 { "" } else { ", " };
+                    let mode = match mode {
+                        ParamMode::Inout => "inout ",
+                        ParamMode::InoutPartial => "inout(partial) ",
+                        ParamMode::Take => "take ",
+                        ParamMode::Keep => "keep ",
+                        ParamMode::Borrow => "",
+                    };
+                    write!(f, "{sep}{mode}{}", self.display_in(param, names))?;
+                }
+                f.write_str(")")?;
+                if *ret != Ty::Unit {
+                    write!(f, " -> {}", self.display_in(ret, names))?;
+                }
+                if *fails != Ty::Never {
+                    write!(f, " fails {}", self.display_in(fails, names))?;
+                }
+                return Ok(());
+            }
             if let Ty::Param(i) = ty
                 && let Some(name) = names.get(*i as usize)
             {
@@ -906,6 +950,7 @@ impl Decls {
                 Ty::Cap(cap) => &self.iface(cap.iface).name,
                 Ty::Param(_) | Ty::Var(_) => "_",
                 Ty::Error => "{unknown}",
+                Ty::Fn(..) => unreachable!("written above"),
             })
         })
     }
