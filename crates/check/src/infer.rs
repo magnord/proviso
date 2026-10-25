@@ -86,6 +86,10 @@ pub struct Vars {
     /// address isn't reused. A statement then walks only the parts of its types that are new,
     /// not the whole of a deep type it got from a local.
     shapes: RefCell<Shapes>,
+    /// How deeply each type argument list without a variable nests, and whether it has an
+    /// error, by address, kept as `shapes` is, so a chain of `let`s that each wrap the one
+    /// before costs each its own level.
+    depths: RefCell<Depths>,
     /// What each bound variable stands for once nothing in it is open, by variable. A bound
     /// variable never changes, so a walk need not go through it again, and a chain of calls
     /// whose types hold the one before costs each call its own part only.
@@ -98,6 +102,7 @@ pub struct Vars {
 }
 
 type Shapes = HashMap<usize, (Arc<[Ty]>, Shape), BuildHasherDefault<AddressHasher>>;
+type Depths = HashMap<usize, (Arc<[Ty]>, u32, bool), BuildHasherDefault<AddressHasher>>;
 
 /// Hashes an address with one multiply, which is all a key that is already unique needs.
 #[derive(Default)]
@@ -128,6 +133,7 @@ impl Vars {
         self.states.clear();
         self.shapes.get_mut().clear();
         self.ground.get_mut().clear();
+        self.depths.get_mut().clear();
         self.trail.clear();
         self.holes.clear();
     }
@@ -253,6 +259,36 @@ impl Vars {
         ty.clone()
     }
 
+    /// How deeply `ty` nests with its variables' types in place, counting each type argument
+    /// as a level, and whether it has an error in it; `None` when it nests more than `limit`
+    /// levels. A part shared in many places is walked once, so a type that doubles at each
+    /// level costs its depth, and the walk stops at `limit`, however deep the type is.
+    pub fn depth(&self, ty: &Ty, limit: u32) -> Option<(u32, bool)> {
+        self.depth_part(ty, limit, &mut HashMap::new())
+    }
+
+    fn depth_part(&self, ty: &Ty, room: u32, memo: &mut HashMap<usize, (u32, bool)>) -> Option<(u32, bool)> {
+        let ty = self.resolve(ty);
+        let Some(parts) = ty.parts() else { return (room > 0).then_some((1, ty == Ty::Error)) };
+        let key = Arc::as_ptr(parts) as *const Ty as usize;
+        let known = memo.get(&key).copied().or_else(|| self.depths.borrow().get(&key).map(|&(_, d, e)| (d, e)));
+        if let Some((depth, error)) = known {
+            return (depth <= room).then_some((depth, error));
+        }
+        let (mut depth, mut error) = (0, false);
+        for part in parts.iter() {
+            let (d, e) = self.depth_part(part, room.checked_sub(1)?, memo)?;
+            (depth, error) = (depth.max(d), error || e);
+        }
+        // A variable in it may be bound later, which changes its depth.
+        if self.has_var(&ty) {
+            memo.insert(key, (depth + 1, error));
+        } else {
+            self.depths.borrow_mut().insert(key, (parts.clone(), depth + 1, error));
+        }
+        Some((depth + 1, error))
+    }
+
     /// `ty` with every bound variable replaced, at any depth. Parts without one are shared.
     pub fn zonk(&self, ty: &Ty) -> Ty {
         self.zonk_part(ty, &mut HashMap::new()).unwrap_or_else(|| ty.clone())
@@ -331,6 +367,11 @@ impl Vars {
     /// `ty` zonked, with an open literal variable as its default, as diagnostics and interface
     /// checks see it. Any other open variable stays.
     pub fn defaulted(&self, ty: &Ty) -> Ty {
+        self.defaulted_part(ty, &mut HashMap::new())
+    }
+
+    /// [`Vars::defaulted`], where `memo` holds what each shared part gave.
+    fn defaulted_part(&self, ty: &Ty, memo: &mut HashMap<usize, Ty>) -> Ty {
         match self.resolve(ty) {
             Ty::Var(v) => match self.open(v).map(|open| (open.kind, open.never)) {
                 Some((Kind::Int, _)) => Ty::INT,
@@ -341,7 +382,13 @@ impl Vars {
             },
             ty if self.has_var(&ty) && ty.parts().is_some() => {
                 let args = ty.parts().expect("checked above");
-                ty.with_parts(args.iter().map(|arg| self.defaulted(arg)).collect())
+                let key = Arc::as_ptr(args) as *const Ty as usize;
+                if let Some(known) = memo.get(&key) {
+                    return known.clone();
+                }
+                let done = ty.with_parts(args.iter().map(|arg| self.defaulted_part(arg, memo)).collect());
+                memo.insert(key, done.clone());
+                done
             }
             ty => ty,
         }
@@ -546,15 +593,27 @@ impl Vars {
 
     /// Whether variable `v` occurs in `ty`, which would make it part of itself.
     fn occurs(&self, v: u32, ty: &Ty) -> bool {
+        self.occurs_in(v, ty, &mut HashSet::new())
+    }
+
+    /// [`Vars::occurs`], where `seen` holds the argument lists and bound variables walked
+    /// already, so a type that shares its parts costs each part once.
+    fn occurs_in(&self, v: u32, ty: &Ty, seen: &mut HashSet<usize>) -> bool {
         if !self.has_var(ty) {
             return false;
         }
         match ty {
             Ty::Var(w) => match &self.states[*w as usize] {
                 State::Open(_) => *w == v,
-                State::Bound(next) => self.ground_of(*w).is_none() && self.occurs(v, next),
+                // A variable's key is odd, which no list's address is.
+                State::Bound(next) => {
+                    self.ground_of(*w).is_none() && seen.insert(2 * *w as usize + 1) && self.occurs_in(v, next, seen)
+                }
             },
-            _ if let Some(args) = ty.parts() => args.iter().any(|arg| self.occurs(v, arg)),
+            _ if let Some(args) = ty.parts() => {
+                seen.insert(Arc::as_ptr(args) as *const Ty as usize)
+                    && args.iter().any(|arg| self.occurs_in(v, arg, seen))
+            }
             _ => false,
         }
     }

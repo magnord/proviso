@@ -2,7 +2,7 @@
 //! module, with the module's implementations. Questions about a type that depend on what it
 //! declares, such as its name or the interfaces it implements, are answered here.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -1042,84 +1042,105 @@ impl Decls {
         }
     }
 
-    /// Like [`Decls::display`], where type parameter `i` is called `names[i]`.
+    /// Like [`Decls::display`], where type parameter `i` is called `names[i]`. A type with
+    /// more than [`DISPLAY_BUDGET`] parts is written in part, with `…` for the rest, so a
+    /// type that doubles at each level gives a short message (issue #18).
     pub fn display_in<'a>(&'a self, ty: &'a Ty, names: &'a [Box<str>]) -> impl fmt::Display + 'a {
-        let std = move |name: &'static str, qualified: &'static str| {
+        fmt::from_fn(move |f| self.write_ty(f, ty, names, &Cell::new(DISPLAY_BUDGET)))
+    }
+
+    /// Writes `ty` as [`Decls::display_in`] does, spending one of `budget` on each part.
+    fn write_ty(&self, f: &mut fmt::Formatter, ty: &Ty, names: &[Box<str>], budget: &Cell<usize>) -> fmt::Result {
+        if budget.get() == 0 {
+            return f.write_str("…");
+        }
+        budget.set(budget.get() - 1);
+        let std = |name: &'static str, qualified: &'static str| {
             if self.adts[AdtId::BUILT_IN..].iter().any(|adt| &*adt.name == name) { qualified } else { name }
         };
-        fmt::from_fn(move |f| {
-            if let Ty::Adt(id, args) = ty
-                && self.adt(*id).tuple
-            {
-                f.write_str("(")?;
-                for (i, arg) in args.iter().enumerate() {
-                    let sep = if i == 0 { "" } else { ", " };
-                    write!(f, "{sep}{}", self.display_in(arg, names))?;
+        let list = |f: &mut fmt::Formatter, args: &[Ty]| -> fmt::Result {
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    f.write_str(", ")?;
                 }
-                return f.write_str(")");
+                if budget.get() == 0 {
+                    return f.write_str("…");
+                }
+                self.write_ty(f, arg, names, budget)?;
             }
-            if let Ty::Adt(id, args) = ty
-                && !args.is_empty()
-            {
-                let name = match *id {
-                    AdtId::POOL => std("Pool", "std.pool.Pool"),
-                    AdtId::HANDLE => std("Handle", "std.pool.Handle"),
-                    _ => &self.adt(*id).name,
+            Ok(())
+        };
+        if let Ty::Adt(id, args) = ty
+            && self.adt(*id).tuple
+        {
+            f.write_str("(")?;
+            list(f, args)?;
+            return f.write_str(")");
+        }
+        if let Ty::Adt(id, args) = ty
+            && !args.is_empty()
+        {
+            let name = match *id {
+                AdtId::POOL => std("Pool", "std.pool.Pool"),
+                AdtId::HANDLE => std("Handle", "std.pool.Handle"),
+                _ => &self.adt(*id).name,
+            };
+            write!(f, "{name}[")?;
+            list(f, args)?;
+            return f.write_str("]");
+        }
+        if let Some((modes, ret, fails, params)) = ty.fn_parts() {
+            f.write_str("fn(")?;
+            for (i, (mode, param)) in modes.iter().zip(params).enumerate() {
+                let sep = if i == 0 { "" } else { ", " };
+                let mode = match mode {
+                    ParamMode::Inout => "inout ",
+                    ParamMode::InoutPartial => "inout(partial) ",
+                    ParamMode::Take => "take ",
+                    ParamMode::Keep => "keep ",
+                    ParamMode::Borrow => "",
                 };
-                write!(f, "{name}[")?;
-                for (i, arg) in args.iter().enumerate() {
-                    let sep = if i == 0 { "" } else { ", " };
-                    write!(f, "{sep}{}", self.display_in(arg, names))?;
-                }
-                return f.write_str("]");
+                write!(f, "{sep}{mode}")?;
+                self.write_ty(f, param, names, budget)?;
             }
-            if let Some((modes, ret, fails, params)) = ty.fn_parts() {
-                f.write_str("fn(")?;
-                for (i, (mode, param)) in modes.iter().zip(params).enumerate() {
-                    let sep = if i == 0 { "" } else { ", " };
-                    let mode = match mode {
-                        ParamMode::Inout => "inout ",
-                        ParamMode::InoutPartial => "inout(partial) ",
-                        ParamMode::Take => "take ",
-                        ParamMode::Keep => "keep ",
-                        ParamMode::Borrow => "",
-                    };
-                    write!(f, "{sep}{mode}{}", self.display_in(param, names))?;
-                }
-                f.write_str(")")?;
-                if *ret != Ty::Unit {
-                    write!(f, " -> {}", self.display_in(ret, names))?;
-                }
-                if *fails != Ty::Never {
-                    write!(f, " fails {}", self.display_in(fails, names))?;
-                }
-                return Ok(());
+            f.write_str(")")?;
+            if *ret != Ty::Unit {
+                f.write_str(" -> ")?;
+                self.write_ty(f, ret, names, budget)?;
             }
-            if let Ty::Param(i) = ty
-                && let Some(name) = names.get(*i as usize)
-            {
-                return f.write_str(name);
+            if *fails != Ty::Never {
+                f.write_str(" fails ")?;
+                self.write_ty(f, fails, names, budget)?;
             }
-            f.write_str(match ty {
-                Ty::Int(it) => it.name(),
-                Ty::Float(ft) => ft.name(),
-                Ty::Bool => "Bool",
-                Ty::Char => "Char",
-                Ty::Text => "Text",
-                Ty::Unit => "Unit",
-                Ty::Never => "Never",
-                Ty::Adt(AdtId::PARSE_ERROR, _) => std("ParseError", "std.text.ParseError"),
-                Ty::Adt(id, _) => &self.adt(*id).name,
-                Ty::IoError => std("IoError", "std.io.IoError"),
-                Ty::Cap(cap) if cap.iface == IfaceId::OUT => std("Out", "std.io.Out"),
-                Ty::Cap(cap) => &self.iface(cap.iface).name,
-                Ty::Param(_) | Ty::Var(_) => "_",
-                Ty::Error => "{unknown}",
-                Ty::Fn(..) => unreachable!("written above"),
-            })
+            return Ok(());
+        }
+        if let Ty::Param(i) = ty
+            && let Some(name) = names.get(*i as usize)
+        {
+            return f.write_str(name);
+        }
+        f.write_str(match ty {
+            Ty::Int(it) => it.name(),
+            Ty::Float(ft) => ft.name(),
+            Ty::Bool => "Bool",
+            Ty::Char => "Char",
+            Ty::Text => "Text",
+            Ty::Unit => "Unit",
+            Ty::Never => "Never",
+            Ty::Adt(AdtId::PARSE_ERROR, _) => std("ParseError", "std.text.ParseError"),
+            Ty::Adt(id, _) => &self.adt(*id).name,
+            Ty::IoError => std("IoError", "std.io.IoError"),
+            Ty::Cap(cap) if cap.iface == IfaceId::OUT => std("Out", "std.io.Out"),
+            Ty::Cap(cap) => &self.iface(cap.iface).name,
+            Ty::Param(_) | Ty::Var(_) => "_",
+            Ty::Error => "{unknown}",
+            Ty::Fn(..) => unreachable!("written above"),
         })
     }
 }
+
+/// How many parts of a type a diagnostic writes before it writes `…` for the rest.
+pub const DISPLAY_BUDGET: usize = 64;
 
 /// Pushes the index of each record and enum that a value of `ty` holds, at any depth, to
 /// `found`. A handle holds no element (STD.md).

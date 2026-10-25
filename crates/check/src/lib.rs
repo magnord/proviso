@@ -370,8 +370,11 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         checker.body(id);
     }
     checker.examples();
+    // Parts shared between expressions are walked once, so a chain of `let`s that each wrap
+    // the one before costs each its own level.
+    let mut seen = HashSet::new();
     debug_assert!(
-        !checker.p.expr_ty.values().any(|ty| holds_var(ty, &mut HashSet::new())),
+        !checker.p.expr_ty.values().any(|ty| holds_var(ty, &mut seen)),
         "an inference variable was left in `expr_ty`"
     );
     checker.p
@@ -4037,6 +4040,7 @@ impl Checker<'_> {
         let (before, outer) = (self.errors, std::mem::replace(&mut self.inner_errors, 0));
         let ty = self.expr_kind(e, expected.as_ref(), chain, copying);
         let ty = self.vars.resolve(&ty);
+        let ty = self.shallow(e, ty, before);
         if copying {
             self.copied(e, &ty);
             self.consumed.insert(e);
@@ -4070,6 +4074,31 @@ impl Checker<'_> {
 
     /// Writes `ty` as the type of `e`. One with a variable in it is zonked when the body is
     /// settled, so the interpreter never sees the variable.
+    /// `ty`, the type of `e`, or an error once it is reported for nesting more than
+    /// [`MAX_TYPE_DEPTH`] levels deep. Each walk of a type and each message about it then
+    /// stays bounded however a generic function nests its type parameter (OPEN_QUESTIONS
+    /// P5; issues #17, #18). Once a part of `e` has an error, from `before` on, the type may
+    /// be deep because of it, so it isn't reported (§15.1).
+    fn shallow(&mut self, e: ExprId, ty: Ty, before: usize) -> Ty {
+        if ty.parts().is_none() {
+            return ty;
+        }
+        // One with an error in it was rejected where the error was, and the walk stops at
+        // the limit, so a type too deep for one is reported however much deeper it is.
+        let error = match self.vars.depth(&ty, MAX_TYPE_DEPTH) {
+            Some(_) => return ty,
+            None => before < self.errors,
+        };
+        if !error {
+            let message = format!(
+                "the type of this nests more than {MAX_TYPE_DEPTH} levels deep, as `{}`, which is more than a type may",
+                self.show(&ty)
+            );
+            self.error(codes::NESTING_TOO_DEEP, self.span(e), message);
+        }
+        Ty::Error
+    }
+
     fn record(&mut self, e: ExprId, ty: Ty) {
         if self.vars.count() > 0 && self.vars.has_var(&ty) {
             self.typed.push(e);
@@ -5254,8 +5283,12 @@ impl Checker<'_> {
         // The type the call is expected to have gives what it can first, so a mismatch is
         // reported at the argument (OPEN_QUESTIONS P5). A `Never` in it is known only in part,
         // and the arguments may widen it.
+        // An open variable has nothing to give, and its argument binds it after the call. A
+        // generic call nested in another's argument would chain their types first, which
+        // the depth check could see only through every variable (issue #17).
         if targs.is_none()
             && let Some(expected) = expected.filter(|t| !t.is_unknown())
+            && !matches!(self.vars.resolve(expected), Ty::Var(v) if self.vars.open(v).is_some_and(|o| o.kind == Kind::Any))
         {
             self.vars.subsume(expected, &ret.subst(&tvars));
         }
@@ -7602,6 +7635,12 @@ fn is_snake(name: &str) -> bool {
 fn is_pascal(name: &str) -> bool {
     name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && name.chars().all(|c| c.is_ascii_alphanumeric())
 }
+
+/// How deeply the type of an expression may nest, counting each type argument as a level
+/// (OPEN_QUESTIONS P5, Nesting limit). `let`s that each wrap the one before nest a type
+/// deeper than any expression, as `collections/deep` does 3,000 levels. A debug build drops
+/// a type 10,000 deep on the main thread's 8 MiB stack, so this keeps half of that.
+pub const MAX_TYPE_DEPTH: u32 = 5_000;
 
 /// Whether `ty` has an error in it.
 fn mentions_error(ty: &Ty) -> bool {

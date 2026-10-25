@@ -247,7 +247,7 @@ pub mod codes {
         NOT_IMPLEMENTED = "E0901", "not_implemented",
             "A construct the language has that this implementation does not support yet.";
         NESTING_TOO_DEEP = "E0902", "nesting_too_deep",
-            "Expressions and blocks nest at most 1,000 levels deep in this implementation (OPEN_QUESTIONS P5).";
+            "Expressions and blocks nest at most 1,000 levels deep, and their types 5,000, in this implementation (OPEN_QUESTIONS P5).";
         MATCH_TOO_COMPLEX = "E0903", "match_too_complex",
             "A `match` whose exhaustiveness takes too many steps to check (OPEN_QUESTIONS P5).";
         EXPANDING_TYPE = "E0904", "expanding_type",

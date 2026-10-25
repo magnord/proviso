@@ -376,3 +376,76 @@ fn nested_cleanup_defects_never_overflow_the_stack() {
     assert_eq!(output.status.code(), Some(70), "{}", stderr(&output));
     assert_eq!(stderr(&output).matches("leak[Tag]").count(), 50_000);
 }
+
+/// A generic call nested in another's argument builds a type that shares its parts, as
+/// `Result[T, T]` does, so its tree doubles at each call. Checking it walks each part once,
+/// and a message writes its first parts with `…` for the rest (issue #18). The generic
+/// records of slice 2.10 double the same way through `let`s.
+#[test]
+fn types_that_double_check_fast_and_show_in_short() {
+    let calls = |n: usize| format!("{}1{}", "dup(x: ".repeat(n), ")".repeat(n));
+    let dup = "fn dup[T: Copy](x: T) -> Result[T, T] {\n    return Ok(x)\n}\n\n";
+    let pairs: String = (1..=60).map(|i| format!("    let p{i} = P(a: p{}, b: p{})\n", i - 1, i - 1)).collect();
+    let pair = "record P[A, B] {\n    a: A\n    b: B\n}\n\n";
+    let cases = [
+        (format!("{dup}fn f() -> Int {{\n    let x = {}\n    return 1\n}}\n", calls(60)), 0),
+        (format!("{dup}fn f() -> Int {{\n    let x: Int = {}\n    return x\n}}\n", calls(60)), 65),
+        (format!("{pair}fn f() -> Int {{\n    let p0 = 1\n{pairs}    let q = p60.a.b\n    return 1\n}}\n"), 0),
+        (format!("{pair}fn f() -> Int {{\n    let p0 = 1\n{pairs}    let x: Int = p60\n    return x\n}}\n"), 65),
+    ];
+    for (i, (text, code)) in cases.into_iter().enumerate() {
+        let file = source(&format!("doubling_{i}.proviso"), &text);
+        let output = check_within(&file, 20);
+        let errors = stderr(&output);
+        assert_eq!(output.status.code(), Some(code), "case {i}: {errors}");
+        if code == 65 {
+            assert_eq!(errors.matches("error[E0301]").count(), 1, "case {i}: {errors}");
+            assert!(errors.len() < 4_000 && errors.contains('…'), "case {i}: {} bytes", errors.len());
+        }
+    }
+}
+
+/// A type may nest 5,000 levels, deeper than an expression may, as `let`s that each wrap
+/// the one before build it. A deeper one is too deep once, where it first is, also when a
+/// generic function's result multiplies the depth at each call, and nothing it reaches
+/// is reported again (OPEN_QUESTIONS P5, Nesting limit; issue #17).
+#[test]
+fn deep_types_are_too_deep_once() {
+    let lets = |n: usize, wrap: &str| -> String {
+        (1..=n).map(|i| format!("    let s{i} = {}\n", wrap.replace('#', &format!("s{}", i - 1)))).collect()
+    };
+    let chain = "record Chain[T] {\n    next: T\n}\n\n";
+    let deep = format!(
+        "fn deep[T](x: take T) -> {}T{} {{\n    return todo(\"x\")\n}}\n\n",
+        "Option[".repeat(50),
+        "]".repeat(50)
+    );
+    let cases = [
+        (format!("{chain}fn f() -> Int {{\n    let s0 = 1\n{}    return 1\n}}\n", lets(4_900, "Chain(next: #)")), 0, 0),
+        (format!("fn f() -> Int {{\n    let s0 = 1\n{}    return 1\n}}\n", lets(6_000, "Some(#)")), 65, 5_002),
+        (
+            format!("{chain}fn f() -> Int {{\n    let s0 = 1\n{}    return 1\n}}\n", lets(6_000, "Chain(next: #)")),
+            65,
+            5_006,
+        ),
+        (
+            format!(
+                "{deep}fn f() -> Int {{\n    let s = {}1{}\n    return 1\n}}\n",
+                "deep(x: ".repeat(150),
+                ")".repeat(150)
+            ),
+            65,
+            6,
+        ),
+    ];
+    for (i, (text, code, line)) in cases.into_iter().enumerate() {
+        let file = source(&format!("deep_type_{i}.proviso"), &text);
+        let output = proviso().args(["check", "--incomplete"]).arg(&file).output().unwrap();
+        let errors = stderr(&output);
+        assert_eq!(output.status.code(), Some(code), "case {i}: {}", &errors[..errors.len().min(2_000)]);
+        if code == 65 {
+            assert_eq!(errors.matches("error[").count(), 1, "case {i}: {}", &errors[..errors.len().min(2_000)]);
+            assert!(errors.contains(&format!(":{line}:")) && errors.contains("error[E0902]"), "case {i}: {errors}");
+        }
+    }
+}
