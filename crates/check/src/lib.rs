@@ -329,6 +329,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         adt_names: HashMap::new(),
         aliases: HashMap::new(),
         poisoned: m.poisoned.clone(),
+        main_lost: m.lost_fns.iter().any(|&sym| m.text(sym) == "main"),
         adts: Vec::new(),
         adt_vis: HashMap::new(),
         iface_names: HashMap::new(),
@@ -650,6 +651,8 @@ struct Checker<'a> {
     /// Names whose declarations were rejected, so their uses aren't reported again: those the
     /// parser rejected, and records and enums whose names the checker rejects.
     poisoned: HashSet<Symbol>,
+    /// Whether a function named `main` was rejected, so it isn't reported as missing.
+    main_lost: bool,
     /// Every record and enum declaration, including those whose name is rejected.
     adts: Vec<AdtSrc<'a>>,
     /// The visibility of each of [`Checker::adts`].
@@ -2433,6 +2436,7 @@ impl Checker<'_> {
                 }
                 // A call may mean either function, so none is checked against one (§15.1).
                 self.poisoned.insert(decl.name.sym);
+                self.main_lost |= name == "main";
             } else {
                 self.fn_names.insert(decl.name.sym, id);
                 if name == "main" {
@@ -3175,9 +3179,8 @@ impl Checker<'_> {
 
     fn check_main(&mut self) {
         let Some(id) = self.p.main else {
-            // A `main` that failed to parse has been reported (§15.1).
-            let lost = self.poisoned.iter().any(|&sym| self.m.text(sym) == "main");
-            if self.opts.needs_main && !lost {
+            // A `main` that failed to parse or clashed has been reported (§15.1).
+            if self.opts.needs_main && !self.main_lost {
                 self.error(
                     codes::INVALID_MAIN,
                     Span::default(),
@@ -3249,8 +3252,8 @@ impl Checker<'_> {
                     self.error(codes::UNKNOWN_TYPE, te.span, format!("`{text}` takes no type arguments"));
                     return Ty::Error;
                 }
-                // `x: Show[Int]` means `[T: Show[Int]]`, which the parser reports (REFERENCE
-                // §4.9; issue #53).
+                // `x: Show[Int]` means `[T: Show[Int]]` (REFERENCE §4.9), and generic
+                // interfaces are not yet scheduled (OPEN_QUESTIONS P5; issue #53).
                 if self.iface_names.contains_key(&name.sym) || IfaceId::prelude(text).is_some() {
                     self.not_implemented(te.span, "generic interfaces", Planned::Unscheduled);
                     return Ty::Error;
@@ -5719,13 +5722,12 @@ impl Checker<'_> {
             return Some((id, self.p.fns[entry.f].receiver.is_some()));
         }
         // An interface's method, which takes `self`, of a type that derives the interface or
-        // has an `impl` of it (issue #50).
+        // has an `impl` of it, for any of its instances (issue #50).
         let text = self.m.text(name);
         let def = self.p.decls.adt(id);
         let own = Ty::Adt(id, (0..def.params as u32).map(Ty::Param).collect());
         let named = self.p.decls.ifaces().any(|(iface, idef)| {
-            idef.method(text).is_some()
-                && (def.derives.contains(&iface) || self.p.decls.impl_for(iface, &own).is_some())
+            idef.method(text).is_some() && (def.derives.contains(&iface) || self.p.decls.has_impl_head(iface, &own))
         });
         named.then_some((id, true))
     }

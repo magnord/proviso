@@ -50,6 +50,7 @@ pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> M
         interner: Interner::default(),
         poisoned: HashSet::new(),
         impls: HashSet::new(),
+        lost_fns: HashSet::new(),
         tuple_impls: false,
         everywhere: HashSet::new(),
     };
@@ -845,6 +846,7 @@ impl Parser<'_> {
         let decl = self.fn_rest(name, FnKind::Free);
         if decl.is_err() {
             self.m.poisoned.insert(name.sym);
+            self.m.lost_fns.insert(name.sym);
         }
         decl
     }
@@ -1688,12 +1690,15 @@ impl Parser<'_> {
                         ExprKind::Else { value: compared, .. } => compared,
                         _ => value,
                     };
-                    // A comparison in parentheses is a plain condition. Its span takes in the
-                    // parentheses, so it is wider than its operands.
+                    // A comparison in parentheses is a plain condition, also with an `else`
+                    // inside them. Its span takes in the parentheses, so it is wider than its
+                    // operands.
                     let bare = match self.m.exprs[compared].kind {
                         ExprKind::Binary { lhs, rhs, .. } => {
                             let span = self.span_of(compared);
-                            span.lo == self.span_of(lhs).lo && span.hi == self.span_of(rhs).hi
+                            span.lo == self.span_of(lhs).lo
+                                && span.hi == self.span_of(rhs).hi
+                                && self.span_of(value).lo == span.lo
                         }
                         _ => false,
                     };

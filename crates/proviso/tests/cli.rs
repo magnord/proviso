@@ -50,12 +50,16 @@ fn run_needs_a_main() {
     assert_eq!(run(&["check"], &file).status.code(), Some(0));
 }
 
-/// Golden files check only codes, so the wording that tells std's `ParseError` from a
-/// module's, and an example from a function, is checked here (OPEN_QUESTIONS P5).
 /// A `main` whose declaration doesn't parse is reported once, not also as missing (§15.1;
-/// issue #55).
+/// issue #55). A type whose rejected name is `main` is no function, so `main` is missing.
 #[test]
 fn a_main_that_fails_to_parse_is_not_missing() {
+    for text in ["record main {\n    n: Int\n}\n", "type main = Int\n"] {
+        let file = source("type_main.proviso", text);
+        let errors = stderr(&run(&["run"], &file));
+        assert!(errors.contains("error[E0204]"), "{text}: {errors}");
+        assert!(errors.contains("error[E0308]: there is no `main` to run"), "{text}: {errors}");
+    }
     for header in ["pub fn main(sys: keep System fails IoError {", "pub fn main(sys: keep System) -> {"] {
         let text = format!("use std.io {{ IoError }}\n\n{header}\n    try sys.stdout.write_line(\"x\")\n}}\n");
         let file = source("broken_main.proviso", &text);
@@ -67,6 +71,8 @@ fn a_main_that_fails_to_parse_is_not_missing() {
     }
 }
 
+/// Golden files check only codes, so the wording that tells std's `ParseError` from a
+/// module's, and an example from a function, is checked here (OPEN_QUESTIONS P5).
 #[test]
 fn messages_name_what_they_mean() {
     let file = source(
@@ -689,13 +695,17 @@ fn recovery_from_deep_nesting_is_linear() {
 }
 
 /// An `else` that takes the place of `==`'s right side in an `expect` is reported from that
-/// side to the fallback's end, not from a parenthesis around the whole (issue #55).
+/// side to the fallback's end, not from the comparison's left side (issue #55). In
+/// parentheses, the comparison is a plain condition, which the `else` follows (OPEN_QUESTIONS
+/// P5, Tests).
 #[test]
 fn an_expect_else_is_reported_at_its_own_span() {
-    let text = "fn sure(n: Int) -> Int {\n    return n\n}\n\ntest \"span\" {\n    expect (sure(1) == 1 else true)\n}\n";
-    let file = source("expect_else_span.proviso", text);
-    let output = run(&["check"], &file);
-    let errors = stderr(&output);
-    assert!(errors.contains("expect_else_span.proviso:6:24: error[E0707]"), "{errors}");
-    assert_eq!(errors.matches("error[").count(), 1, "{errors}");
+    for (line, at) in [("expect sure(1) == 1 else true", "6:23"), ("expect (sure(1) == 1 else true)", "6:12")] {
+        let text = format!("fn sure(n: Int) -> Int {{\n    return n\n}}\n\ntest \"span\" {{\n    {line}\n}}\n");
+        let file = source("expect_else_span.proviso", &text);
+        let output = run(&["check"], &file);
+        let errors = stderr(&output);
+        assert!(errors.contains(&format!("expect_else_span.proviso:{at}: error[E0707]")), "{line}: {errors}");
+        assert_eq!(errors.matches("error[").count(), 1, "{line}: {errors}");
+    }
 }

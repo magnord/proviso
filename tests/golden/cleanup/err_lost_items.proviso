@@ -24,22 +24,23 @@ fn three() -> Int { return 3 } pub fn four() -> Text { return 4 }  // <- E0101, 
 fn five() -> Int { return 5 } pub five_again                  // <- E0101
 fn six() -> Int { return 6 } enum Six { One }                 // <- E0101
 fn seven() -> Int { return 7 } pub(pkg) fn eight() -> Int { return 8 }  // <- E0101
-fn nine() -> Int { return 9 } let TEN: Int = 10               // <- E0101, E0901
+fn nine() -> Int { return 9 } let ten: Int = 10               // <- E0101, E0901
 fn stray() -> Int { return 11 } distinct                      // <- E0101
 fn stray_type() -> Int { return 12 } type                     // <- E0101
 
 fn on_one_line() -> Int {
     let s = Six.One
-    let more = eight() + TEN + stray() + stray_type()
+    let more = eight() + ten + stray() + stray_type()
     return one() + two() + mk().n + three() + four().byte_len()
 }
 
-let LIMIT: Int = 3                                  // <- E0901
+let top: Int = 3                                    // <- E0901
 let limit = 4                                       // <- E0901
 extern "C" fn crc(n: Int) -> Int                    // <- E0901
+    trusted pure
 
 fn constants() -> Int {
-    return LIMIT + limit + crc(n: 1) + nosuch       // <- E0201
+    return top + limit + crc(n: 1) + nosuch       // <- E0201
 }
 
 record Late {

@@ -570,7 +570,7 @@ Writing the §F rows as complete programs ([tests/golden](tests/golden/README.md
 | Row 13 as written calls the fallible `w` unmarked, and its `try` adds a second reason for rejection. The golden makes `w` infallible so that reach is the only reason. | f13 | the row's wording |
 | The error type of an `attempt` whose postfix chain has calls that fail with different types (§6.1, §7.2) | methods/err_methods | P5 |
 | STD.md declares `Set` for phase 2, but neither a literal nor a constructor builds one | collections/err_not_yet | Q37 |
-| STD.md declares none of `is_sorted`, `is_permutation_of` and `is_unique`, which §8.1 and §8.2 use in contracts that P3 schedules for phase 4, so they report E0901 as not yet scheduled | collections/err_not_yet, f17 | issue #39 |
+| STD.md declares none of `is_sorted`, `is_permutation_of` and `is_unique`, which §8.1 uses in refinements and §8.2 in contracts, so they report E0901 as not yet scheduled. Phase 2 already checks refinements at run time, so a phase 2 program can reach them, as f17 does in a distinct type's `where` | collections/err_not_yet, f17 | issue #39 |
 | What a refinement sees when an assignment to one field re-checks it (§8.3) while another field it reads has moved (§5.1) | ownership/moves | P5 |
 | Whether a type parameter may stand for a resource, which its body could drop, and what `T: Abandon` would mean (§4.8, §10) | resources/err_not_yet | P5 |
 | What an `is` test on a resource does when it fails, since it moves what it binds either way (§6.4, §10) | resources/err_discard | P5 |

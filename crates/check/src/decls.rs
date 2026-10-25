@@ -932,6 +932,12 @@ impl Decls {
 
     /// The `impl` of `iface` for `ty`'s name, whose target `ty` matches, with the type
     /// arguments it gives the block's parameters, whatever they implement.
+    /// Whether `iface` has an `impl` for some instance of `ty`'s type head, as
+    /// `impl Show for Box[Int]` is for `Box`.
+    pub fn has_impl_head(&self, iface: IfaceId, ty: &Ty) -> bool {
+        ImplKey::of(ty).is_some_and(|key| self.impls.contains_key(&(iface, key)))
+    }
+
     pub fn impl_for(&self, iface: IfaceId, ty: &Ty) -> Option<(&ImplDef, Vec<Option<Ty>>)> {
         let def = self.impls.get(&(iface, ImplKey::of(ty)?))?;
         let mut binds = vec![None; def.bounds.len()];

@@ -23,6 +23,8 @@ pub struct Module {
     /// Names of items whose declarations were rejected, such as a function that failed to
     /// parse or a later-phase `impl`. Uses of them are not reported again.
     pub poisoned: HashSet<Symbol>,
+    /// Names of functions whose declarations failed to parse, among the `poisoned` ones.
+    pub lost_fns: HashSet<Symbol>,
     /// Types named by a rejected `impl` block, such as `Point` in `impl Show for Point`. The
     /// block may have given them methods and interfaces, so uses of those aren't reported.
     pub impls: HashSet<Symbol>,
