@@ -1,0 +1,163 @@
+// phase: 2
+// expect-error: E0201
+// expect-error: E0301
+// expect-error: E0307
+// expect-error: E0309
+// expect-error: E0319
+// A value whose type was rejected has an unknown type afterwards, so what uses it isn't
+// reported again (REFERENCE §15.1). A map literal whose key type lacks `Eq` or `Hash` is
+// one, as a written map type is, whether its key is known at once or is a float literal
+// (issue #39). Where two literals meet, the one whose entries give the key type is
+// reported, in either operand order. A literal compared with a value whose type was
+// rejected is still reported, in a body or an example, since its key type is its own. A
+// form whose branches mismatched, or a rejected operand, leaves an error inside the other
+// operand reported. In the bodies of a block whose type parameter has a rejected
+// constraint, that parameter meets every interface and has every method, whether its
+// value is a field or a call result, and a rejected generic `impl Abandon` leaves
+// `Abandon.abandon` on any type its target matches unreported (issue #53). An `if`,
+// `match` or `else` whose branches have mismatched types has an unknown type (issue #55).
+// A branch whose own value is rejected still gives the others' type.
+
+fn size[K: Eq + Hash, V](m: Map[K, V]) -> Int {
+    return m.len()
+}
+
+fn known_key(y: Float) -> Int {
+    let m = [y: 1]                                  // <- E0309
+    let s = [:] == m
+    let t = m == [:]
+    let e: Map[Int, Int] = m
+    let n = size(m: m)
+    return m.len()
+}
+
+fn literal_key() -> Int {
+    let m = [1.5: 1]                                // <- E0309
+    let s = [:] == m
+    let e: Map[Int, Int] = m
+    return size(m: m)
+}
+
+fn shared_key(x: Float) -> Bool {
+    let a = [:] ==
+        [x: 1]                                      // <- E0309
+    let b = [x: 2] ==                               // <- E0309
+        [:]
+    return a
+}
+
+fn written_key(k: Float) -> Map[Float, Int] {      // <- E0309
+    return [:]
+}
+
+fn rejected_context(y: Float) -> Bool {
+    let a = written_key(k: 1.5) == [1.5: 1]         // <- E0309
+    let b = written_key(k: 1.5) == [y: 1]           // <- E0309
+    return a
+}
+
+example written_key(k: 1.5) == [1.5: 1]            // <- E0309
+example written_key(k: 1.5) == (if true { 1 } else { "a" })    // <- E0301
+
+record Crate[T] derives(Show, Eq) {
+    item: T
+}
+
+fn first[U: Copy](c: Crate[U]) -> U {
+    return c.item
+}
+
+interface Count {
+    fn count(self) -> Int
+}
+
+impl[T: Show] Count for Crate[T] {
+    fn count(self) -> Int {
+        return 1
+    }
+}
+
+fn counted[C: Count](x: C) -> Int {
+    return x.count()
+}
+
+impl[T: Nope] Crate[T] {                            // <- E0307
+    fn get(self) -> T {
+        return self.item
+    }
+
+    fn using(self) -> Int {
+        let a = first(c: self).len()
+        let b = self.get().len()
+        let c = counted(x: self)
+        let d = f"{self}"
+        let e = self == self
+        let f = self.item.len()
+        let g: Int = "still checked"                // <- E0301
+        return 0
+    }
+}
+
+impl[T: Show + Nope] Crate[T] {                     // <- E0307
+    fn shown(self) -> Text {
+        return f"{self}"
+    }
+}
+
+record Bin[T] {
+    item: T
+}
+
+impl[T] Abandon for Bin[T] {                        // <- E0319
+    fn abandon(take self) {}
+}
+
+fn emptied(b: Bin[Int]) {
+    Abandon.abandon(b)
+    b.abandon()
+}
+
+enum Stop {
+    Halt
+}
+
+fn may_fail(n: Int) -> Int fails Stop {
+    return n
+}
+
+test "expect with a mismatched fallback" {
+    expect may_fail(9) else 1 == 1                  // <- E0301
+}
+
+fn branches(c: Bool, n: Int) -> Int {
+    let a = if c { let k = 1 } else { 2 }           // <- E0301
+    let b = match c {
+        true => "text"
+        false => 2                                  // <- E0301
+    }
+    let d = may_fail(n) else "text"                 // <- E0301
+    let e = may_fail(n) else {
+        "text"                                      // <- E0301
+    }
+    let f = if c { 1 } else if n > 0 { "two" } else { 3 } // <- E0301
+    let a1 = a + 1
+    let b1 = b + 1
+    let d1: Text = d
+    let e1: Text = e
+    let f1: Text = f
+    let g = nosuch == (if c { 1 } else { "a" })     // <- E0201, E0301
+    let h = (if c { 1 } else { "a" }) == (if c { 2 } else { "b" })    // <- E0301, E0301
+    let i = a == match c {
+        true => 1
+        false => "a"                                // <- E0301
+    }
+    return 0
+}
+
+fn rejected_branches(c: Bool, n: Int) -> Int {
+    let a = if c { 1 } else { nosuch }              // <- E0201
+    let b = may_fail(n) else nosuch                 // <- E0201
+    let d: Text = a                                 // <- E0301
+    let e: Text = b                                 // <- E0301
+    return 0
+}

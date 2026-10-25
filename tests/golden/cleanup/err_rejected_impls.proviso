@@ -1,0 +1,73 @@
+// phase: 2
+// expect-error: E0303
+// expect-error: E0306
+// expect-error: E0313
+// expect-error: E0901
+// An `impl` block the checker rejects is reported once, and the interface it was meant to
+// give its target isn't reported as missing (REFERENCE §15.1; issue #55). A hand-written
+// `impl` for a type that derives the interface is E0313, and the type still implements it,
+// though the derive alone wouldn't for those type arguments. An operator `impl` waits for a
+// later phase (E0901), and a distinct type that wraps its target may still derive the
+// operator. An error that doesn't depend on the block is still reported.
+
+record Plain {
+    n: Int
+}
+
+record Box[T] derives(Eq, Ord) {
+    item: T
+}
+
+impl Ord for Box[Plain] {                           // <- E0313
+    fn cmp(self, other: Self) -> Ordering {
+        return Ordering.Equal
+    }
+}
+
+record Cell[T] derives(Eq) {
+    item: T
+}
+
+impl Eq for Cell[Plain] {                           // <- E0313
+    fn eq(self, other: Self) -> Bool {
+        return true
+    }
+}
+
+fn derived(b: Box[Plain], c: Cell[Plain], p: Plain) -> Bool {
+    let o = b.cmp(other: b)
+    let e = c.eq(other: c)
+    let x = b.nosuch()                              // <- E0303
+    let y = p == p                                  // <- E0306
+    return b < b and c == c
+}
+
+type Doubled = distinct Rec derives(Add, Sub, Neg)
+
+record Rec {
+    n: Int
+}
+
+impl Add for Rec {                                  // <- E0901
+    fn add(self, other: Self) -> Self {
+        return self
+    }
+}
+
+impl Sub for Rec {                                  // <- E0901
+    fn sub(self, other: Self) -> Self {
+        return self
+    }
+}
+
+impl Neg for Rec {                                  // <- E0901
+    fn neg(self) -> Self {
+        return self
+    }
+}
+
+fn operators(d: Doubled, r: Rec) -> Doubled {
+    let s = r + r
+    let t = -d
+    return d + d - d
+}

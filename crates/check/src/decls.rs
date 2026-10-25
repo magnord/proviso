@@ -528,6 +528,9 @@ pub struct Decls {
     /// have been meant for the types it matches, with other constraints than the accepted
     /// one, so their uses aren't reported (§15.1).
     taken: HashMap<(IfaceId, ImplKey), Vec<(Ty, usize)>>,
+    /// Interfaces that a rejected `impl` block for every type, as `impl[T] I for T`, may have
+    /// given every type, so their uses aren't reported (§15.1).
+    everywhere: HashSet<IfaceId>,
     /// Whether the module declares a resource, without which no type is one.
     any_resource: bool,
     /// The argument lists [`Decls::is_resource`] has answered for, by address, so a deep type
@@ -634,6 +637,7 @@ impl Default for Decls {
             unknown_tuples: false,
             unknown: HashSet::new(),
             taken: HashMap::new(),
+            everywhere: HashSet::new(),
             any_resource: false,
             resource_args: Mutex::default(),
         }
@@ -762,6 +766,11 @@ impl Decls {
         self.taken.entry((iface, key)).or_default().push((target, params));
     }
 
+    /// Notes that a rejected `impl` block for every type implements `iface`.
+    pub fn mark_everywhere(&mut self, iface: IfaceId) {
+        self.everywhere.insert(iface);
+    }
+
     /// Notes that a rejected `impl` block names `key`, so it may have methods and interfaces
     /// that nothing records.
     pub fn mark_unknown(&mut self, key: ImplKey) {
@@ -849,7 +858,7 @@ impl Decls {
         }
         // Every resource type implements `Abandon`: a base resource by its `impl`, which
         // E0309 asks for, and an aggregate by abandoning what it holds (REFERENCE §10).
-        if iface == IfaceId::ABANDON && self.is_resource(ty) {
+        if iface == IfaceId::ABANDON && self.is_resource(ty) || self.everywhere.contains(&iface) {
             return true;
         }
         match ty {
@@ -873,9 +882,11 @@ impl Decls {
                 // A derived interface holds when the type arguments the type holds implement
                 // it (STD.md; OPEN_QUESTIONS P5). `Never` has no values, so it implements
                 // everything as an argument.
+                // A rejected `impl` block may give it for the arguments the derive doesn't.
                 let known = if self.adt(*id).derives.contains(&iface) {
                     self.held_args(*id, args)
                         .all(|arg| *arg == Ty::Never || self.implements_in(arg, iface, params, memo))
+                        || self.by_impl(ty, iface, params, memo)
                 } else {
                     self.by_impl(ty, iface, params, memo)
                 };
@@ -904,22 +915,29 @@ impl Decls {
     /// rejected `impl` block for it may have been one.
     fn by_impl(&self, ty: &Ty, iface: IfaceId, params: &[Vec<IfaceId>], memo: &mut Memo) -> bool {
         let Some(key) = ImplKey::of(ty) else { return false };
-        if self.unknown.contains(&key) {
+        let taken = self.taken.get(&(iface, key)).map_or(&[][..], |targets| targets.as_slice());
+        if self.unknown.contains(&key)
+            || taken.iter().any(|(target, params)| matches_target(target, ty, &mut vec![None; *params]))
+        {
             return true;
         }
         let Some(def) = self.impls.get(&(iface, key)) else { return false };
         let mut binds = vec![None; def.bounds.len()];
-        let applies = matches_target(&def.target, ty, &mut binds)
+        matches_target(&def.target, ty, &mut binds)
             && binds.iter().zip(&def.bounds).all(|(bind, bounds)| match bind {
                 Some(Ty::Never | Ty::Var(_) | Ty::Error) | None => true,
                 Some(arg) => bounds.iter().all(|&b| self.implements_in(arg, b, params, memo)),
-            });
-        let taken = self.taken.get(&(iface, key)).map_or(&[][..], |targets| targets.as_slice());
-        applies || taken.iter().any(|(target, params)| matches_target(target, ty, &mut vec![None; *params]))
+            })
     }
 
     /// The `impl` of `iface` for `ty`'s name, whose target `ty` matches, with the type
     /// arguments it gives the block's parameters, whatever they implement.
+    /// Whether `iface` has an `impl` for some instance of `ty`'s type head, as
+    /// `impl Show for Box[Int]` is for `Box`.
+    pub fn has_impl_head(&self, iface: IfaceId, ty: &Ty) -> bool {
+        ImplKey::of(ty).is_some_and(|key| self.impls.contains_key(&(iface, key)))
+    }
+
     pub fn impl_for(&self, iface: IfaceId, ty: &Ty) -> Option<(&ImplDef, Vec<Option<Ty>>)> {
         let def = self.impls.get(&(iface, ImplKey::of(ty)?))?;
         let mut binds = vec![None; def.bounds.len()];
@@ -1043,9 +1061,9 @@ impl Decls {
         // Which records and enums mention each one in a field.
         let mut held_by: HashMap<usize, Vec<usize>> = HashMap::new();
         for a in module.clone() {
-            let mut parts = Vec::new();
+            let (mut parts, mut seen) = (Vec::new(), HashSet::new());
             for field in self.adts[a].variants.iter().flat_map(|v| &v.fields) {
-                mentioned(&field.ty, &mut parts);
+                mentioned(&field.ty, &mut parts, &mut seen);
             }
             parts.sort_unstable();
             parts.dedup();
@@ -1092,29 +1110,46 @@ impl Decls {
     /// What a value of `ty`, written in a field, is whatever the type parameters are, from
     /// what is settled so far. Marks each type parameter it holds in `held`.
     fn base_kind(&self, ty: &Ty, held: &mut [bool]) -> Kinds {
-        match ty {
-            Ty::Param(i) => {
-                if let Some(slot) = held.get_mut(*i as usize) {
-                    *slot = true;
-                }
-                Kinds::default()
+        let (kind, params) = self.base_kind_in(ty, &mut HashMap::new());
+        for i in params {
+            if let Some(slot) = held.get_mut(i as usize) {
+                *slot = true;
             }
-            Ty::Cap(_) => Kinds { reach: true, ..Kinds::default() },
+        }
+        kind
+    }
+
+    /// [`Decls::base_kind`], with the type parameters it holds. Types share their parts, so
+    /// each part is walked once, by the address of its type arguments (issue #55).
+    fn base_kind_in(&self, ty: &Ty, memo: &mut KindMemo) -> (Kinds, Vec<u32>) {
+        match ty {
+            Ty::Param(i) => (Kinds::default(), vec![*i]),
+            Ty::Cap(_) => (Kinds { reach: true, ..Kinds::default() }, Vec::new()),
             Ty::Adt(id, args) => {
+                let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
+                if let Some((known, _)) = memo.get(&key) {
+                    return known.clone();
+                }
                 let def = self.adt(*id);
                 let mut kind = Kinds { unique: def.unique, resource: def.resource, reach: def.reach };
+                let mut params = Vec::new();
                 for (i, arg) in args.iter().enumerate() {
+                    let (part, held) = self.base_kind_in(arg, memo);
                     if def.held.get(i).copied().unwrap_or(false) {
-                        kind = kind.or(self.base_kind(arg, held));
+                        kind = kind.or(part);
+                        params.extend(held);
                     } else if *id != AdtId::HANDLE {
                         // A type argument it doesn't hold still gives it reach (REFERENCE §5.1),
                         // but a handle's never does (STD.md).
-                        kind.reach |= self.base_kind(arg, &mut []).reach;
+                        kind.reach |= part.reach;
                     }
                 }
-                kind
+                params.sort_unstable();
+                params.dedup();
+                memo.insert(key, ((kind, params.clone()), args.clone()));
+                (kind, params)
             }
-            _ => Kinds::default(),
+            _ => (Kinds::default(), Vec::new()),
         }
     }
 
@@ -1269,14 +1304,19 @@ impl Decls {
 pub const DISPLAY_BUDGET: usize = 64;
 
 /// Pushes the index of each record and enum that a value of `ty` holds, at any depth, to
-/// `found`. A handle holds no element (STD.md).
-fn mentioned(ty: &Ty, found: &mut Vec<usize>) {
+/// `found`. A handle holds no element (STD.md). Types share their parts, so a list of type
+/// arguments in `seen`, by its address, was walked already (issue #55). The types walked
+/// outlive `seen`, so no address in it is reused.
+fn mentioned(ty: &Ty, found: &mut Vec<usize>, seen: &mut HashSet<usize>) {
     if let Ty::Adt(id, args) = ty
         && *id != AdtId::HANDLE
     {
         found.push(id.index());
+        if args.is_empty() || !seen.insert(Arc::as_ptr(args) as *const Ty as usize) {
+            return;
+        }
         for arg in args.iter() {
-            mentioned(arg, found);
+            mentioned(arg, found, seen);
         }
     }
 }
@@ -1325,10 +1365,20 @@ impl Inhabited {
 
 /// The generic types the [`Graph`] has a node for: each by its id and whether each of its
 /// type arguments has values, with those whose variants aren't in the graph yet.
+/// [`Graph::requirement`]'s answers for applied types, with their type arguments kept alive.
+type AppliedRequirements = HashMap<(usize, AdtId, Box<[bool]>), (Requirement, Arc<[Ty]>)>;
+
+/// [`Decls::base_kind_in`]'s answers, with the type arguments they are for kept alive.
+type KindMemo = HashMap<(u32, usize), ((Kinds, Vec<u32>), Arc<[Ty]>)>;
+
 #[derive(Default)]
 struct Instances {
     nodes: HashMap<(AdtId, Box<[bool]>), usize>,
     pending: Vec<(AdtId, Box<[bool]>, usize)>,
+    /// The requirement of each applied type already met, by the address of its arguments,
+    /// whose `Arc` is kept so the address isn't reused. Types share their parts, so a type
+    /// whose size doubles with each level is walked once per level (issue #55).
+    applied: AppliedRequirements,
 }
 
 /// Whether a type has values, as a condition on records and enums whose answer isn't known
@@ -1441,43 +1491,60 @@ impl Graph {
             },
             Ty::Adt(id, _) if decls.adt(*id).is_native() || decls.adt(*id).unknown_variants => Requirement::Met,
             Ty::Adt(id, args) if !args.is_empty() => {
-                let parts: Vec<Requirement> =
-                    args.iter().map(|arg| self.requirement(decls, arg, params, instances)).collect();
-                let mut open: Vec<usize> = (parts.iter())
-                    .filter_map(|part| match part {
-                        Requirement::Node(node) => Some(*node),
-                        _ => None,
-                    })
-                    .collect();
-                open.sort_unstable();
-                open.dedup();
-                // Each answer of the open arguments is a case. Many open arguments would be
-                // too many cases, so the type is taken to have values, which asks for an arm
-                // rather than leaving one out.
-                if open.len() > 8 {
-                    return Requirement::Met;
+                let key = (args.as_ptr() as usize, *id, Box::<[bool]>::from(params));
+                if let Some((requirement, _)) = instances.applied.get(&key) {
+                    return *requirement;
                 }
-                let cases = (0..1usize << open.len())
-                    .map(|case| {
-                        let holds = |node: usize| case & (1 << open.iter().position(|&n| n == node).unwrap_or(0)) != 0;
-                        let bits = (parts.iter())
-                            .map(|part| match part {
-                                Requirement::Met => true,
-                                Requirement::Unmet => false,
-                                Requirement::Node(node) => holds(*node),
-                            })
-                            .collect();
-                        let mut conditions: Vec<Requirement> =
-                            open.iter().filter(|&&node| holds(node)).map(|&node| Requirement::Node(node)).collect();
-                        conditions.push(Requirement::Node(self.instance(*id, bits, instances)));
-                        self.all(conditions)
-                    })
-                    .collect();
-                self.combine(false, cases)
+                let requirement = self.applied_requirement(decls, *id, args, params, instances);
+                instances.applied.insert(key, (requirement, args.clone()));
+                requirement
             }
             Ty::Adt(id, _) => Requirement::Node(id.index()),
             _ => Requirement::Met,
         }
+    }
+
+    /// [`Graph::requirement`] of `id` applied to `args`.
+    fn applied_requirement(
+        &mut self,
+        decls: &Decls,
+        id: AdtId,
+        args: &[Ty],
+        params: &[bool],
+        instances: &mut Instances,
+    ) -> Requirement {
+        let parts: Vec<Requirement> = args.iter().map(|arg| self.requirement(decls, arg, params, instances)).collect();
+        let mut open: Vec<usize> = (parts.iter())
+            .filter_map(|part| match part {
+                Requirement::Node(node) => Some(*node),
+                _ => None,
+            })
+            .collect();
+        open.sort_unstable();
+        open.dedup();
+        // Each answer of the open arguments is a case. Many open arguments would be
+        // too many cases, so the type is taken to have values, which asks for an arm
+        // rather than leaving one out.
+        if open.len() > 8 {
+            return Requirement::Met;
+        }
+        let cases = (0..1usize << open.len())
+            .map(|case| {
+                let holds = |node: usize| case & (1 << open.iter().position(|&n| n == node).unwrap_or(0)) != 0;
+                let bits = (parts.iter())
+                    .map(|part| match part {
+                        Requirement::Met => true,
+                        Requirement::Unmet => false,
+                        Requirement::Node(node) => holds(*node),
+                    })
+                    .collect();
+                let mut conditions: Vec<Requirement> =
+                    open.iter().filter(|&&node| holds(node)).map(|&node| Requirement::Node(node)).collect();
+                conditions.push(Requirement::Node(self.instance(id, bits, instances)));
+                self.all(conditions)
+            })
+            .collect();
+        self.combine(false, cases)
     }
 
     /// The node of generic type `id` whose type arguments have values as `bits` says.

@@ -50,6 +50,33 @@ fn run_needs_a_main() {
     assert_eq!(run(&["check"], &file).status.code(), Some(0));
 }
 
+/// A `main` whose declaration doesn't parse is reported once, not also as missing (§15.1;
+/// issue #55). A type named `main`, rejected for its name or because it doesn't parse, or a
+/// constant, is no function, so `main` is missing.
+#[test]
+fn a_main_that_fails_to_parse_is_not_missing() {
+    for (text, code) in [
+        ("record main {\n    n: Int\n}\n", "E0204"),
+        ("type main = Int\n", "E0204"),
+        ("record main {\n    n:\n}\n", "E0101"),
+        ("let main: Int = 3\n", "E0901"),
+    ] {
+        let file = source("type_main.proviso", text);
+        let errors = stderr(&run(&["run"], &file));
+        assert!(errors.contains(&format!("error[{code}]")), "{text}: {errors}");
+        assert!(errors.contains("error[E0308]: there is no `main` to run"), "{text}: {errors}");
+    }
+    for header in ["pub fn main(sys: keep System fails IoError {", "pub fn main(sys: keep System) -> {"] {
+        let text = format!("use std.io {{ IoError }}\n\n{header}\n    try sys.stdout.write_line(\"x\")\n}}\n");
+        let file = source("broken_main.proviso", &text);
+        let output = run(&["run"], &file);
+        let errors = stderr(&output);
+        assert_eq!(output.status.code(), Some(65), "{header}: {errors}");
+        assert_eq!(errors.matches("error[").count(), 1, "{header}: {errors}");
+        assert!(errors.contains("error[E0101]"), "{header}: {errors}");
+    }
+}
+
 /// Golden files check only codes, so the wording that tells std's `ParseError` from a
 /// module's, and an example from a function, is checked here (OPEN_QUESTIONS P5).
 #[test]
@@ -601,5 +628,91 @@ fn alias_and_expect_messages_read_right() {
     }
     for nameless in ["`Two` is an alias of the type `(Int, Int)`", "`Nothing` is an alias of the type `Unit`"] {
         assert!(errors.contains(&format!("{nameless}, and an alias names a type only\n")), "{errors}");
+    }
+}
+
+/// Two types that share their parts within each but not with each other, as two doubling
+/// chains built apart do, are compared, joined, listed and passed for one type parameter in
+/// time linear in their sources
+/// (issue #53).
+#[test]
+fn types_built_apart_join_in_linear_time() {
+    let mut text = String::from(
+        "fn same[T: Copy](x: T, y: T) -> Bool {\n    return true\n}\n\nfn f() {\n    let a0 = 1\n    let b0 = 2\n",
+    );
+    for i in 1..=40 {
+        text += &format!("    let a{i} = (a{0}, a{0})\n    let b{i} = (b{0}, b{0})\n", i - 1);
+    }
+    text += "    let c = a40 == b40\n    let d = if c { a40 } else { b40 }\n    let e = [a40, b40]\n    let s = same(x: a40, y: b40)\n}\n";
+    let file = source("built_apart.proviso", &text);
+    let output = check_within(&file, 20);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+/// A doubling alias in a signature keeps its shared parts through the checks of the
+/// signature and of each call, so its uses check in linear time (issue #55). So does one in
+/// a record's field and a variant's, whose kinds and values are settled for the module.
+#[test]
+fn a_doubling_alias_in_calls_checks_in_linear_time() {
+    let mut text = String::from("type A0 = Int\n");
+    for i in 1..=60 {
+        text += &format!("type A{i} = (A{0}, A{0})\n", i - 1);
+    }
+    text += "fn f(x: A60) -> A60 {\n    return x\n}\n\nfn g(y: A60) -> Bool {\n    let z = f(x: y)\n    let w = if true { z } else { y }\n    let v = [z, w, y]\n    return z == w\n}\n\nrecord H {\n    f: A60\n}\n\nenum E {\n    V(x: A60)\n}\n";
+    let file = source("doubling_calls.proviso", &text);
+    let output = check_within(&file, 20);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+/// A program gets a defect after 10,000 nested calls, so the 10,000th still runs its body
+/// (OPEN_QUESTIONS P5, Stack exhaustion; issue #25). `main` is the first.
+#[test]
+fn the_last_nested_call_allowed_runs() {
+    for (n, code) in [(9998, 0), (9999, 70)] {
+        let text = format!(
+            "use std.io {{ IoError }}\n\nfn rec(n: Int) -> Int {{\n    if n == 0 {{\n        return 0\n    }}\n    return rec(n: n - 1) + 1\n}}\n\npub fn main(sys: keep System) fails IoError {{\n    try sys.stdout.write_line(f\"{{rec(n: {n})}}\")\n}}\n"
+        );
+        let file = source("last_call.proviso", &text);
+        let output = run(&["run"], &file);
+        assert_eq!(output.status.code(), Some(code), "{n}: {}", stderr(&output));
+        if code == 0 {
+            assert_eq!(String::from_utf8_lossy(&output.stdout), format!("{n}\n"));
+        } else {
+            assert!(stderr(&output).contains("exhausted after 10000 nested calls"), "{}", stderr(&output));
+        }
+    }
+}
+
+/// Code nested past the limit is reported once, and recovering from it takes time linear in
+/// the depth (issue #27).
+#[test]
+fn recovery_from_deep_nesting_is_linear() {
+    let depth = 64_000;
+    let text = format!(
+        "fn f(n: Int) -> Int {{\n{}    debug(n)\n{}    return n\n}}\n",
+        "    if n > 0 {\n".repeat(depth),
+        "    }\n".repeat(depth)
+    );
+    let file = source("deep_recovery.proviso", &text);
+    let output = check_within(&file, 20);
+    let errors = stderr(&output);
+    assert_eq!(output.status.code(), Some(65), "{errors}");
+    assert_eq!(errors.matches("error[").count(), 1, "{errors}");
+    assert!(errors.contains("error[E0902]"), "{errors}");
+}
+
+/// An `else` that takes the place of `==`'s right side in an `expect` is reported from that
+/// side to the fallback's end, not from the comparison's left side (issue #55). In
+/// parentheses, the comparison is a plain condition, which the `else` follows (OPEN_QUESTIONS
+/// P5, Tests).
+#[test]
+fn an_expect_else_is_reported_at_its_own_span() {
+    for (line, at) in [("expect sure(1) == 1 else true", "6:23"), ("expect (sure(1) == 1 else true)", "6:12")] {
+        let text = format!("fn sure(n: Int) -> Int {{\n    return n\n}}\n\ntest \"span\" {{\n    {line}\n}}\n");
+        let file = source("expect_else_span.proviso", &text);
+        let output = run(&["check"], &file);
+        let errors = stderr(&output);
+        assert!(errors.contains(&format!("expect_else_span.proviso:{at}: error[E0707]")), "{line}: {errors}");
+        assert_eq!(errors.matches("error[").count(), 1, "{line}: {errors}");
     }
 }

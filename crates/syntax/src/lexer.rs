@@ -59,6 +59,34 @@ impl Lexer<'_> {
         Span::new(self.base + start as u32, self.base + self.pos as u32)
     }
 
+    /// Whether the last token can end an operand, so that an operator may follow it. A line
+    /// break inside brackets continues the line, so the token before it counts.
+    fn after_operand(&self) -> bool {
+        use TokenKind::*;
+        matches!(
+            self.tokens.iter().rev().map(|token| token.kind).find(|&kind| kind != Newline),
+            Some(
+                Ident
+                    | Int
+                    | Float
+                    | Text
+                    | FText
+                    | Char
+                    | RParen
+                    | RBracket
+                    | RBrace
+                    | Keyword(
+                        crate::token::Keyword::True
+                            | crate::token::Keyword::False
+                            | crate::token::Keyword::SelfValue
+                            | crate::token::Keyword::It
+                            | crate::token::Keyword::Todo
+                            | crate::token::Keyword::Unreachable
+                    )
+            )
+        )
+    }
+
     fn push(&mut self, kind: TokenKind, start: usize, value: TokenValue) {
         let span = self.span_from(start);
         self.tokens.push(Token { kind, span, value });
@@ -511,6 +539,14 @@ impl Lexer<'_> {
             ('%', _) => (Percent, 1),
             // Each of these is reported, then read as what it most likely means, so the
             // statement around it still parses.
+            // After an operand, `&&` is a C-style `and`. Anywhere else it is an argument's
+            // `&` marker typed twice (issue #44).
+            ('&', Some('&')) if !self.after_operand() => {
+                self.pos += 2;
+                self.error(codes::INVALID_CHARACTER, start, "`&&` marks an argument twice; write one `&` (§5.2)");
+                self.push(Amp, start, TokenValue::None);
+                return;
+            }
             ('&', Some('&')) => {
                 self.pos += 2;
                 self.error(codes::INVALID_CHARACTER, start, "`&&` is not an operator; write `and` (H2)");

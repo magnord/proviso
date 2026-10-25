@@ -23,12 +23,20 @@ pub struct Module {
     /// Names of items whose declarations were rejected, such as a function that failed to
     /// parse or a later-phase `impl`. Uses of them are not reported again.
     pub poisoned: HashSet<Symbol>,
+    /// Names of functions whose declarations failed to parse, among the `poisoned` ones.
+    pub lost_fns: HashSet<Symbol>,
+    /// Names declared by a later phase's item, such as a `cap interface`, whose arguments
+    /// may not be types, among the `poisoned` ones.
+    pub planned_names: HashSet<Symbol>,
     /// Types named by a rejected `impl` block, such as `Point` in `impl Show for Point`. The
     /// block may have given them methods and interfaces, so uses of those aren't reported.
     pub impls: HashSet<Symbol>,
     /// Whether a rejected `impl` block was for a tuple type, which has no name to note in
     /// `impls`. Every tuple type may then have methods and interfaces we don't know.
     pub tuple_impls: bool,
+    /// Interfaces named by a rejected `impl` block for every type, such as `Show` in
+    /// `impl[T] Show for T`. The block may have given every type the interface.
+    pub everywhere: HashSet<Symbol>,
 }
 
 impl Module {

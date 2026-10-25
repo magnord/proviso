@@ -49,6 +49,8 @@ pub(crate) struct Found {
     pub consumed: HashSet<ExprId>,
     /// The expressions an error was reported at, not at one of their parts.
     pub rejected: HashSet<ExprId>,
+    /// The fields rejected as methods named as values.
+    pub method_values: HashSet<ExprId>,
     /// Where the checker reported errors in the body, which the resources reported here must
     /// not depend on (REFERENCE §15.1).
     pub errors: Vec<Span>,
@@ -98,6 +100,7 @@ pub(crate) fn check(
         bounds,
         consumed: &found.consumed,
         rejected: &found.rejected,
+        method_values: &found.method_values,
         checked: &found.errors,
         state: Some(State::default()),
         loops: Vec::new(),
@@ -427,6 +430,8 @@ struct Walk<'a> {
     /// The expressions the checker rejected, which move nothing and lend nothing, so that
     /// nothing is reported that depends on them (REFERENCE §15.1).
     rejected: &'a HashSet<ExprId>,
+    /// See [`Found::method_values`].
+    method_values: &'a HashSet<ExprId>,
     /// See [`Found::errors`].
     checked: &'a [Span],
     /// What may have moved here, or `None` where the code is unreachable.
@@ -513,6 +518,20 @@ impl Walk<'_> {
     fn tainted(&self, e: ExprId) -> bool {
         let span = self.span(e);
         self.rejected.contains(&e) || self.checked.iter().any(|at| span.lo <= at.lo && at.hi <= span.hi)
+    }
+
+    /// Whether what `e` gives is unknown, since the checker rejected it or reported an error
+    /// inside it. A call of a function gives a value of its result type whatever its
+    /// arguments are, so only an error at the call makes that unknown (issue #46), such as
+    /// its value not fitting where it is given.
+    fn gives_unknown(&self, e: ExprId) -> bool {
+        match self.m.exprs[e].kind {
+            ExprKind::Call { callee, .. } if matches!(self.p.res(callee), Some(Res::Fn(_))) => {
+                let span = self.span(e);
+                self.rejected.contains(&e) || self.checked.contains(&span)
+            }
+            _ => self.tainted(e),
+        }
     }
 
     fn moves(&self, ty: &Ty) -> bool {
@@ -728,7 +747,7 @@ impl Walk<'_> {
 
     /// Reports a resource that `e` makes and nothing consumes (§10 rule 5).
     fn discarded(&mut self, e: ExprId, how: &str) {
-        if self.is_temp(e) && self.holds_resource(e) && !self.tainted(e) && *self.p.ty(e) != Ty::Never {
+        if self.is_temp(e) && self.holds_resource(e) && !self.gives_unknown(e) && *self.p.ty(e) != Ty::Never {
             let message = format!(
                 "this makes a resource, `{}`, that {how}, so it would be lost; consume it or transfer it (§10)",
                 self.p.decls.display(self.p.ty(e))
@@ -899,7 +918,7 @@ impl Walk<'_> {
     /// matches (OPEN_QUESTIONS P5), so a failed test loses a resource the value may hold.
     fn tested(&mut self, value: ExprId, pat: PatId) {
         let ty = self.p.ty(value).clone();
-        if !self.is_resource(&ty) || self.tainted(value) {
+        if !self.is_resource(&ty) || self.gives_unknown(value) {
             return;
         }
         let temp = self.is_temp(value);
@@ -954,6 +973,14 @@ impl Walk<'_> {
                 lost || (gone && (left_out || def.resource_base))
             }
         }
+    }
+
+    /// Whether `e` names a place that holds no resource.
+    fn released_place(&self, e: ExprId) -> bool {
+        self.place(e).is_some_and(|(local, mut path)| {
+            let ty = self.ty_at(local, &path);
+            self.released_fully(local, &mut path, &ty)
+        })
     }
 
     /// The local and fields that `e` names, when it is a place a move can leave.
@@ -1406,10 +1433,13 @@ impl Walk<'_> {
         let m = self.m;
         match &m.stmts[s].kind {
             StmtKind::Let { pat, init, .. } => {
+                // A place known to hold no resource, as a `let` bound to `Spare(probe: None)`
+                // is, loses none (issue #46).
+                let empty = self.released_place(*init);
                 self.expr(*init);
                 let ty = self.p.ty(*init).clone();
                 let gone = self.is_temp(*init) || self.consumed.contains(init);
-                if self.holds_resource(*init) && !self.tainted(*init) && self.lost(*pat, &ty, gone) {
+                if self.holds_resource(*init) && !empty && !self.gives_unknown(*init) && self.lost(*pat, &ty, gone) {
                     let message = "this pattern leaves out a resource of the value it takes, which would drop it (§10)";
                     self.report(codes::RESOURCE_DISCARDED, m.pats[*pat].span, message.to_string());
                 }
@@ -1422,11 +1452,11 @@ impl Walk<'_> {
                 }
                 // A value that holds no resource, such as `None`, has nothing to consume.
                 let mut empty = Vec::new();
-                if self.refused.contains(init) || self.tainted(*init) || !self.holds_resource(*init) {
+                if self.refused.contains(init) || self.gives_unknown(*init) || !self.holds_resource(*init) {
                     self.pattern_locals(*pat, &mut empty);
                     // A `var` may get a resource in place later, so it is released only when
                     // the part it binds is a variant (OPEN_QUESTIONS P5).
-                    let tainted = self.refused.contains(init) || self.tainted(*init);
+                    let tainted = self.refused.contains(init) || self.gives_unknown(*init);
                     empty.retain(|l| tainted || !self.locals[l.index()].mutable);
                 }
                 self.empty_bindings(*pat, Some(*init), &mut empty);
@@ -1442,7 +1472,7 @@ impl Walk<'_> {
                     self.change_lent(*target, self.lent.len());
                 }
                 // A place that may still hold a resource can't be assigned over (§10 rule 5).
-                if self.is_resource(self.p.ty(*target)) && !self.tainted(*target) && !self.tainted(*value) {
+                if self.is_resource(self.p.ty(*target)) && !self.tainted(*target) && !self.gives_unknown(*value) {
                     let released = match self.place(*target) {
                         Some((local, _)) if self.excused.contains(&local) => true,
                         Some((local, mut path)) => {
@@ -1700,7 +1730,11 @@ impl Walk<'_> {
             }
             ExprKind::Field { base, .. } => {
                 self.expr(*base);
-                if !matches!(self.p.res(e), Some(Res::Ctor(..))) {
+                // A method value, as in `p.close`, was meant to be called, which may have
+                // consumed its receiver, as a rejected call may (REFERENCE §15.1).
+                if self.method_values.contains(&e) {
+                    self.rejected_receiver(*base);
+                } else if !matches!(self.p.res(e), Some(Res::Ctor(..))) {
                     self.borrowed_temp(*base);
                 }
             }
@@ -1835,7 +1869,7 @@ impl Walk<'_> {
             ExprKind::Match { scrutinee, arms, .. } => {
                 self.expr(*scrutinee);
                 let ty = self.p.ty(*scrutinee).clone();
-                let resource = self.is_resource(&ty) && !self.tainted(*scrutinee);
+                let resource = self.is_resource(&ty) && !self.gives_unknown(*scrutinee);
                 let temp = self.is_temp(*scrutinee);
                 // A temporary that guards may still fail past is held until an arm takes it.
                 if resource && temp {
@@ -2119,6 +2153,19 @@ impl Walk<'_> {
 
     // ---- calls ----
 
+    /// Releases the place `value` names, which a rejected call or method value is given and
+    /// may have meant to consume, so it isn't reported as left over (REFERENCE §15.1).
+    fn rejected_receiver(&mut self, value: ExprId) {
+        let Some((local, path)) = self.place(value) else { return };
+        // A closure's state ends with it, so what it captures is excused instead.
+        if self.captured.contains(&local) {
+            self.excused.insert(local);
+        }
+        if let Some(state) = &mut self.state {
+            state.release(local, path);
+        }
+    }
+
     /// The arguments of a call, and its receiver with the mode it takes `self` in. The
     /// indices of an `&` argument and an `inout self` receiver are evaluated in order with
     /// the other arguments, but the place is reached once they all are (§5.3), and no two
@@ -2129,14 +2176,7 @@ impl Walk<'_> {
             // so no resource it reads is reported as left over (REFERENCE §15.1).
             for value in receiver.map(|(r, _)| r).into_iter().chain(args.iter().map(|arg| arg.value)) {
                 self.read(value);
-                let Some((local, path)) = self.place(value) else { continue };
-                // A closure's state ends with it, so what it captures is excused instead.
-                if self.captured.contains(&local) {
-                    self.excused.insert(local);
-                }
-                if let Some(state) = &mut self.state {
-                    state.release(local, path);
-                }
+                self.rejected_receiver(value);
             }
             return;
         }
@@ -2213,8 +2253,10 @@ impl Walk<'_> {
         for arg in args {
             if arg.inout {
                 self.indices(arg.value);
-                // A function value passed with `&` reads its captures for the call too.
-                if let Some((local, _)) = self.place(arg.value)
+                // A function value passed with `&` reads its captures for the call too, unless
+                // it was rejected, so it accesses nothing (REFERENCE §15.1).
+                if !self.rejected.contains(&arg.value)
+                    && let Some((local, _)) = self.place(arg.value)
                     && let Some(reads) = self.fn_reads.get(&local).cloned()
                 {
                     self.note_reads(&mut accesses, arg.value, reads.to_vec(), Lender::Capture);

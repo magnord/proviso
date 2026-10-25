@@ -329,14 +329,16 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         adt_names: HashMap::new(),
         aliases: HashMap::new(),
         poisoned: m.poisoned.clone(),
+        main_lost: m.lost_fns.iter().any(|&sym| m.text(sym) == "main"),
         adts: Vec::new(),
         adt_vis: HashMap::new(),
         iface_names: HashMap::new(),
         ifaces: Vec::new(),
         inherent: HashMap::new(),
         rejected_abandon: HashSet::new(),
-        rejected_abandon_for: HashSet::new(),
+        rejected_abandon_for: Vec::new(),
         unknown_tys: Vec::new(),
+        operators: Vec::new(),
         f: FnState::new(Ty::Unit, None),
         in_chain: false,
         markers: Vec::new(),
@@ -348,6 +350,8 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         copying: false,
         consumed: HashSet::new(),
         rejected: HashSet::new(),
+        mismatched: HashSet::new(),
+        method_values: HashSet::new(),
         errors: 0,
         inner_errors: 0,
         tail_copying: false,
@@ -381,6 +385,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     checker.adt_derives();
     checker.signatures();
     checker.impls();
+    checker.operator_derives();
     checker.abandon_impls();
     checker.written_keys();
     checker.collisions();
@@ -646,6 +651,8 @@ struct Checker<'a> {
     /// Names whose declarations were rejected, so their uses aren't reported again: those the
     /// parser rejected, and records and enums whose names the checker rejects.
     poisoned: HashSet<Symbol>,
+    /// Whether a function named `main` was rejected, so it isn't reported as missing.
+    main_lost: bool,
     /// Every record and enum declaration, including those whose name is rejected.
     adts: Vec<AdtSrc<'a>>,
     /// The visibility of each of [`Checker::adts`].
@@ -666,11 +673,15 @@ struct Checker<'a> {
     /// The methods of a rejected `impl Abandon`, whose `self` isn't reported as left over,
     /// since its `abandon` was never going to be called (REFERENCE §15.1).
     rejected_abandon: HashSet<FnId>,
-    /// The types of those blocks, whose `Abandon.abandon(x)` may mean one of them.
-    rejected_abandon_for: HashSet<Ty>,
+    /// The targets of those blocks, with how many type parameters each has, so that
+    /// `Abandon.abandon(x)` on a type one matches may mean it (issue #53).
+    rejected_abandon_for: Vec<(Ty, usize)>,
     /// Types without an [`ImplKey`], such as `Never` and `Out`, that a rejected `impl` block
     /// is for. They may have methods and interfaces that nothing records (REFERENCE §15.1).
     unknown_tys: Vec<Ty>,
+    /// The operators distinct types derive, with the name of each, which
+    /// [`Checker::operator_derives`] checks once every `impl` block is known.
+    operators: Vec<(AdtId, IfaceId, Ident)>,
     /// What `Self` means here: the type of an `impl` block, or `Param(0)` in an interface.
     self_ty: Option<Ty>,
     /// The type parameters in scope, by name, with their indices; `None` for one whose
@@ -689,6 +700,12 @@ struct Checker<'a> {
     /// The expressions of the body being checked that an error was reported at, not at one
     /// of their parts, which the move pass leaves alone (REFERENCE §15.1).
     rejected: HashSet<ExprId>,
+    /// The branches whose type didn't match the others', and the `if`, `match` and `else`
+    /// forms they are in, which give no type (REFERENCE §15.1).
+    mismatched: HashSet<ExprId>,
+    /// The fields rejected as methods named as values, as in `p.close`, which the move pass
+    /// treats as rejected calls of them (REFERENCE §15.1).
+    method_values: HashSet<ExprId>,
     /// How many errors were reported, and how many of them inside the parts of the
     /// expression being checked.
     errors: usize,
@@ -844,10 +861,13 @@ impl Checker<'_> {
         self.p.decls.implements(&ty, iface, &self.f.bounds) || self.unknown_tys.contains(&ty)
     }
 
-    /// Whether a rejected declaration may have given `ty` interfaces that nothing records.
+    /// Whether a rejected declaration may have given `ty` interfaces that nothing records. A
+    /// type parameter whose declaration or constraint is rejected is one (issue #53).
     fn unknown_interfaces(&self, ty: &Ty) -> bool {
         let ty = self.vars.resolve(ty);
-        self.p.decls.unknown_interfaces(&ty) || self.unknown_tys.contains(&ty)
+        self.p.decls.unknown_interfaces(&ty)
+            || self.unknown_tys.contains(&ty)
+            || matches!(ty, Ty::Param(i) if self.f.rejected.get(i as usize) == Some(&true))
     }
 
     // ---- inference variables (OPEN_QUESTIONS P5; issue #10) ----
@@ -1573,10 +1593,11 @@ impl Checker<'_> {
                     self.error(codes::SHADOWING, name.span, message);
                 }
                 self.poisoned.insert(name.sym);
-            } else if self.adt_names.contains_key(&name.sym) || self.imports.contains_key(&name.sym) {
-                self.error(codes::DUPLICATE_ITEM, name.span, format!("`{text}` is defined twice in this module"));
-            } else if self.aliases.contains_key(&name.sym) {
-                // Which one a use means is unclear, so its uses aren't checked.
+            } else if self.adt_names.contains_key(&name.sym)
+                || self.imports.contains_key(&name.sym)
+                || self.aliases.contains_key(&name.sym)
+            {
+                // Which one a use means is unclear, so its uses aren't checked (issue #19).
                 self.error(codes::DUPLICATE_ITEM, name.span, format!("`{text}` is defined twice in this module"));
                 self.poisoned.insert(name.sym);
             } else {
@@ -2051,6 +2072,12 @@ impl Checker<'_> {
                 self.unknown_target(sym);
             }
         }
+        for &sym in &m.everywhere {
+            let iface = self.iface_names.get(&sym).copied().or_else(|| IfaceId::prelude(m.text(sym)));
+            if let Some(iface) = iface {
+                self.p.decls.mark_everywhere(iface);
+            }
+        }
     }
 
     /// Notes that a rejected `impl` block is for the type `sym` names, if any.
@@ -2219,17 +2246,25 @@ impl Checker<'_> {
             def.derives = derives;
             def.unknown_interfaces |= unknown;
         }
+        self.operators = operators;
+    }
+
+    /// Checks each operator a distinct type derives against the type it wraps, once every
+    /// `impl` block is known, so one rejected for the wrapped type may have given it.
+    fn operator_derives(&mut self) {
+        let m = self.m;
         // Each is checked against the derives as written, so one that wraps a distinct type
         // whose own derive is rejected isn't reported again (REFERENCE §15.1).
-        let missing: Vec<_> = operators
+        let missing: Vec<_> = std::mem::take(&mut self.operators)
             .into_iter()
             .filter(|&(id, iface, _)| {
                 let wrapped = &self.p.decls.adt(id).variant().fields[0].ty;
-                // A distinct type whose own derives are rejected may have meant this one. A record
-                // or enum can't derive an operator, so its rejected derives can't have meant it.
+                // A distinct type whose own derives are rejected may have meant this one, and so
+                // may a rejected `impl` block for any record or enum (issue #55). A record or
+                // enum can't derive an operator, so its rejected derives can't have meant it.
                 if let Ty::Adt(of, _) = wrapped
-                    && self.p.decls.adt(*of).distinct
-                    && self.p.decls.adt(*of).unknown_interfaces
+                    && (self.p.decls.adt(*of).distinct && self.p.decls.adt(*of).unknown_interfaces
+                        || self.p.decls.adt(*of).unknown_methods)
                 {
                     return false;
                 }
@@ -2365,6 +2400,7 @@ impl Checker<'_> {
         moves::Found {
             consumed: std::mem::take(&mut self.consumed),
             rejected: std::mem::take(&mut self.rejected),
+            method_values: std::mem::take(&mut self.method_values),
             errors,
         }
     }
@@ -2398,6 +2434,9 @@ impl Checker<'_> {
                         format!("`{name}` is defined twice in this module"),
                     );
                 }
+                // A call may mean either function, so none is checked against one (§15.1).
+                self.poisoned.insert(decl.name.sym);
+                self.main_lost |= name == "main";
             } else {
                 self.fn_names.insert(decl.name.sym, id);
                 if name == "main" {
@@ -2709,12 +2748,14 @@ impl Checker<'_> {
         let target = self.resolve_type(decl.target);
         self.impl_scope();
         // Only the target gives the block's type parameters, so one it doesn't name could
-        // be any type at each call (OPEN_QUESTIONS P5). It stands for an unknown type.
+        // be any type at each call (OPEN_QUESTIONS P5). It stands for an unknown type. A
+        // target without an error names no parameter whose constraint was rejected, which
+        // is reported too (issue #53).
         if !mentions_error(&target) {
             let mut used = Vec::new();
             params_in(&target, &mut used);
             for (i, param) in decl.generics.iter().enumerate() {
-                if self.impl_generics[i].rejected || self.impl_generics[i].sym.is_none() || used.contains(&(i as u32)) {
+                if self.impl_generics[i].sym.is_none() || used.contains(&(i as u32)) {
                     continue;
                 }
                 let message = format!(
@@ -2844,7 +2885,7 @@ impl Checker<'_> {
             if let Ty::Adt(adt, _) = target
                 && !self.p.decls.is_resource(&target)
             {
-                self.rejected_abandon_for.insert(target.clone());
+                self.rejected_abandon_for.push((target.clone(), self.impl_generics.len()));
                 let entries = self.inherent.entry(adt).or_default();
                 for (i, method) in decl.methods.iter().enumerate() {
                     entries.push(Inherent { name: method.decl.name.sym, f: first + i, rejected: true });
@@ -2857,6 +2898,9 @@ impl Checker<'_> {
         {
             let message = format!("`{target_text}` derives `{iface_text}`, so it implements it already");
             self.error(codes::DUPLICATE_IMPLEMENTATION, header, message);
+            // The block was meant to give its target the interface, which the derive alone
+            // may not for these type arguments (§15.1).
+            self.p.decls.mark_taken(iface, key, target.clone(), self.impl_generics.len());
             self.declare_rejected(item, decl, &target);
             return;
         }
@@ -3135,7 +3179,8 @@ impl Checker<'_> {
 
     fn check_main(&mut self) {
         let Some(id) = self.p.main else {
-            if self.opts.needs_main {
+            // A `main` that failed to parse or clashed has been reported (§15.1).
+            if self.opts.needs_main && !self.main_lost {
                 self.error(
                     codes::INVALID_MAIN,
                     Span::default(),
@@ -3196,14 +3241,25 @@ impl Checker<'_> {
             },
             TypeExprKind::Applied { name, ref args } => {
                 let text = m.text(name.sym);
+                // A rejected declaration's type arguments mean the same whichever one it was.
+                // A later phase's item, such as a capability, may take arguments that aren't
+                // types, as in `Logger[write]`.
                 if self.poisoned.contains(&name.sym) {
+                    if !m.planned_names.contains(&name.sym) {
+                        for &arg in args.as_deref().unwrap_or_default() {
+                            self.resolve_type(arg);
+                        }
+                    }
                     return Ty::Error;
                 }
-                if self.generic_scope.iter().any(|(sym, _)| *sym == name.sym)
-                    || self.iface_names.contains_key(&name.sym)
-                    || IfaceId::prelude(text).is_some()
-                {
+                if self.generic_scope.iter().any(|(sym, _)| *sym == name.sym) {
                     self.error(codes::UNKNOWN_TYPE, te.span, format!("`{text}` takes no type arguments"));
+                    return Ty::Error;
+                }
+                // `x: Show[Int]` means `[T: Show[Int]]` (REFERENCE §4.9), and generic
+                // interfaces are not yet scheduled (OPEN_QUESTIONS P5; issue #53).
+                if self.iface_names.contains_key(&name.sym) || IfaceId::prelude(text).is_some() {
+                    self.not_implemented(te.span, "generic interfaces", Planned::Unscheduled);
                     return Ty::Error;
                 }
                 if let Some(id) = self.generic_adt(name.sym) {
@@ -3391,10 +3447,12 @@ impl Checker<'_> {
             return;
         }
         let mut state = FnState::new(info.ret.clone(), info.fails.clone());
-        // A type parameter with a rejected declaration or constraint may have been `Copy`, so
-        // copying a value whose type has it isn't reported (§15.1).
+        // A type parameter with a rejected declaration or constraint may have had any
+        // constraint, so it meets every interface, and what needs one of it, such as a copy
+        // or another block's constraint, isn't reported (§15.1; issue #53).
+        let every: Vec<IfaceId> = self.p.decls.ifaces().map(|(iface, _)| iface).collect();
         state.bounds =
-            (info.generics.iter()).map(|g| if g.rejected { vec![IfaceId::COPY] } else { g.bounds.clone() }).collect();
+            (info.generics.iter()).map(|g| if g.rejected { every.clone() } else { g.bounds.clone() }).collect();
         state.rejected = info.generics.iter().map(|g| g.rejected).collect();
         state.anonymous = (info.generics.iter())
             .map(|g| Some((m.text(g.param?).into(), self.iface_name(*g.bounds.first()?).into())))
@@ -3554,9 +3612,11 @@ impl Checker<'_> {
         let err = self.one_error(errors, span, noun, &format!("{what} expects one error type"));
         match expect {
             Expectation::Equals(value) => {
-                // A call that was rejected has nothing to compare with (§15.1).
+                // A call that was rejected gives the value no type, and what the value leaves
+                // open isn't reported, as with an operand of `==` (§15.1; issue #39).
                 if ty == Ty::Error {
-                    self.rejected_value(*value);
+                    let value_ty = self.expr(*value, None);
+                    self.vars.quiet(&value_ty);
                     return;
                 }
                 // As in `operands`, the call gives the value what it knows of its type, and the
@@ -4231,22 +4291,44 @@ impl Checker<'_> {
         let origin = Origin::Variant { adt: AdtId::MAP, span };
         // An expected map type has had its key type checked where it was written or built, so
         // literals whose keys meet, which give each other their types, report it once.
-        let (mut key, mut value, checked) = match expected {
+        let (mut key, mut value, mut checked) = match expected {
             Some(Ty::Adt(AdtId::MAP, args)) => (args[0].clone(), args[1].clone(), true),
             Some(Ty::Error) => (self.vars.rejected(), self.vars.rejected(), true),
             _ => (self.vars.fresh(Kind::Any, origin), self.vars.fresh(Kind::Any, origin), false),
         };
+        // A key type still open in the expected type was left by a literal without entries,
+        // as in `[:] == [x: 1]`, so this literal, whose entries give the key type, takes over
+        // its check (issue #39).
+        if checked
+            && !entries.is_empty()
+            && let open @ Ty::Var(_) = self.vars.resolve(&key)
+            && let Some(i) = self.pending.iter().position(|check| {
+                matches!(check, Pending::Bound { ty, callee, .. } if **callee == *"Map" && self.vars.resolve(ty) == open)
+            })
+        {
+            self.pending.remove(i);
+            checked = false;
+        }
         for &(k, v) in entries {
             key = self.element(k, key);
             value = self.element(v, value);
         }
         if !checked {
             let key = self.vars.resolve(&key);
-            if self.vars.has_var(&key) {
+            // A float literal settles as a float type, and none has `Eq` (REFERENCE §12.2).
+            let float = matches!(key, Ty::Var(v) if self.vars.open(v).is_some_and(|open| open.kind == Kind::Float));
+            if self.vars.has_var(&key) && !float {
                 let (ifaces, callee, param) = (vec![IfaceId::EQ, IfaceId::HASH], "Map".into(), "K".into());
                 self.pending.push(Pending::Bound { ty: key, ifaces, callee, param, span });
-            } else {
-                self.key_bound(&key, span);
+            } else if !self.key_bound(if float { &Ty::Float(FloatTy::F64) } else { &key }, span)
+                && !matches!(key, Ty::Fn(..))
+                && !holds_fn(&key)
+            {
+                // The literal is rejected, as a written map type with this key is, so what uses
+                // it isn't reported again (§15.1). A function key is reported where the map
+                // goes (E0509), which needs its type.
+                self.vars.quiet(&value);
+                return Ty::Error;
             }
         }
         Ty::map(key, value)
@@ -4464,23 +4546,28 @@ impl Checker<'_> {
         }
     }
 
+    /// Reports that `e`'s type doesn't fit where it is. A mismatched place moves nothing. Any
+    /// other value, such as a call, still takes what it is given, and the mismatch is about
+    /// the value it gives.
+    fn mismatch(&mut self, e: ExprId, span: Span, message: String) {
+        if matches!(
+            self.m.exprs[e].kind,
+            ExprKind::Name(_) | ExprKind::It | ExprKind::Field { .. } | ExprKind::Index { .. }
+        ) {
+            self.error_of(e, codes::TYPE_MISMATCH, span, message);
+        } else {
+            self.error(codes::TYPE_MISMATCH, span, message);
+            self.inner_errors += 1;
+        }
+    }
+
     /// Checks `e` against `expected`, reports a mismatch, and returns the actual type.
     fn check(&mut self, e: ExprId, expected: &Ty) -> Ty {
         let actual = self.expr(e, Some(expected));
         if !self.vars.subsume(expected, &actual) {
             let span = self.span(e);
             let message = format!("expected `{}`, found `{}`", self.show(expected), self.show(&actual));
-            // A mismatched place moves nothing. Any other value, such as a call, still takes
-            // what it is given, and the mismatch is about the value it gives.
-            if matches!(
-                self.m.exprs[e].kind,
-                ExprKind::Name(_) | ExprKind::It | ExprKind::Field { .. } | ExprKind::Index { .. }
-            ) {
-                self.error_of(e, codes::TYPE_MISMATCH, span, message);
-            } else {
-                self.error(codes::TYPE_MISMATCH, span, message);
-                self.inner_errors += 1;
-            }
+            self.mismatch(e, span, message);
             // What the value leaves open has no other way to be given, and what the expected
             // type leaves open may have been the value's to give (§15.1).
             self.vars.poison(&actual);
@@ -4979,6 +5066,11 @@ impl Checker<'_> {
         }
         match (&unwrapped, &fallback_ty) {
             (Ty::Never, ty) => ty.clone(),
+            // A fallback whose type doesn't match the value's gives the form no type (issue #55).
+            _ if self.mismatched_tail(tail) => {
+                self.mismatched.insert(e);
+                Ty::Error
+            }
             (ty, Ty::Never | Ty::Error) => ty.clone(),
             // The fallback's value was joined with the unwrapped one, which it may widen.
             (_, ty) => ty.clone(),
@@ -5219,7 +5311,7 @@ impl Checker<'_> {
             }
             return self.unit_variant(e, id, name, expected);
         }
-        if let Some(&f) = self.fn_names.get(&name.sym) {
+        if let Some(&f) = self.fn_names.get(&name.sym).filter(|_| !self.poisoned.contains(&name.sym)) {
             return self.fn_value(e, f, None, name.span);
         } else if self.unqualified_variant(name) || self.poisoned.contains(&name.sym) {
         } else if self.aliases.contains_key(&name.sym) {
@@ -5587,6 +5679,7 @@ impl Checker<'_> {
         let span = self.span(e);
         if let ExprKind::Name(name) = m.exprs[callee].kind
             && self.lookup_local(name.sym).is_none()
+            && !self.poisoned.contains(&name.sym)
             && let Some(&f) = self.fn_names.get(&name.sym)
         {
             let ty = self.fn_value(callee, f, Some(targs), span);
@@ -5628,8 +5721,19 @@ impl Checker<'_> {
             return None;
         }
         let id = self.adt_named(type_name.sym)?;
-        let entry = self.inherent.get(&id)?.iter().find(|entry| entry.name == name)?;
-        Some((id, self.p.fns[entry.f].receiver.is_some()))
+        if let Some(entry) = self.inherent.get(&id).and_then(|entries| entries.iter().find(|entry| entry.name == name))
+        {
+            return Some((id, self.p.fns[entry.f].receiver.is_some()));
+        }
+        // An interface's method, which takes `self`, of a type that derives the interface or
+        // has an `impl` of it, for any of its instances (issue #50).
+        let text = self.m.text(name);
+        let def = self.p.decls.adt(id);
+        let own = Ty::Adt(id, (0..def.params as u32).map(Ty::Param).collect());
+        let named = self.p.decls.ifaces().any(|(iface, idef)| {
+            idef.method(text).is_some() && (def.derives.contains(&iface) || self.p.decls.has_impl_head(iface, &own))
+        });
+        named.then_some((id, true))
     }
 
     /// Whether a value of type `ty` has a method `name`, its own, built in or from an
@@ -5689,7 +5793,7 @@ impl Checker<'_> {
     /// when a wrongly cased function has its name.
     fn fn_named(&self, callee: ExprId) -> Option<FnId> {
         let ExprKind::Name(name) = self.m.exprs[callee].kind else { return None };
-        if bare_variant(self.m.text(name.sym)).is_some() {
+        if bare_variant(self.m.text(name.sym)).is_some() || self.poisoned.contains(&name.sym) {
             return None;
         }
         self.fn_names.get(&name.sym).copied()
@@ -6574,7 +6678,10 @@ impl Checker<'_> {
         }
         let receiver_ty = self.infer(first.value);
         let receiver_ty = self.force(&receiver_ty);
-        if iface == IfaceId::ABANDON && self.rejected_abandon_for.contains(&receiver_ty) {
+        if iface == IfaceId::ABANDON
+            && (self.rejected_abandon_for.iter())
+                .any(|(target, params)| matches_target(target, &receiver_ty, &mut vec![None; *params]))
+        {
             self.rejected_args(rest);
             return Ty::Error;
         }
@@ -6677,6 +6784,7 @@ impl Checker<'_> {
                     "`{text}` is a method, which is called with its arguments; it isn't a function value, but a closure can wrap a call of it, as in `|| x.{text}()`"
                 );
                 self.error(codes::METHOD_VALUE, name.span, message);
+                self.method_values.insert(e);
                 Ty::Error
             }
             (ty, _) => {
@@ -6843,21 +6951,37 @@ impl Checker<'_> {
         // then each closure whose parameter types are written or settled, so the order of the
         // arguments doesn't change the types (OPEN_QUESTIONS Q33). A closure that an `if`,
         // `match` or `else` gives waits as one does.
+        // Where a label is wrong, each argument is checked against the parameter its label
+        // names, so the label isn't reported again as a mismatched type (§15.1; issue #51).
+        // An argument whose label names a parameter another argument has is checked as written.
+        let to = if labels_reported && !unnamed {
+            label_order(m, args, params)
+        } else {
+            (0..args.len()).map(Some).collect()
+        };
         let (mut closures, others): (Vec<usize>, Vec<usize>) =
             (0..args.len()).partition(|&i| self.gives_closure(args[i].value));
         for i in others {
-            self.generic_arg(callee, i, &args[i], (params[i].0.as_ref(), &params[i].1), targs, modes);
+            match to[i] {
+                Some(j) => self.generic_arg(callee, j, &args[i], (params[j].0.as_ref(), &params[j].1), targs, modes),
+                None => self.rejected_args(std::slice::from_ref(&args[i])),
+            }
         }
         while !closures.is_empty() {
-            let ready =
-                closures.iter().position(|&i| self.closure_ready(args[i].value, &params[i].1, targs)).unwrap_or(0);
+            let ready = closures
+                .iter()
+                .position(|&i| to[i].is_none_or(|j| self.closure_ready(args[i].value, &params[j].1, targs)))
+                .unwrap_or(0);
             let i = closures.remove(ready);
-            self.generic_arg(callee, i, &args[i], (params[i].0.as_ref(), &params[i].1), targs, modes);
+            match to[i] {
+                Some(j) => self.generic_arg(callee, j, &args[i], (params[j].0.as_ref(), &params[j].1), targs, modes),
+                None => self.rejected_args(std::slice::from_ref(&args[i])),
+            }
         }
         true
     }
 
-    /// Checks argument `i` of a call against parameter `param` of type `ty`.
+    /// Checks the argument for parameter `i` of a call against parameter `param` of type `ty`.
     fn generic_arg(&mut self, callee: &str, i: usize, arg: &Arg, (param, ty): (&str, &Ty), targs: &[Ty], modes: Modes) {
         let mode = match modes {
             Modes::Borrow => ParamMode::Borrow,
@@ -7272,6 +7396,11 @@ impl Checker<'_> {
                 }
                 match expected {
                     _ if then_ty == Ty::Never && else_ty == Ty::Never => Ty::Never,
+                    // Branches whose types don't match give the `if` no type (issue #55).
+                    _ if self.mismatched_tail(self.tail(then_block)) || self.mismatched_tail(else_tail) => {
+                        self.mismatched.insert(e);
+                        Ty::Error
+                    }
                     // The else-branch's type is the join, unless it has none of its own.
                     Some(known) if else_ty.is_unknown() => known.clone(),
                     _ => else_ty,
@@ -7295,11 +7424,17 @@ impl Checker<'_> {
         }
         self.vars.join(known, &ty).unwrap_or_else(|| {
             let message = format!("expected `{}`, found `{}`", self.show(known), self.show(&ty));
-            self.error(codes::TYPE_MISMATCH, self.span(e), message);
+            self.mismatch(e, self.span(e), message);
             self.vars.poison(&ty);
             self.vars.quiet(known);
+            self.mismatched.insert(e);
             Ty::Error
         })
+    }
+
+    /// Whether `tail`, the value a branch gives, has a type that didn't match the others'.
+    fn mismatched_tail(&self, tail: Option<ExprId>) -> bool {
+        tail.is_some_and(|tail| self.mismatched.contains(&tail))
     }
 
     /// Checks a `Bool` whose `is` bindings scope over what follows it: the rest of an `and`
@@ -7491,6 +7626,7 @@ impl Checker<'_> {
             _ => None,
         };
         let mut diverges = true;
+        let mut mismatched = false;
         let mut leaves = Ty::Never;
         let mut tys = Vec::new();
         for arm in arms {
@@ -7517,6 +7653,7 @@ impl Checker<'_> {
                     if !ty.is_unknown() {
                         expected = Some(ty.clone());
                     }
+                    mismatched |= self.mismatched_tail(self.tail(&arm.body));
                     // A closure the arm gives can't capture its bindings (Q34).
                     if let Some(tail) = self.tail(&arm.body) {
                         self.local_capture(tail, base);
@@ -7558,6 +7695,11 @@ impl Checker<'_> {
             _ if diverges => Ty::Never,
             Mode::Stmt | Mode::Tail(_) => leaves,
             Mode::Value(_) if !complete => Ty::Error,
+            // Arms whose types don't match give the `match` no type (issue #55).
+            Mode::Value(_) if mismatched => {
+                self.mismatched.insert(e);
+                Ty::Error
+            }
             Mode::Value(_) => expected.unwrap_or(Ty::Error),
         };
         self.record(e, ty.clone());
@@ -7813,6 +7955,12 @@ impl Checker<'_> {
         }
         if let Some((code, span, message)) = problem {
             self.error(code, span, message);
+            // A pattern whose fields are only out of order still takes each one apart, so
+            // what it binds and moves is known (§15.1; issue #46).
+            let distinct = targets.iter().collect::<HashSet<_>>().len();
+            if code == codes::WRONG_LABEL && targets.len() == fields.len() && distinct == targets.len() {
+                self.p.pat_ctor.insert(pat, CtorPat { adt: id, variant: v, fields: targets.into() });
+            }
             return Space::Error;
         }
         self.p.pat_ctor.insert(pat, CtorPat { adt: id, variant: v, fields: targets.into() });
@@ -7983,31 +8131,90 @@ impl Checker<'_> {
 /// `ty` with each map whose key type doesn't implement `Eq` and `Hash` an error, where type
 /// parameter `i` implements `bounds[i]`, and `unknown` may implement anything.
 fn without_bad_keys(decls: &Decls, ty: &Ty, bounds: &[Vec<IfaceId>], unknown: &[Ty]) -> Ty {
-    let Ty::Adt(id, args) = ty else { return ty.clone() };
+    without_bad_keys_in(decls, ty, bounds, unknown, &mut HashMap::new()).unwrap_or_else(|| ty.clone())
+}
+
+/// [`without_bad_keys`], or `None` where nothing changes, so the type keeps its shared parts.
+/// A type argument list in `seen`, by address, was looked at already, so a type that shares
+/// its parts, as a doubling alias does, costs each part once (issue #55).
+fn without_bad_keys_in(
+    decls: &Decls,
+    ty: &Ty,
+    bounds: &[Vec<IfaceId>],
+    unknown: &[Ty],
+    seen: &mut HashMap<(AdtId, usize), Option<Ty>>,
+) -> Option<Ty> {
+    let Ty::Adt(id, args) = ty else { return None };
     if args.is_empty() {
-        return ty.clone();
+        return None;
     }
-    let args: Vec<Ty> = args.iter().map(|arg| without_bad_keys(decls, arg, bounds, unknown)).collect();
-    if *id == AdtId::MAP {
+    let key = (*id, Arc::as_ptr(args) as *const Ty as usize);
+    if let Some(done) = seen.get(&key) {
+        return done.clone();
+    }
+    let parts: Vec<Option<Ty>> =
+        args.iter().map(|arg| without_bad_keys_in(decls, arg, bounds, unknown, seen)).collect();
+    let changed = parts.iter().any(Option::is_some) || args.contains(&Ty::Error);
+    let args: Vec<Ty> =
+        parts.into_iter().zip(args.iter()).map(|(part, arg)| part.unwrap_or_else(|| arg.clone())).collect();
+    let keyed = || {
         let key = &args[0];
-        let keyed = key.is_unknown()
+        key.is_unknown()
             || unknown.contains(key)
             || decls.unknown_interfaces(key)
             || (!decls.is_resource(key)
-                && [IfaceId::EQ, IfaceId::HASH].iter().all(|&iface| decls.implements(key, iface, bounds)));
-        if !keyed {
-            return Ty::Error;
-        }
-    }
-    Ty::applied(*id, args)
+                && [IfaceId::EQ, IfaceId::HASH].iter().all(|&iface| decls.implements(key, iface, bounds)))
+    };
+    let done = if *id == AdtId::MAP && !keyed() {
+        Some(Ty::Error)
+    } else if changed {
+        Some(Ty::applied(*id, args))
+    } else {
+        None
+    };
+    seen.insert(key, done.clone());
+    done
 }
 
-/// Whether `ty` mentions one of the type parameters `targs` stands for.
-fn mentions_targ(ty: &Ty, targs: &[Ty]) -> bool {
-    match ty {
-        Ty::Param(i) => (*i as usize) < targs.len(),
-        ty => ty.parts().is_some_and(|parts| parts.iter().any(|part| mentions_targ(part, targs))),
+/// The parameter each argument of a call whose labels are wrong is checked against: the one
+/// its label names, or its own or the first that no argument names when its label names
+/// none. An argument whose label names a parameter an earlier one has gets none.
+fn label_order<S: AsRef<str>>(m: &Module, args: &[Arg], params: &[(S, Ty)]) -> Vec<Option<usize>> {
+    let named: Vec<Option<usize>> = args
+        .iter()
+        .map(|arg| arg.label.and_then(|label| params.iter().position(|(param, _)| param.as_ref() == m.text(label.sym))))
+        .collect();
+    let mut taken = vec![false; params.len()];
+    let mut to: Vec<Option<usize>> = vec![None; args.len()];
+    for (i, &j) in named.iter().enumerate() {
+        if let Some(j) = j.filter(|&j| !taken[j]) {
+            (to[i], taken[j]) = (Some(j), true);
+        }
     }
+    for i in 0..args.len() {
+        if named[i].is_none() {
+            let free = if taken[i] { taken.iter().position(|t| !t) } else { Some(i) };
+            if let Some(j) = free {
+                (to[i], taken[j]) = (Some(j), true);
+            }
+        }
+    }
+    to
+}
+
+/// Whether `ty` mentions one of the type parameters `targs` stands for. Each shared part is
+/// walked once (issue #55).
+fn mentions_targ(ty: &Ty, targs: &[Ty]) -> bool {
+    fn walk(ty: &Ty, targs: &[Ty], seen: &mut HashSet<usize>) -> bool {
+        match ty {
+            Ty::Param(i) => (*i as usize) < targs.len(),
+            ty => ty.parts().is_some_and(|parts| {
+                seen.insert(Arc::as_ptr(parts) as *const Ty as usize)
+                    && parts.iter().any(|part| walk(part, targs, seen))
+            }),
+        }
+    }
+    walk(ty, targs, &mut HashSet::new())
 }
 
 /// Whether `ty` holds a function value where one can't be: in a record, enum, tuple or

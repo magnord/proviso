@@ -1,0 +1,154 @@
+// phase: 2
+// expect-error: E0201
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0305
+// expect-error: E0320
+// expect-error: E0507
+// expect-error: E0508
+// The move pass excuses only what an error makes unknown (REFERENCE §15.1). A `let` known
+// to hold no resource loses none when it is discarded, whole or by a field, while a `var`
+// may get one later (issue #46). A call of a function gives a value of its result type
+// whatever its arguments are, so an error in an argument doesn't hide the resource it
+// gives, whether it is bound, discarded, matched, tested or assigned over a place that
+// holds one (issue #46). An error at the callee or in a construction does, and so does a
+// value given where it doesn't fit. A method used as a value, as in `p.close`, was meant to
+// be called, so its receiver isn't reported as left over, inside a closure or outside one,
+// and nor is a field it is read from or a value it is made on (issue #50). A misspelled
+// field is read, not called, so the leak of its base is still reported. A place given
+// by a branch whose type doesn't fit moves nothing, as one given directly doesn't, and a
+// rejected `&` function value lends nothing it captures.
+
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+record Spare {
+    probe: Option[Probe]
+}
+
+record Pair {
+    left: Probe
+    right: Probe
+}
+
+fn open(name: Text) -> Probe {
+    return Probe(name: name)
+}
+
+fn spare_dropped() {
+    let s = Spare(probe: None)
+    let _ = s
+}
+
+fn spare_field_dropped() {
+    let s = Spare(probe: None)
+    let _ = s.probe
+}
+
+fn spare_some() {
+    let s = Spare(probe: Some(open(name: "a")))
+    let _ = s                                       // <- E0508
+}
+
+fn spare_var() {
+    var s = Spare(probe: None)
+    let _ = s                                       // <- E0508
+}
+
+fn mistyped_bound() {
+    let p = open(name: 5)                           // <- E0507, E0301
+}
+
+fn mistyped_discarded() {
+    open(name: 5)                                   // <- E0508, E0301
+    let _ = open(name: 6)                           // <- E0508, E0301
+    match open(name: 7) {                           // <- E0301
+        _ => {}                                     // <- E0508
+    }
+    if open(name: 8) is Probe(name: n) {            // <- E0508, E0301
+    }
+}
+
+fn mistyped_assigned() {
+    var q = open(name: "a")
+    q = open(name: 9)                               // <- E0508, E0301
+    q.close()
+}
+
+fn takes_int(n: Int) {}
+
+impl Probe {
+    fn add(self, n: Int) -> Int {
+        return n
+    }
+}
+
+fn mismatched_argument(p: Probe) {
+    takes_int(n: open(name: "a"))                   // <- E0301
+    let n = p.add(n: open(name: "b"))               // <- E0301
+}
+
+fn unknown_callee() {
+    let p = nosuch(name: 5)                         // <- E0201
+    let s = Spare(probe: Some(nosuch))              // <- E0201
+}
+
+fn method_value() {
+    let p = open(name: "a")
+    let c = p.close                                 // <- E0320
+}
+
+fn method_value_closure() {
+    let p = open(name: "a")
+    let f = |x: Int| {
+        let c = p.close                             // <- E0320
+        x
+    }
+}
+
+fn method_value_field(pair: take Pair) {
+    let c = pair.left.close                         // <- E0320
+    pair.right.close()
+}
+
+fn method_value_temp() {
+    let c = open(name: "a").close                   // <- E0320
+}
+
+fn misspelled_field() {
+    let p = open(name: "a")                         // <- E0507
+    let n = p.nme                                   // <- E0303
+}
+
+unique record Token {
+    id: Int
+}
+
+fn branch_place(t: take Token, c: Bool) -> Int {
+    let s: Text = if c { t } else { t }             // <- E0301, E0301
+    let u: Text = match c {
+        true => t                                   // <- E0301
+        false => t                                  // <- E0301
+    }
+    return t.id
+}
+
+fn calls(n: inout Int, f: inout fn() -> Int) -> Int {
+    n = n + 1
+    return f()
+}
+
+fn rejected_function_value() -> Int {
+    var n = 1
+    let f = || n
+    return calls(n: &n, f: &f)                      // <- E0305
+}

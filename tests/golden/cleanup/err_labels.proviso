@@ -1,0 +1,114 @@
+// phase: 2
+// expect-error: E0207
+// expect-error: E0301
+// expect-error: E0507
+// A call or pattern whose labels are out of order is E0207 once. Each argument is still
+// checked against the parameter or field its label names, so its type isn't reported again,
+// whether the call is of a function, a generic function, a method, a record or a variant,
+// and whatever its modes (REFERENCE §15.1; issues #39 and #51). A label that names no
+// parameter takes the place it is in, and one that names a parameter another argument has
+// is checked as written. A pattern with its fields out of order still binds and moves
+// each field (issue #46), so a resource it binds and drops is still reported, and one it
+// binds from a field known to be `None` is not. An error inside an argument is still
+// reported.
+
+record Point {
+    x: Int
+    y: Text
+}
+
+enum Shape {
+    Dot(x: Int, y: Text)
+    Empty
+}
+
+fn two(a: Int, b: Text) -> Int {
+    return a
+}
+
+fn pick[T: Copy](a: T, b: List[T]) -> T {
+    return a
+}
+
+fn grow(n: Int, xs: inout List[Int]) {
+    xs.push(n)
+}
+
+fn applied(a: Text, f: fn(Int) -> Int) -> Int {
+    return f(1)
+}
+
+impl Point {
+    fn both(self, a: Int, b: Text) -> Int {
+        return a
+    }
+}
+
+fn calls(p: Point) -> Int {
+    var xs = [1]
+    let c1 = two(b: "x", a: 1)                      // <- E0207
+    let c2 = pick(b: [1], a: 2)                     // <- E0207
+    grow(xs: &xs, n: 3)                             // <- E0207
+    let c3 = p.both(b: "y", a: 1)                   // <- E0207
+    let c4 = Point(y: "z", x: 1)                    // <- E0207
+    let c5 = Shape.Dot(y: "z", x: 1)                // <- E0207
+    let c6 = applied(f: |z| z + 1, a: "w")          // <- E0207
+    let c7 = two(a: 1, c: 5)                        // <- E0207, E0301
+    let c8 = two(a: 1, a: 2)                        // <- E0207
+    let c9 = two(b: "x", a: "one")                  // <- E0207, E0301
+    return c1 + c2 + c3 + c4.x + c6 + c7 + c8 + c9
+}
+
+fn patterns(p: Point, s: Shape) -> Int {
+    let Point(y: t, x: n) = p                       // <- E0207
+    let m = match s {
+        Shape.Dot(y: u, x: k) => k + u.byte_len()   // <- E0207
+        Shape.Empty => 0
+    }
+    return n + t.byte_len() + m
+}
+
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+record Two {
+    a: Option[Probe]
+    b: Option[Probe]
+}
+
+fn consume(n: Int, probe: take Probe) {
+    probe.close()
+}
+
+fn taken(probe: take Probe) {
+    consume(probe: probe, n: 1)                     // <- E0207
+}
+
+fn known_empty() {
+    let Two(b: y, a: x) = Two(a: None, b: None)     // <- E0207
+}
+
+fn dropped(t: take Two) {
+    match t {
+        Two(b: y, a: x) => {}                       // <- E0207, E0507, E0507
+    }
+}
+
+fn kept(t: take Two) {
+    let Two(b: y, a: x) = t                         // <- E0207
+    if y is Some(p) {
+        p.close()
+    }
+    if x is Some(q) {
+        q.close()
+    }
+}

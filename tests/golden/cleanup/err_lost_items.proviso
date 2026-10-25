@@ -1,0 +1,142 @@
+// phase: 2
+// expect-error: E0101
+// expect-error: E0201
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0307
+// expect-error: E0901
+// An item the parser rejects is reported once, and what it declares stays declared, so
+// its uses aren't reported (REFERENCE §15.1). A second item on the line of another is
+// parsed after the error, with or without `pub`, but a keyword with nothing after it
+// isn't (issue #21). A later phase's item, such as a top-level constant, an `extern`
+// function or a capability, leaves its name unknown rather than undefined (issue #39). A
+// `derives` written after a record's or enum's body, before its `where` or after it, or
+// after a distinct type's `where`, is reported and still derives (issue #55). An `impl`
+// block whose header doesn't parse leaves its type with methods nothing records, one for
+// a function type leaves tuples alone, and one for every type, as in `impl[T] I for T`,
+// leaves every type implementing `I` (issue #53). An error inside the item, or beside it,
+// is still reported.
+use std.io { IoError }
+
+fn one() -> Int { return 1 } fn two() -> Int { return 2 }   // <- E0101
+record Pt { n: Int } fn mk() -> Pt { return Pt(n: 1) }        // <- E0101
+fn three() -> Int { return 3 } pub fn four() -> Text { return 4 }  // <- E0101, E0301
+fn five() -> Int { return 5 } pub five_again                  // <- E0101
+fn six() -> Int { return 6 } enum Six { One }                 // <- E0101
+fn seven() -> Int { return 7 } pub(pkg) fn eight() -> Int { return 8 }  // <- E0101
+fn nine() -> Int { return 9 } let ten: Int = 10               // <- E0101, E0901
+fn stray() -> Int { return 11 } distinct                      // <- E0101
+fn stray_type() -> Int { return 12 } type                     // <- E0101
+
+fn on_one_line() -> Int {
+    let s = Six.One
+    let more = eight() + ten + stray() + stray_type()
+    return one() + two() + mk().n + three() + four().byte_len()
+}
+
+let top: Int = 3                                    // <- E0901
+let limit = 4                                       // <- E0901
+extern "C" fn crc(n: Int) -> Int                    // <- E0901
+    trusted pure
+
+cap interface Flag effects(write) {                 // <- E0901
+    fn raise(self)
+}
+
+fn constants(f: Flag[write], g: Nope[write]) -> Int {   // <- E0307
+    return top + limit + crc(n: 1) + nosuch       // <- E0201
+}
+
+record Late {
+    n: Int
+} derives(Eq, Show)                                 // <- E0101
+
+record Kept {
+    n: Int
+} where n > 0 derives(Eq)                           // <- E0101
+
+record Between {
+    n: Int
+} derives(Eq) where n > 0                           // <- E0101
+
+enum Sides {
+    Left
+    Right
+} derives(Eq)                                       // <- E0101
+
+type Pos = distinct Int where self > 0 derives(Eq, Ord)    // <- E0101
+
+record Odd {
+    n: Int
+} derives(Nope)                                     // <- E0101, E0307
+
+fn derived(l: Late, k: Kept, s: Sides, p: Pos, o: Odd, b: Between) -> Bool {
+    let shown = f"{l}"
+    let ordered = p < p
+    let none = l == 1                               // <- E0301
+    return l == l and k == k and s == s and p == p and o == o and b == b
+}
+
+record Hx {
+    n: Int
+}
+
+record Hy {
+    n: Int
+}
+
+impl[T Hx {                                         // <- E0101
+    fn get(self) -> Int {
+        return self.n
+    }
+}
+
+impl 1 Hy {                                         // <- E0101
+    fn get(self) -> Int {
+        return self.n
+    }
+}
+
+fn headers(x: Hx, y: Hy) -> Int {
+    return x.get() + y.get() + x.n + y.m            // <- E0303
+}
+
+interface Named {
+    fn name(self) -> Text
+}
+
+impl[T] Named for T {                               // <- E0901
+    fn name(self) -> Text {
+        return "x"
+    }
+}
+
+impl[T] Show for T {                                // <- E0901
+    fn show(self) -> Text {
+        return "y"
+    }
+}
+
+impl Show for fn(Int) -> Int {                      // <- E0901
+    fn show(self) -> Text {
+        return "f"
+    }
+}
+
+record Plain {
+    n: Int
+}
+
+fn named_of[T: Named](x: T) -> Text {
+    return x.name()
+}
+
+fn everywhere(p: Plain) -> Text {
+    let a = named_of(x: 1)
+    let b = 1.name()
+    let c = Named.name("x")
+    let d = f"{p}"
+    let e = p.nosuch()                              // <- E0303
+    let f = (1, 2).nosuch()                         // <- E0303
+    return a
+}
