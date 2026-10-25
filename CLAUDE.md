@@ -9,7 +9,7 @@ Proviso is a draft programming language designed for coding agents. The reposito
 - `REFERENCE.md` is the language spec. It is meant to stay small enough (about 15K tokens) for an agent to keep in context, so keep additions tight.
 - `RATIONALE.md` explains why the design is the way it is.
 - `OPEN_QUESTIONS.md` holds unresolved design questions (§A–§D), the experiment plan (§E), the acceptance counterexamples (§F), and spec gaps found while writing tests (§G). Its **P3** table defines the six v1 delivery phases.
-- `crates/` is the v1 toolchain: a checker plus a tree-walking interpreter. Phase 1 (scalar types, functions, control flow, `fails`/`try`, a stub `System` with only `stdout`) is done.
+- `crates/` is the v1 toolchain: a checker plus a tree-walking interpreter. Phase 1 (the pipeline, scalar types and functions) and phase 2 (data and ownership) are done. `System` still provides only `stdout` until phase 3.
 
 Code and test comments cite these documents by section and ID, such as `REFERENCE §7.3`, `OPEN_QUESTIONS P5`, `Q25`, `T10` or `H2`. Follow that convention when a rule comes from the spec.
 
@@ -66,8 +66,8 @@ Codes are stable, so a code's meaning never changes once assigned. They are defi
 - `// expect-error: <code>` and a trailing `// <- <code>` on the offending line mark rejected programs. Lines without markers must check cleanly.
 - Check each new golden with `cargo run -- check` before writing the code it tests. An error on a line without a marker is a bug in the test, such as a keyword used as a name. The runner never parses a golden for a later phase, so this is the only early check it gets.
 - Programs that run are compared with `.out` (stdout) and `.err` (stderr). A missing file means no output.
-- `basics/` holds the phase-1 tests. The `fNN_*.proviso` files are the §F acceptance counterexamples. They were written strictly to REFERENCE.md before the compiler existed, so they test the spec, not the implementation. Record spec gaps in OPEN_QUESTIONS §G rather than bending a test to fit the code.
-- If an active golden file uses a directive the runner doesn't support yet (`expect-report`, `expect-log`, `run`, `schedules`, `sig` from phase 4), the test fails instead of passing unchecked. Implement the directive before raising `IMPLEMENTED_PHASE` to that phase.
+- `basics/` holds the phase 1 tests, and the README lists the directories of each slice of phase 2. The `fNN_*.proviso` files at the top of `tests/golden` are the §F acceptance counterexamples. They were written strictly to REFERENCE.md before the compiler existed, so they test the spec, not the implementation. Record spec gaps in OPEN_QUESTIONS §G rather than bending a test to fit the code.
+- If an active golden file uses a directive the runner doesn't support yet (`expect-log`, `schedules`, `run: record-replay`, and `sig` from phase 4), the test fails instead of passing unchecked. Implement the directive before raising `IMPLEMENTED_PHASE` to that phase.
 
 ## Tracking work
 
