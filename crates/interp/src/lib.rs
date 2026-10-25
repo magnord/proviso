@@ -57,6 +57,28 @@ pub enum Value {
     Handle(HandleValue),
     IoError(Arc<str>),
     Cap(Cap),
+    Fn(FnValue),
+}
+
+/// A function value: a module function, or a closure (REFERENCE §6.7).
+#[derive(Clone, Debug)]
+pub enum FnValue {
+    Named(FnId),
+    Closure(Arc<ClosureValue>),
+}
+
+/// A closure, with the values of the locals it captures. It borrows them, so the frame that
+/// made it reads them again whenever a local of its holds the closure, and a call sees them as
+/// they are then (OPEN_QUESTIONS P5).
+#[derive(Debug)]
+pub struct ClosureValue {
+    expr: ExprId,
+    /// The call whose frame made it.
+    frame: u64,
+    /// The size of that frame. The closure's own locals are slots of the function it is
+    /// written in.
+    locals: usize,
+    env: Vec<(LocalId, Value)>,
 }
 
 /// A pool's slots, each empty or holding an element with the generation it was inserted
@@ -100,6 +122,14 @@ impl PoolValue {
         };
         self.len += 1;
         HandleValue { pool: self.id, slot, generation }
+    }
+
+    /// Puts `value` back in the slot of `handle`, whose element was just removed, under the
+    /// same generation, so `handle` reads it again.
+    fn restore(&mut self, handle: &HandleValue, value: Value) {
+        self.free.retain(|&slot| slot != handle.slot);
+        self.slots[handle.slot as usize] = Some((handle.generation, value));
+        self.len += 1;
     }
 
     fn remove(&mut self, handle: &HandleValue) -> Option<Value> {
@@ -473,6 +503,8 @@ fn on_interp_thread<'a, R: Send>(
                     owned: Vec::new(),
                     acquired: 0,
                     base: 0,
+                    frame: 0,
+                    frames: 0,
                 };
                 run(&mut interp)
             })
@@ -544,6 +576,17 @@ struct Interp<'a> {
     acquired: u64,
     /// Where the running call's resources begin in `owned`.
     base: usize,
+    /// The running call, which the closures its frame makes name.
+    frame: u64,
+    /// The last call the run made.
+    frames: u64,
+}
+
+/// What a call runs: a module function, or a closure.
+#[derive(Clone, Copy)]
+enum Callee<'c> {
+    Fn(FnId),
+    Closure(&'c ClosureValue),
 }
 
 /// A function's local slots, indexed by `LocalId`.
@@ -675,21 +718,52 @@ impl Interp<'_> {
     }
 
     fn call(&mut self, f: FnId, args: Vec<Value>, site: Span) -> Flow<Value> {
-        self.run(f, args, site, &[]).0
+        self.run(Callee::Fn(f), args, site, &[]).0
     }
 
-    /// Calls `f` and returns its value, with the final values of the locals `keep` names,
-    /// which are its `inout` parameters, however the call ends. A failure exit abandons the
-    /// resources the call still owns, newest first (REFERENCE §10).
-    fn run(&mut self, f: FnId, args: Vec<Value>, site: Span, keep: &[usize]) -> (Flow<Value>, Vec<Value>) {
-        let body = self.p.decl(self.m, f).body.as_ref().expect("functions that run have bodies");
-        let mut frame = args;
-        frame.resize(self.p.fns[f].locals, Value::Unit);
+    /// Calls the function value `f` with arguments that have no `&` places.
+    fn call_value(&mut self, f: &FnValue, args: Vec<Value>, site: Span) -> Flow<Value> {
+        match f {
+            FnValue::Named(f) => self.call(*f, args, site),
+            FnValue::Closure(c) => self.run(Callee::Closure(c), args, site, &[]).0,
+        }
+    }
+
+    /// Calls `callee` and returns its value, with the final values of the arguments `keep`
+    /// names, which are its `inout` parameters, however the call ends. A failure exit abandons
+    /// the resources the call still owns, newest first (REFERENCE §10). A closure's frame
+    /// starts with what it captures, and its arguments go to its parameters' slots.
+    fn run(&mut self, callee: Callee, args: Vec<Value>, site: Span, keep: &[usize]) -> (Flow<Value>, Vec<Value>) {
+        let p = self.p;
+        let (body, mut frame, owned, params) = match callee {
+            Callee::Fn(f) => {
+                let body = p.decl(self.m, f).body.as_ref().expect("functions that run have bodies");
+                let mut frame = args;
+                frame.resize(p.fns[f].locals, Value::Unit);
+                (body, frame, &p.fns[f].owned, None)
+            }
+            Callee::Closure(c) => {
+                let ExprKind::Closure(closure) = &self.m.exprs[c.expr].kind else {
+                    unreachable!("closures are closures")
+                };
+                let info = p.closures.get(c.expr).expect("closures are checked");
+                let mut frame = vec![Value::Unit; c.locals];
+                for (local, value) in &c.env {
+                    frame[local.index()] = value.clone();
+                }
+                for (local, value) in info.params.iter().zip(args) {
+                    frame[local.index()] = value;
+                }
+                (&closure.body, frame, &info.owned, Some(&info.params))
+            }
+        };
         let mark = self.owned.len();
-        for &(local, span) in &self.p.fns[f].owned {
+        for &(local, span) in owned {
             self.acquire(Owned::Local(local, span));
         }
         let outer = std::mem::replace(&mut self.base, mark);
+        self.frames += 1;
+        let outer_frame = std::mem::replace(&mut self.frame, self.frames);
         // A call that can't start owns its arguments already, so it abandons them and hands
         // its `inout` ones back as any other failure does.
         let begun = self.check_stack(site).and_then(|()| self.step(site));
@@ -704,7 +778,10 @@ impl Interp<'_> {
             Err(unwind) => Err(unwind),
         };
         self.base = outer;
+        self.frame = outer_frame;
+        // A closure's body gives its value, as a block does; a function's ends with `return`.
         let result = match result {
+            Ok(value) if params.is_some() => Ok(value),
             Ok(_) => Ok(Value::Unit),
             Err(Unwind::Return(value)) => Ok(value),
             Err(unwind) => Err(unwind),
@@ -723,7 +800,8 @@ impl Interp<'_> {
                 other => Err(other),
             },
         };
-        let finals = keep.iter().map(|&i| std::mem::replace(&mut frame[i], Value::Unit)).collect();
+        let slot = |i: usize| params.map_or(i, |params| params[i].index());
+        let finals = keep.iter().map(|&i| std::mem::replace(&mut frame[slot(i)], Value::Unit)).collect();
         (result, finals)
     }
 
@@ -822,7 +900,7 @@ impl Interp<'_> {
     ) -> Flow<(Vec<Value>, Vec<Inout>)> {
         let mut values = Vec::with_capacity(args.len() + 1);
         let mut places = Vec::new();
-        let Shape { inout_self, can_fail, f, method } = shape;
+        let Shape { inout_self, can_fail, f, method, value } = shape;
         // An `inout` that keeps partial changes is written back however the call ends.
         let partial = |p: &Program, i: Option<usize>| {
             if let Some((iface, j, self_value, first)) = method {
@@ -832,6 +910,11 @@ impl Interp<'_> {
                 let def = &p.decls.iface(iface).methods[j];
                 let ty = def.params[k].1.subst(std::slice::from_ref(p.ty(self_value)));
                 return def.modes[k] == ParamMode::InoutPartial || p.decls.is_resource(&ty);
+            }
+            if let Some(value) = value {
+                let (modes, _, _, params) = p.ty(value).fn_parts().expect("a function value has a function type");
+                let i = i.expect("a function value has no receiver");
+                return modes[i] == ParamMode::InoutPartial || p.decls.is_resource(&params[i]);
             }
             let Some(f) = f else { return false };
             let info = &p.fns[f];
@@ -879,6 +962,7 @@ impl Interp<'_> {
             can_fail: info.fails.is_some(),
             f: Some(f),
             method: None,
+            value: None,
         }
     }
 
@@ -974,17 +1058,17 @@ impl Interp<'_> {
     /// (REFERENCE §5.4, §8.3).
     fn call_back(
         &mut self,
-        f: FnId,
+        callee: Callee,
         values: Vec<Value>,
         places: &[Inout],
         frame: &mut Frame,
         site: Span,
     ) -> Flow<Value> {
-        if places.is_empty() {
-            return self.call(f, values, site);
-        }
         let keep: Vec<usize> = places.iter().map(|place| place.index).collect();
-        let (result, finals) = self.run(f, values, site, &keep);
+        let (result, finals) = self.run(callee, values, site, &keep);
+        if places.is_empty() {
+            return result;
+        }
         if result.is_err() {
             for (place, value) in places.iter().zip(finals).filter(|(place, _)| place.partial) {
                 if let Ok(slot) = slot(&mut frame[place.root.index()], &place.path) {
@@ -1009,6 +1093,22 @@ impl Interp<'_> {
             }
         }
         Ok(value)
+    }
+
+    /// The value of local `id`. A closure that the running call made reads what it captures
+    /// again, so a call sees them as they are now (REFERENCE §6.7).
+    fn local(&self, id: LocalId, frame: &Frame) -> Value {
+        match &frame[id.index()] {
+            Value::Fn(FnValue::Closure(c)) if c.frame == self.frame => self.closure(c.expr, frame),
+            value => value.clone(),
+        }
+    }
+
+    /// The closure `e`, with the values of what it captures in `frame`.
+    fn closure(&self, e: ExprId, frame: &Frame) -> Value {
+        let info = self.p.closures.get(e).expect("closures are checked");
+        let env = info.captures.iter().map(|(id, _)| (*id, self.local(*id, frame))).collect();
+        Value::Fn(FnValue::Closure(Arc::new(ClosureValue { expr: e, frame: self.frame, locals: frame.len(), env })))
     }
 
     /// Runs a block and returns the value of its final expression, or `Unit`.
@@ -1227,7 +1327,8 @@ impl Interp<'_> {
             ExprKind::Char(c) => Value::Char(*c),
             ExprKind::Text(text) => Value::Text(Arc::from(text.as_str())),
             ExprKind::Unit => Value::Unit,
-            ExprKind::Applied { .. } | ExprKind::Closure(_) => todo!("function values"),
+            ExprKind::Applied { callee, .. } => self.expr(*callee, frame)?,
+            ExprKind::Closure(_) => self.closure(e, frame),
             ExprKind::FText(parts) => {
                 let mut out = String::new();
                 for part in parts {
@@ -1247,10 +1348,27 @@ impl Interp<'_> {
                 Some(Res::Local(_)) if self.p.moves_out.get(e).is_some() => {
                     self.take_out(e, frame).expect("a moved name is a local")
                 }
-                Some(Res::Local(id)) => frame[id.index()].clone(),
+                Some(Res::Local(id)) => self.local(id, frame),
                 Some(Res::Ctor(def, variant)) => Value::Adt(Adt { def, variant, fields: Arc::from([]) }),
+                Some(Res::Fn(f)) => Value::Fn(FnValue::Named(f)),
                 other => unreachable!("names evaluate to locals, not {other:?}"),
             },
+            ExprKind::Call { callee, args, .. } if !matches!(self.p.res(*callee), Some(Res::Fn(_) | Res::Ctor(..))) => {
+                let Value::Fn(f) = self.expr(*callee, frame)? else {
+                    unreachable!("the checker found a function type")
+                };
+                let can_fail = self.p.ty(*callee).fn_parts().is_some_and(|(_, _, fails, _)| *fails != Ty::Never);
+                let shape = Shape { can_fail, value: Some(*callee), ..Shape::default() };
+                let mark = self.owned.len();
+                let (values, places) = self.args(shape, None, args, frame)?;
+                self.owned.truncate(mark);
+                let callee = match &f {
+                    FnValue::Named(f) => Callee::Fn(*f),
+                    FnValue::Closure(c) => Callee::Closure(c),
+                };
+                let result = self.call_back(callee, values, &places, frame, span);
+                return self.attempted(e, result);
+            }
             ExprKind::Call { callee, args, .. } => {
                 let shape = match self.p.res(*callee) {
                     Some(Res::Fn(f)) => self.shape(f),
@@ -1261,7 +1379,7 @@ impl Interp<'_> {
                 match self.p.res(*callee) {
                     Some(Res::Fn(f)) => {
                         self.owned.truncate(mark);
-                        let result = self.call_back(f, values, &places, frame, span);
+                        let result = self.call_back(Callee::Fn(f), values, &places, frame, span);
                         return self.attempted(e, result);
                     }
                     // Labels follow the declaration order, so argument `i` is field `i`.
@@ -1301,7 +1419,7 @@ impl Interp<'_> {
                         let can_fail = self.p.decls.iface(iface).methods[method].fails.is_some();
                         let self_value = receiver.unwrap_or_else(|| args[0].value);
                         let method = Some((iface, method, self_value, qualified));
-                        Shape { inout_self: false, can_fail, f: None, method }
+                        Shape { inout_self: false, can_fail, f: None, method, value: None }
                     }
                     _ => Shape::default(),
                 };
@@ -1329,7 +1447,7 @@ impl Interp<'_> {
                         return self.attempted(e, result);
                     }
                     Res::Fn(f) => {
-                        let result = self.call_back(f, values, &places, frame, span);
+                        let result = self.call_back(Callee::Fn(f), values, &places, frame, span);
                         return self.attempted(e, result);
                     }
                     Res::Dispatch { iface, method, .. } => {
@@ -1342,7 +1460,7 @@ impl Interp<'_> {
                                 let key = impl_key(&values[0]);
                                 let f = self.p.decls.impl_method(iface, key, method);
                                 let f = f.expect("the checker found an implementation");
-                                self.call_back(f, values, &places, frame, span)
+                                self.call_back(Callee::Fn(f), values, &places, frame, span)
                             }
                         };
                         return self.attempted(e, result);
@@ -1554,14 +1672,18 @@ impl Interp<'_> {
                 },
             },
             ExprKind::It => match self.p.res(e) {
-                Some(Res::Local(id)) => frame[id.index()].clone(),
+                Some(Res::Local(id)) => self.local(id, frame),
                 other => unreachable!("`it` is a local, not {other:?}"),
             },
             ExprKind::Error => unreachable!("programs with errors don't run"),
             ExprKind::Debug(values) => {
                 let mut parts = Vec::with_capacity(values.len());
                 for value in values {
-                    parts.push(debug_repr(&self.expr(*value, frame)?, &self.p.decls));
+                    let shown = self.expr(*value, frame)?;
+                    parts.push(match self.p.ty(*value) {
+                        ty @ Ty::Fn(..) => self.p.decls.display(ty).to_string(),
+                        _ => debug_repr(&shown, &self.p.decls),
+                    });
                 }
                 let (line, col) = self.file.line_col(span.lo);
                 // `debug` output is best effort; a failed write is not a program error.
@@ -1950,6 +2072,21 @@ impl Interp<'_> {
                     Err(_) => option(None),
                 }
             }
+            // `update` takes the element out and passes it to `change`, which owns it while it
+            // runs, so a defect there abandons it and leaves the slot empty, as if removed
+            // (OPEN_QUESTIONS P5).
+            (Builtin::Update, Value::Pool(pool)) => {
+                let (Some(Value::Handle(handle)), Some(Value::Fn(change))) = (values.next(), values.next()) else {
+                    unreachable!("`update` takes a handle and a function")
+                };
+                let Some(element) = pool.lookup(&handle).is_ok().then(|| Arc::make_mut(pool).remove(&handle)).flatten()
+                else {
+                    return Ok(Value::Bool(false));
+                };
+                let changed = self.call_value(&change, vec![element], site)?;
+                Arc::make_mut(pool).restore(&handle, changed);
+                Value::Bool(true)
+            }
             (Builtin::Remove, Value::Map(map)) => {
                 let key = values.next().expect("`remove` takes a key");
                 match self.find(map, &key, site)? {
@@ -2114,7 +2251,7 @@ fn impl_key(value: &Value) -> ImplKey {
         Value::Unit => ImplKey::Unit,
         Value::IoError(_) => ImplKey::IoError,
         Value::Adt(adt) => ImplKey::Adt(adt.def),
-        Value::Cap(_) => unreachable!("capabilities implement no interface"),
+        Value::Cap(_) | Value::Fn(_) => unreachable!("capabilities and function values implement no interface"),
         Value::List(_) | Value::Map(_) | Value::Pool(_) | Value::Handle(_) => {
             unreachable!("the standard library's types implement interfaces only as STD.md does")
         }
@@ -2155,6 +2292,8 @@ struct Shape {
     /// An interface's method `j`, with the expression that gives `self` and whether that is
     /// the call's first argument, as in `Iface.method(x)`.
     method: Option<(IfaceId, usize, ExprId, bool)>,
+    /// The expression that gives the function value it calls.
+    value: Option<ExprId>,
 }
 
 /// An `inout` argument or receiver: the index of its value among a call's, and its place.
@@ -2419,6 +2558,7 @@ fn hash_value(value: &Value, decls: &Decls) -> u64 {
             Value::Unit | Value::IoError(_) | Value::Cap(_) => {}
             Value::Handle(handle) => handle.hash(&mut hasher),
             Value::Pool(_) => unreachable!("a pool implements no `Hash`"),
+            Value::Fn(_) => unreachable!("a function value implements no `Hash`"),
             Value::Adt(adt) => {
                 adt.def.index().hash(&mut hasher);
                 if decls.impl_method(IfaceId::EQ, ImplKey::Adt(adt.def), 0).is_none() {
@@ -2584,6 +2724,8 @@ fn write_value<E>(
             }
             Value::IoError(message) => out.push_str(message),
             Value::Cap(Cap::Stdout) => out.push_str("Out"),
+            // `debug` writes a function value's type, which only the checker knows.
+            Value::Fn(_) => out.push_str("fn"),
         }
     }
     Ok(out)

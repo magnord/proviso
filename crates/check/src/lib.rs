@@ -108,7 +108,10 @@ impl Builtin {
     /// Whether it takes `inout self`, so its receiver is a variable or a part of one that it
     /// changes (STD.md, REFERENCE §5.2).
     pub fn changes_receiver(self) -> bool {
-        matches!(self, Builtin::Push | Builtin::Pop | Builtin::Set | Builtin::Remove | Builtin::Insert | Builtin::Update)
+        matches!(
+            self,
+            Builtin::Push | Builtin::Pop | Builtin::Set | Builtin::Remove | Builtin::Insert | Builtin::Update
+        )
     }
 }
 
@@ -4518,9 +4521,10 @@ impl Checker<'_> {
         let m = self.m;
         let span = self.span(e);
         let expected = expected.map(|ty| self.vars.resolve(ty));
-        let mut expected = expected.as_ref().and_then(Ty::fn_parts).map(|(modes, ret, fails, params)| {
-            (modes.to_vec(), ret.clone(), fails.clone(), params.to_vec())
-        });
+        let mut expected = expected
+            .as_ref()
+            .and_then(Ty::fn_parts)
+            .map(|(modes, ret, fails, params)| (modes.to_vec(), ret.clone(), fails.clone(), params.to_vec()));
         let mut rejected = false;
         if let Some((_, _, _, params)) = &expected
             && params.len() != closure.params.len()
@@ -4558,7 +4562,9 @@ impl Checker<'_> {
                 }
                 (None, Some((_, given))) => given,
                 (None, None) if rejected => self.vars.rejected(),
-                (None, None) => self.vars.fresh(Kind::Any, Origin::Closure { name: param.name.sym, span: param.name.span }),
+                (None, None) => {
+                    self.vars.fresh(Kind::Any, Origin::Closure { name: param.name.sym, span: param.name.span })
+                }
             };
             params.push(ty);
         }
@@ -4602,7 +4608,10 @@ impl Checker<'_> {
         let needs = scope.captures.iter().map(|(id, _)| self.local_needs(*id)).max().unwrap_or(0);
         self.f.needs.insert(e, needs);
         self.f.closures.push(e);
-        self.p.closures.insert(e, ClosureInfo { params: locals, modes: modes.clone(), captures: scope.captures, owned: Vec::new() });
+        self.p.closures.insert(
+            e,
+            ClosureInfo { params: locals, modes: modes.clone(), captures: scope.captures, owned: Vec::new() },
+        );
         if rejected {
             self.rejected.insert(e);
             return Ty::Error;
@@ -4623,7 +4632,8 @@ impl Checker<'_> {
         if self.value_needs(e) <= base || self.escaped.iter().any(|inner| span.contains(*inner)) {
             return;
         }
-        let message = "this block gives a function value that captures a local the block declares, which ends with the block";
+        let message =
+            "this block gives a function value that captures a local the block declares, which ends with the block";
         self.error(codes::FUNCTION_VALUE_ESCAPES, span, message);
         self.escaped.push(span);
     }
@@ -4671,7 +4681,11 @@ impl Checker<'_> {
             }
         }
         if first && self.p.decls.has_reach(&self.vars.zonk(&self.f.locals[id.index()].ty)) {
-            self.not_implemented(span, "closures that capture a capability or a value that holds one", Planned::Phase(3));
+            self.not_implemented(
+                span,
+                "closures that capture a capability or a value that holds one",
+                Planned::Phase(3),
+            );
         }
     }
 
@@ -4700,7 +4714,8 @@ impl Checker<'_> {
         }
         if let ExprKind::Field { name, .. } = m.exprs[callee].kind {
             let text = m.text(name.sym);
-            let message = format!("`{text}` is a method, which is called with its arguments; it isn't a function value");
+            let message =
+                format!("`{text}` is a method, which is called with its arguments; it isn't a function value");
             self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
             return Ty::Error;
         }
@@ -5555,7 +5570,9 @@ impl Checker<'_> {
             match arg.label {
                 _ if labels_reported => {}
                 Some(label) if unnamed => {
-                    let message = format!("`{callee}` is a function value, whose parameters have no names, so its arguments take no labels");
+                    let message = format!(
+                        "`{callee}` is a function value, whose parameters have no names, so its arguments take no labels"
+                    );
                     self.error(codes::WRONG_LABEL, label.span, message);
                     labels_reported = true;
                 }

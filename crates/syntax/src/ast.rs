@@ -247,11 +247,7 @@ pub enum TypeExprKind {
     /// `(A, B)`, with at least two elements.
     Tuple(Vec<TypeId>),
     /// `fn(A, inout B) -> R fails E` (REFERENCE §9.4). Without `-> R`, the result is `Unit`.
-    Fn {
-        params: Vec<(ParamMode, TypeId)>,
-        ret: Option<TypeId>,
-        fails: Option<TypeId>,
-    },
+    Fn { params: Vec<(ParamMode, TypeId)>, ret: Option<TypeId>, fails: Option<TypeId> },
 }
 
 pub struct Block {

@@ -1193,7 +1193,11 @@ impl Parser<'_> {
                 }
                 ParamMode::InoutPartial => {
                     let span = start.to(self.prev_span());
-                    self.diags.not_implemented(span, "`inout(partial)` parameters of function types", Planned::Unscheduled);
+                    self.diags.not_implemented(
+                        span,
+                        "`inout(partial)` parameters of function types",
+                        Planned::Unscheduled,
+                    );
                     return Err(());
                 }
                 _ => {}

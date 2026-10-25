@@ -770,8 +770,7 @@ impl Decls {
             Ty::Adt(id, args) => {
                 seen.insert((*id, Arc::as_ptr(args) as *const Ty as usize))
                     && (args.iter().any(|arg| self.reach_in(arg, seen))
-                        || (self.adt(*id).variants.iter())
-                            .any(|v| v.fields.iter().any(|f| self.reach_in(&f.ty, seen))))
+                        || (self.adt(*id).variants.iter()).any(|v| v.fields.iter().any(|f| self.reach_in(&f.ty, seen))))
             }
             _ => false,
         }
