@@ -302,3 +302,15 @@ fn main_that_fails_exits_with_1_and_shows_its_error() {
     assert_eq!(code, proviso::exit::FAILED);
     assert_eq!(String::from_utf8_lossy(&err), "cannot write to stdout: closed\n");
 }
+
+/// Cleanup defects that nest, each `abandon` hitting one while it owns another resource whose
+/// `abandon` does the same, are reported in full and end the run with a defect, never a crash
+/// of the driver (CLAUDE.md "Stacks"; OPEN_QUESTIONS P5 "Cleanup defects").
+#[test]
+fn nested_cleanup_defects_never_overflow_the_stack() {
+    let text = "resource record Tag {\n    id: Int\n}\n\nimpl Abandon for Tag {\n    fn abandon(take self) {\n        if self.id > 0 {\n            let t = Tag(id: self.id - 1)\n            assert false\n            t.abandon()\n        }\n    }\n}\n\nenum Stop derives(Show) {\n    Halt\n}\n\nfn work(n: Int) fails Stop {\n    let t = Tag(id: n)\n    fail Stop.Halt\n}\n\npub fn main(sys: keep System) fails Stop {\n    try work(n: 50000)\n}\n";
+    let file = source("nested_cleanup.proviso", text);
+    let output = run(&["run"], &file);
+    assert_eq!(output.status.code(), Some(70), "{}", stderr(&output));
+    assert_eq!(stderr(&output).matches("leak[Tag]").count(), 50_000);
+}

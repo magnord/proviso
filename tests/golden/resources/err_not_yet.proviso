@@ -1,0 +1,68 @@
+// phase: 2.8
+// expect-error: E0901
+// A generic function's type parameter may be dropped in its body, so a resource as its
+// type argument waits until the reference says what a `T` that may be one can do, and so
+// does an `Abandon` constraint (OPEN_QUESTIONS §G). A refinement that reads a resource
+// field may run again after the field moved, so moving it out waits too. A map keeps the key
+// it has when `set` meets an equal one, which would drop a resource, so a resource as a map
+// key waits too. Interface methods
+// that take `inout self` come later, and so do function types (slice 2.9).
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+record Guarded {
+    probe: Probe
+    n: Int
+} where probe.name != ""
+
+fn drop_it[T](x: take T) {
+}
+
+fn keep_it[T](x: T) -> Int {
+    return 0
+}
+
+fn generic_uses(p: take Probe, q: Probe) {
+    drop_it(x: p)                                   // <- E0901
+    let n = keep_it(x: q)                           // <- E0901
+}
+
+fn constrained[T: Abandon](x: take T) {             // <- E0901
+}
+
+fn moved_out(g: take Guarded) {
+    let p = g.probe                                 // <- E0901
+    p.close()
+}
+
+interface Grow {
+    fn grow(inout self)                             // <- E0901
+}
+
+fn body(f: fn(inout Probe)) {                       // <- E0901
+}
+
+resource record Tag derives(Eq, Hash) {
+    id: Int
+}
+
+impl Abandon for Tag {
+    fn abandon(take self) {}
+}
+
+record Keyed {
+    by: Map[Tag, Int]                               // <- E0901
+}
+
+fn keyed(m: Map[Option[Tag], Int]) {                // <- E0901
+    let lit = [Tag(id: 1): 1]                       // <- E0901
+}

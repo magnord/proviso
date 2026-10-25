@@ -1,0 +1,3 @@
+defect[assertion_failed]: assertion failed: probes.len() == 0
+  at resources/defect.proviso:37:5 (defect.crash+7)
+  called from resources/defect.proviso:44:5 (defect.main+4)

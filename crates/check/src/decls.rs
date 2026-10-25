@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use proviso_syntax::ast::{ExprId, ParamMode};
 
@@ -53,6 +53,8 @@ impl IfaceId {
     pub const OUT: IfaceId = IfaceId(3);
     pub const HASH: IfaceId = IfaceId(4);
     pub const COPY: IfaceId = IfaceId(5);
+    /// Ends a resource on a failure exit (REFERENCE §10, STD.md).
+    pub const ABANDON: IfaceId = IfaceId(6);
 
     /// The interfaces declared before the module's, in id order: the prelude's (REFERENCE §3),
     /// and `std.io`'s `Out`.
@@ -74,11 +76,10 @@ impl IfaceId {
         matches!(self, IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW | IfaceId::HASH)
     }
 
-    /// Whether it is a prelude interface whose methods come later: `Abandon`, whose `abandon`
-    /// takes `take self` (STD.md), and `Index` and the operator interfaces, whose methods
-    /// STD.md doesn't declare yet.
+    /// Whether it is a prelude interface whose methods come later: `Index` and the operator
+    /// interfaces, whose methods STD.md doesn't declare yet.
     pub fn methods_later(self) -> bool {
-        (6..13).contains(&self.0)
+        (7..13).contains(&self.0)
     }
 }
 
@@ -101,6 +102,8 @@ impl IfaceDef {
 /// implementing type, `Self`, as `Ty::Param(0)`.
 pub struct IfaceMethod {
     pub name: Box<str>,
+    /// How it takes `self`: borrowed, or `take self` (REFERENCE §5.2).
+    pub self_mode: ParamMode,
     /// The parameters after `self`.
     pub params: Vec<(Box<str>, Ty)>,
     /// The mode of each parameter in `params`, which an implementation must repeat.
@@ -214,6 +217,13 @@ pub struct AdtDef {
     /// `Pool`, or holds a unique value. A generic type's depends on its type arguments, so
     /// [`Decls::moves`] asks about those.
     pub unique: bool,
+    /// Declared `resource record`: a base resource, which its own `abandon` ends (REFERENCE
+    /// §10).
+    pub resource_base: bool,
+    /// It is a resource (REFERENCE §5.1): a base resource, or one that holds a resource. A
+    /// resource is also [`AdtDef::unique`]. A generic type's depends on its type arguments,
+    /// so [`Decls::is_resource`] asks about those.
+    pub resource: bool,
 }
 
 impl AdtDef {
@@ -241,6 +251,8 @@ impl AdtDef {
             unknown_variants: false,
             tuple: false,
             unique: false,
+            resource_base: false,
+            resource: false,
         }
     }
 
@@ -319,13 +331,22 @@ pub struct VariantDef {
     pub preds: Vec<Pred>,
     /// The local slots its predicates need, fields first.
     pub locals: usize,
+    /// Whether its predicates read each field, by the field's index.
+    pub read_fields: Vec<bool>,
     /// Declared twice, so uses of it are not checked (REFERENCE §15.1).
     pub rejected: bool,
 }
 
 impl VariantDef {
     pub fn new(name: &str, fields: Vec<FieldDef>) -> VariantDef {
-        VariantDef { name: name.into(), locals: fields.len(), fields, preds: Vec::new(), rejected: false }
+        VariantDef {
+            name: name.into(),
+            locals: fields.len(),
+            read_fields: vec![false; fields.len()],
+            fields,
+            preds: Vec::new(),
+            rejected: false,
+        }
     }
 }
 
@@ -342,6 +363,9 @@ pub struct Pred {
     pub field: Option<FieldIdx>,
 }
 
+/// An argument list [`Decls::is_resource`] has answered for, kept alive with the answer.
+type Known = (Arc<[Ty]>, bool);
+
 pub struct Decls {
     adts: Vec<AdtDef>,
     ifaces: Vec<IfaceDef>,
@@ -354,6 +378,12 @@ pub struct Decls {
     /// `Int`. It may have given them methods and interfaces, so uses of those aren't
     /// reported. A record or enum keeps this in its [`AdtDef`].
     unknown: HashSet<ImplKey>,
+    /// Whether the module declares a resource, without which no type is one.
+    any_resource: bool,
+    /// The argument lists [`Decls::is_resource`] has answered for, by address, so a deep type
+    /// such as a list of lists costs each level once over the whole program. Each entry keeps
+    /// its list alive, so the address isn't reused.
+    resource_args: Mutex<HashMap<usize, Known>>,
 }
 
 impl Default for Decls {
@@ -382,6 +412,7 @@ impl Default for Decls {
         // `Ord`'s `cmp` returns an `Ordering`, which comes later, so its calls are rejected.
         let method = |name: &str, params: Vec<(&str, Ty)>, ret: Ty| IfaceMethod {
             name: name.into(),
+            self_mode: ParamMode::Borrow,
             modes: vec![ParamMode::Borrow; params.len()],
             params: params.into_iter().map(|(n, t)| (n.into(), t)).collect(),
             ret,
@@ -394,6 +425,10 @@ impl Default for Decls {
                     "Eq" => vec![method("eq", vec![("other", Ty::Param(0))], Ty::Bool)],
                     "Ord" => vec![method("cmp", vec![("other", Ty::Param(0))], Ty::Error)],
                     "Show" => vec![method("show", vec![], Ty::Text)],
+                    // `abandon` takes `take self` and can't fail (STD.md).
+                    "Abandon" => {
+                        vec![IfaceMethod { self_mode: ParamMode::Take, ..method("abandon", vec![], Ty::Unit) }]
+                    }
                     _ => Vec::new(),
                 };
                 IfaceDef { name: name.into(), methods, incomplete: false }
@@ -410,7 +445,16 @@ impl Default for Decls {
         let adts = vec![system, option, result, parse_error, AdtDef::tuple(2), list, map, pool, handle];
         debug_assert_eq!(adts.len(), AdtId::BUILT_IN);
         let tuples = HashMap::from([(2, AdtId::PAIR)]);
-        Decls { adts, ifaces, impls: HashMap::new(), tuples, unknown_tuples: false, unknown: HashSet::new() }
+        Decls {
+            adts,
+            ifaces,
+            impls: HashMap::new(),
+            tuples,
+            unknown_tuples: false,
+            unknown: HashSet::new(),
+            any_resource: false,
+            resource_args: Mutex::default(),
+        }
     }
 }
 
@@ -598,6 +642,11 @@ impl Decls {
         if iface == IfaceId::COPY {
             return self.copyable(ty, params, &mut Vec::new());
         }
+        // Every resource type implements `Abandon`: a base resource by its `impl`, which
+        // E0309 asks for, and an aggregate by abandoning what it holds (REFERENCE §10).
+        if iface == IfaceId::ABANDON && self.is_resource(ty) {
+            return true;
+        }
         let by_impl =
             || ImplKey::of(ty).is_some_and(|key| self.impls.contains_key(&(iface, key)) || self.unknown.contains(&key));
         match ty {
@@ -684,14 +733,37 @@ impl Decls {
         }
     }
 
+    /// Whether `ty` is a resource (REFERENCE §5.1): a base resource, or an aggregate that holds
+    /// one, such as `Option[File]` or `List[File]`. A type parameter isn't, since a resource
+    /// can't be a type argument of a generic function yet (OPEN_QUESTIONS P5).
+    pub fn is_resource(&self, ty: &Ty) -> bool {
+        match ty {
+            _ if !self.any_resource => false,
+            Ty::Adt(id, _) if self.adt(*id).resource => true,
+            Ty::Adt(AdtId::HANDLE, _) => false,
+            Ty::Adt(_, args) => {
+                let key = Arc::as_ptr(args) as *const Ty as usize;
+                let cache = || self.resource_args.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some((_, known)) = cache().get(&key) {
+                    return *known;
+                }
+                let known = args.iter().any(|arg| self.is_resource(arg));
+                cache().insert(key, (args.clone(), known));
+                known
+            }
+            _ => false,
+        }
+    }
+
     /// Marks each record and enum that holds a unique value as unique itself (REFERENCE
     /// §5.1), once every field's type is known. The module's types take no type arguments,
     /// so a field's kind doesn't depend on a use.
     pub fn settle_kinds(&mut self) {
-        // Which records and enums hold each one, and those that are unique already: those
-        // declared so, and those with a field that moves without them, such as a pool.
+        // Which records and enums hold each one, and those that are unique or resources
+        // already: those declared so, and those with a field that moves without them, such as
+        // a pool.
         let mut held_by: HashMap<usize, Vec<usize>> = HashMap::new();
-        let mut found = Vec::new();
+        let (mut unique, mut resources) = (Vec::new(), Vec::new());
         for a in AdtId::BUILT_IN..self.adts.len() {
             let fields = self.adts[a].variants.iter().flat_map(|v| &v.fields);
             let mut parts = Vec::new();
@@ -703,15 +775,31 @@ impl Decls {
             }
             let def = &self.adts[a];
             if def.unique || fields.clone().any(|f| self.moves(&f.ty, &[])) {
-                found.push(a);
+                unique.push(a);
+            }
+            if def.resource_base {
+                resources.push(a);
             }
         }
-        while let Some(a) = found.pop() {
+        self.any_resource = !resources.is_empty();
+        for a in &resources {
+            self.adts[*a].resource = true;
+        }
+        while let Some(a) = resources.pop() {
+            for &holder in held_by.get(&a).map_or(&[][..], Vec::as_slice) {
+                if !self.adts[holder].resource {
+                    self.adts[holder].resource = true;
+                    resources.push(holder);
+                    unique.push(holder);
+                }
+            }
+        }
+        while let Some(a) = unique.pop() {
             self.adts[a].unique = true;
             for &holder in held_by.get(&a).map_or(&[][..], Vec::as_slice) {
                 if !self.adts[holder].unique {
                     self.adts[holder].unique = true;
-                    found.push(holder);
+                    unique.push(holder);
                 }
             }
         }

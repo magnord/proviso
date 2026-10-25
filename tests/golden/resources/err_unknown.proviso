@@ -1,0 +1,54 @@
+// phase: 2.8
+// expect-error: E0307
+// expect-error: E0201
+// expect-error: E0508
+// expect-error: E0101
+// expect-error: E0501
+// A call that resolves to nothing, as a method of a value of an unknown type or a function
+// that doesn't exist, or a variant that doesn't parse, is rejected, so a resource it was given isn't reported as only borrowed
+// and then lost (REFERENCE §15.1). A resource dropped beside it still is, and a call that
+// resolves to a function whose result type is unknown still moves what it takes.
+resource record Probe {
+    name: Text
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+fn open(name: Text) -> Probe {
+    return Probe(name: name)
+}
+
+fn unknown_receiver(x: Nope) {                      // <- E0307
+    x.store(p: open(name: "a"))
+}
+
+fn unknown_result() {
+    let y = nope_fn()                               // <- E0201
+    y.store(p: open(name: "b"))
+    open(name: "c")                                 // <- E0508
+}
+
+fn unknown_function() {
+    unknown_fn(p: open(name: "d"))                  // <- E0201
+}
+
+enum Chain {
+    End
+    Link(tag: Probe, next: Chain)                   // <- E0101
+}
+
+fn unparsed_variant() {
+    let c = Chain.Link(open(name: "e"), Chain.End)
+}
+
+fn eat(p: take Probe) -> Bogus {                    // <- E0307
+    p.abandon()
+}
+
+fn moved_into_unknown_result() {
+    let p = open(name: "f")
+    let r = eat(p: p)
+    p.abandon()                                     // <- E0501
+}

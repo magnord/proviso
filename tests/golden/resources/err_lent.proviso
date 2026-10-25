@@ -1,0 +1,81 @@
+// phase: 2.8
+// expect-error: E0502
+// A borrowed or `inout` resource is lent, so it can't be consumed: passed to `take`, used
+// by a `take self` method, bound to a new name, returned or consumed by a loop (REFERENCE
+// §10 rule 6). That holds for `self` of a borrowing or `inout self` method, for what a
+// pattern binds from a lent value and for the variable of a loop that doesn't consume its
+// collection. A resource popped from an `inout` list is the caller's (OPEN_QUESTIONS Q35).
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+
+    fn close_twice(self) {
+        self.close()                                // <- E0502
+    }
+
+    fn close_inout(inout self) {
+        self.close()                                // <- E0502
+    }
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+fn consume(probe: take Probe) {
+    probe.close()
+}
+
+fn borrowed(p: Probe) {
+    p.close()                                       // <- E0502
+}
+
+fn passed(p: Probe) {
+    consume(probe: p)                               // <- E0502
+}
+
+fn inout_consumed(p: inout Probe) {
+    p.close()                                       // <- E0502
+}
+
+fn bound(p: Probe) -> Text {
+    let q = p                                       // <- E0502
+    return q.name
+}
+
+fn returned(p: Probe) -> Probe {
+    return p                                        // <- E0502
+}
+
+fn loop_var(probes: List[Probe]) {
+    for p in probes {
+        p.close()                                   // <- E0502
+    }
+}
+
+fn pattern(o: Option[Probe]) {
+    match o {
+        Some(p) => p.close()                        // <- E0502
+        None => {}
+    }
+}
+
+fn inout_loop(probes: inout List[Probe]) {
+    for p in take probes {                          // <- E0502
+        p.close()
+    }
+}
+
+fn inout_popped(probes: inout List[Probe]) {
+    match probes.pop() {
+        Some(p) => p.close()
+        None => {}
+    }
+}
+
+fn abandoned(p: Probe) {
+    p.abandon()                                     // <- E0502
+}

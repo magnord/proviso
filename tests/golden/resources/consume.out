@@ -1,0 +1,64 @@
+probe a
+close a
+close b!?
+close c
+abandon d
+abandon pr
+abandon pl
+abandon maybe
+abandon m2
+abandon m1
+close e
+close e2
+conn 1 holds probe conn
+close conn
+close p true
+close then
+close turn 1
+close turn 2
+close turn 3
+close last
+close p false
+close else
+close turn 1
+close turn 2
+close turn 3
+close last
+2: probe left
+close right
+close left
+close t2
+close t1
+close n2
+close n1
+close jr true
+close jl true
+close again r
+close again l
+close jl false
+close jr false
+close again r
+close again l
+close some
+close ok
+refused no
+close deep
+close full
+empty
+close second
+close first
+close rest
+close tested
+close bound
+close x3
+probe x1
+probe x2
+probe x1
+close x1
+close x2
+close m1
+key m
+close m2
+close l
+close r
+done

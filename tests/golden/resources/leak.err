@@ -1,0 +1,12 @@
+defect[assertion_failed]: assertion failed: not self.fragile
+  at resources/leak.proviso:25:9 (leak.Probe.Abandon.abandon+3)
+  called from resources/leak.proviso:55:9 (leak.work+4)
+  called from resources/leak.proviso:60:9 (leak.main+2)
+leak[Probe]: this `Probe` leaked, since its `abandon` hit a defect
+  at resources/leak.proviso:55:9 (leak.work+4)
+defect[assertion_failed]: assertion failed: not self.fragile
+  at resources/leak.proviso:25:9 (leak.Probe.Abandon.abandon+3)
+  called from resources/leak.proviso:36:9 (leak.Conn.Abandon.abandon+3)
+  called from resources/leak.proviso:54:9 (leak.work+3)
+leak[Conn]: this `Conn` leaked, since its `abandon` hit a defect
+  at resources/leak.proviso:54:9 (leak.work+3)

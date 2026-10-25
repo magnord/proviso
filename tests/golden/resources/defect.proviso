@@ -1,0 +1,49 @@
+// phase: 2.8
+// expect-exit: 70
+// expect-report: defect assertion_failed
+// A defect is a failure exit too, so each frame it leaves abandons the resources it still
+// owns, newest first, before the run ends with exit code 70 (REFERENCE §7.3, §10 rule 3).
+// An `inout` argument that holds a resource is never rolled back (§5.4), so the caller
+// abandons what the callee left in it, and not the probe the callee closed.
+use std.io { Out }
+
+resource record Probe {
+    name: Text
+    out: Out
+}
+
+impl Probe {
+    fn close(take self) {
+        say(out: self.out, line: f"close {self.name}")
+    }
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.name}")
+    }
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)
+}
+
+fn crash(probes: inout List[Probe], out: Out) {
+    let held = Probe(name: "inner", out: out)
+    match probes.pop() {
+        Some(probe) => probe.close()
+        None => {}
+    }
+    assert probes.len() == 0
+    held.close()
+}
+
+pub fn main(sys: keep System) {
+    let outer = Probe(name: "outer", out: sys.stdout)
+    var probes = [Probe(name: "a", out: sys.stdout), Probe(name: "b", out: sys.stdout)]
+    crash(probes: &probes, out: sys.stdout)
+    for probe in take probes {
+        probe.close()
+    }
+    outer.close()
+}

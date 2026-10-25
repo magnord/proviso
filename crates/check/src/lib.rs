@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use proviso_syntax::arena::SideTable;
 use proviso_syntax::ast::*;
-use proviso_syntax::diag::{Code, Diagnostics, Planned, codes};
+use proviso_syntax::diag::{Code, Diagnostics, Planned, Severity, codes};
 use proviso_syntax::intern::Symbol;
 use proviso_syntax::source::Span;
 
@@ -153,6 +153,9 @@ pub struct FnInfo {
     pub fails: Option<Ty>,
     /// Number of local slots, `self` and the parameters first.
     pub locals: usize,
+    /// The resource parameters it owns, which a failure exit abandons, with their spans:
+    /// `take` ones, and a `take self` other than an `abandon`'s, which can't abandon itself.
+    pub owned: Vec<(LocalId, Span)>,
     /// Its declaration was rejected, so its body isn't checked and its calls aren't reported
     /// (REFERENCE §15.1).
     pub rejected: bool,
@@ -227,6 +230,14 @@ pub struct Program {
     /// The `match` arms whose patterns move the whole local or field their scrutinee names,
     /// which leaves its place when the arm is chosen.
     pub arms_out: SideTable<Pat, ()>,
+    /// The expressions whose resource a call, construction, literal or `match` holds while
+    /// the rest of it runs, which a failure exit then abandons (REFERENCE §10).
+    pub held: SideTable<Expr, ()>,
+    /// The bindings that own a resource, which a failure exit abandons.
+    pub owned_binds: SideTable<Pat, ()>,
+    /// The resource parts each pattern moves out of the place its value is in, as paths of
+    /// fields from that place, which the interpreter takes out when the pattern matches.
+    pub parts_out: SideTable<Pat, Box<[Box<[FieldIdx]>]>>,
     /// The module's examples, in declaration order.
     pub examples: Vec<ExampleInfo>,
 }
@@ -275,6 +286,8 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         iface_names: HashMap::new(),
         ifaces: Vec::new(),
         inherent: HashMap::new(),
+        rejected_abandon: HashSet::new(),
+        rejected_abandon_for: HashSet::new(),
         unknown_tys: Vec::new(),
         f: FnState::new(Ty::Unit, None),
         in_chain: false,
@@ -313,6 +326,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     checker.adt_derives();
     checker.signatures();
     checker.impls();
+    checker.abandon_impls();
     checker.written_keys();
     checker.collisions();
     checker.derived_fields();
@@ -522,6 +536,11 @@ struct Checker<'a> {
     ifaces: Vec<IfaceSrc<'a>>,
     /// The methods and associated functions of each record and enum, in declaration order.
     inherent: HashMap<AdtId, Vec<Inherent>>,
+    /// The methods of a rejected `impl Abandon`, whose `self` isn't reported as left over,
+    /// since its `abandon` was never going to be called (REFERENCE §15.1).
+    rejected_abandon: HashSet<FnId>,
+    /// The types of those blocks, whose `Abandon.abandon(x)` may mean one of them.
+    rejected_abandon_for: HashSet<Ty>,
     /// Types without an [`ImplKey`], such as `Never` and `Out`, that a rejected `impl` block
     /// is for. They may have methods and interfaces that nothing records (REFERENCE §15.1).
     unknown_tys: Vec<Ty>,
@@ -1083,6 +1102,9 @@ impl Checker<'_> {
                     self.key_bound(&ty, span);
                     return;
                 }
+                if self.resource_targ(&ty, &callee, &param, span) {
+                    return;
+                }
                 if let Some(&iface) = ifaces.iter().find(|&&iface| !self.implements(&ty, iface)) {
                     let message = format!(
                         "`{}` does not implement `{}`, which `{callee}` needs of `{param}`",
@@ -1326,7 +1348,9 @@ impl Checker<'_> {
                 _ => {}
             }
             let what = if kind == AdtKind::Enum { "enum" } else { "record" };
-            def.unique = matches!(&item.kind, ItemKind::Record(decl) if decl.unique);
+            // A resource moves as a unique value does, and must also be consumed (§5.1, §10).
+            def.resource_base = matches!(&item.kind, ItemKind::Record(decl) if decl.resource);
+            def.unique = def.resource_base || matches!(&item.kind, ItemKind::Record(decl) if decl.unique);
             let id = self.p.decls.push(def);
             self.adts.push(AdtSrc { id, name, vis: item.vis, derives, variants, refinement });
             // A rejected name is reported once. Its uses, and what it collides with, are not.
@@ -1509,9 +1533,9 @@ impl Checker<'_> {
                     self.error(codes::DUPLICATE_NAME, method.name.span, format!("method `{text}` is declared twice"));
                 }
                 let receiver = method.receiver.expect("the parser keeps only interface methods with `self`");
-                if receiver.mode != ParamMode::Borrow {
-                    let what = "interface methods that take `inout self` or `take self`";
-                    self.not_implemented(receiver.span, what, Planned::Phase(2));
+                if !matches!(receiver.mode, ParamMode::Borrow | ParamMode::Take) {
+                    let what = "interface methods that take `inout self`";
+                    self.not_implemented(receiver.span, what, Planned::Unscheduled);
                     incomplete = true;
                     continue;
                 }
@@ -1530,16 +1554,13 @@ impl Checker<'_> {
                         continue 'methods;
                     }
                     let ty = self.resolve_type(param.ty);
-                    if !self.param_mode(param, &ty) {
-                        incomplete = true;
-                        continue 'methods;
-                    }
                     self.exposes(decl.name, vis, &ty, param.ty);
                     params.push((name.into(), ty));
                     modes.push(param.mode);
                 }
                 let ret = method.ret.map_or(Ty::Unit, |t| self.resolve_type(t));
                 let fails = method.fails.map(|t| self.resolve_type(t)).filter(|t| *t != Ty::Never);
+                let fails = self.error_type(fails, method.fails);
                 if let Some(at) = method.ret {
                     self.exposes(decl.name, vis, &ret, at);
                 }
@@ -1547,7 +1568,14 @@ impl Checker<'_> {
                     self.exposes(decl.name, vis, &fails.clone().unwrap_or(Ty::Never), at);
                 }
                 if cased && !duplicate {
-                    methods.push(IfaceMethod { name: text.into(), params, modes, ret, fails });
+                    methods.push(IfaceMethod {
+                        name: text.into(),
+                        self_mode: receiver.mode,
+                        params,
+                        modes,
+                        ret,
+                        fails,
+                    });
                 }
             }
             let def = self.p.decls.iface_mut(id);
@@ -1662,12 +1690,13 @@ impl Checker<'_> {
                     .collect();
                 self.f = state;
                 let mut preds = Vec::new();
+                let mut read = HashSet::new();
                 for (i, field) in kept.iter().enumerate() {
                     if let Some(expr) = field.refinement {
                         self.f.scopes = vec![vec![(field.name.sym, LocalId(i as u32))]];
                         self.check(expr, &Ty::Bool);
                         self.settle();
-                        self.predicate_moves(expr);
+                        read.extend(self.predicate_moves(expr));
                         preds.push(Pred { expr, field: Some(FieldIdx(i as u32)) });
                     }
                 }
@@ -1676,23 +1705,35 @@ impl Checker<'_> {
                     self.f.scopes = vec![all.collect()];
                     self.check(expr, &Ty::Bool);
                     self.settle();
-                    self.predicate_moves(expr);
+                    read.extend(self.predicate_moves(expr));
                     preds.push(Pred { expr, field: None });
                 }
                 let variant = &mut self.p.decls.adt_mut(id).variants[v];
                 variant.preds = preds;
                 variant.locals = self.f.locals.len();
+                variant.read_fields = (0..variant.fields.len()).map(|i| read.contains(&LocalId(i as u32))).collect();
             }
         }
     }
 
-    /// Checks what the refinement `expr` moves, which can't be the fields lent to it.
-    fn predicate_moves(&mut self, expr: ExprId) {
+    /// What the move pass needs to know of the body just checked, whose diagnostics begin at
+    /// `start`.
+    fn found(&mut self, start: usize) -> moves::Found {
+        let errors = self.diags.iter().skip(start).filter(|d| d.severity == Severity::Error).map(|d| d.span).collect();
+        moves::Found {
+            consumed: std::mem::take(&mut self.consumed),
+            rejected: std::mem::take(&mut self.rejected),
+            errors,
+        }
+    }
+
+    /// Checks what the refinement `expr` moves, which can't be the fields lent to it, and
+    /// returns the locals it reads.
+    fn predicate_moves(&mut self, expr: ExprId) -> HashSet<LocalId> {
         let m = self.m;
-        let found =
-            moves::Found { consumed: std::mem::take(&mut self.consumed), rejected: std::mem::take(&mut self.rejected) };
+        let found = self.found(0);
         let body = moves::Body::Predicate(expr);
-        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags);
+        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags)
     }
 
     fn signatures(&mut self) {
@@ -1736,6 +1777,7 @@ impl Checker<'_> {
                 ret: sig.ret,
                 fails: sig.fails,
                 locals: 0,
+                owned: Vec::new(),
                 rejected: sig.rejected,
             });
         }
@@ -1830,12 +1872,12 @@ impl Checker<'_> {
                 },
                 None => self.resolve_type(param.ty),
             };
-            self.param_mode(param, &ty);
             params.push(ParamInfo { name: param.name.sym, ty, mode: param.mode });
         }
         let ret = decl.ret.map_or(Ty::Unit, |t| self.resolve_type(t));
         // `Never` has no values, so a function that fails with it cannot fail.
         let fails = decl.fails.map(|t| self.resolve_type(t)).filter(|t| *t != Ty::Never);
+        let fails = self.error_type(fails, decl.fails);
         let typed = decl.params.iter().map(|p| p.ty).chain(decl.ret).chain(decl.fails);
         let types = params.iter().map(|p| p.ty.clone()).chain(decl.ret.map(|_| ret.clone()));
         let types: Vec<(Ty, TypeId)> =
@@ -1850,17 +1892,20 @@ impl Checker<'_> {
         Signature { generics, receiver, self_mode, params, ret, fails, rejected }
     }
 
-    /// Reports a parameter mode that phase 2 doesn't support yet, and returns whether the
-    /// mode is supported.
-    fn param_mode(&mut self, param: &Param, ty: &Ty) -> bool {
-        let what = match param.mode {
-            ParamMode::Borrow | ParamMode::Inout | ParamMode::Take => return true,
-            ParamMode::Keep if matches!(ty, Ty::Adt(AdtId::SYSTEM, _) | Ty::Error) => return true,
-            ParamMode::Keep => "`keep` parameters other than `System`",
-            ParamMode::InoutPartial => "`inout(partial)` parameters",
-        };
-        self.not_implemented(param.span, what, Planned::Phase(2));
-        false
+    /// The error type `fails` names, written at `at`. A resource can't be one (REFERENCE §10
+    /// rule 5), and is reported and read as an unknown type.
+    fn error_type(&mut self, fails: Option<Ty>, at: Option<TypeId>) -> Option<Ty> {
+        match (fails, at) {
+            (Some(ty), Some(at)) if self.p.decls.is_resource(&ty) => {
+                let message = format!(
+                    "`{}` is a resource, which can't be an error type, since a failure would lose it (§10)",
+                    self.show(&ty)
+                );
+                self.error(codes::RESOURCE_ERROR_TYPE, self.m.types[at].span, message);
+                Some(Ty::Error)
+            }
+            (fails, _) => fails,
+        }
     }
 
     /// Whether `sym` names a type here, which a type parameter may not reuse (H4).
@@ -1912,6 +1957,12 @@ impl Checker<'_> {
         }
         match IfaceId::prelude(text) {
             Some(iface @ (IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW | IfaceId::HASH | IfaceId::COPY)) => Some(iface),
+            // A type argument that is a resource waits for the reference (OPEN_QUESTIONS §G),
+            // and only a resource implements `Abandon`.
+            Some(IfaceId::ABANDON) => {
+                self.not_implemented(name.span, "`Abandon` constraints", Planned::Unscheduled);
+                None
+            }
             Some(_) => {
                 self.not_implemented(name.span, &format!("`{text}` constraints"), Planned::Phase(2));
                 None
@@ -1935,6 +1986,28 @@ impl Checker<'_> {
         for (index, item) in m.items.iter().enumerate() {
             if let ItemKind::Impl(decl) = &item.kind {
                 self.impl_block(index, item.span, decl);
+            }
+        }
+    }
+
+    /// Reports each `resource record` without an `impl Abandon`, since every resource type
+    /// implements it (REFERENCE §10).
+    fn abandon_impls(&mut self) {
+        for k in 0..self.adts.len() {
+            let (id, name) = (self.adts[k].id, self.adts[k].name);
+            let def = self.p.decls.adt(id);
+            if !def.resource_base || def.unknown_interfaces || self.poisoned.contains(&name.sym) {
+                continue;
+            }
+            // A second declaration of the name is reported as such, and the `impl` names the
+            // first (REFERENCE §15.1).
+            let duplicate = self.adts[..k].iter().any(|earlier| earlier.name.sym == name.sym);
+            if !duplicate && self.p.decls.impl_of(IfaceId::ABANDON, ImplKey::Adt(id)).is_none() {
+                let text = self.m.text(name.sym);
+                let message = format!(
+                    "`{text}` is a resource, so it must implement `Abandon`, whose `abandon` ends it on a failure exit (§10)"
+                );
+                self.error(codes::MISSING_IMPLEMENTATION, name.span, message);
             }
         }
     }
@@ -2029,6 +2102,46 @@ impl Checker<'_> {
             self.unknown_ty(&target);
             return;
         };
+        // A `resource record` is a base resource, which its own `abandon` ends, and any other
+        // resource abandons what it holds (REFERENCE §10 rule 4).
+        if iface == IfaceId::ABANDON && !matches!(&target, Ty::Adt(id, _) if self.p.decls.adt(*id).resource_base) {
+            // A name declared twice, once as a resource, may mean that declaration, which is
+            // reported as a duplicate.
+            let twice = match &target {
+                Ty::Adt(id, _) => self.adts.iter().find(|a| a.id == *id).is_some_and(|found| {
+                    let mut named = self.adts.iter().filter(|a| a.name.sym == found.name.sym);
+                    named.clone().count() > 1 && named.any(|a| self.p.decls.adt(a.id).resource_base)
+                }),
+                _ => false,
+            };
+            if twice {
+                // Reported at the second declaration.
+            } else if self.p.decls.is_resource(&target) {
+                let message = format!(
+                    "`{target_text}` is a resource because it holds one, so it implements `Abandon` by itself, abandoning what it holds (§10)"
+                );
+                self.error(codes::NOT_IMPLEMENTABLE, iface_name.span, message);
+            } else {
+                let message = format!("`{target_text}` isn't a resource, so it has nothing to abandon (§10)");
+                self.error(codes::ABANDON_NOT_RESOURCE, iface_name.span, message);
+            }
+            let first = self.p.fns.len();
+            self.declare_rejected(item, decl, &target);
+            self.rejected_abandon.extend(first..self.p.fns.len());
+            // A resource implements `Abandon` by itself, so calls of `abandon` on it resolve. On
+            // another type, a call of a method the block declares may mean it, so it isn't
+            // reported.
+            if let Ty::Adt(adt, _) = target
+                && !self.p.decls.is_resource(&target)
+            {
+                self.rejected_abandon_for.insert(target.clone());
+                let entries = self.inherent.entry(adt).or_default();
+                for (i, method) in decl.methods.iter().enumerate() {
+                    entries.push(Inherent { name: method.decl.name.sym, f: first + i, rejected: true });
+                }
+            }
+            return;
+        }
         if let Ty::Adt(id, _) = &target
             && self.p.decls.adt(*id).derives.contains(&iface)
         {
@@ -2149,7 +2262,7 @@ impl Checker<'_> {
         }
         let later = Rejected { unknown: true, bodies: false };
         match iface {
-            IfaceId::EQ | IfaceId::SHOW => Ok(()),
+            IfaceId::EQ | IfaceId::SHOW | IfaceId::ABANDON => Ok(()),
             IfaceId::COPY => {
                 let message =
                     "`Copy` holds by itself for copyable types with no reach, so it can't be implemented (§5.1)";
@@ -2190,6 +2303,7 @@ impl Checker<'_> {
             ret: sig.ret,
             fails: sig.fails,
             locals: 0,
+            owned: Vec::new(),
             rejected: sig.rejected,
         });
         id
@@ -2219,10 +2333,9 @@ impl Checker<'_> {
             (Some(want), Some(have)) => same(want, have),
             _ => false,
         };
-        // An interface's methods borrow `self` in this phase.
         if info.generics.is_empty()
             && info.receiver.is_some()
-            && info.self_mode == ParamMode::Borrow
+            && info.self_mode == want.self_mode
             && params_agree
             && same(&want.ret, &info.ret)
             && fails_agree
@@ -2230,7 +2343,8 @@ impl Checker<'_> {
             return true;
         }
         let decls = &self.p.decls;
-        let mut declared = format!("fn {}(self", want.name);
+        let receiver = if want.self_mode == ParamMode::Take { "take self" } else { "self" };
+        let mut declared = format!("fn {}({receiver}", want.name);
         for ((param, ty), mode) in want.params.iter().zip(&want.modes) {
             let mode = match mode {
                 ParamMode::Borrow => "",
@@ -2536,11 +2650,46 @@ impl Checker<'_> {
         for param in &decl.params {
             self.shadows_item(param.name);
         }
+        let start = self.diags.iter().count();
         self.fn_body(decl, body);
         self.settle();
-        let found =
-            moves::Found { consumed: std::mem::take(&mut self.consumed), rejected: std::mem::take(&mut self.rejected) };
-        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, moves::Body::Fn(body), self.diags);
+        let found = self.found(start);
+        // The resources it owns from the start: its `take` parameters and a `take self`.
+        let info = &self.p.fns[id];
+        let decls = &self.p.decls;
+        let mut params: Vec<(LocalId, Span, String)> = Vec::new();
+        if let (Some(ty), Some(receiver)) = (&info.receiver, decl.receiver)
+            && info.self_mode == ParamMode::Take
+            && decls.is_resource(ty)
+            && !self.rejected_abandon.contains(&id)
+        {
+            params.push((LocalId(0), receiver.span, "self".to_string()));
+        }
+        let first = usize::from(info.receiver.is_some());
+        for (i, (param, at)) in info.params.iter().zip(&decl.params).enumerate() {
+            if param.mode == ParamMode::Take && decls.is_resource(&param.ty) {
+                params.push((LocalId((first + i) as u32), at.span, m.text(param.name).to_string()));
+            }
+        }
+        // A `take self` method of a base resource consumes `self` when it returns, once it has
+        // consumed what `self` holds (OPEN_QUESTIONS Q35).
+        let consumes_self = info.self_mode == ParamMode::Take
+            && matches!(&info.receiver, Some(Ty::Adt(adt, _)) if decls.adt(*adt).resource_base);
+        // An `abandon` that hits a defect leaks `self`, rather than abandoning it again.
+        let abandon = consumes_self
+            && decls.impl_method(
+                IfaceId::ABANDON,
+                ImplKey::of(info.receiver.as_ref().expect("a method has a receiver")).expect("a record has a key"),
+                0,
+            ) == Some(id);
+        let owned = params
+            .iter()
+            .filter(|(local, ..)| !(abandon && *local == LocalId(0)))
+            .map(|(l, span, _)| (*l, *span))
+            .collect();
+        self.p.fns[id].owned = owned;
+        let body = moves::Body::Fn(moves::FnBody { block: body, params, consumes_self });
+        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags);
         self.p.fns[id].locals = self.f.locals.len();
         self.generic_scope.clear();
         self.param_names.clear();
@@ -2566,8 +2715,17 @@ impl Checker<'_> {
                 self.error(codes::UNEXPECTED_TOKEN, span, message);
                 continue;
             }
+            let start = self.diags.iter().count();
             self.example(decl);
             self.settle();
+            // An example drops what its call and its expected value give (REFERENCE §10).
+            let found = self.found(start);
+            let expected = match decl.expect {
+                Expectation::Equals(x) => Some(x),
+                Expectation::Fails(_) => None,
+            };
+            let body = moves::Body::Example { call: decl.call, expected };
+            moves::check(m, &mut self.p, &self.f.locals, &[], &found, body, self.diags);
             self.p.examples.push(ExampleInfo { item: index, locals: self.f.locals.len() });
         }
     }
@@ -3226,12 +3384,19 @@ impl Checker<'_> {
         }
     }
 
-    /// Reports a map's key type that doesn't implement `Eq` and `Hash` (REFERENCE §4.2),
-    /// and returns whether it does.
+    /// Reports a map's key type that doesn't implement `Eq` and `Hash` (REFERENCE §4.2), or
+    /// is a resource, and returns whether it is fine.
     fn key_bound(&mut self, key: &Ty, span: Span) -> bool {
         let key = self.vars.zonk(key);
         if key.is_unknown() || self.vars.has_open(&key) || self.unknown_interfaces(&key) {
             return true;
+        }
+        // `set` keeps the key it has and drops the equal one it is given, which can't drop a
+        // resource (§10 rule 5).
+        if self.p.decls.is_resource(&key) {
+            let what = format!("resources, such as `{}`, as map keys", self.show(&key));
+            self.not_implemented(span, &what, Planned::Unscheduled);
+            return false;
         }
         let Some(iface) = [IfaceId::EQ, IfaceId::HASH].into_iter().find(|&iface| !self.implements(&key, iface)) else {
             return true;
@@ -3285,6 +3450,20 @@ impl Checker<'_> {
             self.show(&ty)
         );
         self.error(codes::MISSING_IMPLEMENTATION, span, message);
+    }
+
+    /// Reports a receiver that a method takes, when it is an element of a list or pool or a
+    /// part of one, which stays where it is, so taking it copies it (STD.md, §10 rule 1).
+    fn element_taken(&mut self, receiver: ExprId, ty: &Ty) {
+        match self.m.exprs[receiver].kind {
+            ExprKind::Index { base, .. } => {
+                let pool = matches!(self.vars.resolve(self.p.ty(base)), Ty::Adt(AdtId::POOL, _));
+                let span = self.span(receiver);
+                self.needs(ty.clone(), IfaceId::COPY, if pool { "pool[h]" } else { "xs[i]" }, "T", span);
+            }
+            ExprKind::Field { base, .. } if self.in_element(base) => self.element_part_copied(receiver, ty),
+            _ => {}
+        }
     }
 
     /// `xs[i]`, which reads element `i` of a list (STD.md). The element stays in the list, so
@@ -3437,7 +3616,15 @@ impl Checker<'_> {
             self.copied(e, &ty);
             self.consumed.insert(e);
         }
-        if self.errors - before > self.inner_errors {
+        // A call that resolves to nothing, as on a receiver of an unknown type, is rejected
+        // too, though its error was reported before it (REFERENCE §15.1).
+        let unresolved = ty == Ty::Error
+            && match self.m.exprs[e].kind {
+                ExprKind::Call { callee, .. } => self.p.res.get(callee).is_none(),
+                ExprKind::MethodCall { .. } => self.p.res.get(e).is_none(),
+                _ => false,
+            };
+        if self.errors - before > self.inner_errors || unresolved {
             self.rejected.insert(e);
         }
         self.inner_errors = outer + (self.errors - before);
@@ -4175,6 +4362,19 @@ impl Checker<'_> {
     /// `targs`, or else from the type the call is expected to have and then from the
     /// arguments, and each must implement its parameter's constraints (REFERENCE §4.8;
     /// OPEN_QUESTIONS P5).
+    /// Reports a resource as the type argument for `param` of the generic function `callee`.
+    /// Its body may drop a value of a type parameter without `Copy`, which a resource can't
+    /// allow, and the reference doesn't say how a type parameter admits one (OPEN_QUESTIONS
+    /// §G). Returns whether it reported one.
+    fn resource_targ(&mut self, ty: &Ty, callee: &str, param: &str, span: Span) -> bool {
+        if !self.p.decls.is_resource(ty) {
+            return false;
+        }
+        let what = format!("resources, such as `{}`, as the type argument `{param}` of `{callee}`", self.show(ty));
+        self.not_implemented(span, &what, Planned::Unscheduled);
+        true
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn fn_call(
         &mut self,
@@ -4261,10 +4461,11 @@ impl Checker<'_> {
             // One with a variable in it is checked once the statement settles it, which
             // also walks a deep argument once rather than at each call around it.
             if self.vars.has_var(&ty) {
-                if !bounds.is_empty() {
-                    let (ifaces, callee, param) = (bounds.clone(), name.into(), param.clone());
-                    self.pending.push(Pending::Bound { ty: ty.clone(), ifaces, callee, param, span });
-                }
+                let (ifaces, callee, param) = (bounds.clone(), name.into(), param.clone());
+                self.pending.push(Pending::Bound { ty: ty.clone(), ifaces, callee, param, span });
+                continue;
+            }
+            if self.resource_targ(&ty, name, param, span) {
                 continue;
             }
             if let Some(&iface) = bounds.iter().find(|&&iface| !self.implements(&ty, iface)) {
@@ -4379,6 +4580,7 @@ impl Checker<'_> {
             // (REFERENCE §4.4).
             if self.p.decls.adt(*id).unique {
                 self.consumed.insert(receiver);
+                self.element_taken(receiver, &receiver_ty);
             }
             self.with_args(e, *id, args, span);
             return receiver_ty;
@@ -4436,16 +4638,24 @@ impl Checker<'_> {
                 // An `inout self` method changes its receiver, and a `take self` one owns it
                 // (REFERENCE §5.2).
                 match self.p.fns[f].self_mode {
-                    ParamMode::Inout => self.changes(receiver, name),
+                    ParamMode::Inout => {
+                        self.changes(receiver, name);
+                        // The receiver of a resource is partial, as an `&` of one is (§5.4).
+                        if self.p.decls.is_resource(&receiver_ty) && self.refined_part(receiver) {
+                            let message = "this is a part of a refined value, which a failure could leave breaking its refinement, so it can't be the receiver of an `inout self` method of a resource, which keeps partial changes (§5.4)";
+                            self.error(codes::PARTIAL_INOUT_OF_REFINED_PART, self.span(receiver), message);
+                        }
+                    }
                     ParamMode::Take => {
                         self.consumed.insert(receiver);
+                        self.element_taken(receiver, &receiver_ty);
                     }
                     _ => {}
                 }
                 self.fn_call(e, f, targs, args, span, chain, expected)
             }
             Some(Callee::Iface(iface, j)) => {
-                self.dispatch_call(e, iface, j, &receiver_ty, method, targs, args, span, chain, false)
+                self.dispatch_call(e, iface, j, (receiver, &receiver_ty), method, targs, args, span, chain, false)
             }
             None => {
                 self.rejected_args(args);
@@ -4715,6 +4925,10 @@ impl Checker<'_> {
         }
         let receiver_ty = self.infer(first.value);
         let receiver_ty = self.force(&receiver_ty);
+        if iface == IfaceId::ABANDON && self.rejected_abandon_for.contains(&receiver_ty) {
+            self.rejected_args(rest);
+            return Ty::Error;
+        }
         if !receiver_ty.is_unknown() && !self.implements(&receiver_ty, iface) {
             let message = format!("`{}` does not implement `{iface_text}`", self.show(&receiver_ty));
             let at = self.span(first.value);
@@ -4722,18 +4936,19 @@ impl Checker<'_> {
             self.rejected_args(rest);
             return Ty::Error;
         }
-        self.dispatch_call(e, iface, j, &receiver_ty, method, targs, rest, span, chain, true)
+        self.dispatch_call(e, iface, j, (first.value, &receiver_ty), method, targs, rest, span, chain, true)
     }
 
     /// A call of method `j` of `iface` on a receiver of type `receiver_ty`, with `Self` read
-    /// as that type. The implementation for the receiver's value runs it (REFERENCE §4.9).
+    /// as that type. The implementation for the receiver's value runs it (REFERENCE §4.9). A
+    /// `take self` method owns the receiver.
     #[allow(clippy::too_many_arguments)]
     fn dispatch_call(
         &mut self,
         e: ExprId,
         iface: IfaceId,
         j: usize,
-        receiver_ty: &Ty,
+        (receiver, receiver_ty): (ExprId, &Ty),
         method: Ident,
         targs: Option<&[TypeId]>,
         args: &[Arg],
@@ -4743,6 +4958,10 @@ impl Checker<'_> {
     ) -> Ty {
         let name = self.m.text(method.sym);
         self.no_targs(targs, name, span);
+        if self.p.decls.iface(iface).methods[j].self_mode == ParamMode::Take {
+            self.consumed.insert(receiver);
+            self.element_taken(receiver, receiver_ty);
+        }
         let def = &self.p.decls.iface(iface).methods[j];
         let receiver = [receiver_ty.clone()];
         let params: Vec<(Box<str>, Ty)> = def.params.iter().map(|(n, t)| (n.clone(), t.subst(&receiver))).collect();
@@ -4932,11 +5151,12 @@ impl Checker<'_> {
             let ty = if mentions_targ(ty, targs) { ty.subst(targs) } else { ty.clone() };
             let inout = matches!(mode, ParamMode::Inout | ParamMode::InoutPartial);
             if inout && arg.inout {
-                self.inout_arg(arg.value, &ty);
+                // An `inout` of a resource is never rolled back, so it is partial (§5.4).
+                let partial = mode == ParamMode::InoutPartial || self.p.decls.is_resource(&ty);
+                self.inout_arg(arg.value, &ty, partial);
                 continue;
             }
-            // `inout(partial)` was rejected at the parameter, so its marker isn't checked.
-            if (inout || arg.inout) && mode != ParamMode::InoutPartial {
+            if inout || arg.inout {
                 let (param, value) = (param.as_ref(), self.span(arg.value));
                 let message = if inout {
                     format!(
@@ -4953,15 +5173,38 @@ impl Checker<'_> {
         true
     }
 
-    /// Checks an `&` argument. An error about it rejects the argument, not the call.
-    fn inout_arg(&mut self, value: ExprId, ty: &Ty) {
+    /// Checks an `&` argument, which a failure may leave half changed when it is `partial`.
+    /// An error about it rejects the argument, not the call.
+    fn inout_arg(&mut self, value: ExprId, ty: &Ty, partial: bool) {
         let (errors, inner) = (self.errors, self.inner_errors);
         self.inout_place(value, ty);
+        if partial && self.errors == errors && self.refined_part(value) {
+            let message = "this is a part of a refined value, which a failure could leave breaking its refinement, so it can't be passed to an `inout` parameter that keeps partial changes, as `inout(partial)` and an `inout` of a resource do (§5.4)";
+            self.error(codes::PARTIAL_INOUT_OF_REFINED_PART, self.span(value), message);
+        }
         let own = (self.errors - errors) - (self.inner_errors - inner);
         if self.errors > errors {
             self.rejected.insert(value);
         }
         self.inner_errors += own;
+    }
+
+    /// Whether the place `e` is a field of a record with a refinement, at any depth.
+    fn refined_part(&self, e: ExprId) -> bool {
+        match self.m.exprs[e].kind {
+            ExprKind::Field { base, .. } => {
+                let refined = match self.p.ty(base) {
+                    Ty::Adt(id, _) => {
+                        let def = self.p.decls.adt(*id);
+                        !def.is_enum() && def.variants.iter().any(|v| !v.preds.is_empty())
+                    }
+                    _ => false,
+                };
+                refined || self.refined_part(base)
+            }
+            ExprKind::Index { base, .. } => self.refined_part(base),
+            _ => false,
+        }
     }
 
     /// `&x`, the argument of an `inout` parameter of type `ty`. It is a variable the caller
@@ -5959,7 +6202,8 @@ fn without_bad_keys(decls: &Decls, ty: &Ty, bounds: &[Vec<IfaceId>], unknown: &[
         let keyed = key.is_unknown()
             || unknown.contains(key)
             || decls.unknown_interfaces(key)
-            || [IfaceId::EQ, IfaceId::HASH].iter().all(|&iface| decls.implements(key, iface, bounds));
+            || (!decls.is_resource(key)
+                && [IfaceId::EQ, IfaceId::HASH].iter().all(|&iface| decls.implements(key, iface, bounds)));
         if !keyed {
             return Ty::Error;
         }
@@ -6093,8 +6337,9 @@ fn later_collection_method(name: &str) -> Option<(&'static str, Planned)> {
         "map" | "filter" => ("operations that take a closure", Planned::Phase(3)),
         // STD.md declares none of them.
         "is_sorted" | "is_permutation_of" | "is_unique" => ("the predicates of §8.1", Planned::Unscheduled),
-        // `replace` returns a resource it would otherwise discard (REFERENCE §10 rule 5).
-        "replace" => ("operations on collections of resources", Planned::Phase(2)),
+        // `replace` returns a resource it would otherwise discard (REFERENCE §10 rule 5), but
+        // STD.md doesn't declare it yet.
+        "replace" => ("list operations that STD.md doesn't declare, such as `replace`,", Planned::Unscheduled),
         "swap" | "sort" => ("collection operations that STD.md doesn't declare", Planned::Unscheduled),
         _ => return None,
     })

@@ -1,0 +1,40 @@
+// phase: 2.8
+// An `opaque` record hides its fields from other modules (REFERENCE §9.2). A program is one
+// module in phase 2, so inside it an `opaque` record is used like any other, and it may be
+// `unique` or a `resource`. What it `uses` is checked against its fields in phase 3.
+use std.io { IoError }
+
+opaque record Secret {
+    code: Int
+}
+
+pub opaque record Shared {
+    name: Text
+}
+
+opaque unique record Token {
+    id: Int
+}
+
+opaque resource record Lease {
+    id: Int
+}
+
+impl Lease {
+    fn end(take self) -> Int {
+        return self.id
+    }
+}
+
+impl Abandon for Lease {
+    fn abandon(take self) {}
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let secret = Secret(code: 7)
+    let shared = Shared(name: "s")
+    let token = Token(id: 2)
+    let moved = token
+    let lease = Lease(id: 3)
+    try sys.stdout.write_line(f"{secret.code} {shared.name} {moved.id} {lease.end()}")
+}

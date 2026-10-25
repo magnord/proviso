@@ -1,0 +1,79 @@
+// phase: 2.8
+// expect-error: E0309
+// expect-error: E0502
+// expect-error: E0306
+// expect-error: E0301
+// A resource is never copied (REFERENCE §10 rule 1), so it isn't `Copy`, and what copies an
+// element needs one (E0309): `get`, `enumerate`, `duplicate`, and `xs[i]` or a part of it
+// bound to a name or taken by a `take self` method or `with`. What such a copy is bound to isn't reported again as left over, and nor is what a
+// guard tried to consume, or the values of an example that can't compare them, or a value
+// whose construction has a type error, or one given to a place of another type (§15.1).
+use std.pool { Pool, Handle }
+
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+fn open() -> Probe {
+    return Probe(name: "p")
+}
+
+fn take_it(p: take Probe) -> Bool {
+    p.close()
+    return true
+}
+
+fn copies(xs: List[Probe], pool: Pool[Probe], h: Handle[Probe]) {
+    let a = xs.get(0)                               // <- E0309
+    let b = xs[0]                                   // <- E0309
+    let c = pool.get(h)                             // <- E0309
+    let d = pool.duplicate()                        // <- E0309
+    let e = xs.enumerate()                          // <- E0309
+}
+
+record Holder {
+    probe: Probe
+}
+
+fn taken(xs: inout List[Probe], hs: inout List[Holder], pool: inout Pool[Probe], h: Handle[Probe]) {
+    xs[0].close()                                   // <- E0309
+    xs[0].abandon()                                 // <- E0309
+    Abandon.abandon(xs[0])                          // <- E0309
+    hs[0].probe.close()                             // <- E0309
+    pool[h].close()                                 // <- E0309
+}
+
+unique record Ticket {
+    n: Int
+}
+
+fn changed(ts: List[Ticket]) {
+    let t = ts[0].with(n: 2)                        // <- E0309
+}
+
+fn guard(o: take Option[Probe]) {
+    match o {
+        Some(p) if take_it(p: p) => {}              // <- E0502
+        Some(p) => p.close()
+        None => {}
+    }
+}
+
+fn mistyped() {
+    let p = Probe(name: 5)                          // <- E0301
+}
+
+fn mismatched_place() {
+    let p = open()
+    let n: Int = p                                  // <- E0301
+}
+
+example open() == open()                           // <- E0306

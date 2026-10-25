@@ -190,6 +190,8 @@ pub struct RecordDecl {
     pub name: Ident,
     /// Declared `unique record`, so its values move instead of being copied (REFERENCE §5.1).
     pub unique: bool,
+    /// Declared `resource record`, a base resource whose values must be consumed (§10).
+    pub resource: bool,
     /// The interfaces named in `derives(…)`, which the checker resolves.
     pub derives: Vec<Ident>,
     pub fields: Vec<FieldDecl>,

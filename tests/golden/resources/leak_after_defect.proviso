@@ -1,0 +1,45 @@
+// phase: 2.8
+// expect-exit: 70
+// expect-report: defect division_by_zero
+// expect-report: defect assertion_failed
+// expect-report: leak Probe
+// A defect that begins the exit propagates, and a defect in an `abandon` during the
+// cleanup it starts is reported after it, with the leak it causes. The other resources are
+// still abandoned (REFERENCE §10, OPEN_QUESTIONS T10).
+use std.io { Out }
+
+resource record Probe {
+    id: Int
+    fragile: Bool
+    out: Out
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.id}")
+        assert not self.fragile
+    }
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)
+}
+
+fn work(out: keep Out, zero: Int) -> Int {
+    let first = Probe(id: 1, fragile: false, out: out)
+    let second = Probe(id: 2, fragile: true, out: out)
+    let third = Probe(id: 3, fragile: false, out: out)
+    let n = 10 / zero
+    third.close()
+    second.close()
+    first.close()
+    return n
+}
+
+pub fn main(sys: keep System) {
+    let n = work(out: sys.stdout, zero: 0)
+}

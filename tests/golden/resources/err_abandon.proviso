@@ -1,0 +1,131 @@
+// phase: 2.8
+// expect-error: E0309
+// expect-error: E0316
+// expect-error: E0319
+// expect-error: E0301
+// expect-error: E0202
+// expect-error: E0501
+// expect-error: E0314
+// expect-error: E0709
+// Every resource type implements `Abandon` (REFERENCE §10), so a `resource record` needs an
+// `impl Abandon`, whose `abandon` takes `take self` and can't fail (STD.md). An aggregate
+// that holds a resource implements it by itself, abandoning what it holds, and a type that
+// isn't a resource has nothing to abandon, so neither takes an `impl Abandon`. A call of
+// `abandon` on a type whose implementation was rejected or is missing isn't reported, nor is
+// a second declaration of a resource left without one, and
+// nor is the `self` of a rejected one left over, while other errors in its body are (§15.1).
+// An interface method that takes `take self` is implemented with `take self`. An error type
+// can't be a resource (§10 rule 5), whether it is one or holds one.
+resource record Probe {
+    name: Text
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+resource record Bare {                              // <- E0309
+    id: Int
+}
+
+record Plain {
+    id: Int
+}
+
+impl Abandon for Plain {                            // <- E0319
+    fn abandon(take self) {}
+}
+
+record Holder {
+    probe: Probe
+}
+
+impl Abandon for Holder {                           // <- E0316
+    fn abandon(take self) {
+        let n: Int = "not a number"                 // <- E0301
+    }
+}
+
+fn rejected_calls(b: take Bare, p: Plain, h: take Holder) {
+    b.abandon()
+    p.abandon()
+    Abandon.abandon(p)
+    h.abandon()
+}
+
+resource record Borrowing {
+    id: Int
+}
+
+impl Abandon for Borrowing {
+    fn abandon(self) {}                             // <- E0314
+}
+
+enum Stop {
+    Halt
+}
+
+resource record Failing {
+    id: Int
+}
+
+impl Abandon for Failing {
+    fn abandon(take self) fails Stop {}             // <- E0314
+}
+
+interface Closer {
+    fn finish(take self) -> Int
+}
+
+impl Closer for Probe {
+    fn finish(self) -> Int {                        // <- E0314
+        return 0
+    }
+}
+
+fn fails_with_probe() fails Probe {                 // <- E0709
+}
+
+fn fails_with_option() fails Option[Probe] {        // <- E0709
+}
+
+resource record Twice {
+    n: Int
+}
+
+resource record Twice {                             // <- E0202
+    n: Int
+}
+
+impl Abandon for Twice {
+    fn abandon(take self) {}
+}
+
+record Mixed {
+    n: Int
+}
+
+resource record Mixed {                             // <- E0202
+    n: Int
+}
+
+impl Abandon for Mixed {
+    fn abandon(take self) {}
+}
+
+fn holder_twice(h: take Holder) {
+    Abandon.abandon(h)
+    Abandon.abandon(h)                              // <- E0501
+}
+
+record Bland {
+    n: Int
+}
+
+record Bland {                                      // <- E0202
+    n: Int
+}
+
+impl Abandon for Bland {                            // <- E0319
+    fn abandon(take self) {}
+}

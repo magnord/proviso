@@ -1,22 +1,13 @@
 // phase: 2.1
 // expect-error: E0901
-// Records that are generic, opaque or resources, a record's generated validator and
-// distinct types come in later slices of phase 2, and capability declarations and the rest
-// of `System` in phase 3. Uses of what they declare aren't reported again (REFERENCE §15.1).
+// Generic records, a record's generated validator and distinct types come in later slices
+// of phase 2, and capability declarations and the rest of `System` in phase 3. Uses of what they declare aren't reported again (REFERENCE §15.1).
 record Pair[A, B] {                                 // <- E0901
     first: A
     second: B
 }
 
 unique record Token {
-    id: Int
-}
-
-resource record Lock {                              // <- E0901
-    id: Int
-}
-
-opaque record Secret {                              // <- E0901
     id: Int
 }
 
@@ -30,7 +21,7 @@ fn validated(lo: Int, hi: Int) -> Int {
     return 0
 }
 
-fn later_types(t: Token, l: Lock, s: Secret, p: Pair, q: Pair[Int, Int]) -> Int {
+fn later_types(t: Token, p: Pair, q: Pair[Int, Int]) -> Int {
     return 0
 }
 

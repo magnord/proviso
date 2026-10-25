@@ -368,6 +368,34 @@ pub struct Defect {
     pub span: Span,
     /// The call sites that led here, innermost first.
     pub callers: Vec<Span>,
+    /// What the cleanup after it reported, in order: defects in `abandon` and the leaks they
+    /// caused (REFERENCE §10; OPEN_QUESTIONS T10).
+    pub cleanup: Vec<Report>,
+}
+
+/// Drops the cleanup reports with a stack of their own, since a cleanup defect may carry its
+/// own to any depth.
+impl Drop for Defect {
+    fn drop(&mut self) {
+        let mut reports = std::mem::take(&mut self.cleanup);
+        while let Some(report) = reports.pop() {
+            if let Report::Defect(mut defect) = report {
+                reports.append(&mut defect.cleanup);
+            }
+        }
+    }
+}
+
+/// A report from the cleanup that follows a failure exit.
+#[derive(Debug)]
+pub enum Report {
+    Defect(Defect),
+    /// A resource of type `ty` whose `abandon` hit a defect, owned by the binding or the
+    /// expression at `span`.
+    Leak {
+        ty: String,
+        span: Span,
+    },
 }
 
 pub enum Outcome {
@@ -431,8 +459,21 @@ fn on_interp_thread<'a, R: Send>(
             .spawn_scoped(scope, || {
                 // The stack grows down, so this is close to its top.
                 let stack_limit = stack_address().saturating_sub(STACK_SIZE - STACK_RESERVE);
-                let mut interp =
-                    Interp { file, m, p, stdout, stderr, depth: 0, stack_limit, fuel: None, generations: 0, pools: 0 };
+                let mut interp = Interp {
+                    file,
+                    m,
+                    p,
+                    stdout,
+                    stderr,
+                    depth: 0,
+                    stack_limit,
+                    fuel: None,
+                    generations: 0,
+                    pools: 0,
+                    owned: Vec::new(),
+                    acquired: 0,
+                    base: 0,
+                };
                 run(&mut interp)
             })
             .expect("failed to start the interpreter thread")
@@ -473,7 +514,7 @@ fn lacks_final_else(m: &Module, mut e: ExprId) -> bool {
 }
 
 fn defect(kind: DefectKind, message: impl Into<String>, span: Span) -> Unwind {
-    Unwind::Defect(Defect { kind, message: message.into(), span, callers: Vec::new() })
+    Unwind::Defect(Defect { kind, message: message.into(), span, callers: Vec::new(), cleanup: Vec::new() })
 }
 
 struct Interp<'a> {
@@ -494,10 +535,28 @@ struct Interp<'a> {
     generations: u64,
     /// The last identity a pool took.
     pools: u64,
+    /// The resources the calls in progress own, each with when it was acquired, which a
+    /// failure exit abandons newest first (REFERENCE §10). Each call's come after its
+    /// caller's. An entry never moves, since a call, literal or loop keeps where its own
+    /// begin, so a local given a new value is acquired again in place.
+    owned: Vec<(u64, Owned)>,
+    /// The last acquisition the run made.
+    acquired: u64,
+    /// Where the running call's resources begin in `owned`.
+    base: usize,
 }
 
 /// A function's local slots, indexed by `LocalId`.
 type Frame = Vec<Value>;
+
+/// A resource a call owns: in a local, with the span of its binding, or held while its call,
+/// literal or consuming loop runs, with the span of the expression that holds it.
+enum Owned {
+    Local(LocalId, Span),
+    Value(Value, Span),
+    /// The elements a consuming loop hasn't reached, last first.
+    Rest(Vec<Value>, Span),
+}
 
 impl Interp<'_> {
     fn main(&mut self) -> Outcome {
@@ -541,8 +600,14 @@ impl Interp<'_> {
     fn example(&mut self, info: &ExampleInfo) -> ExampleOutcome {
         let ItemKind::Example(decl) = &self.m.items[info.item].kind else { unreachable!("examples are items") };
         let mut frame: Frame = vec![Value::Unit; info.locals];
-        (self.fuel, self.depth) = (Some(EXAMPLE_FUEL), 0);
-        let outcome = self.expect(decl, &mut frame);
+        (self.fuel, self.depth, self.base) = (Some(EXAMPLE_FUEL), 0, 0);
+        let outcome = match self.expect(decl, &mut frame) {
+            Err(unwind) => Err(self.abandon_owned(0, &mut frame, unwind)),
+            ok => {
+                self.owned.clear();
+                ok
+            }
+        };
         self.fuel = None;
         match outcome {
             Ok(None) => ExampleOutcome::Passed,
@@ -610,39 +675,144 @@ impl Interp<'_> {
     }
 
     fn call(&mut self, f: FnId, args: Vec<Value>, site: Span) -> Flow<Value> {
-        Ok(self.run(f, args, site, &[])?.0)
+        self.run(f, args, site, &[]).0
     }
 
     /// Calls `f` and returns its value, with the final values of the locals `keep` names,
-    /// which are its `inout` parameters.
-    fn run(&mut self, f: FnId, args: Vec<Value>, site: Span, keep: &[usize]) -> Flow<(Value, Vec<Value>)> {
-        self.check_stack(site)?;
-        self.step(site)?;
+    /// which are its `inout` parameters, however the call ends. A failure exit abandons the
+    /// resources the call still owns, newest first (REFERENCE §10).
+    fn run(&mut self, f: FnId, args: Vec<Value>, site: Span, keep: &[usize]) -> (Flow<Value>, Vec<Value>) {
         let body = self.p.decl(self.m, f).body.as_ref().expect("functions that run have bodies");
         let mut frame = args;
         frame.resize(self.p.fns[f].locals, Value::Unit);
-        self.depth += 1;
-        let result = self.block(body, &mut frame);
-        self.depth -= 1;
-        let value = match result {
-            Ok(_) => Value::Unit,
-            Err(Unwind::Return(value)) => value,
-            Err(Unwind::Defect(mut defect)) => {
-                defect.callers.push(site);
-                return Err(Unwind::Defect(defect));
+        let mark = self.owned.len();
+        for &(local, span) in &self.p.fns[f].owned {
+            self.acquire(Owned::Local(local, span));
+        }
+        let outer = std::mem::replace(&mut self.base, mark);
+        // A call that can't start owns its arguments already, so it abandons them and hands
+        // its `inout` ones back as any other failure does.
+        let begun = self.check_stack(site).and_then(|()| self.step(site));
+        let started = begun.is_ok();
+        let result = match begun {
+            Ok(()) => {
+                self.depth += 1;
+                let result = self.block(body, &mut frame);
+                self.depth -= 1;
+                result
             }
-            Err(other) => return Err(other),
+            Err(unwind) => Err(unwind),
+        };
+        self.base = outer;
+        let result = match result {
+            Ok(_) => Ok(Value::Unit),
+            Err(Unwind::Return(value)) => Ok(value),
+            Err(unwind) => Err(unwind),
+        };
+        let result = match result {
+            Ok(value) => {
+                self.owned.truncate(mark);
+                Ok(value)
+            }
+            Err(unwind) => match self.abandon_owned(mark, &mut frame, unwind) {
+                // A defect at `site` itself, before the call began, isn't called from there.
+                Unwind::Defect(mut defect) if started => {
+                    defect.callers.push(site);
+                    Err(Unwind::Defect(defect))
+                }
+                other => Err(other),
+            },
         };
         let finals = keep.iter().map(|&i| std::mem::replace(&mut frame[i], Value::Unit)).collect();
-        Ok((value, finals))
+        (result, finals)
+    }
+
+    /// Abandons what the call whose resources begin at `mark` still owns, newest first, as
+    /// `unwind` leaves it. A defect in an `abandon` is reported and leaks its resource, and the
+    /// first one replaces an error that began the exit (REFERENCE §10; OPEN_QUESTIONS T10).
+    fn abandon_owned(&mut self, mark: usize, frame: &mut Frame, mut unwind: Unwind) -> Unwind {
+        let mut owned = self.owned.split_off(mark);
+        owned.sort_by_key(|(acquired, _)| *acquired);
+        while let Some((_, entry)) = owned.pop() {
+            let (value, span) = match entry {
+                Owned::Local(local, span) => (std::mem::replace(&mut frame[local.index()], Value::Unit), span),
+                Owned::Value(value, span) => (value, span),
+                Owned::Rest(mut rest, span) => {
+                    rest.reverse();
+                    (Value::List(Arc::new(ListValue { items: rest })), span)
+                }
+            };
+            unwind = self.abandon(value, span, unwind);
+        }
+        unwind
+    }
+
+    /// Abandons the resources in `value`, which the binding or expression at `span` owned:
+    /// the base resources it holds, at any depth, last first (REFERENCE §10 rule 4). A base
+    /// resource that a field, or a part of one, moved out of abandons the rest of its
+    /// resource fields instead, since its `abandon` would read the one that is gone
+    /// (OPEN_QUESTIONS P5).
+    fn abandon(&mut self, value: Value, span: Span, mut unwind: Unwind) -> Unwind {
+        let p = self.p;
+        let decls = &p.decls;
+        let mut stack = vec![value];
+        while let Some(value) = stack.pop() {
+            match value {
+                Value::Adt(adt) => {
+                    let def = decls.adt(adt.def);
+                    let partial = def.resource_base && has_hole(decls, &adt, &[]);
+                    if def.resource_base && !partial {
+                        let f = decls.impl_method(IfaceId::ABANDON, ImplKey::Adt(adt.def), 0);
+                        let f = f.expect("the checker found every resource's `abandon`");
+                        let ty = adt.def;
+                        if let Err(Unwind::Defect(defect)) = self.call(f, vec![Value::Adt(adt)], span) {
+                            let leak = Report::Leak { ty: decls.name(ty), span };
+                            unwind = match unwind {
+                                Unwind::Defect(mut first) => {
+                                    first.cleanup.push(Report::Defect(defect));
+                                    first.cleanup.push(leak);
+                                    Unwind::Defect(first)
+                                }
+                                _ => {
+                                    let mut defect = defect;
+                                    defect.cleanup.push(leak);
+                                    Unwind::Defect(defect)
+                                }
+                            };
+                        }
+                        continue;
+                    }
+                    // A module's record or enum knows which of its fields hold resources; a
+                    // tuple, `Option` or `Result` is walked whole.
+                    let fields = &def.variants[adt.variant.index()].fields;
+                    for (field, value) in fields.iter().zip(adt.fields.iter()) {
+                        if def.params > 0 || decls.is_resource(&field.ty) {
+                            stack.push(value.clone());
+                        }
+                    }
+                }
+                Value::List(list) => stack.extend(list.items.iter().cloned()),
+                Value::Map(map) => {
+                    for (key, value) in map.iter() {
+                        stack.push(key.clone());
+                        stack.push(value.clone());
+                    }
+                }
+                Value::Pool(pool) => stack.extend(pool.elements().cloned()),
+                _ => {}
+            }
+        }
+        unwind
     }
 
     /// Evaluates the receiver, when there is one, and then the arguments of a call, in
     /// order. An `inout self` receiver and an `&` argument are places, whose indices are
     /// evaluated in order, but whose values are read once every other argument is, since
     /// their access begins then (REFERENCE §5.3). Each is copied in, or taken out when the
-    /// callee can't fail and so never rolls it back (§5.4). Returns the values, and the places
-    /// with the index of the value each gives.
+    /// callee can't fail and so never rolls it back, or keeps partial changes (§5.4). Returns
+    /// the values, and the places with the index of the value each gives. The call holds the
+    /// resources it is given until it takes them, so the caller drops what this pushes to
+    /// [`Interp::owned`] once it has.
     fn args(
         &mut self,
         shape: Shape,
@@ -652,28 +822,47 @@ impl Interp<'_> {
     ) -> Flow<(Vec<Value>, Vec<Inout>)> {
         let mut values = Vec::with_capacity(args.len() + 1);
         let mut places = Vec::new();
-        let Shape { inout_self, can_fail } = shape;
+        let Shape { inout_self, can_fail, f, method } = shape;
+        // An `inout` that keeps partial changes is written back however the call ends.
+        let partial = |p: &Program, i: Option<usize>| {
+            if let Some((iface, j, self_value, first)) = method {
+                // An interface's methods borrow or take `self`, and its parameters may name
+                // `Self`, the type of the value that gives it.
+                let Some(k) = i.and_then(|i| if first { i.checked_sub(1) } else { Some(i) }) else { return false };
+                let def = &p.decls.iface(iface).methods[j];
+                let ty = def.params[k].1.subst(std::slice::from_ref(p.ty(self_value)));
+                return def.modes[k] == ParamMode::InoutPartial || p.decls.is_resource(&ty);
+            }
+            let Some(f) = f else { return false };
+            let info = &p.fns[f];
+            match i {
+                None => info.receiver.as_ref().is_some_and(|ty| p.decls.is_resource(ty)),
+                Some(i) => {
+                    let param = &info.params[i];
+                    param.mode == ParamMode::InoutPartial || p.decls.is_resource(&param.ty)
+                }
+            }
+        };
         if let Some(receiver) = receiver {
             if inout_self {
                 let (root, path) = self.place(receiver, frame)?;
-                places.push(Inout { index: 0, root, path });
+                places.push(Inout { index: 0, root, path, partial: partial(self.p, None) });
                 values.push(Value::Unit);
             } else {
-                values.push(self.expr(receiver, frame)?);
+                values.push(self.held(receiver, frame)?);
             }
         }
-        for arg in args {
+        for (i, arg) in args.iter().enumerate() {
             if arg.inout {
                 let (root, path) = self.place(arg.value, frame)?;
-                places.push(Inout { index: values.len(), root, path });
+                places.push(Inout { index: values.len(), root, path, partial: partial(self.p, Some(i)) });
                 values.push(Value::Unit);
             } else {
-                values.push(self.expr(arg.value, frame)?);
+                values.push(self.held(arg.value, frame)?);
             }
         }
-        let take = !can_fail;
         for place in &places {
-            values[place.index] = if take {
+            values[place.index] = if !can_fail || place.partial {
                 std::mem::replace(slot(&mut frame[place.root.index()], &place.path)?, Value::Unit)
             } else {
                 at(&frame[place.root.index()], &place.path)?.clone()
@@ -685,12 +874,104 @@ impl Interp<'_> {
     /// How function `f` takes its receiver and whether it can fail.
     fn shape(&self, f: FnId) -> Shape {
         let info = &self.p.fns[f];
-        Shape { inout_self: info.self_mode == ParamMode::Inout, can_fail: info.fails.is_some() }
+        Shape {
+            inout_self: info.self_mode == ParamMode::Inout,
+            can_fail: info.fails.is_some(),
+            f: Some(f),
+            method: None,
+        }
+    }
+
+    /// Notes a resource the running call now owns.
+    fn acquire(&mut self, owned: Owned) {
+        self.acquired += 1;
+        self.owned.push((self.acquired, owned));
+    }
+
+    /// Notes that `local`, which the running call owns, holds a new value, bound at `span`
+    /// when given, and returns whether it was owned already.
+    fn reacquire(&mut self, local: LocalId, span: Option<Span>) -> bool {
+        let base = self.base;
+        let Some((acquired, Owned::Local(_, at))) =
+            self.owned[base..].iter_mut().rev().find(|(_, o)| matches!(o, Owned::Local(l, _) if *l == local))
+        else {
+            return false;
+        };
+        self.acquired += 1;
+        *acquired = self.acquired;
+        if let Some(span) = span {
+            *at = span;
+        }
+        true
+    }
+
+    /// The value of `e`, which the call, literal or `match` around it holds until it takes
+    /// it, when it is a resource that moves there (REFERENCE §10).
+    fn held(&mut self, e: ExprId, frame: &mut Frame) -> Flow<Value> {
+        let value = self.expr(e, frame)?;
+        if self.p.held.get(e).is_some() {
+            self.acquire(Owned::Value(value.clone(), self.m.exprs[e].span));
+        }
+        Ok(value)
+    }
+
+    /// Notes the resources the bindings of `pat`, which has just matched, own.
+    fn own_bindings(&mut self, pat: PatId) {
+        let m = self.m;
+        match &m.pats[pat].kind {
+            PatKind::Bind(_) if self.p.owned_binds.get(pat).is_some() => {
+                let local = *self.p.pat_local.get(pat).expect("bindings are resolved");
+                // A local bound again owns only its new value, which is acquired now.
+                if !self.reacquire(local, Some(m.pats[pat].span)) {
+                    self.acquire(Owned::Local(local, m.pats[pat].span));
+                }
+            }
+            PatKind::Tuple(parts) => {
+                for &part in parts {
+                    self.own_bindings(part);
+                }
+            }
+            PatKind::Ctor { fields: Some(fields), .. } => {
+                for field in fields {
+                    self.own_bindings(field.pat);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Takes the resource parts that `pat`, which has just matched the value of `value`, moved
+    /// out of the place `value` names, so that the place no longer holds them (REFERENCE §10).
+    fn take_parts(&mut self, value: ExprId, pat: PatId, frame: &mut Frame) {
+        let Some(paths) = self.p.parts_out.get(pat) else { return };
+        if !self.is_place(value) {
+            return;
+        }
+        let mut base = Vec::new();
+        let mut at = value;
+        let root = loop {
+            match (&self.m.exprs[at].kind, self.p.res(at)) {
+                (ExprKind::Name(_) | ExprKind::It, Some(Res::Local(id))) => break id,
+                (ExprKind::Field { base: inner, .. }, Some(Res::Field(i))) => {
+                    base.push(i);
+                    at = *inner;
+                }
+                _ => return,
+            }
+        };
+        base.reverse();
+        for path in paths.iter() {
+            let full: Vec<Step> = base.iter().chain(path.iter()).map(|&i| Step::Field(i)).collect();
+            if let Ok(place) = slot(&mut frame[root.index()], &full) {
+                *place = Value::Unit;
+            }
+        }
     }
 
     /// Calls `f` with `values`, and once it succeeds writes the final value of each `inout`
     /// parameter back to its place, then checks each record on the places' paths, innermost
-    /// first, each once. A failed call writes nothing back (REFERENCE §5.4, §8.3).
+    /// first, each once. A failed call writes back only the places that keep partial changes
+    /// (REFERENCE §5.4, §8.3).
     fn call_back(
         &mut self,
         f: FnId,
@@ -703,7 +984,16 @@ impl Interp<'_> {
             return self.call(f, values, site);
         }
         let keep: Vec<usize> = places.iter().map(|place| place.index).collect();
-        let (value, finals) = self.run(f, values, site, &keep)?;
+        let (result, finals) = self.run(f, values, site, &keep);
+        if result.is_err() {
+            for (place, value) in places.iter().zip(finals).filter(|(place, _)| place.partial) {
+                if let Ok(slot) = slot(&mut frame[place.root.index()], &place.path) {
+                    *slot = value;
+                }
+            }
+            return result;
+        }
+        let value = result?;
         for (place, value) in places.iter().zip(finals) {
             *slot(&mut frame[place.root.index()], &place.path)? = value;
         }
@@ -744,6 +1034,8 @@ impl Interp<'_> {
                 let value = self.expr(*init, frame)?;
                 // The checker proved that the pattern matches every value.
                 self.matches(*pat, &value, frame)?;
+                self.take_parts(*init, *pat, frame);
+                self.own_bindings(*pat);
             }
             StmtKind::Check { cond, fallback } => {
                 if !self.bool(*cond, frame)? {
@@ -756,6 +1048,10 @@ impl Interp<'_> {
                 // (OPEN_QUESTIONS P5).
                 let value = self.expr(*value, frame)?;
                 let (root, path) = self.place(*target, frame)?;
+                // A local given a new resource acquires it now (REFERENCE §10 rule 3).
+                if path.is_empty() {
+                    self.reacquire(root, None);
+                }
                 let slot = slot(&mut frame[root.index()], &path)?;
                 *slot = match op.bin_op() {
                     None => value,
@@ -959,9 +1255,11 @@ impl Interp<'_> {
                     Some(Res::Fn(f)) => self.shape(f),
                     _ => Shape::default(),
                 };
+                let mark = self.owned.len();
                 let (values, places) = self.args(shape, None, args, frame)?;
                 match self.p.res(*callee) {
                     Some(Res::Fn(f)) => {
+                        self.owned.truncate(mark);
                         let result = self.call_back(f, values, &places, frame, span);
                         return self.attempted(e, result);
                     }
@@ -969,6 +1267,7 @@ impl Interp<'_> {
                     Some(Res::Ctor(def, variant)) => {
                         let value = Value::Adt(Adt { def, variant, fields: values.into() });
                         self.refine(&value, span)?;
+                        self.owned.truncate(mark);
                         value
                     }
                     other => unreachable!("calls are resolved, not {other:?}"),
@@ -997,15 +1296,18 @@ impl Interp<'_> {
                     Res::Fn(f) => self.shape(f),
                     // An interface's methods borrow `self`, and an implementation fails as its
                     // method is declared to.
-                    Res::Dispatch { iface, method, .. } => {
+                    Res::Dispatch { iface, method, qualified } => {
                         let can_fail = self.p.decls.iface(iface).methods[method].fails.is_some();
-                        Shape { inout_self: false, can_fail }
+                        let self_value = receiver.unwrap_or_else(|| args[0].value);
+                        let method = Some((iface, method, self_value, qualified));
+                        Shape { inout_self: false, can_fail, f: None, method }
                     }
                     _ => Shape::default(),
                 };
                 // `with` reads a receiver that is a variable or a field of one once its
                 // arguments, which may read or assign it, are evaluated. One that moves leaves
                 // its local then.
+                let mark = self.owned.len();
                 let (values, places) = if let Some(place) = receiver.filter(|&r| res == Res::With && self.is_place(r)) {
                     let (values, places) = self.args(shape, None, args, frame)?;
                     let taken = match self.p.moves_out.get(place) {
@@ -1016,6 +1318,10 @@ impl Interp<'_> {
                 } else {
                     self.args(shape, receiver, args, frame)?
                 };
+                // The call takes what it is given, and a construction once it is built.
+                if !matches!(res, Res::Ctor(..) | Res::With) {
+                    self.owned.truncate(mark);
+                }
                 match res {
                     Res::Method(builtin) => {
                         let result = self.builtin(builtin, values, span);
@@ -1028,6 +1334,9 @@ impl Interp<'_> {
                     Res::Dispatch { iface, method, .. } => {
                         let result = match iface {
                             IfaceId::SHOW | IfaceId::EQ => self.dispatch(iface, method, values, span),
+                            IfaceId::ABANDON if !matches!(&values[0], Value::Adt(adt) if self.p.decls.adt(adt.def).resource_base) => {
+                                self.dispatch(iface, method, values, span)
+                            }
                             _ => {
                                 let key = impl_key(&values[0]);
                                 let f = self.p.decls.impl_method(iface, key, method);
@@ -1041,6 +1350,7 @@ impl Interp<'_> {
                     Res::Ctor(def, variant) => {
                         let value = Value::Adt(Adt { def, variant, fields: values.into() });
                         self.refine(&value, span)?;
+                        self.owned.truncate(mark);
                         value
                     }
                     Res::With => {
@@ -1051,8 +1361,13 @@ impl Interp<'_> {
                         for (i, value) in replaced.iter().zip(values) {
                             fields[i.index()] = value;
                         }
+                        // The new record holds what the receiver and the arguments held, which
+                        // a refinement that fails abandons with it.
                         let value = Value::Adt(adt);
+                        self.owned.truncate(mark);
+                        self.acquire(Owned::Value(value.clone(), span));
                         self.refine(&value, span)?;
+                        self.owned.truncate(mark);
                         value
                     }
                     other => unreachable!("methods are resolved, not {other:?}"),
@@ -1177,7 +1492,9 @@ impl Interp<'_> {
             }
             ExprKind::Unreachable => return Err(defect(DefectKind::UnreachableReached, "reached `unreachable`", span)),
             ExprKind::Match { scrutinee, arms, .. } => {
-                let value = self.expr(*scrutinee, frame)?;
+                // A resource the scrutinee makes is held until an arm's bindings take it.
+                let mark = self.owned.len();
+                let value = self.held(*scrutinee, frame)?;
                 for arm in arms {
                     if !self.matches(arm.pat, &value, frame)? {
                         continue;
@@ -1187,6 +1504,9 @@ impl Interp<'_> {
                     {
                         continue;
                     }
+                    self.owned.truncate(mark);
+                    self.take_parts(*scrutinee, arm.pat, frame);
+                    self.own_bindings(arm.pat);
                     // An arm whose pattern moves the scrutinee takes it out of its local once
                     // the arm is chosen, so what the pattern bound isn't copied.
                     if self.p.arms_out.get(arm.pat).is_some() && self.take_out(*scrutinee, frame).is_some() {
@@ -1198,17 +1518,24 @@ impl Interp<'_> {
                 let shown = debug_repr(&value, &self.p.decls);
                 return Err(defect(DefectKind::NoArmMatched, format!("no arm of this `match` matches {shown}"), span));
             }
-            ExprKind::Is { value, pat } => {
-                let value = self.expr(*value, frame)?;
-                Value::Bool(self.matches(*pat, &value, frame)?)
+            ExprKind::Is { value: tested, pat } => {
+                let value = self.expr(*tested, frame)?;
+                let matched = self.matches(*pat, &value, frame)?;
+                if matched {
+                    self.take_parts(*tested, *pat, frame);
+                    self.own_bindings(*pat);
+                }
+                Value::Bool(matched)
             }
             ExprKind::Tuple(elements) => {
                 let Ty::Adt(def, _) = self.p.ty(e) else { unreachable!("tuples have tuple types") };
                 let def = *def;
+                let mark = self.owned.len();
                 let mut values = Vec::with_capacity(elements.len());
                 for &element in elements {
-                    values.push(self.expr(element, frame)?);
+                    values.push(self.held(element, frame)?);
                 }
+                self.owned.truncate(mark);
                 Value::Adt(Adt { def, variant: VariantIdx::RECORD, fields: values.into() })
             }
             ExprKind::Else { value, fallback } => match self.p.it_local.get(e) {
@@ -1271,10 +1598,12 @@ impl Interp<'_> {
     /// `[a, b]`.
     #[inline(never)]
     fn list(&mut self, elements: &[ExprId], frame: &mut Frame) -> Flow<Value> {
+        let mark = self.owned.len();
         let mut items = Vec::with_capacity(elements.len());
         for &element in elements {
-            items.push(self.expr(element, frame)?);
+            items.push(self.held(element, frame)?);
         }
+        self.owned.truncate(mark);
         Ok(Value::List(Arc::new(ListValue { items })))
     }
 
@@ -1282,12 +1611,43 @@ impl Interp<'_> {
     /// place and its last value.
     #[inline(never)]
     fn map(&mut self, entries: &[(ExprId, ExprId)], frame: &mut Frame, span: Span) -> Flow<Value> {
+        let mark = self.owned.len();
         let mut map = MapValue::default();
+        // Where in `owned` the value of each of the map's entries is held, if it is.
+        let mut held_at: Vec<Option<usize>> = Vec::new();
         for &(key, value) in entries {
-            let key = self.expr(key, frame)?;
-            let value = self.expr(value, frame)?;
-            self.set(&mut map, key, value, span)?;
+            let key = self.held(key, frame)?;
+            let place = self.m.exprs[value].span;
+            let held = self.p.held.get(value).is_some();
+            let value = self.held(value, frame)?;
+            let at = held.then(|| self.owned.len() - 1);
+            let hash = hash_value(&key, &self.p.decls);
+            match map.find(&key, hash, &mut |a, b| self.equal(a, b, span))? {
+                // A key named again replaces its value, which can't be dropped, so a resource
+                // it held is abandoned now, and isn't held any more (REFERENCE §10 rules 4
+                // and 5; OPEN_QUESTIONS P5).
+                Some(slot) => {
+                    let old = map.replace(slot, value);
+                    // Only a value held as a resource has anything to abandon, under the span
+                    // of the expression that gave it.
+                    if let Some(i) = std::mem::replace(&mut held_at[slot], at) {
+                        let Owned::Value(_, owner) =
+                            std::mem::replace(&mut self.owned[i].1, Owned::Value(Value::Unit, place))
+                        else {
+                            unreachable!("a literal holds its values")
+                        };
+                        if let unwind @ Unwind::Defect(_) = self.abandon(old, owner, Unwind::Return(Value::Unit)) {
+                            return Err(unwind);
+                        }
+                    }
+                }
+                None => {
+                    map.insert(hash, key, value);
+                    held_at.push(at);
+                }
+            }
         }
+        self.owned.truncate(mark);
         Ok(Value::Map(Arc::new(map)))
     }
 
@@ -1304,12 +1664,14 @@ impl Interp<'_> {
         // The receiver's indices are checked before the arguments run, as when a method that
         // doesn't change it reads it.
         let (root, path) = self.place(receiver, frame)?;
+        let mark = self.owned.len();
         let mut values = Vec::with_capacity(args.len());
         for arg in args {
-            values.push(self.expr(arg.value, frame)?);
+            values.push(self.held(arg.value, frame)?);
         }
         let place = slot(&mut frame[root.index()], &path)?;
         let value = self.change(builtin, place, values, span)?;
+        self.owned.truncate(mark);
         // Each record on the path has changed, as after an assignment.
         for depth in (0..path.len()).rev() {
             self.refine(at(&frame[root.index()], &path[..depth])?, span)?;
@@ -1324,11 +1686,15 @@ impl Interp<'_> {
     #[inline(never)]
     fn for_collection(&mut self, e: ExprId, pat: PatId, iter: ExprId, body: &Block, frame: &mut Frame) -> Flow<Value> {
         let consume = matches!(self.m.exprs[e].kind, ExprKind::For { consume: true, .. });
+        if consume && self.p.decls.is_resource(self.p.ty(iter)) {
+            return self.for_resources(e, pat, iter, body, frame);
+        }
         match self.expr(iter, frame)? {
             Value::List(mut list) if consume && Arc::strong_count(&list) == 1 => {
                 let items = std::mem::take(&mut Arc::get_mut(&mut list).expect("nothing else shares it").items);
                 for item in items {
                     self.matches(pat, &item, frame)?;
+                    self.own_bindings(pat);
                     drop(item);
                     if self.loop_body(e, body, frame)?.is_break() {
                         break;
@@ -1338,6 +1704,7 @@ impl Interp<'_> {
             Value::List(list) => {
                 for item in &list.items {
                     self.matches(pat, item, frame)?;
+                    self.own_bindings(pat);
                     if self.loop_body(e, body, frame)?.is_break() {
                         break;
                     }
@@ -1346,6 +1713,7 @@ impl Interp<'_> {
             Value::Map(map) => {
                 for (key, value) in map.iter() {
                     self.matches(pat, &pair(key.clone(), value.clone()), frame)?;
+                    self.own_bindings(pat);
                     if self.loop_body(e, body, frame)?.is_break() {
                         break;
                     }
@@ -1353,6 +1721,35 @@ impl Interp<'_> {
             }
             other => unreachable!("`for` goes over ranges and collections, not {other:?}"),
         }
+        Ok(Value::Unit)
+    }
+
+    /// `for pat in take xs` over a collection of resources. The loop owns the elements it
+    /// hasn't reached, after those its body owns, so a failure exit abandons them too
+    /// (REFERENCE §10). The checker rejects a `break` out of it, which would drop them.
+    #[inline(never)]
+    fn for_resources(&mut self, e: ExprId, pat: PatId, iter: ExprId, body: &Block, frame: &mut Frame) -> Flow<Value> {
+        let mut rest: Vec<Value> = match self.expr(iter, frame)? {
+            Value::List(list) => list.items.clone(),
+            Value::Map(map) => map.iter().map(|(key, value)| pair(key.clone(), value.clone())).collect(),
+            other => unreachable!("a consuming loop goes over a list or a map, not {other:?}"),
+        };
+        rest.reverse();
+        let at = self.owned.len();
+        self.acquire(Owned::Rest(rest, self.m.exprs[iter].span));
+        loop {
+            let (_, Owned::Rest(rest, _)) = &mut self.owned[at] else {
+                unreachable!("the loop's elements stay at its mark")
+            };
+            let Some(item) = rest.pop() else { break };
+            self.matches(pat, &item, frame)?;
+            self.own_bindings(pat);
+            drop(item);
+            if self.loop_body(e, body, frame)?.is_break() {
+                break;
+            }
+        }
+        self.owned.truncate(at);
         Ok(Value::Unit)
     }
 
@@ -1595,6 +1992,16 @@ impl Interp<'_> {
         match (iface, values.as_slice()) {
             (IfaceId::SHOW, [value]) => Ok(Value::Text(self.show(value, site)?.into())),
             (IfaceId::EQ, [a, b]) => Ok(Value::Bool(self.equal(a, b, site)?)),
+            // Every resource implements `Abandon`, and an aggregate abandons what it holds
+            // (REFERENCE §10 rule 4).
+            (IfaceId::ABANDON, [value]) if !matches!(value, Value::Adt(adt) if self.p.decls.adt(adt.def).resource_base) =>
+            {
+                let value = values.into_iter().next().expect("one value");
+                match self.abandon(value, site, Unwind::Return(Value::Unit)) {
+                    Unwind::Return(_) => Ok(Value::Unit),
+                    unwind => Err(unwind),
+                }
+            }
             _ => {
                 let key = impl_key(&values[0]);
                 let f = self.p.decls.impl_method(iface, key, method).expect("the checker found an implementation");
@@ -1737,11 +2144,16 @@ impl Step {
 }
 
 /// How a call takes its arguments: whether its receiver is `inout self`, and whether it can
-/// fail, so that its `inout` arguments are copied in rather than taken out.
+/// fail, so that its `inout` arguments are copied in rather than taken out, and what it
+/// calls, if it is a declared function or an interface's method.
 #[derive(Clone, Copy, Default)]
 struct Shape {
     inout_self: bool,
     can_fail: bool,
+    f: Option<FnId>,
+    /// An interface's method `j`, with the expression that gives `self` and whether that is
+    /// the call's first argument, as in `Iface.method(x)`.
+    method: Option<(IfaceId, usize, ExprId, bool)>,
 }
 
 /// An `inout` argument or receiver: the index of its value among a call's, and its place.
@@ -1749,6 +2161,8 @@ struct Inout {
     index: usize,
     root: LocalId,
     path: Vec<Step>,
+    /// It keeps the callee's changes whether or not the call succeeds (REFERENCE §5.4).
+    partial: bool,
 }
 
 /// The value at `path` inside `value`. An index outside its list is a defect.
@@ -2191,6 +2605,21 @@ fn quote(text: &str, quote: char) -> String {
     }
     out.push(quote);
     out
+}
+
+/// Whether a field of the record or tuple `adt`, whose type arguments are `args`, or a part
+/// of one, has moved out, which leaves `Unit` in a place whose type isn't `Unit`.
+fn has_hole(decls: &Decls, adt: &Adt, args: &[Ty]) -> bool {
+    let def = decls.adt(adt.def);
+    if def.is_enum() || def.is_native() {
+        return false;
+    }
+    let types = def.field_types(adt.variant, args);
+    types.iter().zip(adt.fields.iter()).any(|(ty, value)| match (value, ty) {
+        (Value::Unit, ty) => *ty != Ty::Unit,
+        (Value::Adt(inner), Ty::Adt(_, args)) => has_hole(decls, inner, args),
+        _ => false,
+    })
 }
 
 #[cfg(test)]

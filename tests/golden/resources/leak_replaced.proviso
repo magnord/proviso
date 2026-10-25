@@ -1,0 +1,58 @@
+// phase: 2.8
+// expect-exit: 70
+// expect-report: defect division_by_zero
+// A map literal that names a key again abandons the value it replaces then. A defect in that
+// `abandon` is reported with a `leak` at the expression that gave the value, and the
+// values the literal still holds are abandoned (REFERENCE §10; OPEN_QUESTIONS P5).
+use std.io { Out, IoError }
+
+resource record Probe {
+    name: Text
+    out: Out
+}
+
+impl Probe {
+    fn close(take self) {
+        say(out: self.out, line: f"close {self.name}")
+    }
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.name}")
+        if self.name == "boom" {
+            let z = 0
+            say(out: self.out, line: f"{1 / z}")
+        }
+    }
+}
+
+enum Stop {
+    Halt
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)
+}
+
+fn open(name: Text, out: keep Out) -> Probe {
+    return Probe(name: name, out: out)
+}
+
+fn stop(out: Out, why: Text) -> Probe fails Stop {
+    say(out: out, line: f"failing: {why}")
+    fail Stop.Halt
+}
+
+fn f(out: keep Out) fails Stop {
+    let m = ["k": open(name: "boom", out: out), "j": open(name: "b", out: out), "k": open(name: "c", out: out), "z": open(name: "d", out: out)]
+    for (k, p) in take m {
+        p.close()
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let out = sys.stdout
+    let r = attempt f(out: out)
+    try sys.stdout.write_line("done")
+}

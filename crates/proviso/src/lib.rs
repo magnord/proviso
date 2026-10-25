@@ -7,15 +7,15 @@ use std::io::Write;
 use std::path::Path;
 
 use proviso_check::{ExampleInfo, Options, Program, check_module};
-use proviso_interp::{Defect, ExampleOutcome, Outcome, run_examples, run_main};
+use proviso_interp::{Defect, ExampleOutcome, Outcome, Report, run_examples, run_main};
 use proviso_syntax::ast::{ItemKind, Module, TypeExprKind};
 use proviso_syntax::diag::{Diagnostic, Diagnostics, Severity};
 use proviso_syntax::parse_module;
 use proviso_syntax::source::{SourceFile, Span};
 
 /// How far this toolchain implements the v1 plan (OPEN_QUESTIONS P3): phase 1, and the first
-/// seven slices of phase 2.
-pub const IMPLEMENTED_PHASE: Phase = Phase::slice(2, 7);
+/// eight slices of phase 2.
+pub const IMPLEMENTED_PHASE: Phase = Phase::slice(2, 8);
 
 /// A point in the v1 plan: a whole phase, or a slice of one. A phase delivered over several
 /// pull requests numbers its slices `2.1`, `2.2` and so on, and each pull request turns its
@@ -209,9 +209,34 @@ impl Compiled {
         out
     }
 
-    /// The defect and its call sites. Runs of the same call site, as in deep recursion,
-    /// collapse to one line, and at most [`MAX_TRACE_LINES`] lines are shown.
+    /// The defect and its call sites, then what the cleanup after it reported: a defect in
+    /// an `abandon`, and the leak it caused right after it (REFERENCE §10; OPEN_QUESTIONS
+    /// T10). Runs of the same call site, as in deep recursion, collapse to one line, and at
+    /// most [`MAX_TRACE_LINES`] lines are shown.
     pub fn render_defect(&self, defect: &Defect) -> String {
+        // A cleanup defect may carry its own cleanup to any depth, so the reports are walked
+        // with a stack of their own, in order.
+        let mut out = String::new();
+        let mut reports: Vec<&Report> = Vec::new();
+        out.push_str(&self.render_trace(defect));
+        reports.extend(defect.cleanup.iter().rev());
+        while let Some(report) = reports.pop() {
+            match report {
+                Report::Defect(defect) => {
+                    out.push_str(&self.render_trace(defect));
+                    reports.extend(defect.cleanup.iter().rev());
+                }
+                Report::Leak { ty, span } => {
+                    let _ = writeln!(out, "leak[{ty}]: this `{ty}` leaked, since its `abandon` hit a defect");
+                    let _ = writeln!(out, "  at {} ({})", self.location(*span), self.anchor(*span));
+                }
+            }
+        }
+        out
+    }
+
+    /// The defect and its call sites, as [`Compiled::render_defect`] writes them.
+    fn render_trace(&self, defect: &Defect) -> String {
         let mut out = format!("defect[{}]: {}\n", defect.kind.name(), defect.message);
         let _ = writeln!(out, "  at {} ({})", self.location(defect.span), self.anchor(defect.span));
         let mut runs: Vec<(Span, usize)> = Vec::new();

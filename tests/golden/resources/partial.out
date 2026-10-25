@@ -1,0 +1,15 @@
+close b
+left: 1
+close c
+bench: 0
+bench after add: 1
+renamed: e2
+rolled back: 1
+partial: 2
+count: 2
+close g
+close f
+drained: 0, steps: 15
+close e2
+close a
+close d

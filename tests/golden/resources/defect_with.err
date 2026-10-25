@@ -1,0 +1,3 @@
+defect[refinement_failed]: `Gauge.level` is -1, which breaks its refinement `level >= 0`
+  at resources/defect_with.proviso:42:13 (defect_with.with_place+4)
+  called from resources/defect_with.proviso:49:5 (defect_with.main+3)
