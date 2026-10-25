@@ -251,7 +251,8 @@ pub struct Program {
 pub struct ClosureInfo {
     pub params: Vec<LocalId>,
     pub modes: Vec<ParamMode>,
-    pub captures: Vec<LocalId>,
+    /// What it captures, with each one's name.
+    pub captures: Vec<(LocalId, Box<str>)>,
     /// The resource parameters it owns, its `take` ones, which a failure exit abandons, with
     /// their spans.
     pub owned: Vec<(LocalId, Span)>,
@@ -499,7 +500,7 @@ impl FnState {
 /// that its body uses, which it captures.
 struct ClosureScope {
     base: u32,
-    captures: Vec<LocalId>,
+    captures: Vec<(LocalId, Box<str>)>,
 }
 
 /// An enclosing `try`, `attempt`, `else` form or example, and the error types of the
@@ -1224,6 +1225,17 @@ impl Checker<'_> {
             local.ty = self.vars.zonk(&local.ty);
         }
         self.vars.clear();
+        // A closure owns its `take` parameters of a resource type, which a failure abandons.
+        for e in std::mem::take(&mut self.f.closures) {
+            let ExprKind::Closure(closure) = &self.m.exprs[e].kind else { continue };
+            let Some(info) = self.p.closures.get_mut(e) else { continue };
+            info.owned = (info.params.iter().zip(&info.modes).zip(&closure.params))
+                .filter(|((local, mode), _)| {
+                    **mode == ParamMode::Take && self.p.decls.is_resource(&self.f.locals[local.index()].ty)
+                })
+                .map(|((local, _), param)| (*local, param.name.span))
+                .collect();
+        }
     }
 
     /// Checks the key types of the `Map` types the declarations write, now that every
@@ -3251,7 +3263,7 @@ impl Checker<'_> {
                     return None;
                 };
                 self.p.res.insert(target, Res::Local(id));
-                self.capture(id, name.span);
+                self.capture(id, m.text(name.sym), name.span);
                 (name, id, self.f.locals[id.index()].ty.clone())
             }
             ExprKind::Field { base, name } => {
@@ -4015,7 +4027,7 @@ impl Checker<'_> {
             ExprKind::It => match self.its.last() {
                 Some(&id) => {
                     self.p.res.insert(e, Res::Local(id));
-                    self.capture(id, span);
+                    self.capture(id, "it", span);
                     self.f.locals[id.index()].ty.clone()
                 }
                 None => {
@@ -4359,7 +4371,7 @@ impl Checker<'_> {
         let text = m.text(name.sym);
         if let Some(id) = self.lookup_local(name.sym) {
             self.p.res.insert(e, Res::Local(id));
-            self.capture(id, name.span);
+            self.capture(id, self.m.text(name.sym), name.span);
             return self.f.locals[id.index()].ty.clone();
         }
         // A module item that reuses a variant's name has been reported, and so are its uses.
@@ -4587,7 +4599,7 @@ impl Checker<'_> {
         self.f.scopes.pop();
         let scope = self.closure_scopes.pop().expect("pushed above");
         (self.f.ret, self.f.fails, self.f.loops, self.f.returns, self.markers) = outer;
-        let needs = scope.captures.iter().map(|id| self.local_needs(*id)).max().unwrap_or(0);
+        let needs = scope.captures.iter().map(|(id, _)| self.local_needs(*id)).max().unwrap_or(0);
         self.f.needs.insert(e, needs);
         self.f.closures.push(e);
         self.p.closures.insert(e, ClosureInfo { params: locals, modes: modes.clone(), captures: scope.captures, owned: Vec::new() });
@@ -4650,11 +4662,11 @@ impl Checker<'_> {
     /// Notes that the closures being checked capture local `id`, used at `span`, when it is
     /// declared before them. A capability, or a value that holds one, gives a closure reach,
     /// which phase 3 brings (REFERENCE §9.4).
-    fn capture(&mut self, id: LocalId, span: Span) {
+    fn capture(&mut self, id: LocalId, name: &str, span: Span) {
         let mut first = false;
         for scope in &mut self.closure_scopes {
-            if id.0 < scope.base && !scope.captures.contains(&id) {
-                scope.captures.push(id);
+            if id.0 < scope.base && !scope.captures.iter().any(|(captured, _)| *captured == id) {
+                scope.captures.push((id, name.into()));
                 first = true;
             }
         }

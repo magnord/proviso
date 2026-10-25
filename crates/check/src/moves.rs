@@ -17,6 +17,13 @@
 //! them may not overlap, and a unique value lent to the call by one argument may not move in
 //! a later one (E0505; OPEN_QUESTIONS P5).
 //!
+//! A closure borrows what it captures (REFERENCE §6.7), so its body can't move a captured
+//! unique value or consume a captured resource (E0504, E0502). It reads its captures where
+//! it is made, and a use of a local that holds it reads them again, so they can't have moved
+//! by then (E0501). A closure argument reads its captures for the length of the call, so an
+//! `&` argument or `inout self` receiver may not reach them, and a captured unique value may
+//! not move in a later argument (E0505; OPEN_QUESTIONS P5).
+//!
 //! Resources (REFERENCE §10) are tracked twice: a resource may have moved (E0501), and it
 //! is released where it has moved, or holds none, on every path. Each owned resource must be
 //! released at every normal exit of its scope (E0507), and nothing may overwrite or drop one
@@ -114,6 +121,8 @@ pub(crate) fn check(
         unscheduled: Vec::new(),
         refused: HashSet::new(),
         excused: HashSet::new(),
+        captured: Vec::new(),
+        fn_reads: HashMap::new(),
     };
     match body {
         Body::Fn(body) => {
@@ -338,6 +347,9 @@ enum Access {
     /// A borrowed argument or receiver of a unique type, which nothing in the call's later
     /// arguments may move, at any depth.
     Lent,
+    /// A local of a copy type that a closure argument captures, which the call may read
+    /// while it runs.
+    Read,
 }
 
 #[derive(Clone)]
@@ -348,6 +360,8 @@ struct CallAccess {
     expr: ExprId,
     /// What the place is lent to.
     by: Lender,
+    /// The name of the local, when a closure argument captures it.
+    captured: Option<Box<str>>,
 }
 
 /// What a lent place is lent to, for as long as it runs.
@@ -359,6 +373,8 @@ enum Lender {
     Guard,
     /// Its own index, as the base of an indexing expression.
     Index,
+    /// A call, by a closure argument that captures it.
+    Capture,
 }
 
 /// What a loop reached when it was last walked: what may have moved at its head and where it
@@ -444,6 +460,11 @@ struct Walk<'a> {
     refused: HashSet<ExprId>,
     /// The locals a rejected move would have consumed, which aren't reported as left over.
     excused: HashSet<LocalId>,
+    /// The locals the closures being walked capture, which they borrow.
+    captured: Vec<LocalId>,
+    /// What a call of the function value each local holds reads: the locals its closure
+    /// captures, and what those read in turn, with their names.
+    fn_reads: HashMap<LocalId, Vec<(LocalId, Box<str>)>>,
 }
 
 impl Walk<'_> {
@@ -1009,6 +1030,12 @@ impl Walk<'_> {
     /// Reports a use of `local`'s `path` that may have moved, or a part of which may have.
     fn use_place(&mut self, e: ExprId, local: LocalId, path: &[u32]) {
         self.touch(local);
+        if let Some(reads) = self.fn_reads.get(&local).cloned() {
+            let name = self.describe(e);
+            self.reads(e, &reads, |captured| {
+                format!("`{name}` captures `{captured}`, which may have moved already, so `{name}` can't be used here (§5.1)")
+            });
+        }
         let Some(state) = &self.state else { return };
         let Some((moved, desc)) = state.of(local).find(|(m, _)| is_prefix(m, path) || is_prefix(path, m)) else {
             return;
@@ -1035,6 +1062,20 @@ impl Walk<'_> {
         let resource = self.is_resource(&self.ty_at(local, &path));
         // A lent resource can't be consumed (§10 rule 6).
         let lent = if resource { codes::LENT_RESOURCE_CONSUMED } else { codes::LENT_VALUE_MOVED };
+        if self.captured.contains(&local) {
+            let message = if resource {
+                format!(
+                    "`{desc}` is a resource a closure captures, which only borrows it, so it can't be consumed here; pass it to the closure through a `take` parameter instead (§6.7, §10)"
+                )
+            } else {
+                format!(
+                    "`{desc}` is captured by a closure, which only borrows it, so it can't move here; pass it to the closure through a `take` parameter instead (§5.2, §6.7)"
+                )
+            };
+            self.report(lent, self.span(e), message);
+            self.refused.insert(e);
+            return;
+        }
         if self.locals[local.index()].borrowed {
             let message = if resource {
                 format!(
@@ -1077,6 +1118,12 @@ impl Walk<'_> {
                 Lender::Index => {
                     let message =
                         format!("`{desc}` is indexed here, so it can't move while its index is evaluated (§5.3)");
+                    self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
+                }
+                Lender::Capture => {
+                    let message = format!(
+                        "`{desc}` is captured by a closure an earlier argument passes to this call, which may read it while the call runs, so it can't also move into it (§5.3)"
+                    );
                     self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
                 }
             }
@@ -1145,6 +1192,132 @@ impl Walk<'_> {
         }
     }
 
+    /// Reports the first of `reads`, the locals a closure reads, that may have moved, at
+    /// `e`, with the message `moved` gives for its name.
+    fn reads(&mut self, e: ExprId, reads: &[(LocalId, Box<str>)], moved: impl Fn(&str) -> String) {
+        for (local, name) in reads {
+            self.touch(*local);
+            if self.state.as_ref().is_some_and(|state| state.of(*local).next().is_some()) {
+                self.report(codes::USE_AFTER_MOVE, self.span(e), moved(name));
+                return;
+            }
+        }
+    }
+
+    /// What a call of the function value `e` gives reads: the locals its closure captures,
+    /// and what a function value it captures reads.
+    fn fn_reads(&self, e: ExprId) -> Vec<(LocalId, Box<str>)> {
+        let mut out: Vec<(LocalId, Box<str>)> = Vec::new();
+        let mut add = |reads: &[(LocalId, Box<str>)]| {
+            for read in reads {
+                if !out.iter().any(|(local, _)| *local == read.0) {
+                    out.push(read.clone());
+                }
+            }
+        };
+        let tail = |block: &Block| match block.stmts.last().map(|&s| &self.m.stmts[s].kind) {
+            Some(StmtKind::Expr(e)) => self.fn_reads(*e),
+            _ => Vec::new(),
+        };
+        match &self.m.exprs[e].kind {
+            ExprKind::Closure(_) => {
+                for (local, name) in self.p.closures.get(e).map_or(&[][..], |info| &info.captures) {
+                    add(&[(*local, name.clone())]);
+                    add(self.fn_reads.get(local).map_or(&[], Vec::as_slice));
+                }
+            }
+            ExprKind::Name(_) => {
+                if let Some(Res::Local(local)) = self.p.res(e) {
+                    add(self.fn_reads.get(&local).map_or(&[], Vec::as_slice));
+                }
+            }
+            ExprKind::If { then_block, else_branch, .. } => {
+                add(&tail(then_block));
+                match else_branch {
+                    Some(ElseBranch::Block(block)) => add(&tail(block)),
+                    Some(ElseBranch::If(nested)) => add(&self.fn_reads(*nested)),
+                    None => {}
+                }
+            }
+            ExprKind::Match { arms, .. } => {
+                for arm in arms {
+                    add(&tail(&arm.body));
+                }
+            }
+            ExprKind::Else { value, fallback } => {
+                add(&self.fn_reads(*value));
+                match fallback {
+                    Fallback::Value(value) => add(&self.fn_reads(*value)),
+                    Fallback::Block(block) => add(&tail(block)),
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
+    /// A closure, which reads what it captures where it is made. Its body is walked as a
+    /// function's of its own, which borrows what it captures and owns its `take` parameters
+    /// of a resource type.
+    fn closure(&mut self, e: ExprId, closure: &Closure) {
+        let Some(info) = self.p.closures.get(e) else { return };
+        let captures: Vec<(LocalId, Box<str>)> = info.captures.clone();
+        let reads = self.fn_reads(e);
+        self.reads(e, &reads, |captured| {
+            format!("`{captured}` may have moved already, so this closure can't capture it (§5.1)")
+        });
+        let params: Vec<(LocalId, Span, String)> = (info.owned.iter())
+            .map(|(local, span)| {
+                let i = info.params.iter().position(|p| p == local).expect("an owned parameter is a parameter");
+                (*local, *span, self.m.text(closure.params[i].name.sym).to_string())
+            })
+            .collect();
+        let outer = (
+            self.state.replace(State::default()),
+            std::mem::take(&mut self.loops),
+            std::mem::take(&mut self.lent),
+            std::mem::replace(&mut self.scopes, vec![params]),
+            std::mem::take(&mut self.pending),
+            std::mem::take(&mut self.guarded),
+            std::mem::take(&mut self.handled),
+            std::mem::take(&mut self.touched),
+            self.reach,
+        );
+        let depth = self.captured.len();
+        self.captured.extend(captures.iter().map(|(local, _)| *local));
+        self.value_block(&closure.body, true);
+        self.close_scope("the end of the closure");
+        self.captured.truncate(depth);
+        let touched;
+        (
+            self.state,
+            self.loops,
+            self.lent,
+            self.scopes,
+            self.pending,
+            self.guarded,
+            self.handled,
+            touched,
+            self.reach,
+        ) = outer;
+        self.touched = touched;
+    }
+
+    /// Notes that a call reads `reads`, what the closure its argument `e` passes captures, for
+    /// as long as it runs. A captured unique value is lent to the call.
+    fn note_reads(&mut self, accesses: &mut Vec<CallAccess>, e: ExprId, reads: Vec<(LocalId, Box<str>)>) {
+        for (local, name) in reads {
+            let ty = self.locals[local.index()].ty.clone();
+            let access = if self.moves(&ty) { Access::Lent } else { Access::Read };
+            let access =
+                CallAccess { access, local, steps: Vec::new(), expr: e, by: Lender::Capture, captured: Some(name) };
+            if access.access == Access::Lent {
+                self.lent.push(access.clone());
+            }
+            accesses.push(access);
+        }
+    }
+
     // ---- statements ----
 
     /// A block whose value, if any, is dropped.
@@ -1182,6 +1355,12 @@ impl Walk<'_> {
                     self.report(codes::RESOURCE_DISCARDED, m.pats[*pat].span, message.to_string());
                 }
                 self.matched(*init, *pat);
+                if let Some(&local) = self.p.pat_local.get(*pat) {
+                    let reads = self.fn_reads(*init);
+                    if !reads.is_empty() {
+                        self.fn_reads.insert(local, reads);
+                    }
+                }
                 // A value that holds no resource, such as `None`, has nothing to consume.
                 let mut empty = Vec::new();
                 if self.refused.contains(init) || self.tainted(*init) || !self.holds_resource(*init) {
@@ -1288,9 +1467,9 @@ impl Walk<'_> {
         let Some((local, steps)) = self.access_path(e) else { return };
         let found = self.lent[..upto].iter().rev().find_map(|l| {
             let overlap = if l.local == local { overlap(&l.steps, &steps) } else { Overlap::No };
-            (overlap != Overlap::No).then_some((l.by, l.expr, overlap))
+            (overlap != Overlap::No).then_some((l.by, l.expr, overlap, l.captured.clone()))
         });
-        let Some((by, there, overlap)) = found else { return };
+        let Some((by, there, overlap, captured)) = found else { return };
         let span = self.span(e);
         if overlap == Overlap::Unknown {
             if self.reported.insert((codes::NOT_IMPLEMENTED.id, span)) {
@@ -1305,6 +1484,10 @@ impl Walk<'_> {
             }
             Lender::Guard => format!("`{there}` is lent to this arm's guard, which can only look at it"),
             Lender::Index => format!("`{there}` is indexed while its index is evaluated"),
+            Lender::Capture => format!(
+                "`{}` is captured by a closure that one of a call's earlier arguments passes, which may read it until the call returns",
+                captured.as_deref().unwrap_or(&there)
+            ),
         };
         let message = if here == there {
             format!("{lent}, so it can't change here (§5.3)")
@@ -1401,8 +1584,8 @@ impl Walk<'_> {
             | ExprKind::It
             | ExprKind::Todo(_)
             | ExprKind::Applied { .. }
-            | ExprKind::Closure(_)
             | ExprKind::Unreachable => {}
+            ExprKind::Closure(closure) => self.closure(e, closure),
             // Code that failed to parse may have consumed what the scopes own, so none of it
             // is reported as left over or assigned over (§15.1).
             ExprKind::Error => {
@@ -1417,7 +1600,14 @@ impl Walk<'_> {
                     }
                 }
             }
-            ExprKind::Call { args, .. } => self.call(e, None, args),
+            ExprKind::Call { callee, args, .. } => {
+                // A function value is read before its arguments, and what it captures is read
+                // for as long as the call runs.
+                if self.is_value(*callee) {
+                    self.expr(*callee);
+                }
+                self.call(e, None, args);
+            }
             ExprKind::MethodCall { receiver, args, .. } => {
                 let mode = match self.p.res(e) {
                     Some(Res::Fn(f)) if self.p.fns[f].receiver.is_some() => self.p.fns[f].self_mode,
@@ -1444,7 +1634,14 @@ impl Walk<'_> {
                     && self.moves(self.p.ty(*base))
                     && !self.moved_here(*base)
                 {
-                    self.lent.push(CallAccess { access: Access::Lent, local, steps, expr: *base, by: Lender::Index });
+                    self.lent.push(CallAccess {
+                        access: Access::Lent,
+                        local,
+                        steps,
+                        expr: *base,
+                        by: Lender::Index,
+                        captured: None,
+                    });
                 }
                 self.expr(*index);
                 self.lent.truncate(outer);
@@ -1599,6 +1796,7 @@ impl Walk<'_> {
                                 steps,
                                 expr: *scrutinee,
                                 by: Lender::Guard,
+                                captured: None,
                             });
                         }
                         self.condition(guard);
@@ -1924,12 +2122,20 @@ impl Walk<'_> {
             }
             None => {}
         }
+        if let ExprKind::Call { callee, .. } = self.m.exprs[e].kind
+            && self.is_value(callee)
+        {
+            let reads = self.fn_reads(callee);
+            self.note_reads(&mut accesses, callee, reads);
+        }
         for arg in args {
             if arg.inout {
                 self.indices(arg.value);
                 continue;
             }
             self.expr(arg.value);
+            let reads = self.fn_reads(arg.value);
+            self.note_reads(&mut accesses, arg.value, reads);
             // An argument that moves was checked against what the call lends as it moved.
             if !self.consumed.contains(&arg.value) && !self.rejected.contains(&arg.value) {
                 self.note(&mut accesses, outer, arg.value, Access::Lent);
@@ -2036,7 +2242,9 @@ impl Walk<'_> {
             let conflicts = overlap != Overlap::No
                 && matches!(
                     (other.access, access),
-                    (Access::Inout, Access::Inout) | (Access::Inout, Access::Lent) | (Access::Lent, Access::Inout)
+                    (Access::Inout, Access::Inout)
+                        | (Access::Inout, Access::Lent | Access::Read)
+                        | (Access::Lent | Access::Read, Access::Inout)
                 );
             conflicts.then_some((other, overlap))
         });
@@ -2047,7 +2255,11 @@ impl Walk<'_> {
             }
         } else if let Some((other, _)) = conflict {
             let (here, there) = (self.describe(e), self.describe(other.expr));
-            let message = if here == there {
+            let message = if let Some(name) = &other.captured {
+                format!(
+                    "`{name}` is captured by a closure this call takes, which may read it while the call runs, so the call can't also change `{here}` (§5.3)"
+                )
+            } else if here == there {
                 format!("this call reaches `{here}` twice while one of the accesses is `inout` (§5.3)")
             } else {
                 format!(
@@ -2056,7 +2268,7 @@ impl Walk<'_> {
             };
             self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
         }
-        let access = CallAccess { access, local, steps, expr: e, by: Lender::Call };
+        let access = CallAccess { access, local, steps, expr: e, by: Lender::Call, captured: None };
         if access.access == Access::Lent {
             self.lent.push(access.clone());
         }

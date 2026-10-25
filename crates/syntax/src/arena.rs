@@ -115,6 +115,10 @@ impl<T, V> SideTable<T, V> {
         self.values.get(id.index()).and_then(Option::as_ref)
     }
 
+    pub fn get_mut(&mut self, id: Id<T>) -> Option<&mut V> {
+        self.values.get_mut(id.index()).and_then(Option::as_mut)
+    }
+
     /// Every value in the table, in id order.
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.values.iter().flatten()
