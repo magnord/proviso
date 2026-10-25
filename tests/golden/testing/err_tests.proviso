@@ -1,0 +1,69 @@
+// phase: 2.11
+// expect-error: E0101
+// expect-error: E0103
+// expect-error: E0108
+// expect-error: E0109
+// expect-error: E0202
+// expect-error: E0301
+// expect-error: E0306
+// expect-error: E0701
+// expect-error: E0702
+// expect-error: E0705
+// expect-error: E0708
+// `expect` belongs to a test's own body, not to a function or to a closure inside a test
+// (OPEN_QUESTIONS P5). A test has no function around it, so `return`, `fail` and `try` are
+// errors there, as in an example (REFERENCE §14). `expect c` needs a `Bool`, `== v` a type
+// that has `==`, and `fails P` a call that can fail. A test is named by a plain text literal,
+// once, and has no visibility.
+enum Stop {
+    Halt
+}
+
+record Plain {
+    n: Int
+}
+
+fn may_fail(n: Int) -> Int fails Stop {
+    return n
+}
+
+fn sure(n: Int) -> Int {
+    return n
+}
+
+fn helper() {
+    expect 1 == 1                                   // <- E0109
+}
+
+test "rules" {
+    expect sure(1)                                  // <- E0301
+    expect Plain(n: 1) == Plain(n: 1)               // <- E0306
+    expect sure(1) fails Stop.Halt                  // <- E0708
+    expect may_fail(1) > 0                          // <- E0701
+    expect may_fail(1) == 1
+    let check = || {
+        expect true                                 // <- E0109
+    }
+    expect 1 == 2 == 3                              // <- E0103
+}
+
+test "exits" {
+    let a = try may_fail(1)                         // <- E0702
+    fail Stop.Halt                                  // <- E0705
+}
+
+test "returns" {
+    return                                          // <- E0108
+}
+
+test "rules" {                                      // <- E0202
+}
+
+pub test "visible" {                                // <- E0101
+}
+
+test name {                                         // <- E0101
+}
+
+test f"x{1}" {                                      // <- E0101
+}

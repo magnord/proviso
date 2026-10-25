@@ -1,0 +1,108 @@
+// phase: 2.11
+// run: test
+// Conversions between numbers are named (REFERENCE §12.1, §12.2). `Int64(x)` converts when
+// the target holds every value of the source, as from a smaller integer type or from
+// `Float32` to `Float`. `Int32.try_from(x)` takes any integer and fails with
+// `std.num.ConversionError.OutOfRange` when the value doesn't fit, and `wrapping_from` keeps
+// the low bits. `Float.from(i)` takes any integer and rounds to nearest-even. `f.to_int(…)`
+// rounds by the `Rounding` it is given and fails with `NotANumber` on NaN and `OutOfRange`
+// on infinities and values beyond `Int` (OPEN_QUESTIONS P5). A literal argument takes the
+// target type.
+use std.num { ConversionError }
+
+type Small = Int8
+type Cents = distinct Int32 derives(Eq, Show)
+
+fn widen(x: Small) -> Int {
+    return Int(x)
+}
+
+fn widen_all(a: Int8, b: UInt8, c: UInt32) -> (Int16, UInt16, Int64) {
+    return (Int16(a), UInt16(b), Int64(c))
+}
+
+fn widen_float(d: Float32) -> Float {
+    return Float(d)
+}
+
+fn narrow(x: Int) -> Int8 fails ConversionError {
+    return try Int8.try_from(x)
+}
+
+fn narrow_or(x: Int, fallback: Int8) -> Int8 {
+    return Int8.try_from(x) else fallback
+}
+
+fn unsigned(x: Int8) -> UInt8 fails ConversionError {
+    return try UInt8.try_from(x)
+}
+
+fn wrap(x: Int) -> Int8 {
+    return Int8.wrapping_from(x)
+}
+
+fn wrap_unsigned(x: Int) -> UInt16 {
+    return UInt16.wrapping_from(x)
+}
+
+fn to_float(x: Int) -> Float {
+    return Float.from(x)
+}
+
+fn to_float32(x: Int) -> Float32 {
+    return Float32.from(x)
+}
+
+fn round(x: Float, r: Rounding) -> Int fails ConversionError {
+    return try x.to_int(rounding: r)
+}
+
+fn round32(x: Float32) -> Int fails ConversionError {
+    return try x.to_int(Rounding.NearestAway)
+}
+
+fn cents(x: Int) -> Cents fails ConversionError {
+    return Cents(try Int32.try_from(x))
+}
+
+fn total(xs: List[Int8]) -> Int {
+    let grow = |x: Int8| Int(x)
+    var sum = 0
+    for x in xs {
+        sum += grow(x)
+    }
+    return sum
+}
+
+example widen(-5) == 5 - 10
+example widen_all(a: -1, b: 255, c: 4000000000) == (-1, 255, 4000000000)
+example widen_float(0.1) == 0.10000000149011612
+example narrow(127) == 127
+example narrow(128) fails ConversionError.OutOfRange
+example narrow(-129) fails ConversionError.OutOfRange
+example narrow_or(x: 1000, fallback: -1) == -1
+example unsigned(-1) fails ConversionError.OutOfRange
+example unsigned(5) == 5
+example wrap(300) == 44
+example wrap(-129) == 127
+example wrap_unsigned(-1) == 65535
+example to_float(9007199254740993) == 9007199254740992.0
+example to_float(-3) == -3.0
+example to_float32(16777217) == 16777216.0
+example round(x: 2.5, r: Rounding.TowardZero) == 2
+example round(x: -2.5, r: Rounding.TowardZero) == -2
+example round(x: -2.5, r: Rounding.TowardNegative) == -3
+example round(x: 2.1, r: Rounding.TowardPositive) == 3
+example round(x: 2.5, r: Rounding.NearestEven) == 2
+example round(x: 3.5, r: Rounding.NearestEven) == 4
+example round(x: -2.5, r: Rounding.NearestAway) == -3
+example round(x: 0.0 / 0.0, r: Rounding.TowardZero) fails ConversionError.NotANumber
+example round(x: 1.0 / 0.0, r: Rounding.TowardZero) fails ConversionError.OutOfRange
+example round(x: 10000000000000000000.0, r: Rounding.TowardZero) fails ConversionError.OutOfRange
+example round(x: -9223372036854775808.0, r: Rounding.TowardZero) == -9223372036854775807 - 1
+example round32(2.5) == 3
+example cents(250) == Cents(250)
+example cents(3000000000) fails ConversionError.OutOfRange
+example total([1, 2, -3]) == 0
+example Int16.try_from(Int8(-1)) == -1
+example UInt64.try_from(-1) fails ConversionError.OutOfRange

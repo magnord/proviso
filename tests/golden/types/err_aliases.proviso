@@ -1,0 +1,80 @@
+// phase: 2.11
+// expect-error: E0101
+// expect-error: E0201
+// expect-error: E0202
+// expect-error: E0203
+// expect-error: E0204
+// expect-error: E0211
+// expect-error: E0307
+// expect-error: E0322
+// expect-error: E0509
+// expect-error: E0901
+// An alias that names itself, directly or through other aliases, is E0322, reported once at
+// the first alias of the cycle (OPEN_QUESTIONS P5). An alias names a type only, so in an
+// expression or a pattern it is E0201, also for `System`, which it can't build (issue #11).
+// An alias defined twice, or named like another item, is E0202, and a rejected alias isn't
+// reported again where it is used (REFERENCE §15.1). Aliases take no type arguments yet.
+type Loop = List[Loop]                              // <- E0322
+type Ping = Option[Pong]                            // <- E0322
+type Pong = Ping
+type Fine = Ping
+type Twice = Int
+type Twice = Text                                   // <- E0202
+type Text = Int                                     // <- E0203
+type lower = Int                                    // <- E0204
+type Missing = Nowhere                              // <- E0307
+type Shown = Show                                   // <- E0307
+type Box[T] = List[T]                               // <- E0901
+type Point = Coord
+type Count = Int
+type Sys = System
+type Derived = Int derives(Eq)                      // <- E0101
+type Callback = fn(Int) -> Int
+
+record Coord {
+    x: Int
+}
+
+record Dup {
+    n: Int
+}
+
+type Dup = Int                                      // <- E0202
+
+record Hidden {
+    n: Int
+}
+
+pub type Leak = Hidden                              // <- E0211
+
+record Holder {
+    f: Callback                                     // <- E0509
+}
+
+enum Shape {
+    Dot
+}
+
+type Form = Shape
+
+fn rejected(a: Loop, b: Pong, c: Fine, d: Twice, e: lower, f: Missing, g: Box[Int], h: Shown) -> Int {
+    let n: Twice = "t"
+    let m: Dup = 1
+    return 0
+}
+
+fn args(p: Point, n: Count[Int]) {                  // <- E0307
+}
+
+fn expressions(sys: keep Sys) {
+    let p = Point(x: 1)                             // <- E0201
+    let s = Sys(stdout: sys.stdout)                 // <- E0201
+    let f = Form.Dot                                // <- E0201
+    let n = Count.parse("1") else 0                 // <- E0201
+    let d: Form = Shape.Dot
+    match d {
+        Form.Dot => {}                              // <- E0201
+    }
+    let q = Coord(x: 2)
+    let b = q is Point(x: 2)                        // <- E0201
+}

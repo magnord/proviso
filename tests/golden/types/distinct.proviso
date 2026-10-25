@@ -1,0 +1,119 @@
+// phase: 2.11
+// A distinct type is a new type that holds one value, of the type it wraps (REFERENCE §4.6).
+// `UserId(7)` builds one, with its one label optional (H3), `.value` reads and changes the
+// value, and `UserId(n)` matches it. It has only what it derives: `Eq`, `Ord`, `Hash` and
+// `Show`, and the operators of `Add`, `Sub`, `Mul`, `Div` and `Neg`, which take and give
+// values of the distinct type (OPEN_QUESTIONS P5). `Show` and `debug` write it as it is built.
+// It may have methods and hand-written implementations, and its kind is that of what it
+// wraps, so a distinct pool is unique and moves, and a distinct resource is a resource that
+// abandons its value. An alias may name it, and a generic type may hold it.
+use std.io { IoError, Out }
+use std.pool { Pool }
+
+type UserId = distinct Int derives(Eq, Ord, Hash, Show)
+type Meters = distinct Float derives(Add, Sub, Mul, Div, Neg, Show)
+type Score = distinct Int32 derives(Eq, Ord, Add, Neg, Show)
+type Tags = distinct List[Text] derives(Eq, Show)
+type Label = distinct Text
+type Slots = distinct Pool[Int]
+type Guarded = distinct Lock
+type Id = UserId
+
+resource record Lock {
+    name: Text
+    out: Out
+}
+
+impl Lock {
+    fn close(take self) {
+        say(out: self.out, line: f"close {self.name}")
+    }
+}
+
+impl Abandon for Lock {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.name}")
+    }
+}
+
+impl UserId {
+    fn next(self) -> UserId {
+        return UserId(self.value + 1)
+    }
+}
+
+impl Show for Label {
+    fn show(self) -> Text {
+        return f"<{self.value}>"
+    }
+}
+
+record Pair[A, B] derives(Eq, Show) {
+    first: A
+    second: B
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)
+}
+
+fn largest[T: Ord + Copy](a: T, b: T) -> T {
+    if a < b {
+        return b
+    }
+    return a
+}
+
+fn grow(slots: take Slots) -> Slots {
+    var s = slots
+    let h = s.value.insert(5)
+    return s
+}
+
+fn unlock(g: take Guarded) {
+    let Guarded(lock) = g
+    lock.close()
+}
+
+fn guard_then_fail(g: take Guarded) fails Stop {
+    say(out: g.value.out, line: f"guarded {g.value.name}")
+    fail Stop.Halt
+}
+
+enum Stop {
+    Halt
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let a = UserId(7)
+    let b: Id = UserId(value: 9)
+    try sys.stdout.write_line(f"{a} {a.value} {a == b} {a < b} {largest(a: a, b: b)} {a.next()}")
+    let seen = [a: "a", b: "b"]
+    try sys.stdout.write_line(f"{seen.get(UserId(9))} {seen.get(UserId(1))}")
+    let d = Meters(1.5) + Meters(2.0) * Meters(2.0)
+    var e = -d
+    e -= Meters(0.5)
+    try sys.stdout.write_line(f"{d} {e} {d / Meters(2.0)}")
+    var s = Score(3)
+    s += Score(4)
+    try sys.stdout.write_line(f"{s} {-s} {s > Score(5)}")
+    var tags = Tags(["x"])
+    tags.value.push("y")
+    let Tags(inner) = tags
+    try sys.stdout.write_line(f"{tags} {inner.len()} {Label("l")}")
+    let ids = [UserId(1), UserId(2)]
+    let pair = Pair(first: UserId(3), second: Label("p"))
+    let wrap = |id: UserId| id.next().next()
+    try sys.stdout.write_line(f"{ids} {pair} {wrap(a)}")
+    match a {
+        UserId(7) => try sys.stdout.write_line("seven")
+        UserId(n) => try sys.stdout.write_line(f"{n}")
+    }
+    debug(a, Label("d"))
+    let slots = grow(slots: Slots(Pool.new()))
+    try sys.stdout.write_line(f"{slots.value.len()}")
+    let g = Guarded(Lock(name: "g", out: sys.stdout))
+    unlock(g: g)
+    let h = Guarded(Lock(name: "h", out: sys.stdout))
+    let r = attempt guard_then_fail(g: h)
+}

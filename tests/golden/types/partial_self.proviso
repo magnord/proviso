@@ -1,0 +1,80 @@
+// phase: 2.11
+// An `inout(partial) self` method keeps the changes it made when it fails, as an
+// `inout(partial)` parameter does, where an `inout self` method's failure leaves its receiver
+// as it was (REFERENCE §5.4; OPEN_QUESTIONS P5). It is called on a variable or a part of one,
+// as an `inout self` method is, on a copyable, unique or distinct type, and from a closure.
+use std.io { IoError }
+
+enum Stop derives(Show) {
+    Halt
+}
+
+record Counter derives(Show) {
+    n: Int
+}
+
+unique record Log {
+    lines: List[Text]
+}
+
+type Tally = distinct Int derives(Show)
+
+impl Counter {
+    fn bump_then_fail(inout(partial) self) fails Stop {
+        self.n += 1
+        fail Stop.Halt
+    }
+
+    fn bump_then_roll_back(inout self) fails Stop {
+        self.n += 1
+        fail Stop.Halt
+    }
+
+    fn bump(inout(partial) self) {
+        self.n += 10
+    }
+}
+
+impl Log {
+    fn add_then_fail(inout(partial) self, line: Text) fails Stop {
+        self.lines.push(line)
+        fail Stop.Halt
+    }
+}
+
+impl Tally {
+    fn add_then_fail(inout(partial) self) fails Stop {
+        self.value += 1
+        fail Stop.Halt
+    }
+}
+
+record Holder derives(Show) {
+    counter: Counter
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var c = Counter(n: 0)
+    let a = attempt c.bump_then_fail()
+    let b = attempt c.bump_then_roll_back()
+    c.bump()
+    try sys.stdout.write_line(f"{c} {a is Err(_)} {b is Err(_)}")
+    var h = Holder(counter: Counter(n: 5))
+    let d = attempt h.counter.bump_then_fail()
+    try sys.stdout.write_line(f"{h}")
+    var log = Log(lines: [])
+    let e = attempt log.add_then_fail("x")
+    let f = attempt log.add_then_fail("y")
+    try sys.stdout.write_line(f"{log.lines}")
+    var t = Tally(0)
+    let g = attempt t.add_then_fail()
+    try sys.stdout.write_line(f"{t}")
+    var counters = [Counter(n: 1)]
+    let i = attempt counters[0].bump_then_fail()
+    let run = |x: Int| {
+        var local = Counter(n: x)
+        let r = attempt local.bump_then_fail()
+        return local.n
+    }
+    try sys.stdout.write_line(f"{counters} {run(7)}")
+}

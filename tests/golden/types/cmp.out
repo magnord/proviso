@@ -1,0 +1,10 @@
+Ordering.Less Ordering.Equal Ordering.Greater Ordering.Less Ordering.Greater
+Ordering.Less Ordering.Greater
+Ordering.Equal Rank(9) Ordering.Greater
+Ordering.Greater Ordering.Less Ordering.Equal
+Ordering.Less Ordering.Greater
+Ordering.Greater false Version(major: 1, label: "old") Ordering.Less
+Ordering.Greater true false true
+true true Ordering.Greater equal
+Ordering.Greater Some(2) Ordering.Equal
+Ordering.Less Ordering.Greater true Ticket(seat: 2)

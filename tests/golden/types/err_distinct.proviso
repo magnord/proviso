@@ -1,0 +1,68 @@
+// phase: 2.11
+// expect-error: E0101
+// expect-error: E0201
+// expect-error: E0202
+// expect-error: E0207
+// expect-error: E0211
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0306
+// expect-error: E0307
+// expect-error: E0309
+// expect-error: E0310
+// expect-error: E0705
+// expect-error: E0901
+// A distinct type has only what it derives (REFERENCE §4.6). A literal never becomes one
+// (§2), its operators need `derives`, and it has neither the wrapped type's methods nor
+// `with`. It derives an operator only when the wrapped type has it, and never `Copy`. Its
+// `where` names the value as `self`, not as `value`. A distinct type defined twice is
+// E0202, and its uses aren't reported again (REFERENCE §15.1). Distinct types take no type
+// parameters yet.
+type UserId = distinct Int derives(Eq, Show)
+type Plain = distinct Int
+type Words = distinct List[Text]
+type Name = distinct Text derives(Add)              // <- E0309
+type Natural = distinct UInt8 derives(Neg)          // <- E0309
+type Copied = distinct Int derives(Copy)            // <- E0310
+type Ratio = distinct Int derives(Div)
+type Positive = distinct Int where value > 0        // <- E0201
+type Truthy = distinct Int where self + 1           // <- E0301
+type Failing = distinct Int where fail self         // <- E0705
+type Wrapped[T] = distinct List[T]                  // <- E0901
+type Twice = distinct Int
+type Twice = distinct Text                          // <- E0202
+type Shown = distinct Show                          // <- E0307
+distinct Bare = Int                                 // <- E0101
+
+record Hidden {
+    n: Int
+}
+
+pub type Exposed = distinct Hidden                  // <- E0211
+
+fn literals() -> UserId {
+    let a: UserId = 7                               // <- E0301
+    return UserId(id: 7)                            // <- E0207
+}
+
+fn operators(p: Plain, u: UserId, r: Ratio) -> Bool {
+    let sum = p + p                                 // <- E0306
+    let same = p == p                               // <- E0306
+    let less = u < u                                // <- E0306
+    let mixed = u == 7                              // <- E0301
+    let rest = r % r                                // <- E0306
+    let half = r / r
+    return true
+}
+
+fn members(w: Words, u: UserId) -> Int {
+    let n = w.len()                                 // <- E0303
+    let v = u.with(value: 2)                        // <- E0303
+    let m = w.value.len()
+    return Int64(u)                                 // <- E0301
+}
+
+fn rejected(t: Twice) -> Int {
+    let x = Twice(1)
+    return t.value
+}
