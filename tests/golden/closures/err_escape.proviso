@@ -141,3 +141,33 @@ fn same_eq[T: Eq](x: T) -> Bool {
 fn bound_after(f: fn(Int) -> Int) -> Bool {
     return same_eq(x: Some(f))                      // <- E0509
 }
+
+fn run[R](f: fn() -> R) -> R {
+    return f()
+}
+
+record Box {
+    n: Int
+}
+
+impl Box {
+    fn call[R](self, f: fn() -> R) -> R {
+        return f()
+    }
+
+    fn hold[T](self, x: T) -> Option[T] {
+        return None
+    }
+}
+
+fn once_in_results(f: fn(Int) -> Int, flag: Bool, b: Box) {
+    let c = run(f: || Some(f))                      // <- E0509
+    let g = run(f: || [f])                          // <- E0509
+    let k = || Some(f)                              // <- E0509
+    let d = run(f: k)
+    let e = run(f: if flag { || Some(f) } else { || None })     // <- E0509
+    let m = b.call(f: || Some(f))                   // <- E0509
+    let o = Some(|| 1)                              // <- E0509
+    let h = b.hold(x: f)                            // <- E0509
+    let t = run(f: || (f, 1))                       // <- E0509
+}

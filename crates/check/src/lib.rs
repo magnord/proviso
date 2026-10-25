@@ -5110,8 +5110,12 @@ impl Checker<'_> {
                 .zonk(self.p.ty(e))
                 .fn_parts()
                 .is_some_and(|(_, ret, fails, _)| matches!(ret, Ty::Fn(..)) || matches!(fails, Ty::Fn(..))),
-            ExprKind::Call { args, .. } => args.iter().any(|arg| bare(&arg.value)),
-            ExprKind::MethodCall { receiver, args, .. } => bare(receiver) || args.iter().any(|arg| bare(&arg.value)),
+            // Only a variant takes a function value into what it gives. A function value
+            // given to a function's type parameter is a type argument, reported by
+            // [`Checker::fn_targ`], and a closure's result was reported in the closure.
+            ExprKind::Call { callee, args, .. } if matches!(self.p.res(*callee), Some(Res::Ctor(..))) => {
+                args.iter().any(|arg| bare(&arg.value))
+            }
             ExprKind::List(elements) | ExprKind::Tuple(elements) => elements.iter().any(bare),
             ExprKind::Map(entries) => entries.iter().any(|(key, value)| bare(key) || bare(value)),
             _ => false,
