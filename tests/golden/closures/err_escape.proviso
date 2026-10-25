@@ -179,3 +179,16 @@ fn once_in_results(f: fn(Int) -> Int, flag: Bool, b: Box) {
     let h = b.hold(x: f)                            // <- E0509
     let t = run(f: || (f, 1))                       // <- E0509
 }
+
+fn qualified(f: fn(Int) -> Int, flag: Bool) -> Bool {
+    let a = Option.Some(f)                          // <- E0509
+    let d = Option.Some(|x: Int| x)                 // <- E0509
+    let e = Option.Some(f) == None                  // <- E0509
+    let g = if flag {
+        let deep = 4
+        Option.Some(|x: Int| x + deep)              // <- E0509
+    } else {
+        None
+    }
+    return e
+}

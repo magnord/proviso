@@ -5130,6 +5130,10 @@ impl Checker<'_> {
             ExprKind::Call { callee, args, .. } if matches!(self.p.res(*callee), Some(Res::Ctor(..))) => {
                 args.iter().any(|arg| bare(&arg.value))
             }
+            // A qualified variant, as in `Option.Some(f)`.
+            ExprKind::MethodCall { args, .. } if matches!(self.p.res(e), Some(Res::Ctor(..))) => {
+                args.iter().any(|arg| bare(&arg.value))
+            }
             ExprKind::List(elements) | ExprKind::Tuple(elements) => elements.iter().any(bare),
             ExprKind::Map(entries) => entries.iter().any(|(key, value)| bare(key) || bare(value)),
             _ => false,
