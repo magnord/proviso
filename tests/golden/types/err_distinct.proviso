@@ -14,7 +14,9 @@
 // expect-error: E0901
 // A distinct type has only what it derives (REFERENCE §4.6). A literal never becomes one
 // (§2), its operators need `derives`, and it has neither the wrapped type's methods nor
-// `with`. It derives an operator only when the wrapped type has it, and never `Copy`. Its
+// `with`. It derives an operator only when the wrapped type has it, wherever that type is
+// declared, and never `Copy`. One that wraps a distinct type whose derive is rejected isn't
+// reported again. Its
 // `where` names the value as `self`, not as `value`. A distinct type defined twice is
 // E0202, and its uses aren't reported again (REFERENCE §15.1). Distinct types take no type
 // parameters yet.
@@ -23,6 +25,9 @@ type Plain = distinct Int
 type Words = distinct List[Text]
 type Name = distinct Text derives(Add)              // <- E0309
 type Natural = distinct UInt8 derives(Neg)          // <- E0309
+type Early = distinct Late derives(Add, Neg)        // <- E0309, E0309
+type Late = distinct Int
+type Outer = distinct Name derives(Add)
 type Copied = distinct Int derives(Copy)            // <- E0310
 type Ratio = distinct Int derives(Div)
 type Positive = distinct Int where value > 0        // <- E0201

@@ -2052,6 +2052,9 @@ impl Checker<'_> {
     /// derives is checked once the `impl` blocks are known.
     fn adt_derives(&mut self) {
         let m = self.m;
+        // A distinct type's operator derives, checked once every type's derives are known, so
+        // the wrapped type may be declared later.
+        let mut operators = Vec::new();
         for k in 0..self.adts.len() {
             let (id, derives_of) = (self.adts[k].id, self.adts[k].derives);
             let mut seen: Vec<&str> = Vec::new();
@@ -2070,29 +2073,8 @@ impl Checker<'_> {
                     Some(iface) if iface.derivable() => derives.push(iface),
                     // A distinct type derives an operator of the type it wraps (REFERENCE §4.6).
                     Some(iface) if distinct && op_iface(iface).is_some() => {
-                        let wrapped = self.p.decls.adt(id).variant().fields[0].ty.clone();
-                        let has = match op_iface(iface) {
-                            Some(None) => {
-                                matches!(&wrapped, Ty::Int(it) if it.is_signed()) || matches!(wrapped, Ty::Float(_))
-                            }
-                            Some(Some(op)) => self.has_arithmetic(op, &wrapped),
-                            None => unreachable!("matched above"),
-                        };
-                        if has || wrapped.is_unknown() {
-                            derives.push(iface);
-                        } else {
-                            unknown = true;
-                            let name_of = &self.p.decls.adt(id).name;
-                            let message = format!(
-                                "`{name_of}` wraps `{}`, which has no {}, so it can't derive `{text}`",
-                                self.show(&wrapped),
-                                match op_iface(iface) {
-                                    Some(Some(op)) => format!("`{}`", op.symbol()),
-                                    _ => "unary `-`".to_string(),
-                                }
-                            );
-                            self.error(codes::MISSING_IMPLEMENTATION, name.span, message);
-                        }
+                        derives.push(iface);
+                        operators.push((id, iface, *name));
                     }
                     Some(_) => {
                         unknown = true;
@@ -2127,6 +2109,42 @@ impl Checker<'_> {
             let def = self.p.decls.adt_mut(id);
             def.derives = derives;
             def.unknown_interfaces |= unknown;
+        }
+        // Each is checked against the derives as written, so one that wraps a distinct type
+        // whose own derive is rejected isn't reported again (REFERENCE §15.1).
+        let missing: Vec<_> = operators
+            .into_iter()
+            .filter(|&(id, iface, _)| {
+                let wrapped = &self.p.decls.adt(id).variant().fields[0].ty;
+                let has = match op_iface(iface) {
+                    Some(Some(op)) => self.has_arithmetic(op, wrapped),
+                    _ => match wrapped {
+                        Ty::Int(it) => it.is_signed(),
+                        Ty::Float(_) => true,
+                        Ty::Adt(of, _) => self.p.decls.adt(*of).derives.contains(&IfaceId::NEG),
+                        _ => false,
+                    },
+                };
+                !has && !wrapped.is_unknown()
+            })
+            .collect();
+        for (id, iface, name) in missing {
+            let wrapped = self.p.decls.adt(id).variant().fields[0].ty.clone();
+            let operator = match op_iface(iface) {
+                Some(Some(op)) => format!("`{}`", op.symbol()),
+                _ => "unary `-`".to_string(),
+            };
+            let def = self.p.decls.adt(id);
+            let message = format!(
+                "`{}` wraps `{}`, which has no {operator}, so it can't derive `{}`",
+                def.name,
+                self.show(&wrapped),
+                m.text(name.sym)
+            );
+            self.error(codes::MISSING_IMPLEMENTATION, name.span, message);
+            let def = self.p.decls.adt_mut(id);
+            def.derives.retain(|&derived| derived != iface);
+            def.unknown_interfaces = true;
         }
     }
 

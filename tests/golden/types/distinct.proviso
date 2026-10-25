@@ -6,12 +6,14 @@
 // values of the distinct type (OPEN_QUESTIONS P5). `Show` and `debug` write it as it is built.
 // It may have methods and hand-written implementations, and its kind is that of what it
 // wraps, so a distinct pool is unique and moves, and a distinct resource is a resource that
-// abandons its value. An alias may name it, and a generic type may hold it.
+// abandons its value. An alias may name it, and a generic type may hold it. A distinct type
+// may wrap another and derive its operators, declared before it or after it.
 use std.io { IoError, Out }
 use std.pool { Pool }
 
 type UserId = distinct Int derives(Eq, Ord, Hash, Show)
 type Meters = distinct Float derives(Add, Sub, Mul, Div, Neg, Show)
+type Total = distinct Score derives(Add, Neg, Show)
 type Score = distinct Int32 derives(Eq, Ord, Add, Neg, Show)
 type Tags = distinct List[Text] derives(Eq, Show)
 type Label = distinct Text
@@ -110,6 +112,7 @@ pub fn main(sys: keep System) fails IoError {
         UserId(n) => try sys.stdout.write_line(f"{n}")
     }
     debug(a, Label("d"))
+    try sys.stdout.write_line(f"{-(Total(Score(2)) + Total(Score(3)))}")
     let slots = grow(slots: Slots(Pool.new()))
     try sys.stdout.write_line(f"{slots.value.len()}")
     let g = Guarded(Lock(name: "g", out: sys.stdout))
