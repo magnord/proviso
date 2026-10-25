@@ -116,7 +116,12 @@ fn wrapped(flag: Bool) -> Text {
     let d = first_of(f: |n| n.byte_len(), g: |t: Text| 1)
     let e = first_of(f: |t: Text| 1, g: |n| n.byte_len())
     let g = on_identity(f: |h| h(small()) + 20)
-    return f"{a} {b} {c} {d} {e} {g}"
+    let h = apply_from(f: if flag { |t| t.byte_len() } else { |t| 0 }, x: "four")
+    let i = apply_from(f: match flag {
+        true => |t| t.byte_len(),
+        false => |t| 0,
+    }, x: "four")
+    return f"{a} {b} {c} {d} {e} {g} {h} {i}"
 }
 
 fn never_called(flag: Bool) -> Int {
