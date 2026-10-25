@@ -90,6 +90,12 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Need:** value-level narrowing: paths, hosts, ports, rate limits.
 - **Open:** how a narrowed value appears in `proviso sig`.
 - **Found by the goldens (§G):** `Dir`'s full operation list. The reference shows no operations for `list`, `create` or `delete`, so no complete `impl Dir` can be written, and rows 4 and 11 use test-local interfaces instead. Also open: how an observes-only view narrows a capability type that has no permission list, such as `Out` (row 4 as written); whether `write_text` to a new file needs `create`; and which directory `sys.fs` is rooted at.
+- **Proposed for phase 3:**
+  - `Out` is `effects(write)` and `In` is `effects(read)`, so an observes-only view narrows `Out` to no permissions.
+  - `Dir` keeps §9.2's permissions and operations, and adds `list(path) -> List[Path]` (`needs list`), `create_dir(path)` (`needs create`) and `remove(path)` (`needs delete`).
+  - `write_text` to a new file needs `create` as well as `write`.
+  - `sys.fs` is rooted at the working directory.
+  - `Net`, `Clock`, `Random`, `Env` and `Process` are declared with no permissions or operations, which stay unscheduled.
 
 **Q7 — Partial external writes.**
 - **Now:** `sig` reports "may leave partial writes" for a function that has write authority and can fail.
@@ -199,6 +205,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 **Q31 — Generics over capabilities.**
 - **Now:** a type parameter may be instantiated with a type that has reach, and the result has that reach. Generic code needs `T: Copy` to copy, store or return a borrowed `T`.
 - **Open:** whether generic code needs a way to name the reach of a type parameter (`T uses C`), for example in generic service containers.
+- **Unclear** (found while planning phase 3): what a constraint naming a capability interface means, as in `[T: Out]`. A capability interface always dispatches dynamically (§4.9, §9.2), so `x: T` with `T: Out` says no more than `x: Out`. **Proposed:** such a constraint is an error.
 
 **Q32 — Visible allocation.**
 - **Now:** value semantics hide allocation, and `proviso query costs` reports it only after the fact.
@@ -230,6 +237,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
   - A `let` fixes its type, so a parameter that neither an annotation nor the body gives a type is E0312, as in `let f = |x| x`.
   - Wherever the local is passed or called, the closure reads what it captures, so each capture must not have moved by then (E0501). It sees a `var` as the `var` is at the call.
   - It can't outlive what it captures. So a block can't give a closure that captures a local the block declares, and a `var` can't be given a new function value (E0509).
+- **Unclear** (found while planning phase 3): where a `keep fn` closure may be stored. It may live indefinitely (§6.7), which needs a field, a collection or a result to hold it, and P5's "Where function values go" rejects all three. **Proposed:** a function type may appear anywhere a type may, and phase 3's retention check decides which values may be stored there, so a default closure may be stored only where it doesn't outlive what it captures. This replaces P5's list of places.
 
 **Q35 — Consuming a base resource.** Found by the goldens (§G).
 - **Now:** a resource is consumed by a `take` parameter or a `take self` method (ref §10). The reference's `Txn.abandon` consumes `self` without visibly consuming the `Txn` itself.
@@ -257,6 +265,11 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
   - `List.push`'s `ensures` covers only the length. Whether row 17 is `refuted` or `unknown` is left to phase 5, when the verifier exists.
   - `Pool.insert`, `Pool.get` and the rest of `std.pool` follow §5.5.
   - Phase 2 has no way to open a file. Rows 8 and 14 keep their test-local resource, and `File` arrives with `Dir` in phase 3 (Q6).
+- **Proposed for phase 3:**
+  - `Path` is `distinct Text derives(Eq, Hash, Show)`, built as `Path("u.csv")` (§17).
+  - `FsError` is an enum with `NotFound(path: Path)`, `PermissionDenied(path: Path)` and `Other(message: Text)`, deriving `Eq` and `Show`, as §17's `LoadError` needs.
+  - `MemDir.with_files(files: Map[Text, Text]) -> Dir[read, list, write, create, delete]`, so §17's map literal with text keys fits.
+  - `File` moves to not yet scheduled. No phase 3 row uses it, and the reference gives it a type (§10) but no operations.
 
 **Q37 — Building a `Set`.** Found by the collections goldens (§G).
 - **Now:** STD.md declares `Set` and its methods for phase 2. REFERENCE §2 gives literals only for lists and maps, and nothing declares a constructor, so no program can build one.
@@ -266,6 +279,11 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 **Q38 — `Hash` beside a hand-written `Eq`.** Found by the collections review.
 - **Now:** a type may write `eq` by hand and derive `Hash`, which STD.md makes consistent only with a derived `Eq`. A map finds such a key by its `eq` (P5, Collections), so its hash can't come from its fields, and every key of the type shares one hash. Building a map of `n` such keys calls `eq` about `n²/2` times.
 - **Options:** require a type that writes `eq` by hand to write `Hash` by hand too, as Rust's documentation asks; reject `derives(Hash)` beside a hand-written `eq`; or keep the cost.
+
+**Q39 — The observes-only view outside `self`.** Found while planning phase 3.
+- **Now:** inside an operation that needs only `observes` permissions, `self` is seen through an observes-only view, and helpers the operation calls receive that view (ref §9.2).
+- **Unclear:** no parameter type can say that it holds a view, so a helper that takes the `cap record` can't be checked against it.
+- **Proposed:** inside an observes operation, `self` may be passed only to its own type's observes operations. Its fields may go anywhere, with their narrowed types, so permission subtyping keeps them narrowed. That needs no new syntax.
 
 ## C. Tooling
 
@@ -348,6 +366,8 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 **What phase 2 left out.** When phase 2 ended (slice 2.11), what it still reported as E0901 was given a later phase or marked not yet scheduled. `keep self` is phase 3, with retention. `in` tests and ranges outside `for` loops are phase 4. Generated validators and `Invalid` are phase 5, with the verifier that §4.4's validators share their predicates with. `Array`, `Bytes`, aliases and `distinct` types with type parameters, and implementations, constraints and method calls of `Index` and the operator interfaces are not yet scheduled. No v1 row needs them.
 
 `supervise` moved into phase 6, with tasks, for row 18. Effect variables (§9.5) are named in phase 3, where the implementation already planned them.
+
+**Proposed for phase 3.** `MemDir` is written in Proviso, so phase 3 loads the std modules from Proviso source and checks several modules as one program (§3). A user program stays one file. `scoped fn` moves to phase 6, since a `scoped` closure lives until its `scope` ends and only `spawn` takes one (§6.7, §11).
 
 **The v1 profile.** Until phase 5 there is no verifier. Clauses that would be `[verified]`, and refinements, are checked at runtime instead, and `sig` labels them `[checked]`. So v1 never claims a guarantee it doesn't enforce. The enforcement levels are what make this honest staging possible.
 
