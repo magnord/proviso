@@ -129,7 +129,7 @@ fn swapped[T: Copy](p: Pair[T, T]) -> Pair[T, T] {
     return p.swap()
 }
 
-fn boxed[T: Show](x: T) -> Text {
+fn boxed[T: Show](x: take T) -> Text {
     return Box(item: x).describe()
 }
 

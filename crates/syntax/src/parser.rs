@@ -831,7 +831,11 @@ impl Parser<'_> {
             && generics.iter().any(|g| g.name.sym == name.sym)
         {
             let span = self.m.types[target].span;
-            self.diags.not_implemented(span, "implementations for every type, such as `impl[T] I for T`,", Planned::Unscheduled);
+            self.diags.not_implemented(
+                span,
+                "implementations for every type, such as `impl[T] I for T`,",
+                Planned::Unscheduled,
+            );
             return Err(());
         }
         let open = self.expect(T::LBrace, "`{` and the block's methods")?;

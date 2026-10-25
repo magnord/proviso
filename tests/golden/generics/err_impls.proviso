@@ -61,14 +61,22 @@ enum Slot[T] {
     Vacant
 }
 
+record Lone[T] {
+    item: T
+}
+
 impl[A: Copy] Pair[A, A] {
     fn swap(self) -> Pair[A, A] {
         return Pair(first: self.second, second: self.first)
     }
+
+    fn left(self) -> A {
+        return self.first
+    }
 }
 
 impl Pair[Int, Text] {
-    fn swap(self) -> Int {                          // <- E0210
+    fn left(self) -> Int {                          // <- E0210
         return self.first
     }
 }
@@ -138,7 +146,7 @@ impl (Int, Text) {                                  // <- E0315
     }
 }
 
-impl Pair[Int] {                                    // <- E0307
+impl Lone[Int, Int] {                               // <- E0307
     fn odd(self) -> Int {
         return 1
     }
@@ -163,11 +171,11 @@ impl[T, T] Pair[T, T] {                             // <- E0210
 }
 
 interface Anything {
-    fn any(self) -> Int
+    fn whatever(self) -> Int
 }
 
 impl[T] Anything for T {                            // <- E0901
-    fn any(self) -> Int {
+    fn whatever(self) -> Int {
         return 1
     }
 }

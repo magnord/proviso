@@ -419,7 +419,6 @@ impl Kinds {
 /// which could be anything.
 pub fn matches_target(pattern: &Ty, ty: &Ty, binds: &mut [Option<Ty>]) -> bool {
     match (pattern, ty) {
-        (_, Ty::Never | Ty::Var(_) | Ty::Error) => true,
         (Ty::Param(i), ty) => match &binds[*i as usize] {
             Some(bound) => {
                 let agree = compatible(bound, ty, &mut HashSet::new());
@@ -433,8 +432,11 @@ pub fn matches_target(pattern: &Ty, ty: &Ty, binds: &mut [Option<Ty>]) -> bool {
                 true
             }
         },
+        (_, Ty::Never | Ty::Var(_) | Ty::Error) | (Ty::Error, _) => true,
         (Ty::Adt(a, pargs), Ty::Adt(b, targs)) => {
-            a == b && pargs.len() == targs.len() && pargs.iter().zip(targs.iter()).all(|(p, t)| matches_target(p, t, binds))
+            a == b
+                && pargs.len() == targs.len()
+                && pargs.iter().zip(targs.iter()).all(|(p, t)| matches_target(p, t, binds))
         }
         (pattern, ty) => pattern == ty,
     }
@@ -723,7 +725,8 @@ impl Decls {
                 continue;
             }
             for variant in &def.variants {
-                let fields = variant.fields.iter().map(|f| graph.requirement(self, &f.ty, &[], &mut instances)).collect();
+                let fields =
+                    variant.fields.iter().map(|f| graph.requirement(self, &f.ty, &[], &mut instances)).collect();
                 let variant = graph.all(fields);
                 graph.implies(variant, a);
             }
@@ -781,7 +784,8 @@ impl Decls {
                 // it (STD.md; OPEN_QUESTIONS P5). `Never` has no values, so it implements
                 // everything as an argument.
                 let known = if self.adt(*id).derives.contains(&iface) {
-                    self.held_args(*id, args).all(|arg| *arg == Ty::Never || self.implements_in(arg, iface, params, memo))
+                    self.held_args(*id, args)
+                        .all(|arg| *arg == Ty::Never || self.implements_in(arg, iface, params, memo))
                 } else {
                     self.by_impl(ty, iface, params, memo)
                 };
@@ -819,8 +823,8 @@ impl Decls {
             return false;
         }
         binds.iter().zip(&def.bounds).all(|(bind, bounds)| match bind {
-            Some(arg) if *arg != Ty::Never => bounds.iter().all(|&b| self.implements_in(arg, b, params, memo)),
-            _ => true,
+            Some(Ty::Never | Ty::Var(_) | Ty::Error) | None => true,
+            Some(arg) => bounds.iter().all(|&b| self.implements_in(arg, b, params, memo)),
         })
     }
 
@@ -954,7 +958,8 @@ impl Decls {
                 kind = kind.or(self.base_kind(&field.ty, &mut held));
             }
             let def = &mut self.adts[a];
-            if held == def.held && kind.unique == def.unique && kind.resource == def.resource && kind.reach == def.reach {
+            if held == def.held && kind.unique == def.unique && kind.resource == def.resource && kind.reach == def.reach
+            {
                 continue;
             }
             def.held = held;
@@ -1345,8 +1350,7 @@ impl Graph {
         while let Some((id, bits, node)) = instances.pending.pop() {
             let def = decls.adt(id);
             for variant in &def.variants {
-                let fields =
-                    variant.fields.iter().map(|f| self.requirement(decls, &f.ty, &bits, instances)).collect();
+                let fields = variant.fields.iter().map(|f| self.requirement(decls, &f.ty, &bits, instances)).collect();
                 let variant = self.all(fields);
                 self.implies(variant, node);
             }
