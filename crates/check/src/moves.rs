@@ -123,6 +123,8 @@ pub(crate) fn check(
         excused: HashSet::new(),
         captured: Vec::new(),
         fn_reads: HashMap::new(),
+        listed: Vec::new(),
+        expands: 0,
     };
     match body {
         Body::Fn(body) => {
@@ -361,8 +363,14 @@ struct CallAccess {
     /// What the place is lent to.
     by: Lender,
     /// The name of the local, when a closure argument captures it.
-    captured: Option<Box<str>>,
+    captured: Option<Arc<str>>,
 }
+
+/// A local a call of a function value reads, with its name.
+type Read = (LocalId, Arc<str>);
+
+/// The locals a call of a function value reads.
+type Reads = Vec<Read>;
 
 /// What a lent place is lent to, for as long as it runs.
 #[derive(Clone, Copy, PartialEq)]
@@ -375,6 +383,8 @@ enum Lender {
     Index,
     /// A call, by a closure argument that captures it.
     Capture,
+    /// A call, by the function value it calls, which captures it.
+    Callee,
 }
 
 /// What a loop reached when it was last walked: what may have moved at its head and where it
@@ -462,9 +472,14 @@ struct Walk<'a> {
     excused: HashSet<LocalId>,
     /// The locals the closures being walked capture, which they borrow.
     captured: Vec<LocalId>,
-    /// What a call of the function value each local holds reads: the locals its closure
-    /// captures, and what those read in turn, with their names.
-    fn_reads: HashMap<LocalId, Vec<(LocalId, Box<str>)>>,
+    /// What a call of the function value each `let` local holds reads: the locals its
+    /// closure captures, and what those read in turn, with their names. A `let` local listed
+    /// here is left out of the lists, since nothing can move it or give it a new value, but
+    /// a `var` can still be passed with `&` (§5.3).
+    fn_reads: HashMap<LocalId, Arc<[Read]>>,
+    /// For each local, the last [`Walk::expand`] that listed it, so each lists it once.
+    listed: Vec<u32>,
+    expands: u32,
 }
 
 impl Walk<'_> {
@@ -1074,6 +1089,8 @@ impl Walk<'_> {
             };
             self.report(lent, self.span(e), message);
             self.refused.insert(e);
+            // It was meant to move, so it isn't reported as left over (REFERENCE §15.1).
+            self.excused.insert(local);
             return;
         }
         if self.locals[local.index()].borrowed {
@@ -1126,7 +1143,15 @@ impl Walk<'_> {
                     );
                     self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
                 }
+                Lender::Callee => {
+                    let message = format!(
+                        "`{desc}` is captured by the function value this call calls, which may read it while the call runs, so it can't also move into it (§5.3)"
+                    );
+                    self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
+                }
             }
+            // It was meant to move, so it isn't reported as left over (REFERENCE §15.1).
+            self.excused.insert(local);
             return;
         }
         if resource && !self.unrefined(local, &path) && self.read_by_refinement(local, &path) {
@@ -1194,7 +1219,7 @@ impl Walk<'_> {
 
     /// Reports the first of `reads`, the locals a closure reads, that may have moved, at
     /// `e`, with the message `moved` gives for its name.
-    fn reads(&mut self, e: ExprId, reads: &[(LocalId, Box<str>)], moved: impl Fn(&str) -> String) {
+    fn reads(&mut self, e: ExprId, reads: &[Read], moved: impl Fn(&str) -> String) {
         for (local, name) in reads {
             self.touch(*local);
             if self.state.as_ref().is_some_and(|state| state.of(*local).next().is_some()) {
@@ -1205,55 +1230,76 @@ impl Walk<'_> {
     }
 
     /// What a call of the function value `e` gives reads: the locals its closure captures,
-    /// and what a function value it captures reads.
-    fn fn_reads(&self, e: ExprId) -> Vec<(LocalId, Box<str>)> {
-        let mut out: Vec<(LocalId, Box<str>)> = Vec::new();
-        let mut add = |reads: &[(LocalId, Box<str>)]| {
-            for read in reads {
-                if !out.iter().any(|(local, _)| *local == read.0) {
-                    out.push(read.clone());
+    /// and what a function value it captures reads, at any depth.
+    fn fn_reads(&mut self, e: ExprId) -> Reads {
+        let direct = self.direct_reads(e);
+        self.expand(direct)
+    }
+
+    /// `reads`, with each local listed in [`Walk::fn_reads`] replaced by what it reads, each
+    /// local once. Those lists are expanded already, so a chain of closures as long as the
+    /// function costs time in proportion to its length.
+    fn expand(&mut self, reads: Reads) -> Reads {
+        if self.listed.len() < self.locals.len() {
+            self.listed.resize(self.locals.len(), 0);
+        }
+        self.expands += 1;
+        let mut out = Vec::new();
+        for (local, name) in reads {
+            let held = self.fn_reads.get(&local).cloned();
+            let parts = match &held {
+                Some(held) if self.locals[local.index()].mutable => {
+                    std::iter::once((local, name)).chain(held.iter().cloned()).collect()
+                }
+                Some(held) => held.to_vec(),
+                None => vec![(local, name)],
+            };
+            for (local, name) in parts {
+                if std::mem::replace(&mut self.listed[local.index()], self.expands) != self.expands {
+                    out.push((local, name));
                 }
             }
-        };
+        }
+        out
+    }
+
+    /// The locals the function value `e` reads directly: those its closure captures, or the
+    /// local that holds it. [`Walk::expand`] follows them.
+    fn direct_reads(&self, e: ExprId) -> Reads {
         let tail = |block: &Block| match block.stmts.last().map(|&s| &self.m.stmts[s].kind) {
-            Some(StmtKind::Expr(e)) => self.fn_reads(*e),
+            Some(StmtKind::Expr(e)) => self.direct_reads(*e),
             _ => Vec::new(),
         };
         match &self.m.exprs[e].kind {
-            ExprKind::Closure(_) => {
-                for (local, name) in self.p.closures.get(e).map_or(&[][..], |info| &info.captures) {
-                    add(&[(*local, name.clone())]);
-                    add(self.fn_reads.get(local).map_or(&[], Vec::as_slice));
+            ExprKind::Closure(_) => self.p.closures.get(e).map_or_else(Vec::new, |info| {
+                info.captures.iter().map(|(local, name)| (*local, Arc::from(&**name))).collect()
+            }),
+            ExprKind::Name(_) => match self.p.res(e) {
+                Some(Res::Local(local)) if self.fn_reads.contains_key(&local) => {
+                    vec![(local, self.describe(e).into())]
                 }
-            }
-            ExprKind::Name(_) => {
-                if let Some(Res::Local(local)) = self.p.res(e) {
-                    add(self.fn_reads.get(&local).map_or(&[], Vec::as_slice));
-                }
-            }
+                _ => Vec::new(),
+            },
             ExprKind::If { then_block, else_branch, .. } => {
-                add(&tail(then_block));
+                let mut out = tail(then_block);
                 match else_branch {
-                    Some(ElseBranch::Block(block)) => add(&tail(block)),
-                    Some(ElseBranch::If(nested)) => add(&self.fn_reads(*nested)),
+                    Some(ElseBranch::Block(block)) => out.extend(tail(block)),
+                    Some(ElseBranch::If(nested)) => out.extend(self.direct_reads(*nested)),
                     None => {}
                 }
+                out
             }
-            ExprKind::Match { arms, .. } => {
-                for arm in arms {
-                    add(&tail(&arm.body));
-                }
-            }
+            ExprKind::Match { arms, .. } => arms.iter().flat_map(|arm| tail(&arm.body)).collect(),
             ExprKind::Else { value, fallback } => {
-                add(&self.fn_reads(*value));
+                let mut out = self.direct_reads(*value);
                 match fallback {
-                    Fallback::Value(value) => add(&self.fn_reads(*value)),
-                    Fallback::Block(block) => add(&tail(block)),
+                    Fallback::Value(value) => out.extend(self.direct_reads(*value)),
+                    Fallback::Block(block) => out.extend(tail(block)),
                 }
+                out
             }
-            _ => {}
+            _ => Vec::new(),
         }
-        out
     }
 
     /// A closure, which reads what it captures where it is made. Its body is walked as a
@@ -1266,6 +1312,10 @@ impl Walk<'_> {
         self.reads(e, &reads, |captured| {
             format!("`{captured}` may have moved already, so this closure can't capture it (§5.1)")
         });
+        // A rejected closure may have meant to consume what it captures (REFERENCE §15.1).
+        if self.tainted(e) {
+            self.excused.extend(captures.iter().map(|(local, _)| *local));
+        }
         let params: Vec<(LocalId, Span, String)> = (info.owned.iter())
             .map(|(local, span)| {
                 let i = info.params.iter().position(|p| p == local).expect("an owned parameter is a parameter");
@@ -1303,17 +1353,15 @@ impl Walk<'_> {
         self.touched = touched;
     }
 
-    /// Notes that a call reads `reads`, what the closure its argument `e` passes captures, for
-    /// as long as it runs. A captured unique value is lent to the call.
-    fn note_reads(&mut self, accesses: &mut Vec<CallAccess>, e: ExprId, reads: Vec<(LocalId, Box<str>)>) {
+    /// Notes that a call reads `reads`, what the function value `e` captures, for as long as
+    /// it runs, where `e` is the call's callee or an argument. So a later argument, or a call
+    /// inside one, can't change what it reads, and can't move a captured unique value.
+    fn note_reads(&mut self, accesses: &mut Vec<CallAccess>, e: ExprId, reads: Reads, by: Lender) {
         for (local, name) in reads {
             let ty = self.locals[local.index()].ty.clone();
             let access = if self.moves(&ty) { Access::Lent } else { Access::Read };
-            let access =
-                CallAccess { access, local, steps: Vec::new(), expr: e, by: Lender::Capture, captured: Some(name) };
-            if access.access == Access::Lent {
-                self.lent.push(access.clone());
-            }
+            let access = CallAccess { access, local, steps: Vec::new(), expr: e, by, captured: Some(name) };
+            self.lent.push(access.clone());
             accesses.push(access);
         }
     }
@@ -1355,11 +1403,11 @@ impl Walk<'_> {
                     self.report(codes::RESOURCE_DISCARDED, m.pats[*pat].span, message.to_string());
                 }
                 self.matched(*init, *pat);
-                if let Some(&local) = self.p.pat_local.get(*pat) {
+                if let Some(&local) = self.p.pat_local.get(*pat)
+                    && matches!(self.p.ty(*init), Ty::Fn(..))
+                {
                     let reads = self.fn_reads(*init);
-                    if !reads.is_empty() {
-                        self.fn_reads.insert(local, reads);
-                    }
+                    self.fn_reads.insert(local, reads.into());
                 }
                 // A value that holds no resource, such as `None`, has nothing to consume.
                 let mut empty = Vec::new();
@@ -1486,6 +1534,10 @@ impl Walk<'_> {
             Lender::Index => format!("`{there}` is indexed while its index is evaluated"),
             Lender::Capture => format!(
                 "`{}` is captured by a closure that one of a call's earlier arguments passes, which may read it until the call returns",
+                captured.as_deref().unwrap_or(&there)
+            ),
+            Lender::Callee => format!(
+                "`{}` is captured by the function value a call calls, which may read it until the call returns",
                 captured.as_deref().unwrap_or(&there)
             ),
         };
@@ -2126,7 +2178,7 @@ impl Walk<'_> {
             && self.is_value(callee)
         {
             let reads = self.fn_reads(callee);
-            self.note_reads(&mut accesses, callee, reads);
+            self.note_reads(&mut accesses, callee, reads, Lender::Callee);
         }
         for arg in args {
             if arg.inout {
@@ -2135,7 +2187,7 @@ impl Walk<'_> {
             }
             self.expr(arg.value);
             let reads = self.fn_reads(arg.value);
-            self.note_reads(&mut accesses, arg.value, reads);
+            self.note_reads(&mut accesses, arg.value, reads, Lender::Capture);
             // An argument that moves was checked against what the call lends as it moved.
             if !self.consumed.contains(&arg.value) && !self.rejected.contains(&arg.value) {
                 self.note(&mut accesses, outer, arg.value, Access::Lent);
@@ -2255,7 +2307,13 @@ impl Walk<'_> {
             }
         } else if let Some((other, _)) = conflict {
             let (here, there) = (self.describe(e), self.describe(other.expr));
-            let message = if let Some(name) = &other.captured {
+            let message = if let Some(name) = &other.captured
+                && other.by == Lender::Callee
+            {
+                format!(
+                    "`{name}` is captured by the function value this call calls, which may read it while the call runs, so the call can't also change `{here}` (§5.3)"
+                )
+            } else if let Some(name) = &other.captured {
                 format!(
                     "`{name}` is captured by a closure this call takes, which may read it while the call runs, so the call can't also change `{here}` (§5.3)"
                 )

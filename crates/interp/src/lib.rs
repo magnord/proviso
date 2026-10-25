@@ -127,7 +127,12 @@ impl PoolValue {
     /// Puts `value` back in the slot of `handle`, whose element was just removed, under the
     /// same generation, so `handle` reads it again.
     fn restore(&mut self, handle: &HandleValue, value: Value) {
-        self.free.retain(|&slot| slot != handle.slot);
+        // Nothing changes the pool while its element is out, so the slot is the last freed.
+        if self.free.last() == Some(&handle.slot) {
+            self.free.pop();
+        } else {
+            self.free.retain(|&slot| slot != handle.slot);
+        }
         self.slots[handle.slot as usize] = Some((handle.generation, value));
         self.len += 1;
     }
@@ -950,6 +955,12 @@ impl Interp<'_> {
             } else {
                 at(&frame[place.root.index()], &place.path)?.clone()
             };
+            // A closure this call made reads what it captures as it is now (REFERENCE §6.7).
+            if let Value::Fn(FnValue::Closure(c)) = &values[place.index]
+                && c.frame == self.frame
+            {
+                values[place.index] = self.closure(c.expr, frame);
+            }
         }
         Ok((values, places))
     }
@@ -1104,10 +1115,56 @@ impl Interp<'_> {
         }
     }
 
-    /// The closure `e`, with the values of what it captures in `frame`.
+    /// The closure `e`, with the values of what it captures in `frame`. A captured closure
+    /// that the running call made reads what it captures again too. Each is made once, and
+    /// without recursion, since a chain of them may be as long as the function.
     fn closure(&self, e: ExprId, frame: &Frame) -> Value {
+        let fresh = |id: LocalId| match &frame[id.index()] {
+            Value::Fn(FnValue::Closure(c)) if c.frame == self.frame => Some(c.expr),
+            _ => None,
+        };
+        let mut made: HashMap<LocalId, Value> = HashMap::new();
+        // Each closure to make, with the local that holds it, once what it captures is made.
+        let mut stack = vec![(e, None, false)];
+        while let Some((expr, holder, ready)) = stack.pop() {
+            if holder.is_some_and(|id| made.contains_key(&id)) {
+                continue;
+            }
+            let captures = &self.p.closures.get(expr).expect("closures are checked").captures;
+            if !ready {
+                stack.push((expr, holder, true));
+                for &(id, _) in captures {
+                    if let Some(inner) = fresh(id).filter(|_| !made.contains_key(&id)) {
+                        stack.push((inner, Some(id), false));
+                    }
+                }
+                continue;
+            }
+            let env = captures
+                .iter()
+                .map(|&(id, _)| (id, made.get(&id).cloned().unwrap_or_else(|| frame[id.index()].clone())))
+                .collect();
+            let value = Value::Fn(FnValue::Closure(Arc::new(ClosureValue {
+                expr,
+                frame: self.frame,
+                locals: frame.len(),
+                env,
+            })));
+            match holder {
+                Some(id) => {
+                    made.insert(id, value);
+                }
+                None => return value,
+            }
+        }
+        unreachable!("the closure asked for is made last")
+    }
+
+    /// The closure `e` for a local, with what it captures as it is in `frame`, though not
+    /// read again. [`Interp::local`] reads it again.
+    fn bound(&self, e: ExprId, frame: &Frame) -> Value {
         let info = self.p.closures.get(e).expect("closures are checked");
-        let env = info.captures.iter().map(|(id, _)| (*id, self.local(*id, frame))).collect();
+        let env = info.captures.iter().map(|&(id, _)| (id, frame[id.index()].clone())).collect();
         Value::Fn(FnValue::Closure(Arc::new(ClosureValue { expr: e, frame: self.frame, locals: frame.len(), env })))
     }
 
@@ -1131,7 +1188,12 @@ impl Interp<'_> {
         let stmt = &m.stmts[s];
         match &stmt.kind {
             StmtKind::Let { pat, init, .. } => {
-                let value = self.expr(*init, frame)?;
+                // A local reads its closure's captures again whenever it is read, so they
+                // aren't read here, and a chain of closures is made in linear time.
+                let value = match m.exprs[*init].kind {
+                    ExprKind::Closure(_) => self.bound(*init, frame),
+                    _ => self.expr(*init, frame)?,
+                };
                 // The checker proved that the pattern matches every value.
                 self.matches(*pat, &value, frame)?;
                 self.take_parts(*init, *pat, frame);

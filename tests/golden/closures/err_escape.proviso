@@ -5,8 +5,9 @@
 // a local, an argument or the value of a branch, but nothing that can outlive what it
 // captures. It can't be a field, a result, an error, an element, a type argument or a part
 // of a tuple, whether the type is written or inferred. A function type's own result can't
-// be a function either, and a `var` can't be given a new function value. A block can't
-// yield a closure that captures a local declared inside it. `keep fn` will lift parts of
+// be a function either, and a `var` can't be given a new function value. A block, a
+// branch or an arm can't yield a closure that captures a local declared inside it, or a
+// binding of its `is` test or pattern. `keep fn` will lift parts of
 // this (OPEN_QUESTIONS P5).
 use std.pool { Pool }
 
@@ -71,4 +72,29 @@ fn escape_block(flag: Bool) -> Int {
         |x: Int| x
     }
     return f(1) + g(2)
+}
+
+fn escape_pattern(o: Option[Int]) -> Int {
+    let base = 1
+    let f = if o is Some(n) {
+        |x: Int| x + n                              // <- E0509
+    } else {
+        |x: Int| x + base
+    }
+    let g = match o {
+        Some(n) => |x: Int| x + n                   // <- E0509
+        None => |x: Int| x
+    }
+    let h = match o {
+        Some(n) => {
+            let m = n + 1
+            |x: Int| x + m                          // <- E0509
+        }
+        None => |x: Int| x + base
+    }
+    let k = match o {
+        Some(n) => |x: Int| x + base
+        None => |x: Int| x
+    }
+    return f(1) + g(1) + h(1) + k(1)
 }

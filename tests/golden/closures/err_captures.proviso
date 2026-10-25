@@ -142,3 +142,75 @@ fn moved_in_call() {
     let b = Token(id: 2)
     take_then_read(t: b, f: || b.id)                // <- E0501
 }
+
+fn bump_to(n: inout Int) -> Int {
+    n = 5
+    return 0
+}
+
+fn outer(f: fn() -> Int, a: Int) -> Int {
+    return f()
+}
+
+fn apply_int(f: fn(Int) -> Int, x: Int) -> Int {
+    return f(x)
+}
+
+fn changed_by_later_argument() -> Int {
+    var n = 1
+    let f = || n
+    let a = outer(f: || n, a: bump_to(n: &n))      // <- E0505
+    let b = outer(f: f, a: bump_to(n: &n))          // <- E0505
+    let g: fn(Int) -> Int = |k| k + n
+    let c = g(bump_to(n: &n))                       // <- E0505
+    let d = apply_int(f: |y| y + n, x: if true {
+        n = 5                                       // <- E0505
+        0
+    } else {
+        0
+    })
+    let e = g(if true {
+        n = 5                                       // <- E0505
+        0
+    } else {
+        0
+    })
+    return a
+}
+
+fn take_id(t: take Token) -> Int {
+    return t.id
+}
+
+fn moved_by_callee_argument() -> Int {
+    let token = Token(id: 1)
+    let h: fn(Int) -> Int = |a| a + token.id
+    return h(take_id(t: token))                     // <- E0505
+}
+
+fn give_then(f: fn() -> Text, p: take Probe) {
+    p.close()
+}
+
+fn look_then_take(a: Probe, b: take Probe) {
+    b.close()
+}
+
+fn consumed_only() {
+    let probe = Probe(name: "p")
+    run(f: || probe.close())                        // <- E0502
+}
+
+fn consumed_param_only(probe: take Probe) {
+    run(f: || probe.close())                        // <- E0502
+}
+
+fn captured_then_taken() {
+    let p = Probe(name: "p")
+    give_then(f: || p.name, p: p)                   // <- E0505
+}
+
+fn lent_then_taken() {
+    let p = Probe(name: "p")
+    look_then_take(a: p, b: p)                      // <- E0505
+}

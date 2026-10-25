@@ -6,8 +6,8 @@
 // final expression, and `return` returns from the closure (OPEN_QUESTIONS Q33). A closure
 // lives until the call it is passed to returns, and captures the locals it uses by
 // reference, so it reads a unique or resource value without moving it. A closure bound to a
-// local lives as long as the local, and sees a `var` it reads as it is when it is called
-// (Q34, P5). Closures nest, and one closure may call another it captures.
+// local lives as long as the local, and sees a `var` it reads as it is when it is called,
+// also through another closure that captures it or a `&` argument (Q34, P5). Closures nest, and one closure may call another it captures.
 use std.io { IoError }
 
 unique record Token {
@@ -130,12 +130,20 @@ fn bound() -> Text {
     return f"{inc(1)} {mul(4)} {apply(f: inc, x: 5)} {hello()} {call(f: hello)} {guess(2)}"
 }
 
+fn call_held(f: inout fn() -> Int) -> Int {
+    return f()
+}
+
 fn current() -> Text {
     var count = 1
     let read = || count
     let before = read()
     count = 5
-    return f"{before} {read()}"
+    let doubled = || read() + read()
+    let chain = || doubled() + read()
+    var held = || count
+    count = 7
+    return f"{before} {read()} {doubled()} {chain()} {call_held(f: &held)} {apply(f: |x| x + chain(), x: 0)}"
 }
 
 fn nested() -> Text {

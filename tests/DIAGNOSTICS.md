@@ -33,7 +33,7 @@ The Phase column gives the P3 phase in which the checker first reports the code.
 | E0006 | `unterminated_interpolation` | 1 | An f-string `{` without a matching `}`, or a lone `}` (write `}}`). | basics/err_text_literals |
 | E0007 | `empty_interpolation` | 1 | An f-string interpolation with no expression in it. | basics/err_text_literals |
 | E0101 | `unexpected_token` | 1 | The parser expected something else here, such as `else` after a `check`'s condition, `==` or `fails` after an example's call, or a second element in a tuple. | basics/err_syntax, records/err_unclosed, enums/err_unclosed, methods/err_syntax, parse_user/err_tuples, parse_user/err_check, parse_user/err_examples, parse_user/err_else, parse_user/err_let, parse_user/err_recovery, collections/err_syntax |
-| E0102 | `bare_value_statement` | 1 | An expression statement that is not a call, an assignment or a control expression (§2). | basics/err_bare_value, enums/err_is, option_result/err_fail_attempt, parse_user/err_else, collections/err_syntax |
+| E0102 | `bare_value_statement` | 1 | An expression statement that is not a call, an assignment or a control expression (§2). | basics/err_bare_value, enums/err_is, option_result/err_fail_attempt, parse_user/err_else, collections/err_syntax, closures/err_calls |
 | E0103 | `chained_comparison` | 1 | `a < b < c`: comparisons are non-associative (§6.1). | basics/err_operator_rules |
 | E0104 | `mixed_and_or` | 1 | `and` and `or` mixed without parentheses (§6.1, H2). | basics/err_operator_rules |
 | E0105 | `misplaced_jump` | 1 | `break` or `continue` outside a loop, or naming a label that no enclosing loop has. A closure's body is outside the loops around it. | basics/err_misplaced_jump, closures/err_calls |

@@ -3325,6 +3325,8 @@ impl Checker<'_> {
                 | ExprKind::Map(_)
                 | ExprKind::Index { .. }
                 | ExprKind::It
+                | ExprKind::Closure(_)
+                | ExprKind::Applied { .. }
         ) || matches!(self.m.exprs[e].kind, ExprKind::Else { value, .. } if self.is_bare_value(value))
     }
 
@@ -4137,6 +4139,7 @@ impl Checker<'_> {
                 Ty::Error
             }
         };
+        let base = self.f.locals.len() as u32;
         match &it {
             Some(err) => {
                 let id = LocalId(self.f.locals.len() as u32);
@@ -4163,6 +4166,10 @@ impl Checker<'_> {
             }
             Fallback::Block(block) => (self.block_value(block, expected, copying), self.tail(block)),
         };
+        // A closure the fallback gives can't capture `it` (Q34).
+        if let Some(tail) = tail {
+            self.local_capture(tail, base);
+        }
         match &it {
             Some(_) => {
                 self.its.pop();
@@ -4635,15 +4642,14 @@ impl Checker<'_> {
         (id.0 + 1).max(self.f.local_needs.get(&id).copied().unwrap_or(0))
     }
 
-    /// Reports `e`, the value a block gives, when it is a function value that captures a
-    /// local the block declares, from `base` on, which ends with the block (E0509).
+    /// Reports `e`, the value a block, branch or fallback gives, when it is a function value
+    /// that captures a local declared there, from `base` on, which ends with it (E0509).
     fn local_capture(&mut self, e: ExprId, base: u32) {
         let span = self.span(e);
         if self.value_needs(e) <= base || self.escaped.iter().any(|inner| span.contains(*inner)) {
             return;
         }
-        let message =
-            "this block gives a function value that captures a local the block declares, which ends with the block";
+        let message = "this gives a function value that captures a local declared here, such as a binding of the block or of a pattern, which ends here";
         self.error(codes::FUNCTION_VALUE_ESCAPES, span, message);
         self.escaped.push(span);
     }
@@ -5945,6 +5951,7 @@ impl Checker<'_> {
         };
         let copying = std::mem::take(&mut self.tail_copying);
         // The bindings of an `is` in the condition scope over the then-block (REFERENCE §6.4).
+        let base = self.f.locals.len() as u32;
         self.f.scopes.push(Vec::new());
         self.condition(*cond);
         let then_ty = match (mode, else_branch) {
@@ -5958,6 +5965,10 @@ impl Checker<'_> {
             (Mode::Value(_), None) => self.block_value(then_block, None, copying),
             (Mode::Value(expected), Some(_)) => self.block_value(then_block, expected, copying),
         };
+        // So does a closure the then-block gives, which can't capture them (Q34).
+        if let (Mode::Value(_), Some(tail)) = (mode, self.tail(then_block)) {
+            self.local_capture(tail, base);
+        }
         self.f.scopes.pop();
         let ty = match (mode, else_branch) {
             (Mode::Stmt | Mode::Tail(_), _) => {
@@ -6227,6 +6238,7 @@ impl Checker<'_> {
         let mut tys = Vec::new();
         for arm in arms {
             // An arm's bindings scope over its guard and body.
+            let base = self.f.locals.len() as u32;
             self.f.scopes.push(Vec::new());
             self.pattern_borrowed = borrowed;
             let space = self.pattern(arm.pat, &scrutinee_ty);
@@ -6247,6 +6259,10 @@ impl Checker<'_> {
                     let ty = self.block_value(&arm.body, expected.as_ref(), copying);
                     if !ty.is_unknown() {
                         expected = Some(ty.clone());
+                    }
+                    // A closure the arm gives can't capture its bindings (Q34).
+                    if let Some(tail) = self.tail(&arm.body) {
+                        self.local_capture(tail, base);
                     }
                     ty
                 }

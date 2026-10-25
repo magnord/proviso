@@ -1067,7 +1067,7 @@ impl Parser<'_> {
             }
         }
         self.close(&open, T::RParen, "`,` or `)`")?;
-        let ret = if self.eat(T::Arrow) { Some(self.type_expr()?) } else { None };
+        let ret = if self.eat(T::Arrow) { Some(self.nested(Self::type_expr)?) } else { None };
         let mut fails = None;
         loop {
             match self.kind() {
@@ -1208,8 +1208,8 @@ impl Parser<'_> {
             }
         }
         self.close(&open, T::RParen, "`,` or `)`")?;
-        let ret = if self.eat(T::Arrow) { Some(self.type_expr()?) } else { None };
-        let fails = if self.eat(T::Keyword(Kw::Fails)) { Some(self.type_expr()?) } else { None };
+        let ret = if self.eat(T::Arrow) { Some(self.nested(Self::type_expr)?) } else { None };
+        let fails = if self.eat(T::Keyword(Kw::Fails)) { Some(self.nested(Self::type_expr)?) } else { None };
         if matches!(self.kind(), T::Keyword(Kw::Uses | Kw::With)) {
             return self.not_implemented("`uses` and `with` on function types", Planned::Phase(3));
         }
@@ -2064,7 +2064,7 @@ impl Parser<'_> {
             }
         }
         self.expect(T::Pipe, "`,` or `|` after the closure's parameters")?;
-        let ret = if self.eat(T::Arrow) { Some(self.type_expr()?) } else { None };
+        let ret = if self.eat(T::Arrow) { Some(self.nested(Self::type_expr)?) } else { None };
         let braced = self.at(T::LBrace) || ret.is_some();
         let body = if braced {
             self.block()?

@@ -1,4 +1,5 @@
 // phase: 2.9
+// expect-error: E0102
 // expect-error: E0105
 // expect-error: E0201
 // expect-error: E0207
@@ -20,7 +21,7 @@
 // `continue` can't leave a closure. Function values implement no interface, so they can't
 // be compared or interpolated. A variant with fields is not a function value, and nor is a
 // method or an associated function. Each is written with its arguments, and a closure can
-// wrap it.
+// wrap it. A closure or a function value alone is not a statement (Q33).
 enum Stop {
     Halt
 }
@@ -133,4 +134,16 @@ fn methods(c: Counter) {
     let b = c.pick::[Int]                           // <- E0208
     let d = Counter.fresh                           // <- E0201
     let e = |x: Int| c.pick(x)
+}
+
+fn same[T: Copy](x: T) -> T {
+    return x
+}
+
+fn statements(f: fn(Int) -> Int) {
+    || 1                                            // <- E0102
+    |x: Int| x + 1                                  // <- E0102
+    same::[Int]                                     // <- E0102
+    f                                               // <- E0102
+    f(1)
 }
