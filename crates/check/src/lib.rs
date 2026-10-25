@@ -335,7 +335,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         ifaces: Vec::new(),
         inherent: HashMap::new(),
         rejected_abandon: HashSet::new(),
-        rejected_abandon_for: HashSet::new(),
+        rejected_abandon_for: Vec::new(),
         unknown_tys: Vec::new(),
         operators: Vec::new(),
         f: FnState::new(Ty::Unit, None),
@@ -349,6 +349,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         copying: false,
         consumed: HashSet::new(),
         rejected: HashSet::new(),
+        mismatched: HashSet::new(),
         errors: 0,
         inner_errors: 0,
         tail_copying: false,
@@ -668,8 +669,9 @@ struct Checker<'a> {
     /// The methods of a rejected `impl Abandon`, whose `self` isn't reported as left over,
     /// since its `abandon` was never going to be called (REFERENCE §15.1).
     rejected_abandon: HashSet<FnId>,
-    /// The types of those blocks, whose `Abandon.abandon(x)` may mean one of them.
-    rejected_abandon_for: HashSet<Ty>,
+    /// The targets of those blocks, with how many type parameters each has, so that
+    /// `Abandon.abandon(x)` on a type one matches may mean it (issue #53).
+    rejected_abandon_for: Vec<(Ty, usize)>,
     /// Types without an [`ImplKey`], such as `Never` and `Out`, that a rejected `impl` block
     /// is for. They may have methods and interfaces that nothing records (REFERENCE §15.1).
     unknown_tys: Vec<Ty>,
@@ -694,6 +696,9 @@ struct Checker<'a> {
     /// The expressions of the body being checked that an error was reported at, not at one
     /// of their parts, which the move pass leaves alone (REFERENCE §15.1).
     rejected: HashSet<ExprId>,
+    /// The branches whose type didn't match the others', and the `if`, `match` and `else`
+    /// forms they are in, which give no type (REFERENCE §15.1).
+    mismatched: HashSet<ExprId>,
     /// How many errors were reported, and how many of them inside the parts of the
     /// expression being checked.
     errors: usize,
@@ -849,10 +854,13 @@ impl Checker<'_> {
         self.p.decls.implements(&ty, iface, &self.f.bounds) || self.unknown_tys.contains(&ty)
     }
 
-    /// Whether a rejected declaration may have given `ty` interfaces that nothing records.
+    /// Whether a rejected declaration may have given `ty` interfaces that nothing records. A
+    /// type parameter whose declaration or constraint is rejected is one (issue #53).
     fn unknown_interfaces(&self, ty: &Ty) -> bool {
         let ty = self.vars.resolve(ty);
-        self.p.decls.unknown_interfaces(&ty) || self.unknown_tys.contains(&ty)
+        self.p.decls.unknown_interfaces(&ty)
+            || self.unknown_tys.contains(&ty)
+            || matches!(ty, Ty::Param(i) if self.f.rejected.get(i as usize) == Some(&true))
     }
 
     // ---- inference variables (OPEN_QUESTIONS P5; issue #10) ----
@@ -2866,7 +2874,7 @@ impl Checker<'_> {
             if let Ty::Adt(adt, _) = target
                 && !self.p.decls.is_resource(&target)
             {
-                self.rejected_abandon_for.insert(target.clone());
+                self.rejected_abandon_for.push((target.clone(), self.impl_generics.len()));
                 let entries = self.inherent.entry(adt).or_default();
                 for (i, method) in decl.methods.iter().enumerate() {
                     entries.push(Inherent { name: method.decl.name.sym, f: first + i, rejected: true });
@@ -3422,10 +3430,12 @@ impl Checker<'_> {
             return;
         }
         let mut state = FnState::new(info.ret.clone(), info.fails.clone());
-        // A type parameter with a rejected declaration or constraint may have been `Copy`, so
-        // copying a value whose type has it isn't reported (§15.1).
+        // A type parameter with a rejected declaration or constraint may have had any
+        // constraint, so it meets every interface, and what needs one of it, such as a copy
+        // or another block's constraint, isn't reported (§15.1; issue #53).
+        let every: Vec<IfaceId> = self.p.decls.ifaces().map(|(iface, _)| iface).collect();
         state.bounds =
-            (info.generics.iter()).map(|g| if g.rejected { vec![IfaceId::COPY] } else { g.bounds.clone() }).collect();
+            (info.generics.iter()).map(|g| if g.rejected { every.clone() } else { g.bounds.clone() }).collect();
         state.rejected = info.generics.iter().map(|g| g.rejected).collect();
         state.anonymous = (info.generics.iter())
             .map(|g| Some((m.text(g.param?).into(), self.iface_name(*g.bounds.first()?).into())))
@@ -3585,9 +3595,11 @@ impl Checker<'_> {
         let err = self.one_error(errors, span, noun, &format!("{what} expects one error type"));
         match expect {
             Expectation::Equals(value) => {
-                // A call that was rejected has nothing to compare with (§15.1).
+                // A call that was rejected has nothing to compare with, and is the value's
+                // context, as an operand of `==` is (§15.1; issue #39).
                 if ty == Ty::Error {
-                    self.rejected_value(*value);
+                    let value_ty = self.expr(*value, Some(&Ty::Error));
+                    self.vars.quiet(&value_ty);
                     return;
                 }
                 // As in `operands`, the call gives the value what it knows of its type, and the
@@ -4262,22 +4274,44 @@ impl Checker<'_> {
         let origin = Origin::Variant { adt: AdtId::MAP, span };
         // An expected map type has had its key type checked where it was written or built, so
         // literals whose keys meet, which give each other their types, report it once.
-        let (mut key, mut value, checked) = match expected {
+        let (mut key, mut value, mut checked) = match expected {
             Some(Ty::Adt(AdtId::MAP, args)) => (args[0].clone(), args[1].clone(), true),
             Some(Ty::Error) => (self.vars.rejected(), self.vars.rejected(), true),
             _ => (self.vars.fresh(Kind::Any, origin), self.vars.fresh(Kind::Any, origin), false),
         };
+        // A key type still open in the expected type was left by a literal without entries,
+        // as in `[:] == [x: 1]`, so this literal, whose entries give the key type, takes over
+        // its check (issue #39).
+        if checked
+            && !entries.is_empty()
+            && let open @ Ty::Var(_) = self.vars.resolve(&key)
+            && let Some(i) = self.pending.iter().position(|check| {
+                matches!(check, Pending::Bound { ty, callee, .. } if **callee == *"Map" && self.vars.resolve(ty) == open)
+            })
+        {
+            self.pending.remove(i);
+            checked = false;
+        }
         for &(k, v) in entries {
             key = self.element(k, key);
             value = self.element(v, value);
         }
         if !checked {
             let key = self.vars.resolve(&key);
-            if self.vars.has_var(&key) {
+            // A float literal settles as a float type, and none has `Eq` (REFERENCE §12.2).
+            let float = matches!(key, Ty::Var(v) if self.vars.open(v).is_some_and(|open| open.kind == Kind::Float));
+            if self.vars.has_var(&key) && !float {
                 let (ifaces, callee, param) = (vec![IfaceId::EQ, IfaceId::HASH], "Map".into(), "K".into());
                 self.pending.push(Pending::Bound { ty: key, ifaces, callee, param, span });
-            } else {
-                self.key_bound(&key, span);
+            } else if !self.key_bound(if float { &Ty::Float(FloatTy::F64) } else { &key }, span)
+                && !matches!(key, Ty::Fn(..))
+                && !holds_fn(&key)
+            {
+                // The literal is rejected, as a written map type with this key is, so what uses
+                // it isn't reported again (§15.1). A function key is reported where the map
+                // goes (E0509), which needs its type.
+                self.vars.quiet(&value);
+                return Ty::Error;
             }
         }
         Ty::map(key, value)
@@ -5010,6 +5044,11 @@ impl Checker<'_> {
         }
         match (&unwrapped, &fallback_ty) {
             (Ty::Never, ty) => ty.clone(),
+            // A fallback whose type doesn't match the value's gives the form no type (issue #55).
+            _ if self.mismatched_tail(tail) => {
+                self.mismatched.insert(e);
+                Ty::Error
+            }
             (ty, Ty::Never | Ty::Error) => ty.clone(),
             // The fallback's value was joined with the unwrapped one, which it may widen.
             (_, ty) => ty.clone(),
@@ -5137,10 +5176,10 @@ impl Checker<'_> {
     /// (OPEN_QUESTIONS P5; issue #10). Returns the joined type, or an error once reported.
     fn operands(&mut self, lhs: ExprId, rhs: ExprId, hint: Option<&Ty>, span: Span) -> Ty {
         let lt = self.expr(lhs, hint);
-        // An operand that already has an error gives the other no type, so a literal there
-        // isn't reported again against it, and one of another kind gives none either.
+        // An operand that already has an error is the other's context, so a literal there
+        // isn't reported against it (§15.1). One of another kind gives no type.
         let other = match &lt {
-            Ty::Error => None,
+            Ty::Error => Some(Ty::Error),
             ty if ty.is_numeric() || matches!(ty, Ty::Adt(..) | Ty::Var(_)) => Some(ty.clone()),
             _ => hint.cloned(),
         };
@@ -6606,7 +6645,10 @@ impl Checker<'_> {
         }
         let receiver_ty = self.infer(first.value);
         let receiver_ty = self.force(&receiver_ty);
-        if iface == IfaceId::ABANDON && self.rejected_abandon_for.contains(&receiver_ty) {
+        if iface == IfaceId::ABANDON
+            && (self.rejected_abandon_for.iter())
+                .any(|(target, params)| matches_target(target, &receiver_ty, &mut vec![None; *params]))
+        {
             self.rejected_args(rest);
             return Ty::Error;
         }
@@ -7320,6 +7362,11 @@ impl Checker<'_> {
                 }
                 match expected {
                     _ if then_ty == Ty::Never && else_ty == Ty::Never => Ty::Never,
+                    // Branches whose types don't match give the `if` no type (issue #55).
+                    _ if self.mismatched_tail(self.tail(then_block)) || self.mismatched_tail(else_tail) => {
+                        self.mismatched.insert(e);
+                        Ty::Error
+                    }
                     // The else-branch's type is the join, unless it has none of its own.
                     Some(known) if else_ty.is_unknown() => known.clone(),
                     _ => else_ty,
@@ -7346,8 +7393,14 @@ impl Checker<'_> {
             self.error(codes::TYPE_MISMATCH, self.span(e), message);
             self.vars.poison(&ty);
             self.vars.quiet(known);
+            self.mismatched.insert(e);
             Ty::Error
         })
+    }
+
+    /// Whether `tail`, the value a branch gives, has a type that didn't match the others'.
+    fn mismatched_tail(&self, tail: Option<ExprId>) -> bool {
+        tail.is_some_and(|tail| self.mismatched.contains(&tail))
     }
 
     /// Checks a `Bool` whose `is` bindings scope over what follows it: the rest of an `and`
@@ -7539,6 +7592,7 @@ impl Checker<'_> {
             _ => None,
         };
         let mut diverges = true;
+        let mut mismatched = false;
         let mut leaves = Ty::Never;
         let mut tys = Vec::new();
         for arm in arms {
@@ -7565,6 +7619,7 @@ impl Checker<'_> {
                     if !ty.is_unknown() {
                         expected = Some(ty.clone());
                     }
+                    mismatched |= self.mismatched_tail(self.tail(&arm.body));
                     // A closure the arm gives can't capture its bindings (Q34).
                     if let Some(tail) = self.tail(&arm.body) {
                         self.local_capture(tail, base);
@@ -7606,6 +7661,11 @@ impl Checker<'_> {
             _ if diverges => Ty::Never,
             Mode::Stmt | Mode::Tail(_) => leaves,
             Mode::Value(_) if !complete => Ty::Error,
+            // Arms whose types don't match give the `match` no type (issue #55).
+            Mode::Value(_) if mismatched => {
+                self.mismatched.insert(e);
+                Ty::Error
+            }
             Mode::Value(_) => expected.unwrap_or(Ty::Error),
         };
         self.record(e, ty.clone());
