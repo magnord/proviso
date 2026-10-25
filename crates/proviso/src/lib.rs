@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::Path;
 
 use proviso_check::{ExampleInfo, Options, Program, check_module};
-use proviso_interp::{Defect, ExampleOutcome, Outcome, Report, run_examples, run_main};
+use proviso_interp::{Defect, ExampleOutcome, Outcome, Report, quote, run_examples, run_main};
 use proviso_syntax::ast::{ItemKind, Module, TypeExprKind};
 use proviso_syntax::diag::{Diagnostic, Diagnostics, Severity};
 use proviso_syntax::parse_module;
@@ -150,6 +150,10 @@ impl Compiled {
             if let Some(name) = item.name() {
                 return format!("{}.{}+{}", m.name, m.text(name.sym), from(item.span));
             }
+            // A test is anchored by its name, as in `users."parses names"+3` (OPEN_QUESTIONS P5).
+            if let ItemKind::Test(decl) = &item.kind {
+                return format!("{}.{}+{}", m.name, quote(&decl.name, '"'), from(item.span));
+            }
             // A method is anchored at its type and its name, such as `shapes.Circle.area+2`,
             // and an interface's method also at the interface, as in `shapes.Circle.Show.show+2`.
             // The rest of a block is `shapes.Circle.impl+N` or `shapes.Circle.Show+N`, apart
@@ -280,34 +284,59 @@ pub fn run(compiled: &Compiled, stdout: &mut (dyn Write + Send), stderr: &mut (d
     }
 }
 
-/// Runs the examples of a compiled program without errors, as `proviso test` does, and
-/// returns its exit code: 0 when every example passed, 1 when one failed, and 70 when one hit
-/// a defect (OPEN_QUESTIONS P5). Each example's outcome goes to `stdout`, followed by a count;
-/// defects are reported on `stderr`.
-pub fn test(compiled: &Compiled, stdout: &mut (dyn Write + Send), stderr: &mut (dyn Write + Send)) -> i32 {
-    let (mut passed, mut defects) = (0, 0);
+/// Runs the examples and tests of a compiled program without errors, as `proviso test` does,
+/// or only its examples, as `proviso check --examples` does, and returns its exit code: 0
+/// when each passed, 1 when one failed, and 70 when one hit a defect (OPEN_QUESTIONS P5).
+/// Each outcome goes to `stdout`, followed by a count; defects are reported on `stderr`.
+pub fn test(
+    compiled: &Compiled,
+    tests: bool,
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+) -> i32 {
+    let (mut passed, mut defects, mut examples, mut tests_run) = (0, 0, 0, 0);
     let report = |info: &ExampleInfo, outcome, stdout: &mut dyn Write, stderr: &mut dyn Write| {
-        let at = compiled.location(compiled.module.items[info.item].span);
+        let item = &compiled.module.items[info.item];
+        let at = compiled.location(item.span);
+        // A test is named, and a failed one is reported at the `expect` that didn't hold.
+        let what = match &item.kind {
+            ItemKind::Test(decl) => {
+                tests_run += 1;
+                format!("test {}", quote(&decl.name, '"'))
+            }
+            _ => {
+                examples += 1;
+                "example".to_string()
+            }
+        };
         let _ = match outcome {
             ExampleOutcome::Passed => {
                 passed += 1;
-                writeln!(stdout, "{at}: example passed")
+                writeln!(stdout, "{at}: {what} passed")
             }
-            ExampleOutcome::Failed(why) => writeln!(stdout, "{at}: example failed: {why}"),
+            ExampleOutcome::Failed { why, at: expect } => {
+                let at = expect.map_or(at, |span| compiled.location(span));
+                writeln!(stdout, "{at}: {what} failed: {why}")
+            }
             ExampleOutcome::Defect(defect) => {
                 defects += 1;
                 let _ = write!(stderr, "{}", compiled.render_defect(&defect));
-                writeln!(stdout, "{at}: example failed: it hit a defect")
+                writeln!(stdout, "{at}: {what} failed: it hit a defect")
             }
         };
     };
-    if run_examples(&compiled.file, &compiled.module, &compiled.program, stdout, stderr, report).is_err() {
+    if run_examples(&compiled.file, &compiled.module, &compiled.program, tests, stdout, stderr, report).is_err() {
         let _ = writeln!(stderr, "internal error: the interpreter panicked; this is a bug in proviso");
         return exit::INTERNAL;
     }
-    let total = compiled.program.examples.len();
-    let noun = if total == 1 { "example" } else { "examples" };
-    let _ = writeln!(stdout, "{total} {noun}: {passed} passed, {} failed", total - passed);
+    let total = examples + tests_run;
+    let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let counted = match (examples, tests_run) {
+        (_, 0) => count(examples, "example", "examples"),
+        (0, _) => count(tests_run, "test", "tests"),
+        _ => format!("{} and {}", count(examples, "example", "examples"), count(tests_run, "test", "tests")),
+    };
+    let _ = writeln!(stdout, "{counted}: {passed} passed, {} failed", total - passed);
     let _ = stdout.flush();
     match () {
         _ if defects > 0 => exit::DEFECT,

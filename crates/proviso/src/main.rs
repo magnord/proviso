@@ -9,15 +9,18 @@ const USAGE: &str = "\
 usage: proviso <command> [options]
 
 commands:
-  check [--incomplete] [--json] <file>   type-check a file
+  check [--incomplete] [--json | --examples] <file>
+                                         type-check a file, then run its examples
   run [--incomplete] <file>              check a file, then run its `main`
-  test [--incomplete] <file>             check a file, then run its examples
+  test [--incomplete] <file>             check a file, then run its examples and tests
   explain <code>                         describe a diagnostic code, such as E0301
   version                                print the version and implemented phase
 
 --incomplete accepts `todo` holes. --json prints one diagnostic per line as JSON on stdout.
+--examples runs the file's examples once it checks, but not its tests.
 A program writes to stdout; its `debug` output, failures and defects go to stderr.
-`test` writes each example's result and a count to stdout; defects still go to stderr.
+`test` and `check --examples` write each result and a count to stdout; defects still go
+to stderr.
 
 exit codes: 0 success, 1 `main` or an example failed, 64 usage, 65 check errors,
 66 unreadable file, 70 defect, 101 internal error
@@ -74,12 +77,17 @@ enum Command {
 fn check_or_run(command: Command, args: &[String]) -> i32 {
     let is_check = command == Command::Check;
     let mut opts = Options { needs_main: command == Command::Run, ..Options::default() };
-    let mut json = false;
+    let (mut json, mut examples) = (false, false);
     let mut path = None;
     for arg in args {
         match arg.as_str() {
             "--incomplete" => opts.incomplete = true,
             "--json" if is_check => json = true,
+            "--examples" if is_check => examples = true,
+            "--examples" => {
+                err("proviso: `--examples` applies only to `check`; `test` runs the examples already\n");
+                return exit::USAGE;
+            }
             // `run` and `test` print their output on stdout, which JSON would mix with.
             "--json" => {
                 err("proviso: `--json` applies only to `check`\n");
@@ -95,6 +103,11 @@ fn check_or_run(command: Command, args: &[String]) -> i32 {
                 return exit::USAGE;
             }
         }
+    }
+    // The examples print their results on stdout, which JSON would mix with.
+    if json && examples {
+        err("proviso: `--json` and `--examples` can't be used together\n");
+        return exit::USAGE;
     }
     let Some(path) = path else {
         err(USAGE);
@@ -117,9 +130,10 @@ fn check_or_run(command: Command, args: &[String]) -> i32 {
         return exit::CHECK_ERRORS;
     }
     match command {
+        Command::Check if examples => test(&compiled, false, &mut std::io::stdout(), &mut std::io::stderr()),
         Command::Check => exit::OK,
         Command::Run => run(&compiled, &mut std::io::stdout(), &mut std::io::stderr()),
-        Command::Test => test(&compiled, &mut std::io::stdout(), &mut std::io::stderr()),
+        Command::Test => test(&compiled, true, &mut std::io::stdout(), &mut std::io::stderr()),
     }
 }
 

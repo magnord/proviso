@@ -129,6 +129,32 @@ fn test_runs_examples_without_a_main() {
     assert_eq!(run(&["test", "--json"], &file).status.code(), Some(64));
 }
 
+/// `check --examples` runs the examples once the file checks, but not its tests, which
+/// `test` runs too (REFERENCE §14). Its results go to stdout, so it can't be mixed with
+/// `--json`, and `test` needs no flag to run them.
+#[test]
+fn check_examples_runs_examples_but_not_tests() {
+    let file = source(
+        "check_examples.proviso",
+        "fn double(n: Int) -> Int {\n    return n * 2\n}\n\nexample double(2) == 4\n\ntest \"doubles\" {\n    expect double(3) == 7\n}\n",
+    );
+    let output = run(&["check", "--examples"], &file);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout.ends_with(":5:1: example passed\n1 example: 1 passed, 0 failed\n"), "{stdout}");
+    let output = run(&["test"], &file);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stdout.contains(":8:5: test \"doubles\" failed: expected `7`, found `6`\n"), "{stdout}");
+    assert!(stdout.ends_with("1 example and 1 test: 1 passed, 1 failed\n"), "{stdout}");
+    assert_eq!(run(&["check"], &file).stdout.len(), 0);
+    for args in [&["check", "--examples", "--json"][..], &["test", "--examples"], &["run", "--examples"]] {
+        assert_eq!(run(args, &file).status.code(), Some(64), "{args:?}");
+    }
+    let broken = source("check_examples_broken.proviso", "example double(2) == 4\n");
+    assert_eq!(run(&["check", "--examples"], &broken).status.code(), Some(65));
+}
+
 /// Each example's result is written as soon as it has run, so it sits next to that example's
 /// `debug` output and defect report when both streams go to one place.
 #[test]

@@ -440,11 +440,12 @@ pub enum Outcome {
     Defect(Defect),
 }
 
-/// How an example came out (REFERENCE §14).
+/// How an example or a test came out (REFERENCE §14).
 pub enum ExampleOutcome {
     Passed,
-    /// It ran, but not as it says; this tells how.
-    Failed(String),
+    /// It ran, but not as it says: `why` tells how, and `at` is the `expect` of a test that
+    /// didn't hold.
+    Failed { why: String, at: Option<Span> },
     Defect(Defect),
 }
 
@@ -460,19 +461,22 @@ pub fn run_main(
     on_interp_thread(file, m, p, stdout, stderr, |interp| interp.main())
 }
 
-/// Runs each example in declaration order, each with [`EXAMPLE_FUEL`]. `report` gets how each
-/// came out as soon as it has run, with the output streams, so a result is written next to the
-/// example's `debug` output. `debug` output goes to `stderr`.
+/// Runs each example, and each test when `tests` is set, in declaration order, each with
+/// [`EXAMPLE_FUEL`]. `report` gets how each came out as soon as it has run, with the output
+/// streams, so a result is written next to its `debug` output. `debug` output goes to
+/// `stderr`.
 pub fn run_examples(
     file: &SourceFile,
     m: &Module,
     p: &Program,
+    tests: bool,
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
     mut report: impl FnMut(&ExampleInfo, ExampleOutcome, &mut dyn Write, &mut dyn Write) + Send,
 ) -> std::thread::Result<()> {
     on_interp_thread(file, m, p, stdout, stderr, |interp| {
-        for info in &p.examples {
+        let run = |info: &&ExampleInfo| tests || matches!(m.items[info.item].kind, ItemKind::Example(_));
+        for info in p.examples.iter().filter(run) {
             let outcome = interp.example(info);
             report(info, outcome, &mut *interp.stdout, &mut *interp.stderr);
         }
@@ -503,6 +507,7 @@ fn on_interp_thread<'a, R: Send>(
                     depth: 0,
                     stack_limit,
                     fuel: None,
+                    fueled: "example",
                     generations: 0,
                     pools: 0,
                     owned: Vec::new(),
@@ -534,6 +539,8 @@ enum Unwind {
     /// that one catches it, so a failure from anywhere else, such as a `try` in an argument,
     /// passes it by (REFERENCE §7.2).
     Attempted(ExprId, Value),
+    /// An `expect` that didn't hold, which ends its test: why, and where it is (REFERENCE §14).
+    Expected(String, Span),
     Defect(Defect),
 }
 
@@ -564,8 +571,10 @@ struct Interp<'a> {
     depth: usize,
     /// The lowest stack address the interpreter may reach.
     stack_limit: usize,
-    /// The steps an example has left, or `None` outside one.
+    /// The steps an example or a test has left, or `None` outside one.
     fuel: Option<u64>,
+    /// What the fuel is for, "example" or "test", which a defect names.
+    fueled: &'static str,
     /// The last generation a pool's insert took. One counter serves every pool for the whole
     /// run, and a failed call never rolls it back, so no two handles ever share one
     /// (REFERENCE §5.5).
@@ -625,8 +634,14 @@ impl Interp<'_> {
                 defect.callers.pop();
                 Outcome::Defect(defect)
             }
-            Err(Unwind::Return(_) | Unwind::Break(_) | Unwind::Continue(_) | Unwind::Attempted(..)) => {
-                unreachable!("returns, jumps and attempted failures do not escape a function")
+            Err(
+                Unwind::Return(_)
+                | Unwind::Break(_)
+                | Unwind::Continue(_)
+                | Unwind::Attempted(..)
+                | Unwind::Expected(..),
+            ) => {
+                unreachable!("returns, jumps, attempted failures and `expect`s do not escape a function")
             }
         }
     }
@@ -644,12 +659,23 @@ impl Interp<'_> {
         Ok(())
     }
 
-    /// Runs one example and tells how it came out.
+    /// Runs one example or test and tells how it came out. A test's failed `expect` is a
+    /// failure exit, which abandons the resources it holds (REFERENCE §10).
     fn example(&mut self, info: &ExampleInfo) -> ExampleOutcome {
-        let ItemKind::Example(decl) = &self.m.items[info.item].kind else { unreachable!("examples are items") };
         let mut frame: Frame = vec![Value::Unit; info.locals];
         (self.fuel, self.depth, self.base) = (Some(EXAMPLE_FUEL), 0, 0);
-        let outcome = match self.expect(decl, &mut frame) {
+        let result = match &self.m.items[info.item].kind {
+            ItemKind::Example(decl) => {
+                self.fueled = "example";
+                self.expect(decl.call, &decl.expect, &mut frame).map(|why| why.map(|why| (why, None)))
+            }
+            ItemKind::Test(decl) => {
+                self.fueled = "test";
+                self.block(&decl.body, &mut frame).map(|_| None)
+            }
+            _ => unreachable!("examples and tests are items"),
+        };
+        let outcome = match result {
             Err(unwind) => Err(self.abandon_owned(0, &mut frame, unwind)),
             ok => {
                 self.owned.clear();
@@ -659,22 +685,24 @@ impl Interp<'_> {
         self.fuel = None;
         match outcome {
             Ok(None) => ExampleOutcome::Passed,
-            Ok(Some(message)) => ExampleOutcome::Failed(message),
+            Ok(Some((why, at))) => ExampleOutcome::Failed { why, at },
+            Err(Unwind::Expected(why, at)) => ExampleOutcome::Failed { why, at: Some(at) },
             Err(Unwind::Defect(defect)) => ExampleOutcome::Defect(defect),
-            Err(_) => unreachable!("an example neither returns nor fails"),
+            Err(_) => unreachable!("an example or a test neither returns nor fails"),
         }
     }
 
-    /// Runs an example's call and compares the outcome with what it expects: `None` when they
-    /// agree, or else what differs. Values are written as `debug` writes them.
-    fn expect(&mut self, decl: &ExampleDecl, frame: &mut Frame) -> Flow<Option<String>> {
+    /// Runs the call of an example or an `expect` and compares the outcome with what it
+    /// expects: `None` when they agree, or else what differs. Values are written as `debug`
+    /// writes them.
+    fn expect(&mut self, call: ExprId, expect: &Expectation, frame: &mut Frame) -> Flow<Option<String>> {
         let decls = &self.p.decls;
-        let outcome = match self.expr(decl.call, frame) {
+        let outcome = match self.expr(call, frame) {
             Ok(value) => Ok(value),
-            Err(Unwind::Attempted(handler, error)) if handler == decl.call => Err(error),
+            Err(Unwind::Attempted(handler, error)) if handler == call => Err(error),
             Err(other) => return Err(other),
         };
-        Ok(match (&decl.expect, outcome) {
+        Ok(match (expect, outcome) {
             (Expectation::Equals(x), outcome) => {
                 let expected = self.expr(*x, frame)?;
                 match outcome {
@@ -712,7 +740,8 @@ impl Interp<'_> {
     fn step(&mut self, span: Span) -> Flow<()> {
         match &mut self.fuel {
             Some(0) => {
-                Err(defect(DefectKind::FuelExhausted, format!("the example took more than {EXAMPLE_FUEL} steps"), span))
+                let message = format!("the {} took more than {EXAMPLE_FUEL} steps", self.fueled);
+                Err(defect(DefectKind::FuelExhausted, message, span))
             }
             Some(fuel) => {
                 *fuel -= 1;
@@ -1199,7 +1228,16 @@ impl Interp<'_> {
                 self.take_parts(*init, *pat, frame);
                 self.own_bindings(*pat);
             }
-            StmtKind::Expect { .. } => todo!("expect"),
+            StmtKind::Expect { value, expect } => {
+                let why = match expect {
+                    Some(expect) => self.expect(*value, expect, frame)?,
+                    None if self.bool(*value, frame)? => None,
+                    None => Some(format!("`{}` is false", self.file.slice(m.exprs[*value].span))),
+                };
+                if let Some(why) = why {
+                    return Err(Unwind::Expected(why, stmt.span));
+                }
+            }
             StmtKind::Check { cond, fallback } => {
                 if !self.bool(*cond, frame)? {
                     // The checker proved that the fallback leaves.
@@ -2817,7 +2855,8 @@ fn write_value<E>(
     Ok(out)
 }
 
-fn quote(text: &str, quote: char) -> String {
+/// `text` written as a Proviso literal between `quote`s, with its escapes.
+pub fn quote(text: &str, quote: char) -> String {
     let mut out = String::from(quote);
     for c in text.chars() {
         match c {

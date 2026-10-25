@@ -41,7 +41,7 @@ test "rules" {
     expect sure(1) fails Stop.Halt                  // <- E0708
     expect may_fail(1) > 0                          // <- E0701
     expect may_fail(1) == 1
-    let check = || {
+    let probe = || {
         expect true                                 // <- E0109
     }
     expect 1 == 2 == 3                              // <- E0103
