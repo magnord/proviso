@@ -1178,7 +1178,7 @@ impl Checker<'_> {
                 if self.resource_targ(&ty, &callee, &param, span) {
                     return;
                 }
-                if let Some(&iface) = ifaces.iter().find(|&&iface| !self.implements(&ty, iface)) {
+                if let Some(iface) = self.unmet_bound(&ty, &ifaces) {
                     let message = format!(
                         "`{}` does not implement `{}`, which `{callee}` needs of `{param}`",
                         self.show(&ty),
@@ -1225,9 +1225,12 @@ impl Checker<'_> {
         // reported where a function value goes into it. A part that holds one already was
         // reported where it was made (§15.1).
         for e in std::mem::take(&mut self.builders) {
-            let ty = self.vars.zonk(self.p.ty(e));
             let span = self.span(e);
-            if !holds_fn(&ty) || !self.wraps_fn(e) || self.escaped.contains(&span) {
+            if !self.wraps_fn(e) || self.escaped.contains(&span) {
+                continue;
+            }
+            let ty = self.vars.zonk(self.p.ty(e));
+            if !holds_fn(&ty) {
                 continue;
             }
             // A closure passed where a type argument was already reported has its result
@@ -5071,7 +5074,7 @@ impl Checker<'_> {
             if self.fn_targ(&ty, span) || self.resource_targ(&ty, name, param, span) {
                 continue;
             }
-            if let Some(&iface) = bounds.iter().find(|&&iface| !self.implements(&ty, iface)) {
+            if let Some(iface) = self.unmet_bound(&ty, bounds) {
                 let message = format!(
                     "`{}` does not implement `{}`, which `{name}` needs of `{param}`",
                     self.show(&ty),
@@ -5086,7 +5089,7 @@ impl Checker<'_> {
     /// that holds one already: as an element or argument, or a closure as its result or
     /// error.
     fn wraps_fn(&self, e: ExprId) -> bool {
-        let bare = |e: &ExprId| self.p.expr_ty.get(*e).is_some_and(|ty| matches!(self.vars.zonk(ty), Ty::Fn(..)));
+        let bare = |e: &ExprId| self.p.expr_ty.get(*e).is_some_and(|ty| matches!(self.vars.resolve(ty), Ty::Fn(..)));
         match &self.m.exprs[e].kind {
             ExprKind::Closure(_) => self
                 .vars
@@ -5101,14 +5104,21 @@ impl Checker<'_> {
         }
     }
 
-    /// Reports a function value as a type argument, or a type that holds one, and returns
-    /// whether it did (E0509). One call is reported once, and a type that holds one already
-    /// was reported where it was made (§15.1).
+    /// The first of `bounds` that type argument `ty` doesn't implement. One that holds a
+    /// function value was reported where it was made (E0509), so its bounds are not.
+    fn unmet_bound(&self, ty: &Ty, bounds: &[IfaceId]) -> Option<IfaceId> {
+        let iface = bounds.iter().copied().find(|&iface| !self.implements(ty, iface))?;
+        (!holds_fn(&self.vars.zonk(ty))).then_some(iface)
+    }
+
+    /// Reports a function value as a type argument and returns whether it did (E0509). One
+    /// call is reported once. A type that holds one was reported where it was made, and its
+    /// constraints aren't (see [`Checker::unmet_bound`]).
     fn fn_targ(&mut self, ty: &Ty, span: Span) -> bool {
-        if !matches!(ty, Ty::Fn(..)) && !holds_fn(ty) {
+        if !matches!(ty, Ty::Fn(..)) {
             return false;
         }
-        if !matches!(ty, Ty::Fn(..)) || self.escaped.contains(&span) {
+        if self.escaped.contains(&span) {
             return true;
         }
         self.escaped.push(span);
