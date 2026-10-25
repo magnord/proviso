@@ -2023,8 +2023,7 @@ impl Checker<'_> {
         let m = self.m;
         let found = self.found(0);
         let body = moves::Body::Predicate(expr);
-        let bounds = self.move_bounds();
-        moves::check(m, &mut self.p, &self.f.locals, &bounds, &found, body, self.diags)
+        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags)
     }
 
     fn signatures(&mut self) {
@@ -3037,7 +3036,10 @@ impl Checker<'_> {
             return;
         }
         let mut state = FnState::new(info.ret.clone(), info.fails.clone());
-        state.bounds = info.generics.iter().map(|g| g.bounds.clone()).collect();
+        // A type parameter with a rejected declaration or constraint may have been `Copy`, so
+        // copying a value whose type has it isn't reported (§15.1).
+        state.bounds =
+            (info.generics.iter()).map(|g| if g.rejected { vec![IfaceId::COPY] } else { g.bounds.clone() }).collect();
         state.rejected = info.generics.iter().map(|g| g.rejected).collect();
         state.anonymous = (info.generics.iter())
             .map(|g| Some((m.text(g.param?).into(), self.iface_name(*g.bounds.first()?).into())))
@@ -3110,8 +3112,7 @@ impl Checker<'_> {
             .collect();
         self.p.fns[id].owned = owned;
         let body = moves::Body::Fn(moves::FnBody { block: body, params, consumes_self });
-        let bounds = self.move_bounds();
-        moves::check(m, &mut self.p, &self.f.locals, &bounds, &found, body, self.diags);
+        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags);
         self.p.fns[id].locals = self.f.locals.len();
         self.generic_scope.clear();
         self.param_names.clear();
@@ -6077,15 +6078,6 @@ impl Checker<'_> {
             .map(|(i, &rejected)| if rejected { Ty::Error } else { Ty::Param(i as u32) })
             .collect();
         args.iter().map(|arg| arg.subst(&unknown)).collect()
-    }
-
-    /// The constraints the move checker takes each type parameter to have. One with a
-    /// rejected declaration or constraint may have been `Copy` (§15.1).
-    fn move_bounds(&self) -> Vec<Vec<IfaceId>> {
-        let rejected = |i: usize| self.f.rejected.get(i).copied().unwrap_or(false);
-        (self.f.bounds.iter().enumerate())
-            .map(|(i, bounds)| if rejected(i) { vec![IfaceId::COPY] } else { bounds.clone() })
-            .collect()
     }
 
     fn field(&mut self, e: ExprId, base_ty: &Ty, name: Ident) -> Ty {

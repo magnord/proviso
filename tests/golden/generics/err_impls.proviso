@@ -231,6 +231,7 @@ record Crate[T] {
 
 impl[T: Nope] Crate[T] {                            // <- E0307
     fn k(self) -> Int {
+        let c = self
         let a = self.item
         let b = self.item
         return self.item.len() + self.item
@@ -277,6 +278,15 @@ enum Bin[T] {
 impl[T: Copy] Count for Bin[T] {
     fn count(self) -> Int {
         return 1
+    }
+}
+
+impl[T: Nope] Bin[T] {                              // <- E0307
+    fn peek(self) -> Int {
+        return match self {
+            Full(v) => v.len() + v
+            Empty => 0
+        }
     }
 }
 
