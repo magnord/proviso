@@ -2908,7 +2908,7 @@ impl Checker<'_> {
                     }
                 };
                 let defined = matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::EQ);
-                if !defined && !ty.is_unknown() {
+                if !defined && !ty.is_unknown() && !holds_fn(&ty) {
                     let message =
                         format!("`==` is not defined for `{}`, so an example can't compare it", self.show(&ty));
                     let at = span.to(self.span(*value));
@@ -3607,7 +3607,8 @@ impl Checker<'_> {
             self.pending.push(Pending::Bound { ty, ifaces, callee, param, span });
             return;
         }
-        if !ty.is_unknown() && !self.implements(&ty, iface) && !self.unknown_interfaces(&ty) {
+        // One that holds a function value was reported where it was made (E0509).
+        if !ty.is_unknown() && !self.implements(&ty, iface) && !self.unknown_interfaces(&ty) && !holds_fn(&ty) {
             let message = format!(
                 "`{}` does not implement `{}`, which `{what}` needs of `{param}`",
                 self.show(&ty),
@@ -3967,7 +3968,8 @@ impl Checker<'_> {
                     if let FTextPart::Expr(x) = part {
                         let ty = self.infer(*x);
                         let ty = self.force(&ty);
-                        if !self.implements(&ty, IfaceId::SHOW) && !ty.is_unknown() {
+                        // One that holds a function value was reported where it was made (E0509).
+                        if !self.implements(&ty, IfaceId::SHOW) && !ty.is_unknown() && !holds_fn(&ty) {
                             let span = self.span(*x);
                             self.error(
                                 codes::UNSUPPORTED_OPERATOR,
@@ -3987,7 +3989,10 @@ impl Checker<'_> {
                 self.method_call(e, *receiver, *method, targs.as_deref(), args, span, chain, expected)
             }
             ExprKind::Field { base, name } => {
-                if let Some(id) = self.enum_named(*base) {
+                let enum_id = self.enum_named(*base);
+                if let Some(id) = enum_id
+                    && self.p.decls.adt(id).variant_named(self.m.text(name.sym)).is_some()
+                {
                     return self.unit_variant(e, id, *name, expected);
                 }
                 if let Some((id, method)) = self.associated_named(*base, name.sym) {
@@ -4003,6 +4008,9 @@ impl Checker<'_> {
                     };
                     self.error(codes::METHOD_VALUE, name.span, message);
                     return Ty::Error;
+                }
+                if let Some(id) = enum_id {
+                    return self.unit_variant(e, id, *name, expected);
                 }
                 self.in_chain = chain;
                 let base_ty = self.infer(*base);
@@ -4450,7 +4458,8 @@ impl Checker<'_> {
                     BinOp::Eq | BinOp::Ne => matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::EQ),
                     _ => matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::ORD),
                 };
-                if !defined && !ty.is_unknown() {
+                // One that holds a function value was reported where it was made (E0509).
+                if !defined && !ty.is_unknown() && !holds_fn(&ty) {
                     let message = format!("`{symbol}` is not defined for `{}`", self.show(&ty));
                     self.error(codes::UNSUPPORTED_OPERATOR, span, message);
                 }
@@ -4847,6 +4856,11 @@ impl Checker<'_> {
         let ty = self.rejected_value(callee);
         if !ty.is_unknown() {
             let what = match &m.exprs[callee].kind {
+                ExprKind::Name(name) | ExprKind::Field { name, .. }
+                    if matches!(self.p.res(callee), Some(Res::Ctor(..))) =>
+                {
+                    format!("`{}` is a variant, which", m.text(name.sym))
+                }
                 ExprKind::Name(name) if matches!(ty, Ty::Fn(..)) => {
                     format!("`{}` is a function value, which", m.text(name.sym))
                 }

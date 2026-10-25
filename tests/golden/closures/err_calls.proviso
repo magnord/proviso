@@ -190,6 +190,24 @@ fn builtin_method(xs: List[Int]) {
     let l = xs.len                                  // <- E0320
 }
 
+impl Shape {
+    fn area(self) -> Int {
+        return 0
+    }
+
+    fn origin() -> Shape {
+        return Shape.Empty
+    }
+}
+
+fn enum_methods() {
+    let a = Shape.origin                            // <- E0320
+    let b = Shape.area                              // <- E0320
+    let c = Shape.Square                            // <- E0303
+    let d = Shape.Empty::[Int]                      // <- E0317
+    let n: Option[Int] = None::[Int]                // <- E0317
+}
+
 fn same[T: Copy](x: T) -> T {
     return x
 }

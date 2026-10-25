@@ -142,6 +142,14 @@ fn bound_after(f: fn(Int) -> Int) -> Bool {
     return same_eq(x: Some(f))                      // <- E0509
 }
 
+fn compared(f: fn(Int) -> Int) -> Bool {
+    let a = None == Some(f)                         // <- E0509
+    let b = Some(f) < None                          // <- E0509
+    let t = f"{Some(f)}"                            // <- E0509
+    let xs = [Some(f)]                              // <- E0509
+    return xs.contains(None)
+}
+
 fn run[R](f: fn() -> R) -> R {
     return f()
 }
