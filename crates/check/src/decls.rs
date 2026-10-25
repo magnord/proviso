@@ -1365,6 +1365,9 @@ impl Inhabited {
 
 /// The generic types the [`Graph`] has a node for: each by its id and whether each of its
 /// type arguments has values, with those whose variants aren't in the graph yet.
+/// [`Graph::requirement`]'s answers for applied types, with their type arguments kept alive.
+type AppliedRequirements = HashMap<(usize, AdtId, Box<[bool]>), (Requirement, Arc<[Ty]>)>;
+
 /// [`Decls::base_kind_in`]'s answers, with the type arguments they are for kept alive.
 type KindMemo = HashMap<(u32, usize), ((Kinds, Vec<u32>), Arc<[Ty]>)>;
 
@@ -1375,7 +1378,7 @@ struct Instances {
     /// The requirement of each applied type already met, by the address of its arguments,
     /// whose `Arc` is kept so the address isn't reused. Types share their parts, so a type
     /// whose size doubles with each level is walked once per level (issue #55).
-    applied: HashMap<(usize, AdtId, Box<[bool]>), (Requirement, Arc<[Ty]>)>,
+    applied: AppliedRequirements,
 }
 
 /// Whether a type has values, as a condition on records and enums whose answer isn't known
