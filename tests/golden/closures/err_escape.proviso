@@ -7,8 +7,9 @@
 // of a tuple, whether the type is written or inferred. A function type's own result can't
 // be a function either, and a `var` can't be given a new function value. A block, a
 // branch or an arm can't yield a closure that captures a local declared inside it, or a
-// binding of its `is` test or pattern. `keep fn` will lift parts of
-// this (OPEN_QUESTIONS P5).
+// binding of its `is` test or pattern. Each mistake is reported once, where the function
+// value goes in, and not again at a value that holds it or a call that takes that value
+// (REFERENCE §15.1). `keep fn` will lift parts of this (OPEN_QUESTIONS P5).
 use std.pool { Pool }
 
 record Holder {
@@ -97,4 +98,29 @@ fn escape_pattern(o: Option[Int]) -> Int {
         None => |x: Int| x
     }
     return f(1) + g(1) + h(1) + k(1)
+}
+
+fn some[T: Copy](x: T) -> Option[T] {
+    return Some(x)
+}
+
+fn apply_to[T, R](x: T, f: fn(T) -> R) -> R {
+    return f(x)
+}
+
+fn once(f: fn(Int) -> Int) {
+    let a = some(x: f)                              // <- E0509
+    let b = some(x: some(x: f))                     // <- E0509
+    let c = Some(Some(f))                           // <- E0509
+    let d = apply_to(x: f, f: |h| h)                // <- E0509
+    let e = some::[fn(Int) -> Int](x: f)            // <- E0509
+    let m = [f: 1]                                  // <- E0509
+    var xs = [f]                                    // <- E0509
+    let y = xs.pop()
+    let n = xs.len()
+    let t = (xs, 1)
+    let k = || {                                    // <- E0509
+        let o = Some(f)                             // <- E0509
+        f
+    }
 }

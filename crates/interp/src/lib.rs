@@ -1742,9 +1742,9 @@ impl Interp<'_> {
                 let mut parts = Vec::with_capacity(values.len());
                 for value in values {
                     let shown = self.expr(*value, frame)?;
-                    parts.push(match self.p.ty(*value) {
-                        ty @ Ty::Fn(..) => self.p.decls.display(ty).to_string(),
-                        _ => debug_repr(&shown, &self.p.decls),
+                    parts.push(match self.p.debug_fns.get(*value) {
+                        Some(ty) => ty.to_string(),
+                        None => debug_repr(&shown, &self.p.decls),
                     });
                 }
                 let (line, col) = self.file.line_col(span.lo);

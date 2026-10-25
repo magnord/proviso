@@ -332,9 +332,11 @@ impl Vars {
     /// checks see it. Any other open variable stays.
     pub fn defaulted(&self, ty: &Ty) -> Ty {
         match self.resolve(ty) {
-            Ty::Var(v) => match self.open(v).map(|open| open.kind) {
-                Some(Kind::Int) => Ty::INT,
-                Some(Kind::Float) => Ty::Float(FloatTy::F64),
+            Ty::Var(v) => match self.open(v).map(|open| (open.kind, open.never)) {
+                Some((Kind::Int, _)) => Ty::INT,
+                Some((Kind::Float, _)) => Ty::Float(FloatTy::F64),
+                // Only `Never` has reached it, as a closure's error type when nothing fails.
+                Some((_, true)) => Ty::Never,
                 _ => Ty::Var(self.root(v)),
             },
             ty if self.has_var(&ty) && ty.parts().is_some() => {

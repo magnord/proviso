@@ -7,7 +7,7 @@
 // call that can fail (§7.2). A function that can't fail, or fails with `Never`, is a value
 // of the type that adds `fails E`, and one whose parameter is wider is a value of the type
 // with the narrower parameter (OPEN_QUESTIONS P5). `debug` writes a function value as its
-// type.
+// type, as the function it is in writes it.
 use std.io { IoError }
 
 enum Stop derives(Show) {
@@ -113,12 +113,18 @@ fn failing() -> Text fails Stop {
     return f"{a} {b} {guarded(f: half, x: 3)} {guarded(f: half, x: 6)}"
 }
 
+fn debug_in[T: Copy](f: fn(T) -> T, x: T) -> T {
+    debug(f)
+    return f(x)
+}
+
 fn debugged() {
     let f = same::[Text]
     let stopper = || {
         fail Stop.Halt
     }
     debug(double, add, bump, f, half, nothing, length, stopper)
+    let n = debug_in(f: double, x: 1)
 }
 
 pub fn main(sys: keep System) fails IoError {

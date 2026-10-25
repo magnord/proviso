@@ -1,4 +1,5 @@
 // phase: 2.9
+// expect-error: E0101
 // expect-error: E0102
 // expect-error: E0105
 // expect-error: E0201
@@ -9,20 +10,23 @@
 // expect-error: E0306
 // expect-error: E0307
 // expect-error: E0312
+// expect-error: E0317
+// expect-error: E0320
 // expect-error: E0506
 // expect-error: E0701
 // expect-error: E0702
 // expect-error: E0705
-// A function value is called without labels and with one argument per parameter, `&` on
-// each `inout` one (REFERENCE §3, §5.2), and a call through `fails E` is marked (§7.2). A
+// A function value is called without labels, type arguments or a mode on a closure's
+// parameter, and with one argument per parameter, `&` on each `inout` one (REFERENCE §3,
+// §5.2), and a call through `fails E` is marked (§7.2). A
 // closure has the parameters, result and error type that the expected function type gives,
 // and a function value matches a function type only if its modes match and it fails with
 // the same error type or none (OPEN_QUESTIONS P5). A closure's parameter needs a type from
 // its annotation, the expected type or its body, and its `let` fixes it there. `break` and
 // `continue` can't leave a closure. Function values implement no interface, so they can't
-// be compared or interpolated. A variant with fields is not a function value, and nor is a
-// method or an associated function. Each is written with its arguments, and a closure can
-// wrap it. A closure or a function value alone is not a statement (Q33). A closure where a
+// be compared or interpolated. A variant with fields is not a function value (E0208), and
+// nor is a method or an associated function (E0320). Each is written with its arguments,
+// and a closure can wrap it. Only a generic function takes type arguments without a call. A closure or a function value alone is not a statement (Q33). A closure where a
 // value of another type is expected is a mismatch, and one passed to a rejected call, or
 // as a rejected function type, reports nothing more.
 enum Stop {
@@ -63,6 +67,8 @@ fn calls(f: fn(Int) -> Int, g: fn(inout Int), h: fn(Int) -> Int fails Stop) -> I
     let d = f(&n)                                   // <- E0506
     let e = h(1)                                    // <- E0701
     let ok = try h(2)
+    let i = f::[Int](1)                             // <- E0317
+    let j = |inout x: Int| x                        // <- E0101
     return a
 }
 
@@ -133,9 +139,12 @@ impl Counter {
 }
 
 fn methods(c: Counter) {
-    let a = c.get                                   // <- E0303
-    let b = c.pick::[Int]                           // <- E0208
-    let d = Counter.fresh                           // <- E0201
+    let a = c.get                                   // <- E0320
+    let b = c.pick::[Int]                           // <- E0320
+    let d = Counter.fresh                           // <- E0320
+    let g = Counter.get                             // <- E0320
+    let h = c.len                                   // <- E0303
+    let n = c.n::[Int]                              // <- E0317
     let e = |x: Int| c.pick(x)
 }
 

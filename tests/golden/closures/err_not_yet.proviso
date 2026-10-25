@@ -4,7 +4,9 @@
 // `scoped fn` and `keep fn` parameters, and closures that capture a capability or a value
 // that holds one (REFERENCE §9.4, §6.7). So do closures that change a `var` they capture
 // (§5.3), and the operations of `List` and `Map` that take a closure, such as `map` and
-// `filter`.
+// `filter`. `keep` and `inout(partial)` parameters of function types, and an `impl` for a
+// function type, are not scheduled. A closure passed as one checks its body without
+// reporting what the rejected type would have given it (§15.1).
 use std.io { Out }
 
 record Sink {
@@ -75,4 +77,33 @@ impl Abandon for Held {
 
 fn reach_resource(h: take Held) {
     run(f: || h.close())                            // <- E0901
+}
+
+enum Stop {
+    Halt
+}
+
+fn keep_mode(f: fn(keep Out)) {}                    // <- E0901
+
+fn partial_mode(f: fn(inout(partial) Int) fails Stop) -> Int {  // <- E0901
+    var m = 1
+    let r = attempt f(&m)
+    return m
+}
+
+fn partial_closure() -> Int {
+    return partial_mode(f: |n| {
+        n = 7
+        fail Stop.Halt
+    })
+}
+
+interface Named {
+    fn name(self) -> Text
+}
+
+impl Named for fn() {                               // <- E0901
+    fn name(self) -> Text {
+        return "f"
+    }
 }

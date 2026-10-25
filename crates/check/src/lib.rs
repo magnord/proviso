@@ -248,6 +248,9 @@ pub struct Program {
     pub examples: Vec<ExampleInfo>,
     /// What each closure takes and captures (REFERENCE §6.7).
     pub closures: SideTable<Expr, ClosureInfo>,
+    /// How `debug` writes each function value it is given: as its type, with the names of
+    /// the type parameters of the function it is in (OPEN_QUESTIONS P5).
+    pub debug_fns: SideTable<Expr, Box<str>>,
 }
 
 /// A closure's parameters and their modes, and the locals of the frame it is made in that it
@@ -472,6 +475,8 @@ struct FnState {
     anonymous: Vec<Option<(Box<str>, Box<str>)>>,
     /// The closures of the body, in the order they were checked.
     closures: Vec<ExprId>,
+    /// The function values `debug` is given, which it writes as their types.
+    debugged: Vec<ExprId>,
     /// The captures whose type wasn't known when they were captured, each with where, which
     /// are checked for reach once it is.
     late_captures: Vec<(LocalId, Span)>,
@@ -497,6 +502,7 @@ impl FnState {
             bounds: Vec::new(),
             anonymous: Vec::new(),
             closures: Vec::new(),
+            debugged: Vec::new(),
             late_captures: Vec::new(),
             needs: HashMap::new(),
             local_needs: HashMap::new(),
@@ -509,6 +515,9 @@ impl FnState {
 struct ClosureScope {
     base: u32,
     captures: Vec<(LocalId, Box<str>)>,
+    /// Whether its body has a call without the marker it needs, whose failure its error type
+    /// would have taken.
+    unmarked: bool,
 }
 
 /// An enclosing `try`, `attempt`, `else` form or example, and the error types of the
@@ -1157,11 +1166,14 @@ impl Checker<'_> {
                 if ty.is_unknown() || self.vars.has_open(&ty) {
                     return;
                 }
+                if self.fn_targ(&ty, span) {
+                    return;
+                }
                 if *callee == *"Map" {
                     self.key_bound(&ty, span);
                     return;
                 }
-                if self.fn_targ(&ty, span) || self.resource_targ(&ty, &callee, &param, span) {
+                if self.resource_targ(&ty, &callee, &param, span) {
                     return;
                 }
                 if let Some(&iface) = ifaces.iter().find(|&&iface| !self.implements(&ty, iface)) {
@@ -1207,12 +1219,20 @@ impl Checker<'_> {
     /// without variables, so the interpreter never sees one.
     fn settle(&mut self) {
         self.solve(0, 0, 0);
-        // A value that holds a function value could outlive what it captures (E0509). One
-        // inside a value already reported isn't reported again.
+        // A value that holds a function value could outlive what it captures (E0509). It is
+        // reported where a function value goes into it. A part that holds one already was
+        // reported where it was made (§15.1).
         for e in std::mem::take(&mut self.builders) {
             let ty = self.vars.zonk(self.p.ty(e));
             let span = self.span(e);
-            if !holds_fn(&ty) || self.escaped.iter().any(|inner| span.contains(*inner)) {
+            if !holds_fn(&ty) || !self.wraps_fn(e) || self.escaped.contains(&span) {
+                continue;
+            }
+            // A closure passed where a type argument was already reported has its result
+            // from it.
+            if matches!(self.m.exprs[e].kind, ExprKind::Closure(_))
+                && self.escaped.iter().any(|outer| outer.contains(span))
+            {
                 continue;
             }
             let message = format!(
@@ -1231,6 +1251,10 @@ impl Checker<'_> {
         }
         for local in &mut self.f.locals {
             local.ty = self.vars.zonk(&local.ty);
+        }
+        for e in std::mem::take(&mut self.f.debugged) {
+            let shown = self.show(self.p.ty(e)).into();
+            self.p.debug_fns.insert(e, shown);
         }
         for (id, span) in std::mem::take(&mut self.f.late_captures) {
             if self.p.decls.has_reach(&self.f.locals[id.index()].ty) {
@@ -1478,7 +1502,7 @@ impl Checker<'_> {
                 for field in decls {
                     let text = m.text(field.name.sym);
                     let cased = self.snake_case(field.name, "field");
-                    let ty = self.part_type(field.ty);
+                    let ty = self.part_type(field.ty, "a field");
                     if let Some(&first) = index.get(&field.name.sym) {
                         if cased {
                             let message = format!("field `{text}` is declared twice");
@@ -1649,8 +1673,8 @@ impl Checker<'_> {
                     params.push((name.into(), ty));
                     modes.push(param.mode);
                 }
-                let ret = method.ret.map_or(Ty::Unit, |t| self.part_type(t));
-                let fails = method.fails.map(|t| self.part_type(t)).filter(|t| *t != Ty::Never);
+                let ret = method.ret.map_or(Ty::Unit, |t| self.part_type(t, "a result"));
+                let fails = method.fails.map(|t| self.part_type(t, "an error type")).filter(|t| *t != Ty::Never);
                 let fails = self.error_type(fails, method.fails);
                 if let Some(at) = method.ret {
                     self.exposes(decl.name, vis, &ret, at);
@@ -1965,9 +1989,9 @@ impl Checker<'_> {
             };
             params.push(ParamInfo { name: param.name.sym, ty, mode: param.mode });
         }
-        let ret = decl.ret.map_or(Ty::Unit, |t| self.part_type(t));
+        let ret = decl.ret.map_or(Ty::Unit, |t| self.part_type(t, "a result"));
         // `Never` has no values, so a function that fails with it cannot fail.
-        let fails = decl.fails.map(|t| self.part_type(t)).filter(|t| *t != Ty::Never);
+        let fails = decl.fails.map(|t| self.part_type(t, "an error type")).filter(|t| *t != Ty::Never);
         let fails = self.error_type(fails, decl.fails);
         let typed = decl.params.iter().map(|p| p.ty).chain(decl.ret).chain(decl.fails);
         let types = params.iter().map(|p| p.ty.clone()).chain(decl.ret.map(|_| ret.clone()));
@@ -2547,7 +2571,7 @@ impl Checker<'_> {
             TypeExprKind::Named(name) => self.type_name(name),
             TypeExprKind::Fn { ref params, ret, fails } => self.fn_type(params, ret, fails),
             TypeExprKind::Tuple(ref elements) => {
-                let tys = elements.iter().map(|&t| self.part_type(t)).collect();
+                let tys = elements.iter().map(|&t| self.part_type(t, "a tuple's element")).collect();
                 self.p.decls.tuple_ty(tys)
             }
             TypeExprKind::SelfType => match &self.self_ty {
@@ -2572,7 +2596,7 @@ impl Checker<'_> {
                 }
                 if let Some(id) = self.generic_adt(name.sym) {
                     let args = args.as_deref().unwrap_or_default();
-                    let tys: Vec<Ty> = args.iter().map(|&arg| self.part_type(arg)).collect();
+                    let tys: Vec<Ty> = args.iter().map(|&arg| self.part_type(arg, "a type argument")).collect();
                     let n = self.p.decls.adt(id).params;
                     if tys.len() != n {
                         let verb = if tys.len() == 1 { "was" } else { "were" };
@@ -2616,12 +2640,13 @@ impl Checker<'_> {
     /// The type written at `t` where a function type can't be: a field, a result, an error, a
     /// type argument or a tuple's element. A function value there could outlive what it
     /// captures (REFERENCE §6.7, OPEN_QUESTIONS P5).
-    fn part_type(&mut self, t: TypeId) -> Ty {
+    fn part_type(&mut self, t: TypeId, what: &str) -> Ty {
         let ty = self.resolve_type(t);
         if !matches!(ty, Ty::Fn(..)) {
             return ty;
         }
-        let message = "a function value can't be stored, returned or failed with, since it lives only as long as what it captures";
+        let message =
+            format!("a function type can't be {what}, since a function value lives only as long as what it captures");
         self.error(codes::FUNCTION_VALUE_ESCAPES, self.m.types[t].span, message);
         Ty::Error
     }
@@ -2630,9 +2655,9 @@ impl Checker<'_> {
     fn fn_type(&mut self, params: &[(ParamMode, TypeId)], ret: Option<TypeId>, fails: Option<TypeId>) -> Ty {
         let modes = params.iter().map(|&(mode, _)| mode).collect();
         let tys = params.iter().map(|&(_, t)| self.resolve_type(t)).collect();
-        let ret = ret.map_or(Ty::Unit, |t| self.part_type(t));
+        let ret = ret.map_or(Ty::Unit, |t| self.part_type(t, "a result"));
         let at = fails;
-        let fails = fails.map(|t| self.part_type(t)).filter(|t| *t != Ty::Never);
+        let fails = fails.map(|t| self.part_type(t, "an error type")).filter(|t| *t != Ty::Never);
         let fails = self.error_type(fails, at).unwrap_or(Ty::Never);
         Ty::func(modes, tys, ret, fails)
     }
@@ -3240,8 +3265,11 @@ impl Checker<'_> {
             return self.rejected_value(value);
         }
         // A `var` given a function value could outlive what it captures (OPEN_QUESTIONS P5).
-        if let Ty::Fn(..) = self.vars.resolve(&ty) {
-            let message = "a `var` can't be given a new function value, which could outlive what it captures";
+        // A `let` can't be given anything, which is reported already.
+        if let Ty::Fn(..) = self.vars.resolve(&ty)
+            && self.f.locals[id.index()].mutable
+        {
+            let message = "a `var` or an `inout` parameter can't be given a new function value, which could outlive what it captures";
             self.error(codes::FUNCTION_VALUE_ESCAPES, span, message);
             return self.rejected_value(value);
         }
@@ -3538,6 +3566,10 @@ impl Checker<'_> {
         let key = self.vars.zonk(key);
         if key.is_unknown() || self.vars.has_open(&key) || self.unknown_interfaces(&key) {
             return true;
+        }
+        // A function value can't be a key, which is reported where it goes in (E0509).
+        if matches!(key, Ty::Fn(..)) || holds_fn(&key) {
+            return false;
         }
         // `set` keeps the key it has and drops the equal one it is given, which can't drop a
         // resource (§10 rule 5).
@@ -3946,6 +3978,20 @@ impl Checker<'_> {
                 if let Some(id) = self.enum_named(*base) {
                     return self.unit_variant(e, id, *name, expected);
                 }
+                if let Some((id, method)) = self.associated_named(*base, name.sym) {
+                    let (ty, text) = (&self.p.decls.adt(id).name, self.m.text(name.sym));
+                    let message = if method {
+                        format!(
+                            "`{text}` is a method of `{ty}`, which is called on a value with its arguments; it isn't a function value, but a closure can wrap a call of it, as in `|x: {ty}| x.{text}()`"
+                        )
+                    } else {
+                        format!(
+                            "`{ty}.{text}` is an associated function, which is called with its arguments; it isn't a function value, but a closure can wrap a call of it, as in `|| {ty}.{text}()`"
+                        )
+                    };
+                    self.error(codes::METHOD_VALUE, name.span, message);
+                    return Ty::Error;
+                }
                 self.in_chain = chain;
                 let base_ty = self.infer(*base);
                 let base_ty = self.force_receiver(&base_ty);
@@ -4043,7 +4089,9 @@ impl Checker<'_> {
             ExprKind::Unreachable => Ty::Never,
             ExprKind::Debug(values) => {
                 for value in values {
-                    self.infer(*value);
+                    if let Ty::Fn(..) = self.infer(*value) {
+                        self.f.debugged.push(*value);
+                    }
                 }
                 Ty::Unit
             }
@@ -4611,7 +4659,7 @@ impl Checker<'_> {
             params.push(ty);
         }
         let ret = match (closure.ret, &expected) {
-            (Some(t), _) => self.part_type(t),
+            (Some(t), _) => self.part_type(t, "a result"),
             (None, Some((_, ret, _, _))) => ret.clone(),
             (None, None) => self.vars.fresh(Kind::Any, Origin::Defaulted),
         };
@@ -4630,11 +4678,12 @@ impl Checker<'_> {
             std::mem::replace(&mut self.f.returns, true),
             std::mem::take(&mut self.markers),
         );
-        self.closure_scopes.push(ClosureScope { base, captures: Vec::new() });
+        self.closure_scopes.push(ClosureScope { base, captures: Vec::new(), unmarked: false });
         self.f.scopes.push(Vec::new());
         let mut locals = Vec::new();
         for ((param, ty), mode) in closure.params.iter().zip(&params).zip(&modes) {
-            let mutable = matches!(mode, ParamMode::Inout | ParamMode::InoutPartial);
+            // Without a function type, what the body may change is unknown (§15.1).
+            let mutable = quiet || matches!(mode, ParamMode::Inout | ParamMode::InoutPartial);
             locals.push(self.declare(param.name, ty.clone(), mutable, "parameter", *mode != ParamMode::Take));
         }
         let body = self.block_value(&closure.body, Some(&ret), true);
@@ -4649,6 +4698,10 @@ impl Checker<'_> {
         let _ = self.vars.subsume(&fails, &Ty::Never);
         self.f.scopes.pop();
         let scope = self.closure_scopes.pop().expect("pushed above");
+        // Its error type would have come from the call, so it is unknown (§15.1).
+        if scope.unmarked && expected.is_none() {
+            rejected = true;
+        }
         (self.f.ret, self.f.fails, self.f.loops, self.f.returns, self.markers) = outer;
         let needs = scope.captures.iter().map(|(id, _)| self.local_needs(*id)).max().unwrap_or(0);
         self.f.needs.insert(e, needs);
@@ -4750,7 +4803,7 @@ impl Checker<'_> {
     }
 
     /// `f::[T]` without a call, which names a generic function as a value. A method is
-    /// called, never a value, and nothing else takes type arguments.
+    /// called, never a value (E0320), and nothing else takes type arguments.
     fn applied(&mut self, e: ExprId, callee: ExprId, targs: &[TypeId]) -> Ty {
         let m = self.m;
         let span = self.span(e);
@@ -4762,18 +4815,51 @@ impl Checker<'_> {
             self.record(callee, ty.clone());
             return ty;
         }
-        if let ExprKind::Field { name, .. } = m.exprs[callee].kind {
-            let text = m.text(name.sym);
-            let message =
-                format!("`{text}` is a method, which is called with its arguments; it isn't a function value");
-            self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
-            return Ty::Error;
-        }
-        let ty = self.infer(callee);
+        // What the type arguments were meant for is checked as written, and its type is
+        // unknown after them (§15.1).
+        let ty = self.rejected_value(callee);
         if !ty.is_unknown() {
-            self.no_targs(Some(targs), "this", span);
+            let what = match &m.exprs[callee].kind {
+                ExprKind::Name(name) if matches!(ty, Ty::Fn(..)) => {
+                    format!("`{}` is a function value, which", m.text(name.sym))
+                }
+                ExprKind::Name(name) => format!("`{}`", m.text(name.sym)),
+                ExprKind::Field { name, .. } => format!("`{}` is a field, which", m.text(name.sym)),
+                _ => "this value".to_string(),
+            };
+            let span = match (targs.first(), targs.last()) {
+                (Some(&first), Some(&last)) => m.types[first].span.to(m.types[last].span),
+                _ => span,
+            };
+            self.error(codes::TYPE_ARGUMENT_COUNT, span, format!("{what} takes no type arguments"));
         }
         Ty::Error
+    }
+
+    /// The record or enum that `base` names, when `name` is one of its associated functions
+    /// or methods, so `base.name` without a call names it as a value (E0320), and whether it
+    /// is a method.
+    fn associated_named(&self, base: ExprId, name: Symbol) -> Option<(AdtId, bool)> {
+        let ExprKind::Name(type_name) = self.m.exprs[base].kind else { return None };
+        if self.lookup_local(type_name.sym).is_some() {
+            return None;
+        }
+        let id = self.adt_named(type_name.sym)?;
+        let entry = self.inherent.get(&id)?.iter().find(|entry| entry.name == name)?;
+        Some((id, self.p.fns[entry.f].receiver.is_some()))
+    }
+
+    /// Whether a value of type `ty` has a method `name`, its own, built in or from an
+    /// interface it implements. Nothing is reported.
+    fn has_method(&self, ty: &Ty, name: Symbol) -> bool {
+        let text = self.m.text(name);
+        if let Ty::Adt(id, _) = ty
+            && self.inherent.get(id).is_some_and(|entries| entries.iter().any(|entry| entry.name == name))
+        {
+            return true;
+        }
+        builtin_method(ty, text).is_some()
+            || self.p.decls.ifaces().any(|(iface, def)| def.method(text).is_some() && self.implements(ty, iface))
     }
 
     /// A call of a function value, which takes no labels and no type arguments, and takes
@@ -4920,7 +5006,7 @@ impl Checker<'_> {
         // also right.
         let duplicates = info.generics.iter().filter(|g| g.sym.is_none() && g.param.is_none()).count();
         if let Some(targs) = targs {
-            let tys: Vec<Ty> = targs.iter().map(|&t| self.part_type(t)).collect();
+            let tys: Vec<Ty> = targs.iter().map(|&t| self.part_type(t, "a type argument")).collect();
             let fewest = declared - duplicates;
             if tys.len() != declared && (fewest..declared).contains(&tys.len()) {
                 tvars.fill(Some(Ty::Error));
@@ -4986,14 +5072,38 @@ impl Checker<'_> {
         }
     }
 
+    /// Whether the value `e` builds takes a function value itself, rather than in a part
+    /// that holds one already: as an element or argument, or a closure as its result or
+    /// error.
+    fn wraps_fn(&self, e: ExprId) -> bool {
+        let bare = |e: &ExprId| self.p.expr_ty.get(*e).is_some_and(|ty| matches!(self.vars.zonk(ty), Ty::Fn(..)));
+        match &self.m.exprs[e].kind {
+            ExprKind::Closure(_) => self
+                .vars
+                .zonk(self.p.ty(e))
+                .fn_parts()
+                .is_some_and(|(_, ret, fails, _)| matches!(ret, Ty::Fn(..)) || matches!(fails, Ty::Fn(..))),
+            ExprKind::Call { args, .. } => args.iter().any(|arg| bare(&arg.value)),
+            ExprKind::MethodCall { receiver, args, .. } => bare(receiver) || args.iter().any(|arg| bare(&arg.value)),
+            ExprKind::List(elements) | ExprKind::Tuple(elements) => elements.iter().any(bare),
+            ExprKind::Map(entries) => entries.iter().any(|(key, value)| bare(key) || bare(value)),
+            _ => false,
+        }
+    }
+
     /// Reports a function value as a type argument, or a type that holds one, and returns
-    /// whether it did (E0509).
+    /// whether it did (E0509). One call is reported once, and a type that holds one already
+    /// was reported where it was made (§15.1).
     fn fn_targ(&mut self, ty: &Ty, span: Span) -> bool {
         if !matches!(ty, Ty::Fn(..)) && !holds_fn(ty) {
             return false;
         }
+        if !matches!(ty, Ty::Fn(..)) || self.escaped.contains(&span) {
+            return true;
+        }
+        self.escaped.push(span);
         let message = format!(
-            "`{}` is or holds a function type, which can't be a type argument, since a function value lives only as long as what it captures",
+            "`{}` is a function type, which can't be a type argument, since a function value lives only as long as what it captures",
             self.show(ty)
         );
         self.error(codes::FUNCTION_VALUE_ESCAPES, span, message);
@@ -5503,6 +5613,13 @@ impl Checker<'_> {
                 Ty::Error
             }
             (Ty::Error, _) => Ty::Error,
+            (ty, _) if self.has_method(ty, name.sym) => {
+                let message = format!(
+                    "`{text}` is a method, which is called with its arguments; it isn't a function value, but a closure can wrap a call of it, as in `|| x.{text}()`"
+                );
+                self.error(codes::METHOD_VALUE, name.span, message);
+                Ty::Error
+            }
             (ty, _) => {
                 let message = format!("`{}` has no field `{text}`", self.show(ty));
                 self.error(codes::UNKNOWN_MEMBER, name.span, message);
@@ -5844,6 +5961,9 @@ impl Checker<'_> {
                 if self.vars.has_var(err) {
                     self.pending.push(Pending::Unmarked { ty: err.clone(), callee: callee.into(), span });
                 } else {
+                    if let Some(scope) = self.closure_scopes.last_mut() {
+                        scope.unmarked = true;
+                    }
                     self.unmarked(callee, err, span);
                 }
             }
