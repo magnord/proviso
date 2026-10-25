@@ -91,11 +91,13 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Open:** how a narrowed value appears in `proviso sig`.
 - **Found by the goldens (§G):** `Dir`'s full operation list. The reference shows no operations for `list`, `create` or `delete`, so no complete `impl Dir` can be written, and rows 4 and 11 use test-local interfaces instead. Also open: how an observes-only view narrows a capability type that has no permission list, such as `Out` (row 4 as written); whether `write_text` to a new file needs `create`; and which directory `sys.fs` is rooted at.
 - **Proposed for phase 3:**
-  - `Out` is `effects(write)` and `In` is `effects(read)`, so an observes-only view narrows `Out` to no permissions.
-  - `Dir` keeps §9.2's permissions and operations, and adds `list(path) -> List[Path]` (`needs list`), `create_dir(path)` (`needs create`) and `remove(path)` (`needs delete`).
-  - `write_text` to a new file needs `create` as well as `write`.
-  - `sys.fs` is rooted at the working directory.
-  - `Net`, `Clock`, `Random`, `Env` and `Process` are declared with no permissions or operations, which stay unscheduled.
+  - A bare capability interface name means every permission it declares, so `stdout: Out` stays valid and an observes-only view narrows `Out` to no permissions.
+  - `Out` is `effects(write)`, and `write_line` needs `write`. `In` is `effects(read)`, and `read_line(self) -> Option[Text] fails IoError` needs `read` and gives `None` at the end of input.
+  - `Dir` keeps §9.2's permissions, `read_text`, `write_text` and `size`, and adds `list(path) -> List[Path]` (`needs list`), `create_dir(path)` (`needs create`) and `remove(path)` (`needs delete`).
+  - `write_text` creates a missing file under `write`. Permissions are static, so whether a file is new can't decide them. `create` is for directories.
+  - `sub` waits for value-level narrowing, not yet scheduled. A `Self` result in a `cap interface` and a sub-directory that holds its receiver need rules of their own.
+  - `sys.fs` is rooted at the working directory. A path that is absolute or leaves the root through `..` fails with `PermissionDenied`.
+  - `Net[connect, listen]` and `Process[spawn]` keep §9.1's permissions, and `Clock`, `Random` and `Env` have none. Their operations stay unscheduled.
 
 **Q7 — Partial external writes.**
 - **Now:** `sig` reports "may leave partial writes" for a function that has write authority and can fail.
@@ -201,6 +203,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 **Q30 — Serialized capability state.**
 - **Now:** calls on one capability object run one at a time. Proviso-implemented operations run with cancellation masked and commit `state` only on success. Calling back into the same object through a handle is a defect.
 - **Open:** whether re-entrancy can be ruled out at compile time; the throughput cost for shared fakes; deadlocks between two capability objects that call each other; long operations that delay cancellation.
+- **Proposed for phase 3:** a call through a capability interface type is a handle call, and a call on a value of the `cap record`'s own type is direct. So inside an operation, `self.write_count()` is an ordinary call and `Store.of(self).write_count()` is a re-entry defect.
 
 **Q31 — Generics over capabilities.**
 - **Now:** a type parameter may be instantiated with a type that has reach, and the result has that reach. Generic code needs `T: Copy` to copy, store or return a borrowed `T`.
@@ -237,7 +240,8 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
   - A `let` fixes its type, so a parameter that neither an annotation nor the body gives a type is E0312, as in `let f = |x| x`.
   - Wherever the local is passed or called, the closure reads what it captures, so each capture must not have moved by then (E0501). It sees a `var` as the `var` is at the call.
   - It can't outlive what it captures. So a block can't give a closure that captures a local the block declares, and a `var` can't be given a new function value (E0509).
-- **Unclear** (found while planning phase 3): where a `keep fn` closure may be stored. It may live indefinitely (§6.7), which needs a field, a collection or a result to hold it, and P5's "Where function values go" rejects all three. **Proposed:** a function type may appear anywhere a type may, and phase 3's retention check decides which values may be stored there, so a default closure may be stored only where it doesn't outlive what it captures. This replaces P5's list of places.
+- **Unclear** (found while planning phase 3): where a `keep fn` closure may be stored. It may live indefinitely (§6.7), which needs a field, a collection or a result to hold it, and P5's "Where function values go" rejects all three. **Proposed:** a function type may appear anywhere a type may, and phase 3's retention check decides which values may be stored there, so a default closure may be stored only where it doesn't outlive what it captures. This replaces P5's list of places. A call's result is bounded by its arguments that can hold a function value, and `fail` is an escape like `return`. A function type doesn't satisfy `Copy`, as a type with reach doesn't, so generic code can't return or store a closure it borrowed.
+- **Unclear** (found while planning phase 3): how long a closure that changes a captured `var` holds it when the closure is bound to a local. **Proposed:** from its creation to its last use, during which the `var` can't be read or changed (E0505). Passed directly, it holds the `var` for the call, as an `inout` argument does (§5.3).
 
 **Q35 — Consuming a base resource.** Found by the goldens (§G).
 - **Now:** a resource is consumed by a `take` parameter or a `take self` method (ref §10). The reference's `Txn.abandon` consumes `self` without visibly consuming the `Txn` itself.
@@ -282,8 +286,23 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 
 **Q39 — The observes-only view outside `self`.** Found while planning phase 3.
 - **Now:** inside an operation that needs only `observes` permissions, `self` is seen through an observes-only view, and helpers the operation calls receive that view (ref §9.2).
-- **Unclear:** no parameter type can say that it holds a view, so a helper that takes the `cap record` can't be checked against it.
-- **Proposed:** inside an observes operation, `self` may be passed only to its own type's observes operations. Its fields may go anywhere, with their narrowed types, so permission subtyping keeps them narrowed. That needs no new syntax.
+- **Unclear:** no parameter type can say that it holds a view, and no type can say that a record holding an `Out` is narrowed, so a helper can't be checked against the view.
+- **Proposed:** a view is a path from `self`, never a value.
+  - A path from `self` may be read through, and its `state` is read-only.
+  - A capability at the end of the path is narrowed to its `observes` permissions, and so is everything in its `uses`.
+  - Any other value at the end of the path whose reach has an `effects` permission can't be bound, passed, called, captured or returned.
+  - `self` itself may be only the root of a path or the receiver of its own type's `observes` operations, so `let me = self` is rejected.
+  - Calls the narrowing forbids are E0601. That needs no new syntax.
+
+**Q40 — A `cap record` outside its operations.** Found while planning phase 3.
+- **Now:** a `cap record` value is a capability handle, and its `effects` operations may change `state` (ref §9.6).
+- **Unclear:** whether code outside the record's operations may read or assign `state`, as in `m.writes = 5`, and what `with` does to `state`.
+- **Proposed:** `state` fields are visible only in the record's own `impl` blocks. `with` may change only plain fields, and the result shares `state`, as any copy of a handle does.
+
+**Q41 — Several capabilities after `uses`.** Found while planning phase 3.
+- **Now:** a function type may end in `uses C`, where `C` lists capability types (ref §9.4).
+- **Unclear:** inside a parameter list, `fn(fn() uses Dir[read], Int)` could read `Int` as a second capability or as the next parameter.
+- **Proposed:** `uses` takes one capability type, or several in parentheses, as in `uses (Dir[read], Out)`. A function declaration has no `uses` clause, since its parameters carry its authority (§9.2), so `uses` there is a syntax error.
 
 ## C. Tooling
 
