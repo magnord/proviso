@@ -953,7 +953,10 @@ impl Interp<'_> {
             let Some(f) = f else { return false };
             let info = &p.fns[f];
             match i {
-                None => info.receiver.as_ref().is_some_and(|ty| p.decls.is_resource(ty)),
+                None => {
+                    info.self_mode == ParamMode::InoutPartial
+                        || info.receiver.as_ref().is_some_and(|ty| p.decls.is_resource(ty))
+                }
                 Some(i) => {
                     let param = &info.params[i];
                     param.mode == ParamMode::InoutPartial || p.decls.is_resource(&param.ty)
@@ -998,7 +1001,7 @@ impl Interp<'_> {
     fn shape(&self, f: FnId) -> Shape {
         let info = &self.p.fns[f];
         Shape {
-            inout_self: info.self_mode == ParamMode::Inout,
+            inout_self: matches!(info.self_mode, ParamMode::Inout | ParamMode::InoutPartial),
             can_fail: info.fails.is_some(),
             f: Some(f),
             method: None,

@@ -2183,7 +2183,7 @@ impl Walk<'_> {
         let mut accesses: Vec<CallAccess> = Vec::new();
         let outer = self.lent.len();
         let held = self.pending.len();
-        let late = matches!(receiver, Some((_, ParamMode::Inout)));
+        let late = matches!(receiver, Some((_, ParamMode::Inout | ParamMode::InoutPartial)));
         match receiver {
             Some((receiver, _)) if late => self.indices(receiver),
             Some((receiver, _)) => {

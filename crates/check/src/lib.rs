@@ -1984,9 +1984,17 @@ impl Checker<'_> {
                     self.error(codes::DUPLICATE_NAME, method.name.span, format!("method `{text}` is declared twice"));
                 }
                 let receiver = method.receiver.expect("the parser keeps only interface methods with `self`");
-                if !matches!(receiver.mode, ParamMode::Borrow | ParamMode::Take) {
-                    let what = "interface methods that take `inout self`";
-                    self.not_implemented(receiver.span, what, Planned::Unscheduled);
+                let later = match receiver.mode {
+                    ParamMode::Borrow | ParamMode::Take => None,
+                    // Retention comes with the capabilities (OPEN_QUESTIONS P3).
+                    ParamMode::Keep => Some(("`keep self` methods", Planned::Phase(3))),
+                    ParamMode::Inout => Some(("interface methods that take `inout self`", Planned::Unscheduled)),
+                    ParamMode::InoutPartial => {
+                        Some(("interface methods that take `inout(partial) self`", Planned::Unscheduled))
+                    }
+                };
+                if let Some((what, planned)) = later {
+                    self.not_implemented(receiver.span, what, planned);
                     incomplete = true;
                     continue;
                 }
@@ -2350,16 +2358,12 @@ impl Checker<'_> {
         self.self_ty = owner.clone();
         let mut rejected = false;
         let self_mode = decl.receiver.map_or(ParamMode::Borrow, |r| r.mode);
-        if let Some(receiver) = decl.receiver {
-            let what = match receiver.mode {
-                ParamMode::Borrow | ParamMode::Inout | ParamMode::Take => None,
-                ParamMode::InoutPartial => Some("`inout(partial) self` methods"),
-                ParamMode::Keep => Some("`keep self` methods"),
-            };
-            if let Some(what) = what {
-                self.not_implemented(receiver.span, what, Planned::Phase(2));
-                rejected = true;
-            }
+        // Retention comes with the capabilities (OPEN_QUESTIONS P3).
+        if let Some(receiver) = decl.receiver
+            && receiver.mode == ParamMode::Keep
+        {
+            self.not_implemented(receiver.span, "`keep self` methods", Planned::Phase(3));
+            rejected = true;
         }
         let receiver = decl.receiver.and(owner);
         let mut params: Vec<ParamInfo> = Vec::new();
@@ -5954,11 +5958,19 @@ impl Checker<'_> {
                 // An `inout self` method changes its receiver, and a `take self` one owns it
                 // (REFERENCE §5.2).
                 match self.p.fns[f].self_mode {
-                    ParamMode::Inout => {
+                    mode @ (ParamMode::Inout | ParamMode::InoutPartial) => {
                         self.changes(receiver, name);
                         // The receiver of a resource is partial, as an `&` of one is (§5.4).
-                        if self.p.decls.is_resource(&receiver_ty) && self.refined_part(receiver) {
-                            let message = "this is a part of a refined value, which a failure could leave breaking its refinement, so it can't be the receiver of an `inout self` method of a resource, which keeps partial changes (§5.4)";
+                        let partial = mode == ParamMode::InoutPartial;
+                        if (partial || self.p.decls.is_resource(&receiver_ty)) && self.refined_part(receiver) {
+                            let method = if partial {
+                                "an `inout(partial) self` method"
+                            } else {
+                                "an `inout self` method of a resource"
+                            };
+                            let message = format!(
+                                "this is a part of a refined value, which a failure could leave breaking its refinement, so it can't be the receiver of {method}, which keeps partial changes (§5.4)"
+                            );
                             self.error(codes::PARTIAL_INOUT_OF_REFINED_PART, self.span(receiver), message);
                         }
                     }
