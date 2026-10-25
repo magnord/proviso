@@ -445,7 +445,10 @@ pub enum ExampleOutcome {
     Passed,
     /// It ran, but not as it says: `why` tells how, and `at` is the `expect` of a test that
     /// didn't hold.
-    Failed { why: String, at: Option<Span> },
+    Failed {
+        why: String,
+        at: Option<Span>,
+    },
     Defect(Defect),
 }
 
@@ -2666,7 +2669,7 @@ fn order_with<E>(a: &Value, b: &Value, hand_written: &mut HandWrittenOrd<'_, E>)
                     Some(Ordering::Equal)
                 }
                 (Value::Map(x), Value::Map(y)) => {
-                    work.push(Work::Entries(sorted_entries(x), sorted_entries(y), 0));
+                    work.push(Work::Entries(sorted_entries(x, hand_written)?, sorted_entries(y, hand_written)?, 0));
                     Some(Ordering::Equal)
                 }
                 (a, b) => unreachable!("cannot order {a:?} and {b:?}"),
@@ -2698,12 +2701,36 @@ fn ordering_value(ordering: Ordering) -> Value {
     Value::Adt(Adt { def: AdtId::ORDERING, variant: VariantIdx::new(variant), fields: Arc::from([]) })
 }
 
-/// A map's entries sorted by key. Its keys implement `Ord` when the map does, and none is a
-/// float, so they are ordered.
-fn sorted_entries(map: &MapValue) -> Vec<(&Value, &Value)> {
+/// A map's entries sorted by key, as the keys' `Ord` orders them, written by hand or not. Its
+/// keys implement `Ord` when the map does, and none is a float, so they are ordered. A `cmp`
+/// written by hand need not be a total order, so this is a merge sort of its own, which keeps
+/// equal keys in insertion order and never panics, as `sort_by` may for such an order.
+fn sorted_entries<'v, E>(
+    map: &'v MapValue,
+    hand_written: &mut HandWrittenOrd<'_, E>,
+) -> Result<Vec<(&'v Value, &'v Value)>, E> {
     let mut entries: Vec<(&Value, &Value)> = map.iter().collect();
-    entries.sort_by(|x, y| order(x.0, y.0).unwrap_or(Ordering::Equal));
-    entries
+    let mut width = 1;
+    while width < entries.len() {
+        let mut merged = Vec::with_capacity(entries.len());
+        for run in entries.chunks(2 * width) {
+            let (mut left, mut right) = run.split_at(width.min(run.len()));
+            while let (Some(&l), Some(&r)) = (left.first(), right.first()) {
+                if order_with(r.0, l.0, hand_written)? == Some(Ordering::Less) {
+                    merged.push(r);
+                    right = &right[1..];
+                } else {
+                    merged.push(l);
+                    left = &left[1..];
+                }
+            }
+            merged.extend_from_slice(left);
+            merged.extend_from_slice(right);
+        }
+        entries = merged;
+        width *= 2;
+    }
+    Ok(entries)
 }
 
 /// `==` as built into scalars and derived for records and enums, which are equal when their

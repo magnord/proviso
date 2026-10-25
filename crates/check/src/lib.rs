@@ -1642,7 +1642,8 @@ impl Checker<'_> {
         match self.aliases.get(&sym) {
             Some(Alias::Done(ty)) => ty.clone(),
             Some(&Alias::Resolving(_)) => {
-                let at = self.alias_stack.iter().position(|&s| s == sym).expect("an alias being resolved is on the stack");
+                let at =
+                    self.alias_stack.iter().position(|&s| s == sym).expect("an alias being resolved is on the stack");
                 let cycle: Vec<Ident> = self.alias_stack[at..]
                     .iter()
                     .map(|s| match self.aliases[s] {
@@ -1653,7 +1654,9 @@ impl Checker<'_> {
                 let first = cycle.iter().min_by_key(|name| name.span.lo).expect("a cycle has an alias");
                 let names: Vec<String> = cycle.iter().map(|name| format!("`{}`", self.m.text(name.sym))).collect();
                 let message = match names.as_slice() {
-                    [one] => format!("alias {one} names itself, so it names no type; a recursive type is a record or enum (§4.6)"),
+                    [one] => format!(
+                        "alias {one} names itself, so it names no type; a recursive type is a record or enum (§4.6)"
+                    ),
                     _ => format!(
                         "aliases {} name each other in a cycle, so they name no type; a recursive type is a record or enum (§4.6)",
                         names.join(" and ")
@@ -2069,8 +2072,9 @@ impl Checker<'_> {
                     Some(iface) if distinct && op_iface(iface).is_some() => {
                         let wrapped = self.p.decls.adt(id).variant().fields[0].ty.clone();
                         let has = match op_iface(iface) {
-                            Some(None) => matches!(&wrapped, Ty::Int(it) if it.is_signed())
-                                || matches!(wrapped, Ty::Float(_)),
+                            Some(None) => {
+                                matches!(&wrapped, Ty::Int(it) if it.is_signed()) || matches!(wrapped, Ty::Float(_))
+                            }
                             Some(Some(op)) => self.has_arithmetic(op, &wrapped),
                             None => unreachable!("matched above"),
                         };
@@ -2487,7 +2491,7 @@ impl Checker<'_> {
                 None
             }
             Some(_) => {
-                self.not_implemented(name.span, &format!("`{text}` constraints"), Planned::Phase(2));
+                self.not_implemented(name.span, &format!("`{text}` constraints"), Planned::Unscheduled);
                 None
             }
             None if self.names_type(name.sym) || self.generic_scope.iter().any(|(sym, _)| *sym == name.sym) => {
@@ -2867,7 +2871,7 @@ impl Checker<'_> {
             }
             _ => {
                 let text = self.m.text(name.sym);
-                self.not_implemented(name.span, &format!("`{text}` implementations"), Planned::Phase(2));
+                self.not_implemented(name.span, &format!("`{text}` implementations"), Planned::Unscheduled);
                 Err(later)
             }
         }
@@ -4612,7 +4616,7 @@ impl Checker<'_> {
             }
             ExprKind::Binary { op, lhs, rhs } => self.binary(*op, *lhs, *rhs, expected, span),
             ExprKind::Range { .. } => {
-                self.not_implemented(span, "ranges outside `for` loops", Planned::Phase(2));
+                self.not_implemented(span, "ranges outside `for` loops", Planned::Phase(4));
                 Ty::Error
             }
             ExprKind::Try(inner) => self.try_expr(*inner, expected, span),
@@ -6322,7 +6326,7 @@ impl Checker<'_> {
             // A record with refinements gets a validator (REFERENCE §4.4).
             None if name == "validate" && !def.is_enum() && def.variants.iter().any(|v| !v.preds.is_empty()) => {
                 let what = format!("generated validators such as `{}.validate`", def.name);
-                self.not_implemented(span, &what, Planned::Phase(2));
+                self.not_implemented(span, &what, Planned::Phase(5));
             }
             None => {
                 let message = format!("`{}` has no associated function `{name}`", def.name);
@@ -6395,7 +6399,7 @@ impl Checker<'_> {
         let found = def.method(name);
         let rejected = match found {
             None if iface.methods_later() => {
-                self.not_implemented(method.span, &format!("calls of `{iface_text}`'s methods"), Planned::Phase(2));
+                self.not_implemented(method.span, &format!("calls of `{iface_text}`'s methods"), Planned::Unscheduled);
                 true
             }
             None if def.incomplete => true,

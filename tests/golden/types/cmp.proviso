@@ -3,15 +3,16 @@
 // that implements `Ord` has it: the integers, `Char` and `Text`, a derived `Ord` on a record,
 // enum or distinct type, a generic type, a collection, a tuple, `Option`, `Result`, a type
 // parameter `T: Ord`, and an alias of any of them. `Ord.cmp(a, b)` calls it on `a`. A
-// hand-written `impl Ord` defines `cmp`, and then `<` and the derived `Ord` of a type that
-// holds it use it (OPEN_QUESTIONS P5). `Ordering` derives `Eq`, `Ord`, `Hash` and `Show`,
-// ordered as declared. `cmp` borrows both values, so a unique one doesn't move.
+// hand-written `impl Ord` defines `cmp`, and then `<`, the derived `Ord` of a type that holds
+// it, and the order of two maps keyed by it use it (OPEN_QUESTIONS P5). `Ordering` derives
+// `Eq`, `Ord`, `Hash` and `Show`, ordered as declared. `cmp` borrows both values, so a unique
+// one doesn't move.
 use std.io { IoError }
 
 type Count = Int
 type Rank = distinct Int derives(Eq, Ord, Show)
 
-record Version derives(Eq, Show) {
+record Version derives(Eq, Hash, Show) {
     major: Int
     label: Text
 }
@@ -81,4 +82,8 @@ pub fn main(sys: keep System) fails IoError {
     let t = Ticket(seat: 2)
     let u = Ticket(seat: 3)
     try sys.stdout.write_line(f"{t.cmp(u)} {Ord.cmp(u, t)} {t < u} {t}")
+    // Sorted newest first, `low`'s first key is `5` and `high`'s is `3`.
+    let low = [Version(major: 1, label: "a"): 0, Version(major: 5, label: "a"): 0]
+    let high = [Version(major: 2, label: "a"): 0, Version(major: 3, label: "a"): 0]
+    try sys.stdout.write_line(f"{low.cmp(high)} {low < high} {high.cmp(low)}")
 }

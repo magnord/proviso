@@ -1,5 +1,5 @@
 // §F row 8: `attempt` on a call that returns a resource yields a resource
-// phase: 2.8
+// phase: 2
 //
 // `Result[Probe, OpenError]` is a resource because it may hold one (§5.1).
 // Matching it moves the Probe into the binding (§6.4), and abandoning it

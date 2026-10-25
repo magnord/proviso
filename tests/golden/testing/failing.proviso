@@ -2,8 +2,8 @@
 // run: test
 // expect-exit: 70
 // A failing `expect` ends its test, and the test's line names the `expect` that failed and
-// why: `c` is false, or both values of an `expect … == v`, or what a call returned or failed
-// with (REFERENCE §14). The tests after it still run. A defect in a test is reported on
+// says why. Either `c` is false, or it gives both values of an `expect … == v`, or what a
+// call returned or failed with (REFERENCE §14). The tests after it still run. A defect in a test is reported on
 // stderr, traced to the test, which is anchored by its name, and makes the exit code 70
 // (OPEN_QUESTIONS P5). Each test has the example fuel. A failing `expect` is a failure exit,
 // which abandons the resources the test holds (REFERENCE §10).

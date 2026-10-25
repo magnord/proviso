@@ -1,5 +1,5 @@
 // §F row 6: a pool is unique, so `var b = a` moves it
-// phase: 2.7
+// phase: 2
 // expect-error: E0501
 //
 // Copying a pool would let two objects share one slot and generation, so

@@ -8,12 +8,6 @@ record Span {
     hi: Int
 }
 
-impl Ord for Span {                                 // <- E0901
-    fn cmp(self, other: Self) -> Ordering {
-        return Ordering.Less
-    }
-}
-
 fn f(xs: List[Int]) -> Int {
     let ys = xs.map(f: 1)                           // <- E0901
     let n = ys[0]
@@ -57,8 +51,6 @@ fn now(x: Int) observes Clock {                     // <- E0901
 fn tick(x: Int) -> Int effects Clock {              // <- E0901
     return x
 }
-
-distinct UserId = Int                               // <- E0901
 
 effect Foo                                          // <- E0901
 

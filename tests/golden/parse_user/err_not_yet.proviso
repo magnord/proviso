@@ -1,24 +1,13 @@
 // phase: 2.5
 // expect-error: E0901
-// The `Text` functions of REFERENCE §12.3 that STD.md doesn't declare yet, the integer
-// conversions of §12.1 other than `parse`, `test` blocks and `expect` statements aren't
+// The `Text` functions of REFERENCE §12.3 that STD.md doesn't declare yet aren't
 // implemented yet. Uses of what they produce aren't reported again (§15.1).
 fn later(t: Text) -> Int {
     let rows = t.lines()
     let n = rows.len()
-    let narrow = Int32.try_from(5) else 0           // <- E0901
-    let wrapped = Int8.wrapping_from(300)           // <- E0901
     for (i, x) in rows.enumerate() {
     }
     return 1
-}
-
-test "not yet" {                                    // <- E0901
-    expect later("a") == 1
-}
-
-fn expects() {
-    expect 1 == 1                                   // <- E0901
 }
 
 fn text_later(t: Text) {

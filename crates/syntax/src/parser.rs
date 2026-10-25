@@ -999,8 +999,7 @@ impl Parser<'_> {
         if !distinct {
             if self.at_kw(Kw::Derives) || self.at_kw(Kw::Where) {
                 let span = self.peek().span;
-                let message =
-                    "an alias is the type it names, so only a distinct type derives or has a `where`, as in `type Id = distinct Int derives(Eq)`";
+                let message = "an alias is the type it names, so only a distinct type derives or has a `where`, as in `type Id = distinct Int derives(Eq)`";
                 self.error(codes::UNEXPECTED_TOKEN, span, message);
                 return Err(());
             }
@@ -1026,7 +1025,11 @@ impl Parser<'_> {
         self.bump();
         if !self.at(T::Text) {
             let span = self.peek().span;
-            self.error(codes::UNEXPECTED_TOKEN, span, "a test is named by a text literal, as in `test \"parses\" { … }`");
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "a test is named by a text literal, as in `test \"parses\" { … }`",
+            );
             return Err(());
         }
         let token = self.bump();

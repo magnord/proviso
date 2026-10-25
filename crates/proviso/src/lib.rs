@@ -13,9 +13,8 @@ use proviso_syntax::diag::{Diagnostic, Diagnostics, Severity};
 use proviso_syntax::parse_module;
 use proviso_syntax::source::{SourceFile, Span};
 
-/// How far this toolchain implements the v1 plan (OPEN_QUESTIONS P3): phase 1, and the first
-/// ten slices of phase 2.
-pub const IMPLEMENTED_PHASE: Phase = Phase::slice(2, 10);
+/// How far this toolchain implements the v1 plan (OPEN_QUESTIONS P3): phases 1 and 2.
+pub const IMPLEMENTED_PHASE: Phase = Phase::whole(2);
 
 /// A point in the v1 plan: a whole phase, or a slice of one. A phase delivered over several
 /// pull requests numbers its slices `2.1`, `2.2` and so on, and each pull request turns its
@@ -288,12 +287,7 @@ pub fn run(compiled: &Compiled, stdout: &mut (dyn Write + Send), stderr: &mut (d
 /// or only its examples, as `proviso check --examples` does, and returns its exit code: 0
 /// when each passed, 1 when one failed, and 70 when one hit a defect (OPEN_QUESTIONS P5).
 /// Each outcome goes to `stdout`, followed by a count; defects are reported on `stderr`.
-pub fn test(
-    compiled: &Compiled,
-    tests: bool,
-    stdout: &mut (dyn Write + Send),
-    stderr: &mut (dyn Write + Send),
-) -> i32 {
+pub fn test(compiled: &Compiled, tests: bool, stdout: &mut (dyn Write + Send), stderr: &mut (dyn Write + Send)) -> i32 {
     let (mut passed, mut defects, mut examples, mut tests_run) = (0, 0, 0, 0);
     let report = |info: &ExampleInfo, outcome, stdout: &mut dyn Write, stderr: &mut dyn Write| {
         let item = &compiled.module.items[info.item];

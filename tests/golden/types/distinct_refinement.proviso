@@ -2,11 +2,11 @@
 // run: test
 // expect-exit: 70
 // A distinct type's `where` reads the value it wraps as `self` (REFERENCE §4.6, §8.2). The v1
-// profile checks it at run time (OPEN_QUESTIONS P3) wherever a value of the type is built or
-// changed: by its constructor, by a derived operator, and by any change through `.value`,
-// whether an assignment, a compound assignment, an `&` argument once the call returns, or a
-// method that changes it, such as `push` (§8.3; OPEN_QUESTIONS P5). A broken one is a
-// `refinement_failed` defect. A refinement inside the wrapped type is checked too.
+// profile checks it at run time (OPEN_QUESTIONS P3) wherever a value of the type is built
+// or changed. That is by its constructor, by a derived operator, and by any change through
+// `.value`, whether an assignment, a compound assignment, an `&` argument once the call
+// returns, or a method that changes it, such as `push` (§8.3; OPEN_QUESTIONS P5). A broken
+// one is a `refinement_failed` defect. A refinement inside the wrapped type is checked too.
 type Percent = distinct Int derives(Eq, Show, Add, Sub) where 0 <= self and self <= 100
 type Short = distinct List[Int] derives(Eq, Show) where self.len() < 3
 type Spanned = distinct Span derives(Eq, Show) where self.hi < 10

@@ -8,3 +8,4 @@ Ordering.Greater true false true
 true true Ordering.Greater equal
 Ordering.Greater Some(2) Ordering.Equal
 Ordering.Less Ordering.Greater true Ticket(seat: 2)
+Ordering.Less true Ordering.Greater
