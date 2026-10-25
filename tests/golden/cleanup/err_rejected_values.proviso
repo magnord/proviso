@@ -8,11 +8,13 @@
 // reported again (REFERENCE §15.1). A map literal whose key type lacks `Eq` or `Hash` is
 // one, as a written map type is, whether its key is known at once or is a float literal
 // (issue #39). Where two literals meet, the one whose entries give the key type is
-// reported, in either operand order, and a literal compared with a value whose type was
-// rejected isn't, in a body or an example. In the bodies of a block whose type parameter
-// has a rejected constraint, that parameter meets every interface and has every method,
-// whether its value is a field or a call result, and a rejected generic `impl Abandon`
-// leaves `Abandon.abandon` on any type its target matches unreported (issue #53). An `if`,
+// reported, in either operand order. A literal compared with a value whose type was
+// rejected is still reported, in a body or an example, since its key type is its own. A
+// form whose branches mismatched, or a rejected operand, leaves an error inside the other
+// operand reported. In the bodies of a block whose type parameter has a rejected
+// constraint, that parameter meets every interface and has every method, whether its
+// value is a field or a call result, and a rejected generic `impl Abandon` leaves
+// `Abandon.abandon` on any type its target matches unreported (issue #53). An `if`,
 // `match` or `else` whose branches have mismatched types has an unknown type (issue #55).
 // A branch whose own value is rejected still gives the others' type.
 
@@ -49,12 +51,13 @@ fn written_key(k: Float) -> Map[Float, Int] {      // <- E0309
 }
 
 fn rejected_context(y: Float) -> Bool {
-    let a = written_key(k: 1.5) == [1.5: 1]
-    let b = written_key(k: 1.5) == [y: 1]
+    let a = written_key(k: 1.5) == [1.5: 1]         // <- E0309
+    let b = written_key(k: 1.5) == [y: 1]           // <- E0309
     return a
 }
 
-example written_key(k: 1.5) == [1.5: 1]
+example written_key(k: 1.5) == [1.5: 1]            // <- E0309
+example written_key(k: 1.5) == (if true { 1 } else { "a" })    // <- E0301
 
 record Crate[T] derives(Show, Eq) {
     item: T
@@ -142,6 +145,12 @@ fn branches(c: Bool, n: Int) -> Int {
     let d1: Text = d
     let e1: Text = e
     let f1: Text = f
+    let g = nosuch == (if c { 1 } else { "a" })     // <- E0201, E0301
+    let h = (if c { 1 } else { "a" }) == (if c { 2 } else { "b" })    // <- E0301, E0301
+    let i = a == match c {
+        true => 1
+        false => "a"                                // <- E0301
+    }
     return 0
 }
 

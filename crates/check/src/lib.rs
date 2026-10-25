@@ -3605,10 +3605,10 @@ impl Checker<'_> {
         let err = self.one_error(errors, span, noun, &format!("{what} expects one error type"));
         match expect {
             Expectation::Equals(value) => {
-                // A call that was rejected has nothing to compare with, and is the value's
-                // context, as an operand of `==` is (§15.1; issue #39).
+                // A call that was rejected gives the value no type, and what the value leaves
+                // open isn't reported, as with an operand of `==` (§15.1; issue #39).
                 if ty == Ty::Error {
-                    let value_ty = self.expr(*value, Some(&Ty::Error));
+                    let value_ty = self.expr(*value, None);
                     self.vars.quiet(&value_ty);
                     return;
                 }
@@ -4539,23 +4539,28 @@ impl Checker<'_> {
         }
     }
 
+    /// Reports that `e`'s type doesn't fit where it is. A mismatched place moves nothing. Any
+    /// other value, such as a call, still takes what it is given, and the mismatch is about
+    /// the value it gives.
+    fn mismatch(&mut self, e: ExprId, span: Span, message: String) {
+        if matches!(
+            self.m.exprs[e].kind,
+            ExprKind::Name(_) | ExprKind::It | ExprKind::Field { .. } | ExprKind::Index { .. }
+        ) {
+            self.error_of(e, codes::TYPE_MISMATCH, span, message);
+        } else {
+            self.error(codes::TYPE_MISMATCH, span, message);
+            self.inner_errors += 1;
+        }
+    }
+
     /// Checks `e` against `expected`, reports a mismatch, and returns the actual type.
     fn check(&mut self, e: ExprId, expected: &Ty) -> Ty {
         let actual = self.expr(e, Some(expected));
         if !self.vars.subsume(expected, &actual) {
             let span = self.span(e);
             let message = format!("expected `{}`, found `{}`", self.show(expected), self.show(&actual));
-            // A mismatched place moves nothing. Any other value, such as a call, still takes
-            // what it is given, and the mismatch is about the value it gives.
-            if matches!(
-                self.m.exprs[e].kind,
-                ExprKind::Name(_) | ExprKind::It | ExprKind::Field { .. } | ExprKind::Index { .. }
-            ) {
-                self.error_of(e, codes::TYPE_MISMATCH, span, message);
-            } else {
-                self.error(codes::TYPE_MISMATCH, span, message);
-                self.inner_errors += 1;
-            }
+            self.mismatch(e, span, message);
             // What the value leaves open has no other way to be given, and what the expected
             // type leaves open may have been the value's to give (§15.1).
             self.vars.poison(&actual);
@@ -5186,10 +5191,10 @@ impl Checker<'_> {
     /// (OPEN_QUESTIONS P5; issue #10). Returns the joined type, or an error once reported.
     fn operands(&mut self, lhs: ExprId, rhs: ExprId, hint: Option<&Ty>, span: Span) -> Ty {
         let lt = self.expr(lhs, hint);
-        // An operand that already has an error is the other's context, so a literal there
-        // isn't reported against it (§15.1). One of another kind gives no type.
+        // An operand that already has an error gives the other no type, so a literal there
+        // isn't reported again against it, and one of another kind gives none either.
         let other = match &lt {
-            Ty::Error => Some(Ty::Error),
+            Ty::Error => None,
             ty if ty.is_numeric() || matches!(ty, Ty::Adt(..) | Ty::Var(_)) => Some(ty.clone()),
             _ => hint.cloned(),
         };
@@ -7413,7 +7418,7 @@ impl Checker<'_> {
         }
         self.vars.join(known, &ty).unwrap_or_else(|| {
             let message = format!("expected `{}`, found `{}`", self.show(known), self.show(&ty));
-            self.error(codes::TYPE_MISMATCH, self.span(e), message);
+            self.mismatch(e, self.span(e), message);
             self.vars.poison(&ty);
             self.vars.quiet(known);
             self.mismatched.insert(e);

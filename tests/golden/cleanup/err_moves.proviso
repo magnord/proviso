@@ -2,6 +2,7 @@
 // expect-error: E0201
 // expect-error: E0301
 // expect-error: E0303
+// expect-error: E0305
 // expect-error: E0320
 // expect-error: E0507
 // expect-error: E0508
@@ -14,7 +15,9 @@
 // value given where it doesn't fit. A method used as a value, as in `p.close`, was meant to
 // be called, so its receiver isn't reported as left over, inside a closure or outside one,
 // and nor is a field it is read from or a value it is made on (issue #50). A misspelled
-// field is read, not called, so the leak of its base is still reported.
+// field is read, not called, so the leak of its base is still reported. A place given
+// by a branch whose type doesn't fit moves nothing, as one given directly doesn't, and a
+// rejected `&` function value lends nothing it captures.
 
 resource record Probe {
     name: Text
@@ -124,4 +127,28 @@ fn method_value_temp() {
 fn misspelled_field() {
     let p = open(name: "a")                         // <- E0507
     let n = p.nme                                   // <- E0303
+}
+
+unique record Token {
+    id: Int
+}
+
+fn branch_place(t: take Token, c: Bool) -> Int {
+    let s: Text = if c { t } else { t }             // <- E0301, E0301
+    let u: Text = match c {
+        true => t                                   // <- E0301
+        false => t                                  // <- E0301
+    }
+    return t.id
+}
+
+fn calls(n: inout Int, f: inout fn() -> Int) -> Int {
+    n = n + 1
+    return f()
+}
+
+fn rejected_function_value() -> Int {
+    var n = 1
+    let f = || n
+    return calls(n: &n, f: &f)                      // <- E0305
 }
