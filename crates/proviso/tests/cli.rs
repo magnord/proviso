@@ -515,3 +515,85 @@ fn copies_of_borrows_name_the_parameter_that_needs_copy() {
     assert_eq!(errors.matches("which needs `U: Copy`").count(), 2, "{errors}");
     assert_eq!(errors.matches("error[").count(), 2, "{errors}");
 }
+
+/// Aliases resolve in an order of their own, without recursing once per alias, so a long
+/// chain declared in either order checks, and a long cycle is reported once (E0322). An
+/// alias deeper than a type may be is reported once, where it is declared, and its uses
+/// aren't reported again (E0905, REFERENCE §15.1).
+#[test]
+fn long_alias_chains_check_once() {
+    let n = 100_000;
+    let chain = |order: &dyn Fn(usize) -> String, target: &dyn Fn(usize) -> String| -> String {
+        let mut lines: Vec<String> = (1..=n).map(|i| format!("type {} = {}\n", order(i), target(i))).collect();
+        lines.reverse();
+        lines.concat()
+    };
+    let reversed = chain(&|i| format!("A{i}"), &|i| format!("A{}", i - 1))
+        + &format!("type A0 = Int\n\nfn f(x: A{n}) -> Int {{\n    return x + 1\n}}\n");
+    let cycle = chain(&|i| format!("C{i}"), &|i| format!("C{}", if i == n { 1 } else { i + 1 }));
+    let deep = 10_000;
+    let nested = |rev: bool| {
+        let mut lines: Vec<String> = (1..=deep).map(|i| format!("type L{i} = List[L{}]\n", i - 1)).collect();
+        if rev {
+            lines.reverse();
+        }
+        lines.concat()
+            + &format!(
+                "type L0 = Int\n\nrecord R {{\n    f: L{deep}\n}}\n\nfn g(x: L{deep}, y: L9000) -> L{deep} {{\n    return x\n}}\n\nfn h(x: L4000) -> L4000 {{\n    return x\n}}\n"
+            )
+    };
+    let cases = [
+        ("alias_reversed", reversed, 0, None),
+        ("alias_cycle", cycle, 65, Some(("E0322", 1))),
+        ("alias_nested", nested(false), 65, Some(("E0905", 1))),
+        ("alias_nested_reversed", nested(true), 65, Some(("E0905", 1))),
+    ];
+    for (name, text, code, errors) in cases {
+        let file = source(&format!("{name}.proviso"), &text);
+        let output = check_within(&file, 20);
+        let shown = stderr(&output);
+        assert_eq!(output.status.code(), Some(code), "{name}: {}", &shown[..shown.len().min(2_000)]);
+        if let Some((error, count)) = errors {
+            assert_eq!(shown.matches("error[").count(), count, "{name}: {}", &shown[..shown.len().min(2_000)]);
+            assert!(shown.contains(&format!("error[{error}]")), "{name}: {}", &shown[..shown.len().min(2_000)]);
+        }
+    }
+}
+
+/// A `pub` alias whose type repeats a part, as `Pair[P1, P1]` does, is checked for what it
+/// exposes once per part, though the tree it stands for doubles with each alias (REFERENCE §3).
+#[test]
+fn a_doubling_pub_alias_checks_in_linear_time() {
+    let mut text = String::from("pub record Pair[A, B] {\n    first: A\n    second: B\n}\n\npub type P0 = Int\n");
+    for i in 1..=60 {
+        text += &format!("pub type P{i} = Pair[P{0}, P{0}]\n", i - 1);
+    }
+    let file = source("doubling_alias.proviso", &text);
+    let output = check_within(&file, 20);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+/// An alias used as a value names the type to write instead, by its name alone when the type
+/// has type arguments, which an expression doesn't write (REFERENCE §4.8). A message about the
+/// calls an example or `expect` marks reads as a sentence.
+#[test]
+fn alias_and_expect_messages_read_right() {
+    let file = source(
+        "alias_messages.proviso",
+        "record Pair[A, B] {\n    first: A\n    second: B\n}\n\ntype P = Pair[Int, Text]\ntype Opt = Option[Int]\ntype Two = (Int, Int)\n\nfn f(t: Two) {\n    let p = P(first: 1, second: \"x\")\n    let o = Opt.Some(1)\n    let w = Two(1, 2)\n}\n\nrecord Box {\n    n: Int\n}\n\nimpl Box {\n    fn give(self) -> Box fails Text {\n        fail \"x\"\n    }\n\n    fn count(self) -> Int fails Int {\n        fail 1\n    }\n}\n\nexample Box(n: 1).give().count() fails _\n\ntest \"t\" {\n    expect Box(n: 1).give().count() fails _\n}\n",
+    );
+    let errors = stderr(&run(&["check"], &file));
+    for expected in [
+        "`P` is an alias of the type `Pair[Int, Text]`, and an alias names a type only; write `Pair` here",
+        "`Opt` is an alias of the type `Option[Int]`, and an alias names a type only; write `Option` here",
+        "`Two` is an alias of the type `(Int, Int)`, and an alias names a type only",
+        "the calls this example marks fail with",
+        "the calls this `expect` marks fail with",
+    ] {
+        assert!(errors.contains(expected), "missing {expected:?} in:\n{errors}");
+    }
+    assert!(
+        !errors.contains("`Two` is an alias of the type `(Int, Int)`, and an alias names a type only; write"),
+        "{errors}"
+    );
+}

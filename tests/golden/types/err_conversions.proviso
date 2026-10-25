@@ -6,11 +6,13 @@
 // expect-error: E0302
 // expect-error: E0303
 // expect-error: E0701
+// expect-error: E0506
 // expect-error: E0901
 // `Int64(x)` converts only when the target holds every value of the source, so a narrowing,
-// a change of sign, an integer to a float and a float to an integer are E0301, which names
-// the conversion to use instead (REFERENCE §12.1, §12.2). `try_from` and `wrapping_from`
-// take integers, and `try_from` and `to_int` can fail, so their calls are marked (§7.2).
+// a change of sign, an integer to a float that can't hold it exactly and a float to an
+// integer are E0301, which names the conversion to use instead (REFERENCE §12.1, §12.2).
+// `try_from` and `wrapping_from` take integers, labeled `value` or not (H3) and without `&`,
+// and `try_from` and `to_int` can fail, so their calls are marked (§7.2).
 // `ConversionError` comes from `std.num`. A distinct type isn't a number.
 type Cents = distinct Int
 
@@ -32,6 +34,10 @@ fn shapes(a: Int, d: Float) {
     let n = Int64(a, a)                             // <- E0208
     let m = Int64(number: a)                        // <- E0207
     let w = Int32.wrapping_from(d)                  // <- E0301
+    let v = Int32.wrapping_from(other: a)           // <- E0207
+    let u = Int32.wrapping_from(&a)                 // <- E0506
+    let t = Float.from(&a)                          // <- E0506
+    let l = Int64(&a)                               // <- E0506
     let x = Int32.try_from(d) else 0                // <- E0301
     let y = Int32.try_from(a)                       // <- E0701
     let z = d.to_int(rounding: Rounding.TowardZero) // <- E0701

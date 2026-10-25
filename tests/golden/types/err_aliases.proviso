@@ -10,13 +10,19 @@
 // expect-error: E0509
 // expect-error: E0901
 // An alias that names itself, directly or through other aliases, is E0322, reported once at
-// the first alias of the cycle (OPEN_QUESTIONS P5). An alias names a type only, so in an
-// expression or a pattern it is E0201, also for `System`, which it can't build (issue #11).
-// An alias defined twice, or named like another item, is E0202, and a rejected alias isn't
-// reported again where it is used (REFERENCE §15.1). Aliases take no type arguments yet.
+// the first alias of the cycle, also when it closes more than one cycle (OPEN_QUESTIONS P5).
+// An alias names a type only, so in an expression or a pattern it is E0201, also for
+// `System`, which it can't build (issue #11). A `pub` alias or function may not name a
+// private type in any part of its type, a function type's included (§3). An alias defined
+// twice, or named like another item, is E0202, and a rejected alias isn't reported again
+// where it is used (REFERENCE §15.1). Aliases take no type arguments yet.
 type Loop = List[Loop]                              // <- E0322
 type Ping = Option[Pong]                            // <- E0322
 type Pong = Ping
+type Twin = (Twin, Twin)                            // <- E0322
+type Root = (Left, Right)                           // <- E0322
+type Left = Root
+type Right = Root
 type Fine = Ping
 type Twice = Int
 type Twice = Text                                   // <- E0202
@@ -41,11 +47,26 @@ record Dup {
 
 type Dup = Int                                      // <- E0202
 
+type Greeter = Int
+
+interface Greeter {                                 // <- E0202
+}
+
+interface Named {                                   // <- E0202
+}
+
+type Named = Text
+
 record Hidden {
     n: Int
 }
 
 pub type Leak = Hidden                              // <- E0211
+pub type Call = fn(Hidden) -> Int                   // <- E0211
+pub type Pairs = (Int, Option[Hidden])              // <- E0211
+
+pub fn takes(cb: fn(Int) -> Hidden) {               // <- E0211
+}
 
 record Holder {
     f: Callback                                     // <- E0509
@@ -57,9 +78,11 @@ enum Shape {
 
 type Form = Shape
 
-fn rejected(a: Loop, b: Pong, c: Fine, d: Twice, e: lower, f: Missing, g: Box[Int], h: Shown) -> Int {
+fn rejected(a: Loop, b: Pong, c: Fine, d: Twice, e: lower, f: Missing, g: Box[Int], h: Shown, i: Twin, j: Left) -> Int {
     let n: Twice = "t"
     let m: Dup = 1
+    let k: Greeter = 1.5
+    let l: Named = 2
     return 0
 }
 

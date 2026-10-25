@@ -1487,7 +1487,7 @@ impl Walk<'_> {
                     self.expr(other);
                 }
                 // What it compares, or the call whose error it matches, it drops (REFERENCE §10).
-                if expect.is_some() && self.checked.is_empty() {
+                if expect.is_some() {
                     for e in std::iter::once(*value).chain(expected) {
                         self.discarded(e, "the `expect` drops once it has compared it");
                     }

@@ -25,6 +25,10 @@ fn widen_float(d: Float32) -> Float {
     return Float(d)
 }
 
+fn labeled(x: Int) -> Float {
+    return Float(Int8.wrapping_from(value: x)) + Float.from(value: x)
+}
+
 fn exact_float(a: Int32) -> Float {
     return Float(a)
 }
@@ -87,6 +91,7 @@ example widen_all(a: -1, b: 255, c: 4000000000) == (-1, 255, 4000000000)
 example widen_float(0.1) == 0.10000000149011612
 example exact_float(-2147483648) == -2147483648.0
 example exact_float32(b: 65535, c: -128) == 65407.0
+example labeled(300) == 344.0
 example narrow(127) == 127
 example narrow(128) fails ConversionError.OutOfRange
 example narrow(-129) fails ConversionError.OutOfRange

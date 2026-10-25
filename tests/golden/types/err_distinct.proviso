@@ -16,10 +16,9 @@
 // (§2), its operators need `derives`, and it has neither the wrapped type's methods nor
 // `with`. It derives an operator only when the wrapped type has it, wherever that type is
 // declared, and never `Copy`. One that wraps a distinct type whose derive is rejected isn't
-// reported again. Its
-// `where` names the value as `self`, not as `value`. A distinct type defined twice is
-// E0202, and its uses aren't reported again (REFERENCE §15.1). Distinct types take no type
-// parameters yet.
+// reported again. Its `where` names the value as `self`, not as `value`. A distinct type
+// defined twice is E0202, as a record is, and its uses are checked against the first
+// declaration (issue #19). Distinct types take no type parameters yet.
 type UserId = distinct Int derives(Eq, Show)
 type Plain = distinct Int
 type Words = distinct List[Text]

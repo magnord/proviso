@@ -328,10 +328,9 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         imports: HashMap::new(),
         adt_names: HashMap::new(),
         aliases: HashMap::new(),
-        alias_stack: Vec::new(),
-        alias_cycles: HashSet::new(),
         poisoned: m.poisoned.clone(),
         adts: Vec::new(),
+        adt_vis: HashMap::new(),
         iface_names: HashMap::new(),
         ifaces: Vec::new(),
         inherent: HashMap::new(),
@@ -426,7 +425,8 @@ enum Import {
 enum Alias {
     /// Declared with this type and name.
     Pending(TypeId, Ident),
-    Resolving(Ident),
+    /// Being resolved after the aliases its type names.
+    Resolving(TypeId, Ident),
     Done(Ty),
 }
 
@@ -643,15 +643,13 @@ struct Checker<'a> {
     adt_names: HashMap<Symbol, AdtId>,
     /// The module's aliases, as far as they are resolved (REFERENCE §4.6).
     aliases: HashMap<Symbol, Alias>,
-    /// The aliases being resolved, innermost last, which a cycle runs through.
-    alias_stack: Vec<Symbol>,
-    /// The aliases found in a cycle (E0322), which resolve to an unknown type.
-    alias_cycles: HashSet<Symbol>,
     /// Names whose declarations were rejected, so their uses aren't reported again: those the
     /// parser rejected, and records and enums whose names the checker rejects.
     poisoned: HashSet<Symbol>,
     /// Every record and enum declaration, including those whose name is rejected.
     adts: Vec<AdtSrc<'a>>,
+    /// The visibility of each of [`Checker::adts`].
+    adt_vis: HashMap<AdtId, Visibility>,
     /// The function being checked, or the record whose refinements are.
     f: FnState,
     /// Set while checking the postfix chain a `try` or `attempt` covers (REFERENCE §6.1).
@@ -1566,6 +1564,7 @@ impl Checker<'_> {
             def.params = generics.len();
             let id = self.p.decls.push(def);
             self.adts.push(AdtSrc { id, name, vis: item.vis, generics, derives, variants, refinement });
+            self.adt_vis.insert(id, item.vis);
             // A rejected name is reported once. Its uses, and what it collides with, are not.
             let cased = self.pascal_case(name, "type");
             if !cased || prelude_type(text) {
@@ -1636,56 +1635,127 @@ impl Checker<'_> {
         }
     }
 
-    /// The type alias `sym` names, resolved on first use. One that names itself is reported
-    /// once, at the first alias of its cycle, and every alias of the cycle is unknown.
+    /// The type alias `sym` names, resolved on first use.
     fn alias_type(&mut self, sym: Symbol) -> Ty {
+        if let Some(Alias::Pending(..)) = self.aliases.get(&sym) {
+            self.resolve_alias(sym);
+        }
         match self.aliases.get(&sym) {
             Some(Alias::Done(ty)) => ty.clone(),
-            Some(&Alias::Resolving(_)) => {
-                let at =
-                    self.alias_stack.iter().position(|&s| s == sym).expect("an alias being resolved is on the stack");
-                let cycle: Vec<Ident> = self.alias_stack[at..]
-                    .iter()
-                    .map(|s| match self.aliases[s] {
-                        Alias::Resolving(name) => name,
-                        _ => unreachable!("the aliases on the stack are being resolved"),
-                    })
-                    .collect();
-                let first = cycle.iter().min_by_key(|name| name.span.lo).expect("a cycle has an alias");
-                let names: Vec<String> = cycle.iter().map(|name| format!("`{}`", self.m.text(name.sym))).collect();
-                let message = match names.as_slice() {
-                    [one] => format!(
-                        "alias {one} names itself, so it names no type; a recursive type is a record or enum (§4.6)"
-                    ),
-                    _ => format!(
-                        "aliases {} name each other in a cycle, so they name no type; a recursive type is a record or enum (§4.6)",
-                        names.join(" and ")
-                    ),
-                };
-                self.error(codes::ALIAS_CYCLE, first.span, message);
-                self.alias_cycles.extend(cycle.iter().map(|name| name.sym));
-                Ty::Error
-            }
-            Some(&Alias::Pending(target, name)) => {
-                self.aliases.insert(sym, Alias::Resolving(name));
-                self.alias_stack.push(sym);
-                // An alias has no type parameters, and is not in an `impl` block.
-                let scope = std::mem::take(&mut self.generic_scope);
-                let names = std::mem::take(&mut self.param_names);
-                let bounds = std::mem::take(&mut self.f.bounds);
-                let self_ty = self.self_ty.take();
-                let ty = self.resolve_type(target);
-                (self.generic_scope, self.param_names, self.f.bounds, self.self_ty) = (scope, names, bounds, self_ty);
-                self.alias_stack.pop();
-                let ty = if self.alias_cycles.contains(&sym) { Ty::Error } else { ty };
-                if ty == Ty::Error {
-                    self.poisoned.insert(sym);
-                }
-                self.aliases.insert(sym, Alias::Done(ty.clone()));
-                ty
-            }
-            None => unreachable!("only a declared alias is resolved"),
+            // The aliases an alias names are resolved before it, so only one of a cycle,
+            // which is reported already, is still being resolved.
+            Some(Alias::Resolving(..)) => Ty::Error,
+            _ => unreachable!("only a declared alias is resolved"),
         }
+    }
+
+    /// Resolves alias `sym` after the aliases it names, depth first on a stack of its own, so
+    /// a long chain of aliases doesn't recurse once per alias. A cycle is reported once, at
+    /// its first alias in the file, and its aliases are unknown types. A type deeper than a
+    /// type may be is reported once, at the alias that makes it so (REFERENCE §15.1).
+    fn resolve_alias(&mut self, sym: Symbol) {
+        let Some(&Alias::Pending(target, name)) = self.aliases.get(&sym) else { return };
+        self.aliases.insert(sym, Alias::Resolving(target, name));
+        let mut stack = vec![(sym, self.aliases_in(target), 0)];
+        while let Some((top, names, next)) = stack.last_mut() {
+            if let Some(&named) = names.get(*next) {
+                *next += 1;
+                match self.aliases.get(&named) {
+                    Some(&Alias::Pending(target, name)) => {
+                        self.aliases.insert(named, Alias::Resolving(target, name));
+                        let names = self.aliases_in(target);
+                        stack.push((named, names, 0));
+                    }
+                    Some(Alias::Resolving(..)) => {
+                        let at = stack.iter().position(|(s, ..)| *s == named).expect("a resolving alias is stacked");
+                        let cycle: Vec<Symbol> = stack[at..].iter().map(|(s, ..)| *s).collect();
+                        self.alias_cycle(&cycle);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            let top = *top;
+            stack.pop();
+            let Some(&Alias::Resolving(target, name)) = self.aliases.get(&top) else { continue };
+            // An alias has no type parameters, and is not in an `impl` block.
+            let scope = std::mem::take(&mut self.generic_scope);
+            let names = std::mem::take(&mut self.param_names);
+            let bounds = std::mem::take(&mut self.f.bounds);
+            let self_ty = self.self_ty.take();
+            let before = self.errors;
+            let mut ty = self.resolve_type(target);
+            (self.generic_scope, self.param_names, self.f.bounds, self.self_ty) = (scope, names, bounds, self_ty);
+            if self.vars.depth(&ty, MAX_TYPE_DEPTH).is_none() {
+                if before == self.errors {
+                    let message = format!(
+                        "`{}` names a type that nests more than {MAX_TYPE_DEPTH} levels deep, which is more than a type may",
+                        self.m.text(name.sym)
+                    );
+                    self.error(codes::TYPE_TOO_DEEP, name.span, message);
+                }
+                ty = Ty::Error;
+            }
+            if ty == Ty::Error {
+                self.poisoned.insert(top);
+            }
+            self.aliases.insert(top, Alias::Done(ty));
+        }
+    }
+
+    /// Reports the aliases of `cycle`, which name each other in this order, and makes each an
+    /// unknown type.
+    fn alias_cycle(&mut self, cycle: &[Symbol]) {
+        let names: Vec<Ident> = cycle
+            .iter()
+            .map(|s| match self.aliases[s] {
+                Alias::Resolving(_, name) => name,
+                _ => unreachable!("the aliases of a cycle are being resolved"),
+            })
+            .collect();
+        let first = names.iter().min_by_key(|name| name.span.lo).expect("a cycle has an alias");
+        // A long cycle is named by its first few aliases.
+        let mut shown: Vec<String> = names.iter().take(3).map(|name| format!("`{}`", self.m.text(name.sym))).collect();
+        if names.len() > 3 {
+            shown.push(format!("{} more", names.len() - 3));
+        }
+        let message = match shown.as_slice() {
+            [one] => {
+                format!("alias {one} names itself, so it names no type; a recursive type is a record or enum (§4.6)")
+            }
+            _ => format!(
+                "aliases {} name each other in a cycle, so they name no type; a recursive type is a record or enum (§4.6)",
+                shown.join(" and ")
+            ),
+        };
+        self.error(codes::ALIAS_CYCLE, first.span, message);
+        for &sym in cycle {
+            self.aliases.insert(sym, Alias::Done(Ty::Error));
+            self.poisoned.insert(sym);
+        }
+    }
+
+    /// The aliases that type expression `t` names, in the order it names them.
+    fn aliases_in(&self, t: TypeId) -> Vec<Symbol> {
+        let mut found = Vec::new();
+        let mut work = vec![t];
+        while let Some(t) = work.pop() {
+            match &self.m.types[t].kind {
+                TypeExprKind::Named(name) if self.aliases.contains_key(&name.sym) => found.push(name.sym),
+                TypeExprKind::Named(_) | TypeExprKind::SelfType => {}
+                TypeExprKind::Applied { name, args } => {
+                    if self.aliases.contains_key(&name.sym) {
+                        found.push(name.sym);
+                    }
+                    work.extend(args.iter().flatten().rev());
+                }
+                TypeExprKind::Tuple(parts) => work.extend(parts.iter().rev()),
+                TypeExprKind::Fn { params, ret, fails } => {
+                    work.extend(fails.iter().chain(ret.iter()).chain(params.iter().map(|(_, t)| t)).rev());
+                }
+            }
+        }
+        found
     }
 
     /// How to tell a use of alias `name` as a value or pattern what to write instead: aliases
@@ -1693,9 +1763,20 @@ impl Checker<'_> {
     fn alias_value(&mut self, name: Ident) {
         let text = self.m.text(name.sym);
         let Some(Alias::Done(ty)) = self.aliases.get(&name.sym) else { return };
-        let shown = self.show(&ty.clone());
-        let message =
-            format!("`{text}` is an alias of the type `{shown}`, and an alias names a type only; write `{shown}` here");
+        let ty = ty.clone();
+        let shown = self.show(&ty);
+        // An expression writes a generic type by its name alone, and a tuple or function type
+        // by none (REFERENCE §4.8).
+        let write = match &ty {
+            Ty::Fn(..) => None,
+            _ if self.p.decls.is_tuple(&ty) => None,
+            Ty::Adt(id, args) if !args.is_empty() => Some(self.p.decls.adt(*id).name.to_string()),
+            _ => Some(shown.clone()),
+        };
+        let mut message = format!("`{text}` is an alias of the type `{shown}`, and an alias names a type only");
+        if let Some(write) = write {
+            message += &format!("; write `{write}` here");
+        }
         self.error(codes::UNKNOWN_NAME, name.span, message);
     }
 
@@ -1866,6 +1947,10 @@ impl Checker<'_> {
     /// Reports a type that `item`, declared with `vis`, may not mention because it is less
     /// visible (REFERENCE §3).
     fn exposes(&mut self, item: Ident, vis: Visibility, ty: &Ty, at: TypeId) {
+        // Nothing is less visible than a private item.
+        if reach(vis) == 0 {
+            return;
+        }
         let Some((record, record_vis)) = self.least_visible(ty) else { return };
         if reach(record_vis) < reach(vis) {
             let name = self.p.decls.adt(record).name.clone();
@@ -1890,12 +1975,30 @@ impl Checker<'_> {
         self.error(codes::PRIVATE_IN_PUBLIC, span, message);
     }
 
-    /// The least visible module record or enum that `ty` mentions.
+    /// The least visible module record or enum that `ty` mentions, the first one written of
+    /// those equally visible, which is the first private one if there is one. A shared part is looked at once, so a type that repeats a part
+    /// costs what its source does (issue #18).
     fn least_visible(&self, ty: &Ty) -> Option<(AdtId, Visibility)> {
-        let Ty::Adt(id, args) = ty else { return None };
-        let own = self.adts.iter().find(|adt| adt.id == *id).map(|adt| (*id, adt.vis));
-        let inner = args.iter().filter_map(|arg| self.least_visible(arg));
-        own.into_iter().chain(inner).min_by_key(|&(_, vis)| reach(vis))
+        let mut least: Option<(AdtId, Visibility)> = None;
+        let mut seen = HashSet::new();
+        let mut work = vec![ty];
+        while let Some(ty) = work.pop() {
+            if let Ty::Adt(id, _) = ty
+                && let Some(&vis) = self.adt_vis.get(id)
+                && least.is_none_or(|(_, least)| reach(vis) < reach(least))
+            {
+                least = Some((*id, vis));
+                if reach(vis) == 0 {
+                    break;
+                }
+            }
+            if let Some(parts) = ty.parts()
+                && seen.insert(Arc::as_ptr(parts) as *const Ty as usize)
+            {
+                work.extend(parts.iter().rev());
+            }
+        }
+        least
     }
 
     /// Declares the module's interfaces, whose methods are resolved once every type has a
@@ -1916,6 +2019,7 @@ impl Checker<'_> {
                 }
                 self.poisoned.insert(decl.name.sym);
             } else if self.adt_names.contains_key(&decl.name.sym)
+                || self.aliases.contains_key(&decl.name.sym)
                 || self.imports.contains_key(&decl.name.sym)
                 || self.iface_names.contains_key(&decl.name.sym)
             {
@@ -2081,9 +2185,7 @@ impl Checker<'_> {
                         self.error(
                             codes::NOT_DERIVABLE,
                             name.span,
-                            format!(
-                                "`{text}` can't be derived; the derivable interfaces are `Eq`, `Ord`, `Hash` and `Show`"
-                            ),
+                            format!("`{text}` can't be derived; the derivable interfaces are {}", derivable(distinct)),
                         );
                     }
                     None if self.iface_names.contains_key(&name.sym) => {
@@ -2101,7 +2203,7 @@ impl Checker<'_> {
                         self.error(
                             codes::UNKNOWN_TYPE,
                             name.span,
-                            format!("unknown interface `{text}`; the derivable interfaces are `Eq`, `Ord`, `Hash` and `Show`"),
+                            format!("unknown interface `{text}`; the derivable interfaces are {}", derivable(distinct)),
                         );
                     }
                 }
@@ -3432,7 +3534,9 @@ impl Checker<'_> {
         let errors = self.pop_marker();
         let span = self.span(call);
         let hole = self.met_hole(&errors);
-        let err = self.one_error(errors, span, what, &format!("{what} expects one error type"));
+        // "the calls this example marks", but "an example expects".
+        let noun = what.strip_prefix("an ").unwrap_or(what);
+        let err = self.one_error(errors, span, noun, &format!("{what} expects one error type"));
         match expect {
             Expectation::Equals(value) => {
                 // A call that was rejected has nothing to compare with (§15.1).
@@ -6167,11 +6271,18 @@ impl Checker<'_> {
             self.rejected_args(args);
             return;
         };
-        if let Some(label) = arg.label {
-            let message = format!("the value `{callee}` converts takes no label");
+        // STD.md names the one parameter `value`, so its label is optional (H3).
+        if let Some(label) = arg.label
+            && self.m.text(label.sym) != "value"
+        {
+            let message = format!("`{callee}`'s one parameter is `value`, so its label is `value:` or none");
             self.error(codes::WRONG_LABEL, label.span, message);
             self.rejected_value(arg.value);
             return;
+        }
+        if arg.inout {
+            let message = format!("`{callee}` reads its value, so its argument takes no `&`");
+            self.error(codes::INOUT_MARKER_MISMATCH, self.span(arg.value), message);
         }
         let ty = self.infer(arg.value);
         let ty = self.force(&ty);
@@ -8080,6 +8191,16 @@ fn builtin_type(name: &str) -> Option<Ty> {
 }
 
 /// How far an item's visibility reaches, so that a wider one is greater.
+/// The interfaces a record or enum derives, or with `distinct`, a distinct type (REFERENCE
+/// §4.4, §4.6).
+fn derivable(distinct: bool) -> &'static str {
+    if distinct {
+        "`Eq`, `Ord`, `Hash` and `Show`, and on a distinct type `Add`, `Sub`, `Mul`, `Div` and `Neg`"
+    } else {
+        "`Eq`, `Ord`, `Hash` and `Show`"
+    }
+}
+
 fn reach(vis: Visibility) -> u8 {
     match vis {
         Visibility::Private => 0,
