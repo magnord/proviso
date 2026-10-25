@@ -12,7 +12,8 @@
 // consumed may take a new one, and an element popped from a list is owned (Q35). Records
 // that hold each other have no values, so checking one ends. A record consumed whole on one
 // path and field by field on the other is consumed after both. A value built of parts that
-// hold no resource, such as `(1, None)` or `[]`, bound by `let`, has nothing to consume. Every resource implements
+// hold no resource, such as `(1, None)` or `[]`, bound by `let`, has nothing to consume, and
+// nor has a `var` that a pattern binds to such a variant. Every resource implements
 // `Abandon`, so an aggregate's `abandon` consumes it by abandoning what it holds (§10).
 use std.io { Out, IoError }
 
@@ -271,6 +272,8 @@ fn empties() {
     let nothing: Map[Text, Probe] = [:]
     let _ = Spare(probe: None)
     let _: List[Probe] = []
+    var (first, second): (Option[Probe], Option[Probe]) = (None, None)
+    var Spare(probe: spared) = Spare(probe: None)
     var cleared: List[Probe] = []
     for probe in take cleared {
         probe.close()

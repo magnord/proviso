@@ -552,6 +552,48 @@ impl Walk<'_> {
         }
     }
 
+    /// The locals of `pat` whose part of `init`, when the pattern follows its construction,
+    /// holds no resource and can't get one in place: for a `var`, a variant without one, and
+    /// for a `let`, any value without one.
+    fn empty_bindings(&self, pat: PatId, init: Option<ExprId>, out: &mut Vec<LocalId>) {
+        let Some(init) = init else { return };
+        match &self.m.pats[pat].kind {
+            PatKind::Bind(_) => {
+                let Some(&local) = self.p.pat_local.get(pat) else { return };
+                let empty = if self.locals[local.index()].mutable {
+                    !self.may_hold_later(init)
+                } else {
+                    !self.holds_resource(init)
+                };
+                if empty && !out.contains(&local) {
+                    out.push(local);
+                }
+            }
+            PatKind::Tuple(parts) => {
+                if let ExprKind::Tuple(values) = &self.m.exprs[init].kind {
+                    for (&part, &value) in parts.iter().zip(values) {
+                        self.empty_bindings(part, Some(value), out);
+                    }
+                }
+            }
+            PatKind::Ctor { fields, .. } => {
+                let (Some(ctor), ExprKind::Call { callee, args, .. }) =
+                    (self.p.pat_ctor.get(pat), &self.m.exprs[init].kind)
+                else {
+                    return;
+                };
+                if !matches!(self.p.res(*callee), Some(Res::Ctor(adt, v)) if adt == ctor.adt && v == ctor.variant) {
+                    return;
+                }
+                // Labels follow the declaration order, so argument `i` is field `i`.
+                for (field, idx) in fields.iter().flatten().zip(ctor.fields.iter()) {
+                    self.empty_bindings(field.pat, args.get(idx.index()).map(|arg| arg.value), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Whether `local`'s `path`, of type `ty`, holds no resource on every path here: it is
     /// released, or it is a record or tuple whose parts all are. A base resource holds itself,
     /// apart from the `self` of its own `take self` method (OPEN_QUESTIONS Q35).
@@ -1140,18 +1182,19 @@ impl Walk<'_> {
                     self.report(codes::RESOURCE_DISCARDED, m.pats[*pat].span, message.to_string());
                 }
                 self.matched(*init, *pat);
-                // A value that holds no resource, such as `None`, has nothing to consume. One a
-                // `var` may fill in place later counts only when it is a variant.
-                let excused = self.refused.contains(init) || self.tainted(*init);
-                let (empty, empty_for_var) = (!self.holds_resource(*init), !self.may_hold_later(*init));
-                let mut locals = Vec::new();
-                self.pattern_locals(*pat, &mut locals);
-                let mutable: Vec<bool> = locals.iter().map(|l| self.locals[l.index()].mutable).collect();
+                // A value that holds no resource, such as `None`, has nothing to consume.
+                let mut empty = Vec::new();
+                if self.refused.contains(init) || self.tainted(*init) || !self.holds_resource(*init) {
+                    self.pattern_locals(*pat, &mut empty);
+                    // A `var` may get a resource in place later, so it is released only when
+                    // the part it binds is a variant (OPEN_QUESTIONS P5).
+                    let tainted = self.refused.contains(init) || self.tainted(*init);
+                    empty.retain(|l| tainted || !self.locals[l.index()].mutable);
+                }
+                self.empty_bindings(*pat, Some(*init), &mut empty);
                 if let Some(state) = &mut self.state {
-                    for (local, mutable) in locals.into_iter().zip(mutable) {
-                        if excused || if mutable { empty_for_var } else { empty } {
-                            state.release(local, Vec::new());
-                        }
+                    for local in empty {
+                        state.release(local, Vec::new());
                     }
                 }
             }
