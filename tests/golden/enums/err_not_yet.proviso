@@ -1,6 +1,6 @@
 // phase: 2.2
 // expect-error: E0901
-// `cmp` comes in a later slice of phase 2, and units of measure after v1. Uses of what they declare aren't reported again (REFERENCE §15.1).
+// Units of measure come after v1. Uses of what they declare aren't reported again (REFERENCE §15.1).
 enum Ranked derives(Eq, Ord) {
     Low
     High
@@ -8,7 +8,7 @@ enum Ranked derives(Eq, Ord) {
 
 fn later(r: Ranked) -> Int {
     let b = r < Ranked.High
-    let d = r.cmp(Ranked.High)                      // <- E0901
+    let d = r.cmp(Ranked.High)
     let e = 0
     let h = match 2.5 {
         0.0[m]..1.0[m] => 1                         // <- E0901

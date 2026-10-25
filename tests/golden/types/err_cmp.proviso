@@ -1,0 +1,53 @@
+// phase: 2.11
+// expect-error: E0208
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0309
+// expect-error: E0311
+// expect-error: E0313
+// expect-error: E0314
+// `Float` has no `Ord`, so no `cmp` (REFERENCE §12.2), and nor has a type that doesn't
+// implement it. A hand-written `cmp` repeats `Ord`'s declaration (§4.9), and a type can't
+// both derive `Ord` and implement it. A `match` on `Ordering` covers its three variants.
+record Plain {
+    n: Int
+}
+
+record Twice derives(Ord) {
+    n: Int
+}
+
+impl Ord for Twice {                                // <- E0313
+    fn cmp(self, other: Self) -> Ordering {
+        return Ordering.Equal
+    }
+}
+
+record Wrong {
+    n: Int
+}
+
+impl Ord for Wrong {
+    fn cmp(self, other: Int) -> Ordering {          // <- E0314
+        return Ordering.Equal
+    }
+}
+
+fn floats(x: Float) -> Ordering {
+    return x.cmp(1.0)                               // <- E0303
+}
+
+fn plain(p: Plain) -> Ordering {
+    let q = Ord.cmp(p, p)                           // <- E0309
+    return p.cmp(p)                                 // <- E0303
+}
+
+fn shapes(a: Int, b: Text) -> Ordering {
+    let c = a.cmp(b)                                // <- E0301
+    let d = a.cmp()                                 // <- E0208
+    let e = Ordering.Lesser                         // <- E0303
+    return match a.cmp(1) {                         // <- E0311
+        Ordering.Less => Ordering.Greater
+        Ordering.Equal => Ordering.Equal
+    }
+}

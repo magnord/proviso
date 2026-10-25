@@ -1,6 +1,6 @@
 // phase: 2.4
 // expect-error: E0901
-// A hand-written `Ord` or `Hash`, `cmp`, interface functions without `self`, generic
+// A hand-written `Hash`, interface functions without `self`, generic
 // interface methods, generic interfaces such as `Index[Int]`, tag parameters, and `Self` in
 // expressions and patterns come later. So do implementations for `Never` and for capability
 // types such as `Out`, capability interfaces in an `impl`, a constraint or a call, and calls
@@ -106,7 +106,7 @@ impl Size for Counter {
     }
 }
 
-impl Ord for Counter {                              // <- E0901
+impl Ord for Counter {
     fn cmp(self, other: Self) -> Ordering {
         return Ordering.Less
     }
@@ -120,7 +120,7 @@ fn calls(c: Counter) -> Int {
     d.bump()
     let e = c.close() + Counter.fresh().n + c.size()
     let f = c < c
-    let g = c.n.cmp(2)                              // <- E0901
+    let g = c.n.cmp(2)
     let i = c.get(i: 0) + first(x: c) + scaled(x: 1) + id(x: 2)
     let j = c.empty() or c.zeroed()
     return e

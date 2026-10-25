@@ -1,0 +1,5 @@
+testing/tests.proviso:32:1: example passed
+testing/tests.proviso:34:1: test "scores parse and order" passed
+testing/tests.proviso:48:1: test "generic values, closures and moves" passed
+testing/tests.proviso:60:1: example passed
+2 examples and 2 tests: 4 passed, 0 failed

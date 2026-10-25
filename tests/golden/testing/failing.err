@@ -1,0 +1,7 @@
+[debug testing/failing.proviso:69:5] "before"
+defect[index_out_of_bounds]: index 3 is out of bounds for a list of length 1
+  at testing/failing.proviso:71:12 (failing."a defect"+4)
+defect[fuel_exhausted]: the test took more than 1000000 steps
+  at testing/failing.proviso:39:5 (failing.forever+3)
+  called from testing/failing.proviso:75:12 (failing."out of fuel"+2)
+[debug testing/failing.proviso:33:9] "abandon 1"

@@ -1,0 +1,12 @@
+UserId(7) 7 false true UserId(9) UserId(8)
+Some("b") None
+Meters(5.5) Meters(-6.0) Meters(2.75)
+Score(7) Score(-7) true
+Tags(["x", "y"]) 2 <l>
+[UserId(1), UserId(2)] Pair(first: UserId(3), second: <p>) UserId(9)
+seven
+Total(Score(-5))
+1
+close g
+guarded h
+abandon h

@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use proviso_check::decls::{AdtId, Decls, FieldIdx, IfaceId, ImplKey, VariantIdx};
 use proviso_check::types::{FloatTy, IntTy, Ty};
-use proviso_check::{Builtin, ExampleInfo, FnId, LocalId, Program, Res};
+use proviso_check::{Builtin, ExampleInfo, FnId, LocalId, Num, Program, Res};
 use proviso_syntax::ast::*;
 use proviso_syntax::source::{SourceFile, Span};
 
@@ -440,11 +440,15 @@ pub enum Outcome {
     Defect(Defect),
 }
 
-/// How an example came out (REFERENCE §14).
+/// How an example or a test came out (REFERENCE §14).
 pub enum ExampleOutcome {
     Passed,
-    /// It ran, but not as it says; this tells how.
-    Failed(String),
+    /// It ran, but not as it says: `why` tells how, and `at` is the `expect` of a test that
+    /// didn't hold.
+    Failed {
+        why: String,
+        at: Option<Span>,
+    },
     Defect(Defect),
 }
 
@@ -460,19 +464,22 @@ pub fn run_main(
     on_interp_thread(file, m, p, stdout, stderr, |interp| interp.main())
 }
 
-/// Runs each example in declaration order, each with [`EXAMPLE_FUEL`]. `report` gets how each
-/// came out as soon as it has run, with the output streams, so a result is written next to the
-/// example's `debug` output. `debug` output goes to `stderr`.
+/// Runs each example, and each test when `tests` is set, in declaration order, each with
+/// [`EXAMPLE_FUEL`]. `report` gets how each came out as soon as it has run, with the output
+/// streams, so a result is written next to its `debug` output. `debug` output goes to
+/// `stderr`.
 pub fn run_examples(
     file: &SourceFile,
     m: &Module,
     p: &Program,
+    tests: bool,
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
     mut report: impl FnMut(&ExampleInfo, ExampleOutcome, &mut dyn Write, &mut dyn Write) + Send,
 ) -> std::thread::Result<()> {
     on_interp_thread(file, m, p, stdout, stderr, |interp| {
-        for info in &p.examples {
+        let run = |info: &&ExampleInfo| tests || matches!(m.items[info.item].kind, ItemKind::Example(_));
+        for info in p.examples.iter().filter(run) {
             let outcome = interp.example(info);
             report(info, outcome, &mut *interp.stdout, &mut *interp.stderr);
         }
@@ -503,6 +510,7 @@ fn on_interp_thread<'a, R: Send>(
                     depth: 0,
                     stack_limit,
                     fuel: None,
+                    fueled: "example",
                     generations: 0,
                     pools: 0,
                     owned: Vec::new(),
@@ -534,6 +542,8 @@ enum Unwind {
     /// that one catches it, so a failure from anywhere else, such as a `try` in an argument,
     /// passes it by (REFERENCE §7.2).
     Attempted(ExprId, Value),
+    /// An `expect` that didn't hold, which ends its test: why, and where it is (REFERENCE §14).
+    Expected(String, Span),
     Defect(Defect),
 }
 
@@ -564,8 +574,10 @@ struct Interp<'a> {
     depth: usize,
     /// The lowest stack address the interpreter may reach.
     stack_limit: usize,
-    /// The steps an example has left, or `None` outside one.
+    /// The steps an example or a test has left, or `None` outside one.
     fuel: Option<u64>,
+    /// What the fuel is for, "example" or "test", which a defect names.
+    fueled: &'static str,
     /// The last generation a pool's insert took. One counter serves every pool for the whole
     /// run, and a failed call never rolls it back, so no two handles ever share one
     /// (REFERENCE §5.5).
@@ -625,8 +637,14 @@ impl Interp<'_> {
                 defect.callers.pop();
                 Outcome::Defect(defect)
             }
-            Err(Unwind::Return(_) | Unwind::Break(_) | Unwind::Continue(_) | Unwind::Attempted(..)) => {
-                unreachable!("returns, jumps and attempted failures do not escape a function")
+            Err(
+                Unwind::Return(_)
+                | Unwind::Break(_)
+                | Unwind::Continue(_)
+                | Unwind::Attempted(..)
+                | Unwind::Expected(..),
+            ) => {
+                unreachable!("returns, jumps, attempted failures and `expect`s do not escape a function")
             }
         }
     }
@@ -644,12 +662,23 @@ impl Interp<'_> {
         Ok(())
     }
 
-    /// Runs one example and tells how it came out.
+    /// Runs one example or test and tells how it came out. A test's failed `expect` is a
+    /// failure exit, which abandons the resources it holds (REFERENCE §10).
     fn example(&mut self, info: &ExampleInfo) -> ExampleOutcome {
-        let ItemKind::Example(decl) = &self.m.items[info.item].kind else { unreachable!("examples are items") };
         let mut frame: Frame = vec![Value::Unit; info.locals];
         (self.fuel, self.depth, self.base) = (Some(EXAMPLE_FUEL), 0, 0);
-        let outcome = match self.expect(decl, &mut frame) {
+        let result = match &self.m.items[info.item].kind {
+            ItemKind::Example(decl) => {
+                self.fueled = "example";
+                self.expect(decl.call, &decl.expect, &mut frame).map(|why| why.map(|why| (why, None)))
+            }
+            ItemKind::Test(decl) => {
+                self.fueled = "test";
+                self.block(&decl.body, &mut frame).map(|_| None)
+            }
+            _ => unreachable!("examples and tests are items"),
+        };
+        let outcome = match result {
             Err(unwind) => Err(self.abandon_owned(0, &mut frame, unwind)),
             ok => {
                 self.owned.clear();
@@ -659,22 +688,24 @@ impl Interp<'_> {
         self.fuel = None;
         match outcome {
             Ok(None) => ExampleOutcome::Passed,
-            Ok(Some(message)) => ExampleOutcome::Failed(message),
+            Ok(Some((why, at))) => ExampleOutcome::Failed { why, at },
+            Err(Unwind::Expected(why, at)) => ExampleOutcome::Failed { why, at: Some(at) },
             Err(Unwind::Defect(defect)) => ExampleOutcome::Defect(defect),
-            Err(_) => unreachable!("an example neither returns nor fails"),
+            Err(_) => unreachable!("an example or a test neither returns nor fails"),
         }
     }
 
-    /// Runs an example's call and compares the outcome with what it expects: `None` when they
-    /// agree, or else what differs. Values are written as `debug` writes them.
-    fn expect(&mut self, decl: &ExampleDecl, frame: &mut Frame) -> Flow<Option<String>> {
+    /// Runs the call of an example or an `expect` and compares the outcome with what it
+    /// expects: `None` when they agree, or else what differs. Values are written as `debug`
+    /// writes them.
+    fn expect(&mut self, call: ExprId, expect: &Expectation, frame: &mut Frame) -> Flow<Option<String>> {
         let decls = &self.p.decls;
-        let outcome = match self.expr(decl.call, frame) {
+        let outcome = match self.expr(call, frame) {
             Ok(value) => Ok(value),
-            Err(Unwind::Attempted(handler, error)) if handler == decl.call => Err(error),
+            Err(Unwind::Attempted(handler, error)) if handler == call => Err(error),
             Err(other) => return Err(other),
         };
-        Ok(match (&decl.expect, outcome) {
+        Ok(match (expect, outcome) {
             (Expectation::Equals(x), outcome) => {
                 let expected = self.expr(*x, frame)?;
                 match outcome {
@@ -712,7 +743,8 @@ impl Interp<'_> {
     fn step(&mut self, span: Span) -> Flow<()> {
         match &mut self.fuel {
             Some(0) => {
-                Err(defect(DefectKind::FuelExhausted, format!("the example took more than {EXAMPLE_FUEL} steps"), span))
+                let message = format!("the {} took more than {EXAMPLE_FUEL} steps", self.fueled);
+                Err(defect(DefectKind::FuelExhausted, message, span))
             }
             Some(fuel) => {
                 *fuel -= 1;
@@ -924,7 +956,10 @@ impl Interp<'_> {
             let Some(f) = f else { return false };
             let info = &p.fns[f];
             match i {
-                None => info.receiver.as_ref().is_some_and(|ty| p.decls.is_resource(ty)),
+                None => {
+                    info.self_mode == ParamMode::InoutPartial
+                        || info.receiver.as_ref().is_some_and(|ty| p.decls.is_resource(ty))
+                }
                 Some(i) => {
                     let param = &info.params[i];
                     param.mode == ParamMode::InoutPartial || p.decls.is_resource(&param.ty)
@@ -969,7 +1004,7 @@ impl Interp<'_> {
     fn shape(&self, f: FnId) -> Shape {
         let info = &self.p.fns[f];
         Shape {
-            inout_self: info.self_mode == ParamMode::Inout,
+            inout_self: matches!(info.self_mode, ParamMode::Inout | ParamMode::InoutPartial),
             can_fail: info.fails.is_some(),
             f: Some(f),
             method: None,
@@ -1199,6 +1234,16 @@ impl Interp<'_> {
                 self.take_parts(*init, *pat, frame);
                 self.own_bindings(*pat);
             }
+            StmtKind::Expect { value, expect } => {
+                let why = match expect {
+                    Some(expect) => self.expect(*value, expect, frame)?,
+                    None if self.bool(*value, frame)? => None,
+                    None => Some(format!("`{}` is false", self.file.slice(m.exprs[*value].span))),
+                };
+                if let Some(why) = why {
+                    return Err(Unwind::Expected(why, stmt.span));
+                }
+            }
             StmtKind::Check { cond, fallback } => {
                 if !self.bool(*cond, frame)? {
                     // The checker proved that the fallback leaves.
@@ -1415,7 +1460,9 @@ impl Interp<'_> {
                 Some(Res::Fn(f)) => Value::Fn(FnValue::Named(f)),
                 other => unreachable!("names evaluate to locals, not {other:?}"),
             },
-            ExprKind::Call { callee, args, .. } if !matches!(self.p.res(*callee), Some(Res::Fn(_) | Res::Ctor(..))) => {
+            ExprKind::Call { callee, args, .. }
+                if !matches!(self.p.res(*callee), Some(Res::Fn(_) | Res::Ctor(..) | Res::Method(_))) =>
+            {
                 let Value::Fn(f) = self.expr(*callee, frame)? else {
                     unreachable!("the checker found a function type")
                 };
@@ -1444,6 +1491,11 @@ impl Interp<'_> {
                         let result = self.call_back(Callee::Fn(f), values, &places, frame, span);
                         return self.attempted(e, result);
                     }
+                    // `T(x)` converts its one value (STD.md).
+                    Some(Res::Method(builtin)) => {
+                        self.owned.truncate(mark);
+                        self.builtin(builtin, values, span)?
+                    }
                     // Labels follow the declaration order, so argument `i` is field `i`.
                     Some(Res::Ctor(def, variant)) => {
                         let value = Value::Adt(Adt { def, variant, fields: values.into() });
@@ -1468,7 +1520,13 @@ impl Interp<'_> {
                 let named = match res {
                     Res::Ctor(..)
                     | Res::Dispatch { qualified: true, .. }
-                    | Res::Method(Builtin::Parse(_) | Builtin::PoolNew) => true,
+                    | Res::Method(
+                        Builtin::Parse(_)
+                        | Builtin::PoolNew
+                        | Builtin::TryFrom(_)
+                        | Builtin::WrappingFrom(_)
+                        | Builtin::Convert(_),
+                    ) => true,
                     Res::Fn(f) => self.p.fns[f].receiver.is_none(),
                     _ => false,
                 };
@@ -1514,7 +1572,7 @@ impl Interp<'_> {
                     }
                     Res::Dispatch { iface, method, .. } => {
                         let result = match iface {
-                            IfaceId::SHOW | IfaceId::EQ => self.dispatch(iface, method, values, span),
+                            IfaceId::SHOW | IfaceId::EQ | IfaceId::ORD => self.dispatch(iface, method, values, span),
                             IfaceId::ABANDON if !matches!(&values[0], Value::Adt(adt) if self.p.decls.adt(adt.def).resource_base) => {
                                 self.dispatch(iface, method, values, span)
                             }
@@ -1577,22 +1635,8 @@ impl Interp<'_> {
                     // The checker treats `-128` as one literal, so it never overflows here.
                     return Ok(Value::Int(-(value as i128), self.int_ty(e)));
                 }
-                match self.expr(*operand, frame)? {
-                    Value::Int(x, it) => {
-                        let negated = -x;
-                        if !it.contains(negated) {
-                            return Err(defect(
-                                DefectKind::IntegerOverflow,
-                                format!("`{}` negation overflowed", it.name()),
-                                span,
-                            ));
-                        }
-                        Value::Int(negated, it)
-                    }
-                    Value::F64(x) => Value::F64(-x),
-                    Value::F32(x) => Value::F32(-x),
-                    other => unreachable!("cannot negate {other:?}"),
-                }
+                let value = self.expr(*operand, frame)?;
+                return self.negate(value, span);
             }
             ExprKind::Binary { op: BinOp::And, lhs, rhs } => {
                 Value::Bool(self.bool(*lhs, frame)? && self.bool(*rhs, frame)?)
@@ -1607,7 +1651,7 @@ impl Interp<'_> {
                     _ if op.is_arithmetic() => return self.arithmetic(*op, a, b, span),
                     BinOp::Eq => Value::Bool(self.equal(&a, &b, span)?),
                     BinOp::Ne => Value::Bool(!self.equal(&a, &b, span)?),
-                    _ => Value::Bool(compare(*op, &a, &b)),
+                    _ => Value::Bool(holds(*op, self.ordering(&a, &b, span)?)),
                 }
             }
             ExprKind::Range { .. } => unreachable!("ranges appear only in `for` loops"),
@@ -2031,7 +2075,41 @@ impl Interp<'_> {
                 BinOp::Div => x / y,
                 _ => unreachable!("floats have no `{}`", op.symbol()),
             }),
+            // A distinct type's operator works on the values it wraps, and the result is
+            // checked against its refinement (REFERENCE §4.6; OPEN_QUESTIONS P5).
+            (Value::Adt(a), Value::Adt(b)) => {
+                let value = self.arithmetic(op, a.fields[0].clone(), b.fields[0].clone(), span)?;
+                let wrapped = Value::Adt(Adt { def: a.def, variant: a.variant, fields: Arc::from([value]) });
+                self.refine(&wrapped, span)?;
+                wrapped
+            }
             (a, b) => unreachable!("no arithmetic on {a:?} and {b:?}"),
+        })
+    }
+
+    /// Unary `-`.
+    fn negate(&mut self, value: Value, span: Span) -> Flow<Value> {
+        Ok(match value {
+            Value::Int(x, it) => {
+                let negated = -x;
+                if !it.contains(negated) {
+                    return Err(defect(
+                        DefectKind::IntegerOverflow,
+                        format!("`{}` negation overflowed", it.name()),
+                        span,
+                    ));
+                }
+                Value::Int(negated, it)
+            }
+            Value::F64(x) => Value::F64(-x),
+            Value::F32(x) => Value::F32(-x),
+            Value::Adt(a) => {
+                let value = self.negate(a.fields[0].clone(), span)?;
+                let wrapped = Value::Adt(Adt { def: a.def, variant: a.variant, fields: Arc::from([value]) });
+                self.refine(&wrapped, span)?;
+                wrapped
+            }
+            other => unreachable!("cannot negate {other:?}"),
         })
     }
 
@@ -2104,6 +2182,40 @@ impl Interp<'_> {
                     return Err(Unwind::Fail(Value::Adt(error)));
                 }
             },
+            // A conversion that keeps every value, or an integer to the nearest float, ties
+            // to even, as Rust's `as` rounds it (STD.md).
+            (Builtin::Convert(Num::Int(it)), [Value::Int(x, _)]) => Value::Int(*x, it),
+            (Builtin::Convert(Num::Float(FloatTy::F64)), [Value::Int(x, _)]) => Value::F64(*x as f64),
+            (Builtin::Convert(Num::Float(FloatTy::F64)), [Value::F32(x)]) => Value::F64(f64::from(*x)),
+            (Builtin::Convert(Num::Float(FloatTy::F32)), [Value::Int(x, _)]) => Value::F32(*x as f32),
+            (Builtin::Convert(Num::Float(_)), [value @ (Value::F64(_) | Value::F32(_))]) => value.clone(),
+            (Builtin::TryFrom(it), [Value::Int(x, _)]) if it.contains(*x) => Value::Int(*x, it),
+            (Builtin::TryFrom(_), [Value::Int(..)]) => return Err(conversion_error(CONVERSION_OUT_OF_RANGE)),
+            (Builtin::WrappingFrom(it), [Value::Int(x, _)]) => Value::Int(wrap(*x, it), it),
+            (Builtin::ToInt, [x, Value::Adt(rounding)]) => {
+                let x = match x {
+                    Value::F64(x) => *x,
+                    Value::F32(x) => f64::from(*x),
+                    other => unreachable!("`to_int` rounds a float, not {other:?}"),
+                };
+                if x.is_nan() {
+                    return Err(conversion_error(CONVERSION_NOT_A_NUMBER));
+                }
+                // As `Rounding` declares its variants (STD.md).
+                let rounded = match rounding.variant.index() {
+                    0 => x.trunc(),
+                    1 => x.floor(),
+                    2 => x.ceil(),
+                    3 => x.round_ties_even(),
+                    _ => x.round(),
+                };
+                // `Int` holds -2^63 up to 2^63 - 1, and both bounds are exact as floats.
+                let bound = 2f64.powi(63);
+                if !(-bound..bound).contains(&rounded) {
+                    return Err(conversion_error(CONVERSION_OUT_OF_RANGE));
+                }
+                Value::Int(rounded as i128, IntTy::I64)
+            }
             (builtin, values) => unreachable!("{builtin:?} does not apply to {values:?}"),
         })
     }
@@ -2192,6 +2304,10 @@ impl Interp<'_> {
         match (iface, values.as_slice()) {
             (IfaceId::SHOW, [value]) => Ok(Value::Text(self.show(value, site)?.into())),
             (IfaceId::EQ, [a, b]) => Ok(Value::Bool(self.equal(a, b, site)?)),
+            // Only a type that implements `Ord` has `cmp`, and a float doesn't (Q22).
+            (IfaceId::ORD, [a, b]) => {
+                Ok(ordering_value(self.ordering(a, b, site)?.expect("values of an `Ord` type are ordered")))
+            }
             // Every resource implements `Abandon`, and an aggregate abandons what it holds
             // (REFERENCE §10 rule 4).
             (IfaceId::ABANDON, [value]) if !matches!(value, Value::Adt(adt) if self.p.decls.adt(adt.def).resource_base) =>
@@ -2220,6 +2336,24 @@ impl Interp<'_> {
             match self.call(f, vec![value.clone()], site)? {
                 Value::Text(text) => Ok(Some(text)),
                 other => unreachable!("`show` returns Text, not {other:?}"),
+            }
+        })
+    }
+
+    /// How `a` and `b` are ordered, as `<` and `cmp` order them. A record or enum whose type
+    /// implements `Ord` by hand is ordered by its `cmp`, also inside a value whose `Ord` is
+    /// derived (OPEN_QUESTIONS P5). A defect in it is traced to `site`.
+    fn ordering(&mut self, a: &Value, b: &Value, site: Span) -> Flow<Option<Ordering>> {
+        let p = self.p;
+        order_with(a, b, &mut |a, b| {
+            let Some(f) = hand_written(a, IfaceId::ORD, &p.decls) else { return Ok(None) };
+            match self.call(f, vec![a.clone(), b.clone()], site)? {
+                Value::Adt(adt) if adt.def == AdtId::ORDERING => Ok(Some(match adt.variant.index() {
+                    0 => Ordering::Less,
+                    1 => Ordering::Equal,
+                    _ => Ordering::Greater,
+                })),
+                other => unreachable!("`cmp` returns an Ordering, not {other:?}"),
             }
         })
     }
@@ -2279,6 +2413,21 @@ const PARSE_OUT_OF_RANGE: VariantIdx = VariantIdx::new(2);
 /// `parse` on integer type `it`: an optional `+` or `-`, then one or more ASCII digits
 /// (STD.md). Text of that form whose value doesn't fit is out of range; any other text is
 /// invalid, so the form is checked first (OPEN_QUESTIONS P5).
+/// `std.num`'s `ConversionError.OutOfRange` and `NotANumber`, as STD.md declares them.
+const CONVERSION_OUT_OF_RANGE: VariantIdx = VariantIdx::new(0);
+const CONVERSION_NOT_A_NUMBER: VariantIdx = VariantIdx::new(1);
+
+/// A failure with `std.num`'s `ConversionError` variant `variant`.
+fn conversion_error(variant: VariantIdx) -> Unwind {
+    Unwind::Fail(Value::Adt(Adt { def: AdtId::CONVERSION_ERROR, variant, fields: Arc::from([]) }))
+}
+
+/// The value of `it` with the low bits of `x`, as two's complement keeps them.
+fn wrap(x: i128, it: IntTy) -> i128 {
+    let span = it.max() - it.min() + 1;
+    (x - it.min()).rem_euclid(span) + it.min()
+}
+
 fn parse_int(text: &str, it: IntTy) -> Result<i128, VariantIdx> {
     if text.is_empty() {
         return Err(PARSE_EMPTY);
@@ -2453,7 +2602,11 @@ fn int_arithmetic(op: BinOp, x: i128, y: i128, it: IntTy) -> Result<i128, (Defec
 /// Ordering of two values of the same type, as `Ord` gives it. Floats follow IEEE, so NaN is
 /// unordered with everything; text compares by code point, which UTF-8 byte order preserves.
 fn compare(op: BinOp, a: &Value, b: &Value) -> bool {
-    let ordering = order(a, b);
+    holds(op, order(a, b))
+}
+
+/// Whether comparison `op` holds of two values in `ordering`, where `None` is unordered.
+fn holds(op: BinOp, ordering: Option<Ordering>) -> bool {
     match op {
         BinOp::Lt => ordering == Some(Ordering::Less),
         BinOp::Le => matches!(ordering, Some(Ordering::Less | Ordering::Equal)),
@@ -2463,12 +2616,25 @@ fn compare(op: BinOp, a: &Value, b: &Value) -> bool {
     }
 }
 
-/// The derived `Ord` orders a record or enum by variant in declaration order, then field by
-/// field in declaration order (STD.md). Lists and tuples are ordered element by element from
-/// the left, so a prefix comes first, and maps by their entries sorted by key (OPEN_QUESTIONS
-/// P5). No `Ord` is written by hand yet, so this is every ordering. Like [`equal`], it keeps
-/// what is still to compare in a list of its own, so no value is too deep for the native stack.
+/// [`order_with`] for values with no `Ord` written by hand.
 fn order(a: &Value, b: &Value) -> Option<Ordering> {
+    match order_with(a, b, &mut |_, _| Ok::<_, Infallible>(None)) {
+        Ok(ordering) => ordering,
+        Err(never) => match never {},
+    }
+}
+
+/// Decides the order of a pair of records or enums whose `cmp` is written by hand, and `None`
+/// for any other pair.
+type HandWrittenOrd<'a, E> = dyn FnMut(&Value, &Value) -> Result<Option<Ordering>, E> + 'a;
+
+/// The derived `Ord` orders a record or enum by variant in declaration order, then field by
+/// field in declaration order (STD.md), where `hand_written` decides a pair of records or
+/// enums it returns `Some` for. Lists and tuples are ordered element by element from the
+/// left, so a prefix comes first, and maps by their entries sorted by key (OPEN_QUESTIONS
+/// P5). Like [`equal`], it keeps what is still to compare in a list of its own, so no value
+/// is too deep for the native stack.
+fn order_with<E>(a: &Value, b: &Value, hand_written: &mut HandWrittenOrd<'_, E>) -> Result<Option<Ordering>, E> {
     /// What is left to compare, last first.
     enum Work<'v> {
         Pair(&'v Value, &'v Value),
@@ -2488,18 +2654,22 @@ fn order(a: &Value, b: &Value) -> Option<Ordering> {
                 (Value::Char(x), Value::Char(y)) => x.partial_cmp(y),
                 (Value::Text(x), Value::Text(y)) => x.partial_cmp(y),
                 (Value::Unit, Value::Unit) => Some(Ordering::Equal),
-                (Value::Adt(x), Value::Adt(y)) => {
-                    // Pushed in reverse, so the first field is compared first, with all it holds.
-                    work.extend(x.fields.iter().zip(y.fields.iter()).rev().map(|(a, b)| Work::Pair(a, b)));
-                    x.variant.index().partial_cmp(&y.variant.index())
-                }
+                (a @ Value::Adt(x), b @ Value::Adt(y)) => match hand_written(a, b)? {
+                    Some(ordering) => Some(ordering),
+                    None => {
+                        // Pushed in reverse, so the first field is compared first, with all it
+                        // holds.
+                        work.extend(x.fields.iter().zip(y.fields.iter()).rev().map(|(a, b)| Work::Pair(a, b)));
+                        x.variant.index().partial_cmp(&y.variant.index())
+                    }
+                },
                 (Value::List(x), Value::List(y)) => {
                     work.push(Work::Lengths(x.items.len(), y.items.len()));
                     work.extend(x.items.iter().zip(y.items.iter()).rev().map(|(a, b)| Work::Pair(a, b)));
                     Some(Ordering::Equal)
                 }
                 (Value::Map(x), Value::Map(y)) => {
-                    work.push(Work::Entries(sorted_entries(x), sorted_entries(y), 0));
+                    work.push(Work::Entries(sorted_entries(x, hand_written)?, sorted_entries(y, hand_written)?, 0));
                     Some(Ordering::Equal)
                 }
                 (a, b) => unreachable!("cannot order {a:?} and {b:?}"),
@@ -2515,18 +2685,52 @@ fn order(a: &Value, b: &Value) -> Option<Ordering> {
             Work::Entries(xs, ys, _) => xs.len().partial_cmp(&ys.len()),
         };
         if ordering != Some(Ordering::Equal) {
-            return ordering;
+            return Ok(ordering);
         }
     }
-    Some(Ordering::Equal)
+    Ok(Some(Ordering::Equal))
 }
 
-/// A map's entries sorted by key. Its keys implement `Ord` when the map does, and none is a
-/// float, so they are ordered.
-fn sorted_entries(map: &MapValue) -> Vec<(&Value, &Value)> {
+/// The prelude's `Ordering` value for `ordering` (STD.md).
+fn ordering_value(ordering: Ordering) -> Value {
+    let variant = match ordering {
+        Ordering::Less => 0,
+        Ordering::Equal => 1,
+        Ordering::Greater => 2,
+    };
+    Value::Adt(Adt { def: AdtId::ORDERING, variant: VariantIdx::new(variant), fields: Arc::from([]) })
+}
+
+/// A map's entries sorted by key, as the keys' `Ord` orders them, written by hand or not. Its
+/// keys implement `Ord` when the map does, and none is a float, so they are ordered. A `cmp`
+/// written by hand need not be a total order, so this is a merge sort of its own, which keeps
+/// equal keys in insertion order and never panics, as `sort_by` may for such an order.
+fn sorted_entries<'v, E>(
+    map: &'v MapValue,
+    hand_written: &mut HandWrittenOrd<'_, E>,
+) -> Result<Vec<(&'v Value, &'v Value)>, E> {
     let mut entries: Vec<(&Value, &Value)> = map.iter().collect();
-    entries.sort_by(|x, y| order(x.0, y.0).unwrap_or(Ordering::Equal));
-    entries
+    let mut width = 1;
+    while width < entries.len() {
+        let mut merged = Vec::with_capacity(entries.len());
+        for run in entries.chunks(2 * width) {
+            let (mut left, mut right) = run.split_at(width.min(run.len()));
+            while let (Some(&l), Some(&r)) = (left.first(), right.first()) {
+                if order_with(r.0, l.0, hand_written)? == Some(Ordering::Less) {
+                    merged.push(r);
+                    right = &right[1..];
+                } else {
+                    merged.push(l);
+                    left = &left[1..];
+                }
+            }
+            merged.extend_from_slice(left);
+            merged.extend_from_slice(right);
+        }
+        entries = merged;
+        width *= 2;
+    }
+    Ok(entries)
 }
 
 /// `==` as built into scalars and derived for records and enums, which are equal when their
@@ -2731,8 +2935,9 @@ fn write_value<E>(
                 out.push('(');
                 // Pushed in reverse, so they are written in order.
                 parts.push(Part::Text(")"));
-                // `Some(3)` and `Err(e)` are written in literal form, without a label (STD.md).
-                if def.bare_variants {
+                // `Some(3)`, `Err(e)` and `UserId(7)` are written in literal form, without a
+                // label (STD.md, REFERENCE §4.6).
+                if def.bare_variants || def.distinct {
                     parts.push(Part::Value(&adt.fields[0], true));
                     continue;
                 }
@@ -2795,7 +3000,8 @@ fn write_value<E>(
     Ok(out)
 }
 
-fn quote(text: &str, quote: char) -> String {
+/// `text` written as a Proviso literal between `quote`s, with its escapes.
+pub fn quote(text: &str, quote: char) -> String {
     let mut out = String::from(quote);
     for c in text.chars() {
         match c {

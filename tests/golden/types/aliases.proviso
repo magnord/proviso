@@ -1,0 +1,114 @@
+// phase: 2.11
+// An alias is transparent: each use of its name is the type it names, and values of the two
+// mix freely (REFERENCE §4.6). An alias may name a scalar, a record, an enum, a generic type
+// with its type arguments, a tuple, a function type or another alias, declared before or
+// after it. It may stand where its type may: a field, a parameter, a result, an error type,
+// a type argument, a closure's parameter, an `impl`'s target and a `main` parameter. A
+// unique or resource type moves through its alias as it does by itself (OPEN_QUESTIONS P5).
+use std.io { IoError, Out }
+
+type Name = Text
+type Count = Int
+type Point = Coord
+type Names = List[Name]
+type Tally = Map[Name, Count]
+type Pairing = (Name, Count)
+type Step = fn(Count) -> Count
+type Maybe = Option[Count]
+type Outcome2 = Result[Count, Problem]
+type Sys = System
+type Again = Count
+type Bag = Holder
+type Lease = Lock
+
+record Coord derives(Eq, Show) {
+    x: Count
+    y: Again
+}
+
+enum Problem derives(Show) {
+    Bad
+}
+
+unique record Holder {
+    items: Names
+}
+
+resource record Lock {
+    label: Name
+    out: Out
+}
+
+impl Abandon for Lease {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.label}")
+    }
+}
+
+impl Point {
+    fn sum(self) -> Count {
+        return self.x + self.y
+    }
+}
+
+impl Lease {
+    fn close(take self) {
+    }
+}
+
+fn say(out: Out, line: Name) {
+    let _ = attempt out.write_line(line)
+}
+
+fn largest[T: Ord + Copy](a: T, b: T) -> T {
+    if a < b {
+        return b
+    }
+    return a
+}
+
+fn twice(step: Step, n: Count) -> Count {
+    return step(step(n))
+}
+
+fn checked(n: Count) -> Count fails Problem {
+    if n < 0 {
+        fail Problem.Bad
+    }
+    return n
+}
+
+fn pass_on(bag: take Bag) -> Holder {
+    return bag
+}
+
+fn release(lock: take Lease) {
+    say(out: lock.out, line: f"release {lock.label}")
+    lock.close()
+}
+
+pub fn main(sys: keep Sys) fails IoError {
+    let n: Name = "ada"
+    let t: Text = n
+    let c: Count = 3
+    let i: Int = c + 1
+    try sys.stdout.write_line(f"{t} {i} {largest(a: c, b: 7)}")
+    let p: Point = Coord(x: 1, y: 2)
+    let q: Coord = p
+    try sys.stdout.write_line(f"{p == q} {q} {p.sum()}")
+    var names: Names = ["a"]
+    names.push("b")
+    let tally: Tally = ["a": 1]
+    let pair: Pairing = ("z", 26)
+    try sys.stdout.write_line(f"{names} {tally} {pair}")
+    let add = |x: Count| x + 1
+    try sys.stdout.write_line(f"{twice(step: add, n: 1)} {twice(step: |x| x * 10, n: 2)}")
+    let m: Maybe = Some(4)
+    let o: Outcome2 = attempt checked(n: -1)
+    try sys.stdout.write_line(f"{m} {o}")
+    let bag: Bag = Holder(items: names)
+    let moved = pass_on(bag: bag)
+    try sys.stdout.write_line(f"{moved.items.len()}")
+    let lock: Lease = Lock(label: "l", out: sys.stdout)
+    release(lock: lock)
+}

@@ -129,6 +129,32 @@ fn test_runs_examples_without_a_main() {
     assert_eq!(run(&["test", "--json"], &file).status.code(), Some(64));
 }
 
+/// `check --examples` runs the examples once the file checks, but not its tests, which
+/// `test` runs too (REFERENCE §14). Its results go to stdout, so it can't be mixed with
+/// `--json`, and `test` needs no flag to run them.
+#[test]
+fn check_examples_runs_examples_but_not_tests() {
+    let file = source(
+        "check_examples.proviso",
+        "fn double(n: Int) -> Int {\n    return n * 2\n}\n\nexample double(2) == 4\n\ntest \"doubles\" {\n    expect double(3) == 7\n}\n",
+    );
+    let output = run(&["check", "--examples"], &file);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout.ends_with(":5:1: example passed\n1 example: 1 passed, 0 failed\n"), "{stdout}");
+    let output = run(&["test"], &file);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stdout.contains(":8:5: test \"doubles\" failed: expected `7`, found `6`\n"), "{stdout}");
+    assert!(stdout.ends_with("1 example and 1 test: 1 passed, 1 failed\n"), "{stdout}");
+    assert_eq!(run(&["check"], &file).stdout.len(), 0);
+    for args in [&["check", "--examples", "--json"][..], &["test", "--examples"], &["run", "--examples"]] {
+        assert_eq!(run(args, &file).status.code(), Some(64), "{args:?}");
+    }
+    let broken = source("check_examples_broken.proviso", "example double(2) == 4\n");
+    assert_eq!(run(&["check", "--examples"], &broken).status.code(), Some(65));
+}
+
 /// Each example's result is written as soon as it has run, so it sits next to that example's
 /// `debug` output and defect report when both streams go to one place.
 #[test]
@@ -488,4 +514,92 @@ fn copies_of_borrows_name_the_parameter_that_needs_copy() {
     assert_eq!(output.status.code(), Some(65), "{errors}");
     assert_eq!(errors.matches("which needs `U: Copy`").count(), 2, "{errors}");
     assert_eq!(errors.matches("error[").count(), 2, "{errors}");
+}
+
+/// Aliases resolve in an order of their own, without recursing once per alias, so a long
+/// chain declared in either order checks, and a long cycle is reported once (E0322). An
+/// alias deeper than a type may be is reported once, where it is declared, and its uses
+/// aren't reported again (E0905, REFERENCE §15.1).
+#[test]
+fn long_alias_chains_check_once() {
+    let n = 100_000;
+    let chain = |order: &dyn Fn(usize) -> String, target: &dyn Fn(usize) -> String| -> String {
+        let mut lines: Vec<String> = (1..=n).map(|i| format!("type {} = {}\n", order(i), target(i))).collect();
+        lines.reverse();
+        lines.concat()
+    };
+    let reversed = chain(&|i| format!("A{i}"), &|i| format!("A{}", i - 1))
+        + &format!("type A0 = Int\n\nfn f(x: A{n}) -> Int {{\n    return x + 1\n}}\n");
+    let cycle = chain(&|i| format!("C{i}"), &|i| format!("C{}", if i == n { 1 } else { i + 1 }));
+    let deep = 10_000;
+    // Signatures alone, which no expression's type reaches, or a body that returns one.
+    let nested = |rev: bool, body: &str| {
+        let mut lines: Vec<String> = (1..=deep).map(|i| format!("type L{i} = List[L{}]\n", i - 1)).collect();
+        if rev {
+            lines.reverse();
+        }
+        lines.concat()
+            + &format!(
+                "type L0 = Int\n\nrecord R {{\n    f: L{deep}\n}}\n\nfn g(x: L{deep}, y: L9000) -> L{deep} {{\n{body}}}\n\nfn h(x: L4000) -> L4000 {{\n    return x\n}}\n"
+            )
+    };
+    let cases = [
+        ("alias_reversed", reversed, 0, None),
+        ("alias_cycle", cycle, 65, Some(("E0322", 1))),
+        ("alias_nested", nested(false, "    return x\n"), 65, Some(("E0905", 1))),
+        ("alias_nested_reversed", nested(true, "    return x\n"), 65, Some(("E0905", 1))),
+        ("alias_nested_unused", nested(false, "    return R(f: x).f\n"), 65, Some(("E0905", 1))),
+        ("alias_signatures", nested(true, "    loop {\n    }\n"), 65, Some(("E0905", 1))),
+    ];
+    for (name, text, code, errors) in cases {
+        let file = source(&format!("{name}.proviso"), &text);
+        let output = check_within(&file, 20);
+        let shown = stderr(&output);
+        assert_eq!(output.status.code(), Some(code), "{name}: {}", &shown[..shown.len().min(2_000)]);
+        if let Some((error, count)) = errors {
+            assert_eq!(shown.matches("error[").count(), count, "{name}: {}", &shown[..shown.len().min(2_000)]);
+            assert!(shown.contains(&format!("error[{error}]")), "{name}: {}", &shown[..shown.len().min(2_000)]);
+            // A deep alias is reported where it is declared, not where it is used.
+            if error == "E0905" {
+                assert!(shown.contains("`L5000` names a type that nests"), "{name}: {shown}");
+            }
+        }
+    }
+}
+
+/// A `pub` alias whose type repeats a part, as `Pair[P1, P1]` does, is checked for what it
+/// exposes once per part, though the tree it stands for doubles with each alias (REFERENCE §3).
+#[test]
+fn a_doubling_pub_alias_checks_in_linear_time() {
+    let mut text = String::from("pub record Pair[A, B] {\n    first: A\n    second: B\n}\n\npub type P0 = Int\n");
+    for i in 1..=60 {
+        text += &format!("pub type P{i} = Pair[P{0}, P{0}]\n", i - 1);
+    }
+    let file = source("doubling_alias.proviso", &text);
+    let output = check_within(&file, 20);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+/// An alias used as a value names the type to write instead, by its name alone when the type
+/// has type arguments, which an expression doesn't write (REFERENCE §4.8). A message about the
+/// calls an example or `expect` marks reads as a sentence.
+#[test]
+fn alias_and_expect_messages_read_right() {
+    let file = source(
+        "alias_messages.proviso",
+        "record Pair[A, B] {\n    first: A\n    second: B\n}\n\ntype P = Pair[Int, Text]\ntype Opt = Option[Int]\ntype Two = (Int, Int)\ntype Nothing = Unit\n\nfn f(t: Two) {\n    let u = Nothing()\n    let p = P(first: 1, second: \"x\")\n    let o = Opt.Some(1)\n    let w = Two(1, 2)\n}\n\nrecord Box {\n    n: Int\n}\n\nimpl Box {\n    fn give(self) -> Box fails Text {\n        fail \"x\"\n    }\n\n    fn count(self) -> Int fails Int {\n        fail 1\n    }\n}\n\nexample Box(n: 1).give().count() fails _\n\ntest \"t\" {\n    expect Box(n: 1).give().count() fails _\n}\n",
+    );
+    let errors = stderr(&run(&["check"], &file));
+    for expected in [
+        "`P` is an alias of the type `Pair[Int, Text]`, and an alias names a type only; write `Pair` here",
+        "`Opt` is an alias of the type `Option[Int]`, and an alias names a type only; write `Option` here",
+        "`Two` is an alias of the type `(Int, Int)`, and an alias names a type only",
+        "the calls this example marks fail with",
+        "the calls this `expect` marks fail with",
+    ] {
+        assert!(errors.contains(expected), "missing {expected:?} in:\n{errors}");
+    }
+    for nameless in ["`Two` is an alias of the type `(Int, Int)`", "`Nothing` is an alias of the type `Unit`"] {
+        assert!(errors.contains(&format!("{nameless}, and an alias names a type only\n")), "{errors}");
+    }
 }

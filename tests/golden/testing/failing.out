@@ -1,0 +1,10 @@
+testing/failing.proviso:48:5: test "a false condition" failed: `n * 2 == 7 or n < 0` is false
+testing/failing.proviso:53:5: test "unequal values" failed: expected `[1, 3]`, found `[1, 2]`
+testing/failing.proviso:57:5: test "a call that fails" failed: expected `2`, but it failed with `Stop.Wait(seconds: 2)`
+testing/failing.proviso:61:5: test "a call that returns" failed: expected a failure matching `Stop.Halt`, but it returned `0`
+testing/failing.proviso:65:5: test "another error" failed: expected a failure matching `Stop.Wait(seconds: 1)`, but it failed with `Stop.Wait(seconds: 5)`
+testing/failing.proviso:68:1: test "a defect" failed: it hit a defect
+testing/failing.proviso:74:1: test "out of fuel" failed: it hit a defect
+testing/failing.proviso:80:5: test "a resource it holds" failed: expected `2`, found `1`
+testing/failing.proviso:84:1: test "passes" passed
+9 tests: 1 passed, 8 failed

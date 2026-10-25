@@ -1,0 +1,74 @@
+// phase: 2.11
+// run: test
+// expect-exit: 70
+// A distinct type's `where` reads the value it wraps as `self` (REFERENCE §4.6, §8.2). The v1
+// profile checks it at run time (OPEN_QUESTIONS P3) wherever a value of the type is built
+// or changed. That is by its constructor, by a derived operator, and by any change through
+// `.value`, whether an assignment, a compound assignment, an `&` argument once the call
+// returns, or a method that changes it, such as `push` (§8.3; OPEN_QUESTIONS P5). A broken
+// one is a `refinement_failed` defect. A refinement inside the wrapped type is checked too.
+type Percent = distinct Int derives(Eq, Show, Add, Sub) where 0 <= self and self <= 100
+type Short = distinct List[Int] derives(Eq, Show) where self.len() < 3
+type Spanned = distinct Span derives(Eq, Show) where self.hi < 10
+
+record Span derives(Eq, Show) {
+    lo: Int
+    hi: Int
+} where lo <= hi
+
+fn set_to(x: inout Int, to: Int) {
+    x = to
+}
+
+fn build(n: Int) -> Percent {
+    return Percent(n)
+}
+
+fn assigned(n: Int) -> Percent {
+    var p = Percent(50)
+    p.value = n
+    return p
+}
+
+fn bumped(n: Int) -> Percent {
+    var p = Percent(50)
+    p.value += n
+    return p
+}
+
+fn lent(n: Int) -> Percent {
+    var p = Percent(50)
+    set_to(x: &p.value, to: n)
+    return p
+}
+
+fn added(a: Int, b: Int) -> Percent {
+    return Percent(a) + Percent(b)
+}
+
+fn pushed(start: List[Int], n: Int) -> Short {
+    var s = Short(start)
+    s.value.push(n)
+    return s
+}
+
+fn widened(hi: Int) -> Spanned {
+    var s = Spanned(Span(lo: 0, hi: 1))
+    s.value.hi = hi
+    return s
+}
+
+example build(100) == Percent(100)
+example build(101) == Percent(0)
+example assigned(7) == Percent(7)
+example assigned(-1) == Percent(0)
+example bumped(50) == Percent(100)
+example bumped(51) == Percent(0)
+example lent(200) == Percent(0)
+example added(a: 60, b: 40) == Percent(100)
+example added(a: 60, b: 41) == Percent(0)
+example pushed(start: [1], n: 2) == Short([1, 2])
+example pushed(start: [1, 2], n: 3) == Short([0])
+example widened(9) == Spanned(Span(lo: 0, hi: 9))
+example widened(10) == Spanned(Span(lo: 0, hi: 1))
+example widened(-1) == Spanned(Span(lo: 0, hi: 1))

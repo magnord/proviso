@@ -124,7 +124,9 @@ pub mod codes {
         TODO_REQUIRES_INCOMPLETE = "E0107", "todo_requires_incomplete",
             "`todo` holes are accepted only with `--incomplete` (REFERENCE §15.2, Q25).";
         MISPLACED_RETURN = "E0108", "misplaced_return",
-            "`return` outside a function body, such as in a `where` clause.";
+            "`return` outside a function body, such as in a `where` clause, an example or a test.";
+        MISPLACED_EXPECT = "E0109", "misplaced_expect",
+            "`expect` outside the body of a `test`, such as in a function or in a closure inside a test (REFERENCE §14; OPEN_QUESTIONS P5).";
 
         UNKNOWN_NAME = "E0201", "unknown_name",
             "A name that resolves to no local, function or import, a variant used without its enum (REFERENCE §4.5), a type that has no constructor, such as `Pool(…)` or an enum, or an `it` outside the fallback of an `else` form on a call that can fail (Q33).";
@@ -170,7 +172,7 @@ pub mod codes {
         MISSING_IMPLEMENTATION = "E0309", "missing_implementation",
             "A type doesn't implement an interface it needs, such as a field's type in a `derives` list, a type argument that a constraint of its parameter names, a map's key type without `Eq` and `Hash`, or an element that `xs[i]`, `pool[h]`, `get`, `enumerate`, `duplicate` or `contains` copies or compares (REFERENCE §4.2, §4.4, §4.8, §4.9). A unique type isn't `Copy` (REFERENCE §5.1). A `resource record` without an `impl Abandon` (REFERENCE §10).";
         NOT_DERIVABLE = "E0310", "not_derivable",
-            "A `derives` list names a prelude interface that can't be derived, such as `Copy` or `Add` (REFERENCE §4.4).";
+            "A `derives` list names a prelude interface that can't be derived, such as `Copy`, or `Add` on a record or enum (REFERENCE §4.4, §4.6).";
         NON_EXHAUSTIVE_MATCH = "E0311", "non_exhaustive_match",
             "A `match` does not cover every value of its type; add the missing arms or `_` (REFERENCE §6.3).";
         CANNOT_INFER = "E0312", "cannot_infer",
@@ -193,13 +195,15 @@ pub mod codes {
             "A method or associated function named without a call, as in `x.len` or `Counter.fresh`. Neither is a function value, so it is called with its arguments, and a closure can wrap it, as in `|| x.len()` (OPEN_QUESTIONS P5).";
         IMPLEMENTATION_HEAD_TAKEN = "E0321", "implementation_head_taken",
             "A second `impl` of an interface for a generic type with other type arguments, as `impl I for Pair[Text, Text]` beside `impl I for Pair[Int, Int]`. A generic type has one `impl` of each interface (OPEN_QUESTIONS P5).";
+        ALIAS_CYCLE = "E0322", "alias_cycle",
+            "An alias that names itself, directly or through other aliases, as `type Loop = List[Loop]`. An alias is the type it names, so a cycle names no type. A recursive type is a record or enum (REFERENCE §4.6; OPEN_QUESTIONS P5).";
 
         // E0412, E0414, E0601 and E0602 are reserved for later phases: the §F
         // goldens already expect them.
         REFINEMENT_REFUTED = "E0412", "refinement_refuted",
             "A refinement obligation is refuted: values consistent with every admissible fact violate it (REFERENCE §8.3, §8.5).";
         PARTIAL_INOUT_OF_REFINED_PART = "E0413", "partial_inout_of_refined_part",
-            "A part of a refined value cannot be passed as `inout(partial)` or as `inout` of a resource, or be the receiver of an `inout self` method of a resource (REFERENCE §5.4).";
+            "A part of a refined value cannot be passed as `inout(partial)` or as `inout` of a resource, or be the receiver of an `inout(partial) self` method or of an `inout self` method of a resource (REFERENCE §5.4).";
         IMPL_REQUIRES_MISMATCH = "E0414", "impl_requires_mismatch",
             "An implementation takes the interface method's `requires` clauses exactly as written (REFERENCE §4.9).";
         CHECK_FALLS_THROUGH = "E0415", "check_falls_through",
@@ -236,13 +240,13 @@ pub mod codes {
         MAIN_ERROR_NOT_SHOW = "E0704", "main_error_not_show",
             "`main`'s error type must implement `Show` (REFERENCE §7.4).";
         FAIL_WITHOUT_FAILS = "E0705", "fail_without_fails",
-            "`fail` in a function that declares no `fails`, or in a `where` clause (REFERENCE §7.1).";
+            "`fail` in a function that declares no `fails`, or in a `where` clause, an example or a test (REFERENCE §7.1).";
         ATTEMPT_WITHOUT_FAILURE = "E0706", "attempt_without_failure",
             "`attempt` marks no call that can fail.";
         NOTHING_TO_UNWRAP = "E0707", "nothing_to_unwrap",
             "An `else` form whose left side is neither an `Option` nor a call that can fail (REFERENCE §6.6).";
         EXAMPLE_CANNOT_FAIL = "E0708", "example_cannot_fail",
-            "An `example … fails P` whose call can't fail (REFERENCE §14).";
+            "An `example … fails P` or `expect … fails P` whose call can't fail (REFERENCE §14).";
         RESOURCE_ERROR_TYPE = "E0709", "resource_error_type",
             "A `fails` type cannot be a resource or hold one (REFERENCE §10).";
 

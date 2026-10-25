@@ -1,0 +1,60 @@
+// phase: 2.11
+// run: test
+// A `test "name" { … }` block runs under `proviso test`, with examples, in file order
+// (REFERENCE §14). Its body is statements, and `expect` asserts: `expect c` that `c` holds,
+// `expect f(…) == v` that the call returns `v`, and `expect f(…) fails P` that it fails with
+// an error that matches `P`. The last two mark the calls of their postfix chain, and an
+// `else` after `v` belongs to `v`, as in an example. A test sees private items, and may use locals, loops, closures and every
+// kind of value. Each passing test writes one line, and the count counts both kinds
+// (OPEN_QUESTIONS P5).
+use std.text { ParseError }
+
+type Score = distinct Int derives(Eq, Ord, Show)
+type Name = Text
+
+record Pair[A, B] derives(Eq, Show) {
+    first: A
+    second: B
+}
+
+unique record Token {
+    id: Int
+}
+
+fn parse_score(text: Name) -> Score fails ParseError {
+    return Score(try Int.parse(text))
+}
+
+fn spend(token: take Token) -> Int {
+    return token.id
+}
+
+example parse_score("4") == Score(4)
+
+test "scores parse and order" {
+    expect parse_score("12") == Score(12)
+    expect parse_score("x") fails ParseError.Invalid
+    expect parse_score("7") == parse_score("x") else Score(7)
+    expect (parse_score("1") else Score(0)) < (parse_score("2") else Score(0))
+    let scores = [Score(3), Score(1)]
+    var total = 0
+    for s in scores {
+        total += s.value
+    }
+    expect total == 4
+    expect Score(1).cmp(Score(2)) == Ordering.Less
+}
+
+test "generic values, closures and moves" {
+    let p = Pair(first: 1, second: "a")
+    expect p == Pair(first: 1, second: "a")
+    let double = |x: Int| x * 2
+    expect double(4) == 8
+    let t = Token(id: 5)
+    expect spend(token: t) == 5
+    if p.first > 0 {
+        expect not p.second.is_empty()
+    }
+}
+
+example parse_score("") fails ParseError.Empty

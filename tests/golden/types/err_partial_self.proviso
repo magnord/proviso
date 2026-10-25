@@ -1,0 +1,47 @@
+// phase: 2.11
+// expect-error: E0305
+// expect-error: E0413
+// expect-error: E0901
+// A part of a refined value can't be the receiver of an `inout(partial) self` method, since
+// a failure would leave it breaking its refinement (REFERENCE §5.4), nor can a `let`
+// binding, which can't change. An interface's method can't take `inout(partial) self` yet,
+// as it can't take `inout self`, and `keep self` comes with retention in phase 3.
+record Counter {
+    n: Int
+}
+
+impl Counter {
+    fn bump(inout(partial) self) {
+        self.n += 1
+    }
+
+    fn kept(keep self) {                            // <- E0901
+    }
+}
+
+record Window {
+    counter: Counter
+    limit: Int
+} where counter.n < limit
+
+type Score = distinct Counter where self.n >= 0
+
+interface Bumps {
+    fn bump_all(inout(partial) self)                // <- E0901
+}
+
+fn calls(w: Window) {
+    var v = w
+    v.counter.bump()                                // <- E0413
+    var s = Score(Counter(n: 0))
+    s.value.bump()                                  // <- E0413
+    let c = Counter(n: 1)
+    c.bump()                                        // <- E0305
+    v.bump_twice()
+}
+
+impl Window {
+    fn bump_twice(inout(partial) self) {
+        self.limit += 2
+    }
+}

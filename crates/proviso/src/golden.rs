@@ -280,8 +280,11 @@ fn run_file(path: &Path, name: &str, phase: Phase, bless: bool) -> Result<Verdic
     }
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let code =
-        if header.test { test(&compiled, &mut stdout, &mut stderr) } else { run(&compiled, &mut stdout, &mut stderr) };
+    let code = if header.test {
+        test(&compiled, true, &mut stdout, &mut stderr)
+    } else {
+        run(&compiled, &mut stdout, &mut stderr)
+    };
     let stdout = String::from_utf8_lossy(&stdout).into_owned();
     let stderr = String::from_utf8_lossy(&stderr).into_owned();
 

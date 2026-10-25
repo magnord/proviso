@@ -1,0 +1,52 @@
+// phase: 2.11
+// expect-error: E0201
+// expect-error: E0207
+// expect-error: E0208
+// expect-error: E0301
+// expect-error: E0302
+// expect-error: E0303
+// expect-error: E0701
+// expect-error: E0506
+// expect-error: E0901
+// `Int64(x)` converts only when the target holds every value of the source, so a narrowing,
+// a change of sign, an integer to a float that can't hold it exactly and a float to an
+// integer are E0301, which names the conversion to use instead (REFERENCE §12.1, §12.2).
+// `try_from` and `wrapping_from` take integers, labeled `value` or not (H3) and without `&`,
+// and `try_from` and `to_int` can fail, so their calls are marked (§7.2).
+// `ConversionError` comes from `std.num`. A distinct type isn't a number.
+type Cents = distinct Int
+
+fn lossy(a: Int, b: UInt8, c: Int8, d: Float, e: Float32, w: Int32, v: UInt32) {
+    let n = Int32(a)                                // <- E0301
+    let s = Int8(b)                                 // <- E0301
+    let u = UInt64(c)                               // <- E0301
+    let f = Float(a)                                // <- E0301
+    let g = Float32(w)                              // <- E0301
+    let x = Float(v)
+    let i = Int(d)                                  // <- E0301
+    let h = Float32(d)                              // <- E0301
+    let k = Int64(Cents(1))                         // <- E0301
+    let t = Int64("1")                              // <- E0301
+    let big = Int8(300)                             // <- E0302
+}
+
+fn shapes(a: Int, d: Float) {
+    let n = Int64(a, a)                             // <- E0208
+    let m = Int64(number: a)                        // <- E0207
+    let w = Int32.wrapping_from(d)                  // <- E0301
+    let v = Int32.wrapping_from(other: a)           // <- E0207
+    let u = Int32.wrapping_from(&a)                 // <- E0506
+    let t = Float.from(&a)                          // <- E0506
+    let l = Int64(&a)                               // <- E0506
+    let x = Int32.try_from(d) else 0                // <- E0301
+    let y = Int32.try_from(a)                       // <- E0701
+    let z = d.to_int(rounding: Rounding.TowardZero) // <- E0701
+    let r = d.to_int() else 0                       // <- E0208
+    let q = d.to_int(rounding: 1) else 0            // <- E0301
+    let p = a.to_int(Rounding.TowardZero)           // <- E0303
+    let o = Rounding.Up                             // <- E0303
+    let e = ConversionError.OutOfRange              // <- E0201
+    let s = Int32.saturating_from(a)                // <- E0901
+    let f = Float.try_from(a)                       // <- E0901
+    let g = Text.try_from(a)                        // <- E0303
+}

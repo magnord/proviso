@@ -21,10 +21,20 @@ pub enum Result[T, E] {
     Err(error: E)
 }
 
-pub enum Ordering {
+/// What `cmp` returns, ordered `Less < Equal < Greater`.
+pub enum Ordering derives(Eq, Ord, Hash, Show) {
     Less
     Equal
     Greater
+}
+
+/// How `to_int` rounds a `Float` that isn't a whole number. The names are IEEE 754's.
+pub enum Rounding derives(Eq, Hash, Show) {
+    TowardZero
+    TowardNegative
+    TowardPositive
+    NearestEven
+    NearestAway
 }
 
 pub interface Eq {
@@ -45,18 +55,20 @@ pub interface Abandon {
 }
 ```
 
+A hand-written `impl Ord` defines `cmp`. Then `<`, `<=`, `>` and `>=`, and the derived `Ord` of a type that holds the value, use it. `Float` and `Float32` have `<` but don't implement `Ord`.
+
 `Hash` has no method that phase 2 code calls. It is only derived. `Copy` is satisfied automatically by copyable types with no reach (§5.1). `Index` is the built-in `xs[i]` and `pool[h]` below.
 
 ### Derived implementations
 
-`derives(Eq, Ord, Hash, Show)` on a record or enum generates these implementations:
+`derives(Eq, Ord, Hash, Show)` on a record, enum or distinct type generates these implementations:
 
 | Interface | Behaviour |
 |---|---|
 | `Eq` | Equal when the variants are equal and every field is equal. |
 | `Ord` | Compares variants in declaration order, then fields in declaration order. |
 | `Hash` | Consistent with the derived `Eq`. |
-| `Show` | Writes the expression that builds the value: `User(name: "ada", age: 36)`, `LoadError.MissingComma(line_no: 7)`, `Stop.Halt`. Text and chars inside are quoted and escaped the way `debug` writes them (OPEN_QUESTIONS P5). |
+| `Show` | Writes the expression that builds the value: `User(name: "ada", age: 36)`, `LoadError.MissingComma(line_no: 7)`, `Stop.Halt`, `UserId(7)`. Text and chars inside are quoted and escaped the way `debug` writes them (OPEN_QUESTIONS P5). |
 
 `List`, `Map`, `Set`, `Option`, `Result` and tuples implement each of these interfaces when their element types do. `Show` writes them in literal form: `[1, 2]`, `["k": 1]`, `Some(3)`, `None`, `Ok("a")`, `(1, "a")`. A tuple is ordered element by element from the left.
 
@@ -176,6 +188,30 @@ impl Int {
 
 Every integer type has the same `parse`. It fails with `ParseError.Empty` on empty text, with `ParseError.Invalid` on other text that isn't of that form, and with `ParseError.OutOfRange` when the value doesn't fit the type.
 
+`derives` on a distinct type also takes `Add`, `Sub`, `Mul`, `Div` and `Neg` when the wrapped type has the operator, which then works on values of the distinct type (REFERENCE §4.6). These interfaces have no methods that phase 2 code calls or implements.
+
+### Conversions
+
+```proviso
+impl Int32 {
+    /// `value` as an `Int32`. Fails with `ConversionError.OutOfRange` when it doesn't fit.
+    pub fn try_from(value: Int64) -> Int32 fails ConversionError
+
+    /// The low 32 bits of `value`, as two's complement.
+    pub fn wrapping_from(value: Int64) -> Int32
+}
+
+impl Float {
+    /// The nearest `Float` to `value`, ties to even.
+    pub fn from(value: Int64) -> Float
+
+    /// `self` rounded to a whole number by `rounding`. Fails with `ConversionError.NotANumber` on NaN, and with `ConversionError.OutOfRange` when the result is infinite or doesn't fit an `Int`.
+    pub fn to_int(self, rounding: Rounding) -> Int fails ConversionError
+}
+```
+
+Every integer type has `try_from` and `wrapping_from`, and `Float` and `Float32` have `from` and `to_int`. `try_from`, `wrapping_from` and `from` each take a value of any integer type. Calling a numeric type as a function, as in `Int64(x)`, converts only when the target holds every value of the source type, as `Int64` holds every `Int32`, `Int16` every `UInt8`, `Float` every `Int32` and every `Float32`, and `Float32` every `UInt16`. Other conversions are a type error that names the function to use. `ConversionError` is in `std.num`.
+
 ## std.io
 
 ```proviso
@@ -230,6 +266,16 @@ impl[T: Copy] Pool[T] {
 ```
 
 `pool[h]` borrows the element, as `xs[i]` does, so only copying it needs `T: Copy`. A stale or wrong-pool handle is a `stale_handle` defect.
+
+## std.num
+
+```proviso
+/// Why a conversion failed.
+pub enum ConversionError derives(Eq, Show) {
+    OutOfRange
+    NotANumber
+}
+```
 
 ## std.text
 

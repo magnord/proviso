@@ -1,6 +1,6 @@
 // phase: 2.1
 // expect-error: E0901
-// A record's generated validator and distinct types come in later slices of phase 2, and capability declarations and the rest of `System` in phase 3. Uses of what they declare aren't reported again (REFERENCE §15.1).
+// A record's generated validator comes with the verifier in phase 5, and capability declarations and the rest of `System` in phase 3. Uses of what they declare aren't reported again (REFERENCE §15.1).
 unique record Token {
     id: Int
 }
@@ -27,15 +27,12 @@ cap record Counter {                                // <- E0901
     n: Int
 }
 
-distinct type Meters = Int                          // <- E0901
-
 record Holder {
     l: Logger
     c: Counter
-    m: Meters
 }
 
-fn later_declarations(l: Logger, c: Counter, m: Meters, h: Holder) -> Int {
+fn later_declarations(l: Logger, c: Counter, h: Holder) -> Int {
     return 0
 }
 
