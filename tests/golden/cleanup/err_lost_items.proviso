@@ -5,15 +5,17 @@
 // expect-error: E0303
 // expect-error: E0307
 // expect-error: E0901
-// An item the parser rejects is reported once, and what it declares stays declared, so its
-// uses aren't reported (REFERENCE §15.1). A second item on the line of another is parsed
-// after the error (issue #21). A later phase's item, such as a top-level constant or an
-// `extern` function, leaves its name unknown rather than undefined (issue #39). A `derives`
-// written after a record's or enum's body, or after a distinct type's `where`, is reported
-// and still derives (issue #55). An `impl` block whose header doesn't parse leaves its type
-// with methods nothing records, and one for every type, as in `impl[T] I for T`, leaves every
-// type implementing `I` (issue #53). An error inside the item, or beside it, is still
-// reported.
+// An item the parser rejects is reported once, and what it declares stays declared, so
+// its uses aren't reported (REFERENCE §15.1). A second item on the line of another is
+// parsed after the error, with or without `pub`, but a keyword with nothing after it
+// isn't (issue #21). A later phase's item, such as a top-level constant or an `extern`
+// function, leaves its name unknown rather than undefined (issue #39). A `derives`
+// written after a record's or enum's body, before its `where` or after it, or after a
+// distinct type's `where`, is reported and still derives (issue #55). An `impl` block
+// whose header doesn't parse leaves its type with methods nothing records, one for a
+// function type leaves tuples alone, and one for every type, as in `impl[T] I for T`,
+// leaves every type implementing `I` (issue #53). An error inside the item, or beside it,
+// is still reported.
 use std.io { IoError }
 
 fn one() -> Int { return 1 } fn two() -> Int { return 2 }   // <- E0101
@@ -21,9 +23,14 @@ record Pt { n: Int } fn mk() -> Pt { return Pt(n: 1) }        // <- E0101
 fn three() -> Int { return 3 } pub fn four() -> Text { return 4 }  // <- E0101, E0301
 fn five() -> Int { return 5 } pub five_again                  // <- E0101
 fn six() -> Int { return 6 } enum Six { One }                 // <- E0101
+fn seven() -> Int { return 7 } pub(pkg) fn eight() -> Int { return 8 }  // <- E0101
+fn nine() -> Int { return 9 } let TEN: Int = 10               // <- E0101, E0901
+fn stray() -> Int { return 11 } distinct                      // <- E0101
+fn stray_type() -> Int { return 12 } type                     // <- E0101
 
 fn on_one_line() -> Int {
     let s = Six.One
+    let more = eight() + TEN + stray() + stray_type()
     return one() + two() + mk().n + three() + four().byte_len()
 }
 
@@ -43,6 +50,10 @@ record Kept {
     n: Int
 } where n > 0 derives(Eq)                           // <- E0101
 
+record Between {
+    n: Int
+} derives(Eq) where n > 0                           // <- E0101
+
 enum Sides {
     Left
     Right
@@ -54,11 +65,11 @@ record Odd {
     n: Int
 } derives(Nope)                                     // <- E0101, E0307
 
-fn derived(l: Late, k: Kept, s: Sides, p: Pos, o: Odd) -> Bool {
+fn derived(l: Late, k: Kept, s: Sides, p: Pos, o: Odd, b: Between) -> Bool {
     let shown = f"{l}"
     let ordered = p < p
     let none = l == 1                               // <- E0301
-    return l == l and k == k and s == s and p == p and o == o
+    return l == l and k == k and s == s and p == p and o == o and b == b
 }
 
 record Hx {
@@ -101,6 +112,12 @@ impl[T] Show for T {                                // <- E0901
     }
 }
 
+impl Show for fn(Int) -> Int {                      // <- E0901
+    fn show(self) -> Text {
+        return "f"
+    }
+}
+
 record Plain {
     n: Int
 }
@@ -115,5 +132,6 @@ fn everywhere(p: Plain) -> Text {
     let c = Named.name("x")
     let d = f"{p}"
     let e = p.nosuch()                              // <- E0303
+    let f = (1, 2).nosuch()                         // <- E0303
     return a
 }

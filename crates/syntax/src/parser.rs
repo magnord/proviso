@@ -234,6 +234,23 @@ impl Parser<'_> {
         item && self.starts_line(span) && self.indent(span) <= self.item_indent
     }
 
+    /// Whether an item starts here, after the end of another on the same line: an item
+    /// keyword, perhaps after `pub` or `pub(…)`, with more of the item after it.
+    fn item_follows(&self) -> bool {
+        let mut n = 0;
+        if self.nth(n) == T::Keyword(Kw::Pub) {
+            n += 1;
+            if self.nth(n) == T::LParen {
+                while !matches!(self.nth(n), T::RParen | T::Newline | T::Eof) {
+                    n += 1;
+                }
+                n += 1;
+            }
+        }
+        let item = matches!(self.nth(n), T::Keyword(kw) if kw == Kw::Let || item_keyword(kw));
+        item && !matches!(self.nth(n + 1), T::Newline | T::Eof)
+    }
+
     /// Whether `span` is the first token on its line.
     fn starts_line(&self, span: Span) -> bool {
         let text = &self.file.text.as_bytes()[..span.lo as usize];
@@ -381,8 +398,7 @@ impl Parser<'_> {
                         let _ = self.unexpected::<()>("end of line after the item");
                         // Another item on the same line is parsed, so its name stays declared
                         // (§15.1).
-                        let item_at = |kind| matches!(kind, T::Keyword(kw) if item_keyword(kw));
-                        if !(item_at(self.kind()) || self.at_kw(Kw::Pub) && item_at(self.nth(1))) {
+                        if !self.item_follows() {
                             self.recover(start, Stop::Item);
                         }
                     }
@@ -592,6 +608,8 @@ impl Parser<'_> {
         let mut depth = 0usize;
         for token in &self.tokens[at + 1..] {
             match token.kind {
+                // A function type has no methods to note.
+                T::Keyword(Kw::Fn) if depth == 0 => return,
                 T::LParen if depth == 0 => {
                     self.m.tuple_impls = true;
                     return;
@@ -705,8 +723,13 @@ impl Parser<'_> {
                 break;
             }
         }
+        // A late `derives` may come before the refinement or after it.
+        let place = "before the record's fields, as in `record R derives(Eq) { … }`";
+        let mut derives = self.late_derives(derives, place)?;
         let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
-        let derives = self.late_derives(derives, "before the record's fields, as in `record R derives(Eq) { … }`")?;
+        if refinement.is_some() {
+            derives = self.late_derives(derives, place)?;
+        }
         Ok(RecordDecl { name, generics, unique: false, resource: false, derives, fields, refinement, distinct: false })
     }
 

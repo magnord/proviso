@@ -59,11 +59,12 @@ impl Lexer<'_> {
         Span::new(self.base + start as u32, self.base + self.pos as u32)
     }
 
-    /// Whether the last token can end an operand, so that an operator may follow it.
+    /// Whether the last token can end an operand, so that an operator may follow it. A line
+    /// break inside brackets continues the line, so the token before it counts.
     fn after_operand(&self) -> bool {
         use TokenKind::*;
         matches!(
-            self.tokens.last().map(|token| token.kind),
+            self.tokens.iter().rev().map(|token| token.kind).find(|&kind| kind != Newline),
             Some(
                 Ident
                     | Int

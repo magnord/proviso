@@ -4,12 +4,13 @@
 // expect-error: E0312
 // expect-error: E0320
 // expect-error: E0901
-// A doubled `&` before an argument is one error, which asks for one `&` (§5.2), while `&&`
-// after an operand asks for `and` (H2; issue #44). An interface method named on its type,
-// as `Shape.show`, is a method used as a value, whether the type derives the interface or
-// has an `impl` of it (OPEN_QUESTIONS P5; issue #50). A block's type parameter that its
-// target doesn't name is E0312 also when its constraint is rejected, and an interface with
-// type arguments is a generic interface wherever it is written (REFERENCE §4.9; issue #53).
+// A doubled `&` before an argument is one error, which asks for one `&` (§5.2), while
+// `&&` after an operand asks for `and`, also on the next line inside brackets (H2; issue
+// #44). An interface method named on its type, as `Shape.show`, is a method used as a
+// value, whether the type derives the interface or has an `impl` of it (OPEN_QUESTIONS
+// P5; issue #50). A block's type parameter that its target doesn't name is E0312 also
+// when its constraint is rejected, and an interface with type arguments is a generic
+// interface wherever it is written (REFERENCE §4.9; issue #53).
 
 fn bump(n: inout Int) {
     n = n + 1
@@ -19,6 +20,10 @@ fn doubled(a: Bool, b: Bool) -> Bool {
     var v = 1
     bump(n: &&v)                                    // <- E0001
     let c = a && b                                  // <- E0001
+    let d = (a
+        && b)                                       // <- E0001
+    let l = [a
+        && b]                                       // <- E0001
     return (a) && c                                 // <- E0001
 }
 
