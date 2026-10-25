@@ -1,11 +1,11 @@
 // phase: 2.9
 // expect-error: E0901
 // Reach comes with phase 3: `uses C` and `with E` on a function type, effect variables,
-// `scoped fn` and `keep fn` parameters, and closures that capture a capability or a value
-// that holds one (REFERENCE §9.4, §6.7). So do closures that change a `var` they capture
-// (§5.3), and the operations of `List` and `Map` that take a closure, such as `map` and
-// `filter`. `keep` and `inout(partial)` parameters of function types, and an `impl` for a
-// function type, are not scheduled. A closure passed as one checks its body without
+// `scoped fn` and `keep fn` parameters, `keep` parameters of function types, and closures
+// that capture a capability or a value that holds one (REFERENCE §9.4, §6.7). So do closures
+// that change a `var` they capture (§5.3), and the operations of `List` and `Map` that take a
+// closure, such as `map` and `filter`. `inout(partial)` parameters of function types, and an
+// `impl` for a function type, are not scheduled. A closure passed as one checks its body without
 // reporting what the rejected type would have given it (§15.1).
 use std.io { Out }
 
