@@ -9,7 +9,9 @@
 // constraint, at any depth, and nor does a `unique record` whatever its type arguments. A
 // value built from a type parameter without `Copy` can't be copied out of a borrow (§4.8).
 // A function type can't be a type argument of a generic type, whether written or inferred
-// (§6.7, OPEN_QUESTIONS Q34).
+// (§6.7, OPEN_QUESTIONS Q34). A type argument gives reach even when no field holds a value
+// of it, so `Phantom[Out]` isn't `Copy`, though a handle is whatever its element (§5.1).
+use std.io { Out }
 use std.pool { Pool, Handle }
 
 unique record Token {
@@ -35,6 +37,10 @@ unique record Cell[T] {
 
 record Ref[T] {
     h: Handle[T]
+}
+
+record Phantom[T] {
+    n: Int
 }
 
 enum Slot[T] {
@@ -88,3 +94,15 @@ fn functions(f: fn(Int) -> Int) {
 }
 
 fn written(b: Box[fn()], s: Slot[Option[fn()]]) {}  // <- E0509, E0509
+
+fn phantoms(p: Phantom[Out], q: Phantom[Option[Out]], h: Handle[Out], r: Ref[Out]) {
+    let a = dup(x: p)                               // <- E0309
+    let b = dup(x: q)                               // <- E0309
+    let c = dup(x: h)
+    let d = dup(x: r)                               // <- E0309
+}
+
+fn phantom_params[T, U: Copy](p: Phantom[T], q: Phantom[U]) {
+    let a = dup(x: p)                               // <- E0309
+    let b = dup(x: q)
+}

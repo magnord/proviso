@@ -902,16 +902,38 @@ impl Decls {
         self.reach_in(ty, &mut HashMap::new())
     }
 
+    /// Whether a value of `ty` may have reach, where type parameter `i` has none when
+    /// `params[i]` makes it `Copy`.
+    fn may_reach(&self, ty: &Ty, params: &[Vec<IfaceId>], memo: &mut HashMap<(u32, usize), bool>) -> bool {
+        match ty {
+            Ty::Param(i) => !params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)),
+            Ty::Adt(AdtId::HANDLE, _) => false,
+            Ty::Adt(id, args) if !args.is_empty() && !self.adt(*id).reach => {
+                let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
+                if let Some(&reach) = memo.get(&key) {
+                    return reach;
+                }
+                let reach = args.iter().any(|arg| self.may_reach(arg, params, memo));
+                memo.insert(key, reach);
+                reach
+            }
+            ty => self.reach_in(ty, memo),
+        }
+    }
+
     fn reach_in(&self, ty: &Ty, memo: &mut HashMap<(u32, usize), bool>) -> bool {
         match ty {
             Ty::Cap(_) => true,
             Ty::Adt(id, _) if self.adt(*id).reach => true,
+            // A handle is `Copy` whatever its element is (STD.md).
+            Ty::Adt(AdtId::HANDLE, _) => false,
             Ty::Adt(id, args) if !args.is_empty() => {
                 let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
                 if let Some(&reach) = memo.get(&key) {
                     return reach;
                 }
-                let reach = self.held_args(*id, args).any(|arg| self.reach_in(arg, memo));
+                // Reach comes through every type argument, held or not (REFERENCE §5.1).
+                let reach = args.iter().any(|arg| self.reach_in(arg, memo));
                 memo.insert(key, reach);
                 reach
             }
@@ -1012,7 +1034,13 @@ impl Decls {
                 if let Some(&known) = memo.get(&key) {
                     return known;
                 }
-                let known = self.held_args(*id, args).all(|arg| self.copyable(arg, params, memo));
+                // A type argument it doesn't hold still gives it reach (REFERENCE §5.1), but a
+                // handle's never does (STD.md).
+                let held = &self.adt(*id).held;
+                let known = args.iter().enumerate().all(|(i, arg)| match held.get(i).copied().unwrap_or(true) {
+                    true => self.copyable(arg, params, memo),
+                    false => *id == AdtId::HANDLE || !self.may_reach(arg, params, &mut HashMap::new()),
+                });
                 memo.insert(key, known);
                 known
             }

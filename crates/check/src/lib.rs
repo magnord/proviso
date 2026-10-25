@@ -2492,9 +2492,27 @@ impl Checker<'_> {
             self.declare_rejected(item, decl, &target);
             return;
         }
-        if self.p.decls.impl_of(iface, key).is_some() {
-            let message = format!("`{target_text}` already implements `{iface_text}`");
-            self.error(codes::DUPLICATE_IMPLEMENTATION, header, message);
+        if let Some(earlier) = self.p.decls.impl_of(iface, key) {
+            // A generic type has one `impl` of each interface, whatever the targets' type
+            // arguments are (OPEN_QUESTIONS P5, §G).
+            let (code, message) = if earlier.target == target {
+                (codes::DUPLICATE_IMPLEMENTATION, format!("`{target_text}` already implements `{iface_text}`"))
+            } else {
+                let names: Vec<Box<str>> = (earlier.methods.iter().flatten().next())
+                    .map(|&f| self.p.fns[f].generics.iter().map(|g| g.name.clone()).collect())
+                    .unwrap_or_default();
+                let earlier = self.p.decls.display_in(&earlier.target, &names).to_string();
+                let head = match &target {
+                    Ty::Adt(id, _) if self.p.decls.adt(*id).tuple => "a tuple type".to_string(),
+                    Ty::Adt(id, _) => format!("`{}`", self.p.decls.name(*id)),
+                    _ => format!("`{target_text}`"),
+                };
+                let message = format!(
+                    "`{earlier}` already implements `{iface_text}`, and {head} has one `impl` of each interface, whatever its type arguments"
+                );
+                (codes::IMPLEMENTATION_HEAD_TAKEN, message)
+            };
+            self.error(code, header, message);
             self.declare_rejected(item, decl, &target);
             return;
         }
@@ -4100,7 +4118,7 @@ impl Checker<'_> {
                 "the type of this nests more than {MAX_TYPE_DEPTH} levels deep, as `{}`, which is more than a type may",
                 self.show(&ty)
             );
-            self.error(codes::NESTING_TOO_DEEP, self.span(e), message);
+            self.error(codes::TYPE_TOO_DEEP, self.span(e), message);
         }
         Ty::Error
     }

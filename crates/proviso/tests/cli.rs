@@ -407,7 +407,7 @@ fn types_that_double_check_fast_and_show_in_short() {
 
 /// A type may nest 5,000 levels, deeper than an expression may, as `let`s that each wrap
 /// the one before build it. A deeper one is too deep once, where it first is, also when a
-/// generic function's result multiplies the depth at each call, and nothing it reaches
+/// generic function's result adds its own depth at each call, and nothing it reaches
 /// is reported again (OPEN_QUESTIONS P5, Nesting limit; issue #17).
 #[test]
 fn deep_types_are_too_deep_once() {
@@ -445,7 +445,7 @@ fn deep_types_are_too_deep_once() {
         assert_eq!(output.status.code(), Some(code), "case {i}: {}", &errors[..errors.len().min(2_000)]);
         if code == 65 {
             assert_eq!(errors.matches("error[").count(), 1, "case {i}: {}", &errors[..errors.len().min(2_000)]);
-            assert!(errors.contains(&format!(":{line}:")) && errors.contains("error[E0902]"), "case {i}: {errors}");
+            assert!(errors.contains(&format!(":{line}:")) && errors.contains("error[E0905]"), "case {i}: {errors}");
         }
     }
 }

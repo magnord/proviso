@@ -10,12 +10,13 @@
 // expect-error: E0314
 // expect-error: E0315
 // expect-error: E0317
+// expect-error: E0321
 // expect-error: E0901
 // A generic `impl`'s methods apply only to values whose type matches its target, and its
 // constraints must hold for the type arguments (REFERENCE §4.8, §4.9). Each of its type
 // parameters must appear in the target, which it can't name otherwise. A type implements an
 // interface with one `impl`, so two blocks for one interface and one generic type clash
-// even when no type matches both, and a type's methods have distinct names across all of
+// even when no type matches both (E0321), and a type's methods have distinct names across all of
 // its blocks (OPEN_QUESTIONS §G, P5). An `impl` lives in the module of the interface or of
 // the type, and a type's module is that of its outermost type, so `impl Show for
 // Option[Point]` is an orphan, and a tuple belongs to no module. An `impl` for every type,
@@ -104,7 +105,7 @@ impl[T: Show] Describe for Box[T] {
     }
 }
 
-impl Describe for Box[Int] {                        // <- E0313
+impl Describe for Box[Int] {                        // <- E0321
     fn describe(self) -> Text {
         return "int box"
     }
@@ -120,7 +121,7 @@ impl Count for Pair[Int, Int] {
     }
 }
 
-impl Count for Pair[Text, Text] {                   // <- E0313
+impl Count for Pair[Text, Text] {                   // <- E0321
     fn count(self) -> Int {
         return 2
     }
@@ -132,6 +133,12 @@ impl[T] Count for Slot[T] {
             Full(_) => 1
             Vacant => 0
         }
+    }
+}
+
+impl[U] Count for Slot[U] {                         // <- E0313
+    fn count(self) -> Int {
+        return 0
     }
 }
 

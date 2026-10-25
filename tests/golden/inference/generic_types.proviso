@@ -1,7 +1,7 @@
 // phase: 2.10
 // A generic record's or variant's type arguments come from its expected type and all of its
 // fields together, whatever their order and spelling, as a generic call's do (REFERENCE
-// §4.8; OPEN_QUESTIONS P5). Each group is one value and its rewrites: swapped fields, a
+// §4.8; OPEN_QUESTIONS P5). Each group is one value and its rewrites, which are swapped fields, a
 // literal or `None` beside a value that fixes the type, one more level of nesting, a tuple
 // field, a recursive variant, and branches, list elements and operands that meet. Every
 // rewrite checks, so each type argument is the one `small` gives.

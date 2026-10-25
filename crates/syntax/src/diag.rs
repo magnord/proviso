@@ -174,7 +174,7 @@ pub mod codes {
         NON_EXHAUSTIVE_MATCH = "E0311", "non_exhaustive_match",
             "A `match` does not cover every value of its type; add the missing arms or `_` (REFERENCE §6.3).";
         CANNOT_INFER = "E0312", "cannot_infer",
-            "A value or call whose type arguments neither its expected type nor its fields or arguments give, such as `let x = None` or `var xs = []`, or a closure parameter whose type neither its annotation, the expected type nor its body gives (OPEN_QUESTIONS P5).";
+            "A value or call whose type arguments neither its expected type nor its fields or arguments give, such as `let x = None` or `var xs = []`, a type parameter of an `impl` that its target doesn't name, or a closure parameter whose type neither its annotation, the expected type nor its body gives (OPEN_QUESTIONS P5).";
         DUPLICATE_IMPLEMENTATION = "E0313", "duplicate_implementation",
             "A type implements an interface twice, by two `impl` blocks or by an `impl` and `derives` (REFERENCE §4.9).";
         IMPL_MISMATCH = "E0314", "impl_mismatch",
@@ -191,6 +191,8 @@ pub mod codes {
             "An `impl Abandon` for a type that isn't a resource, which has nothing to abandon (REFERENCE §10).";
         METHOD_VALUE = "E0320", "method_value",
             "A method or associated function named without a call, as in `x.len` or `Counter.fresh`. Neither is a function value, so it is called with its arguments, and a closure can wrap it, as in `|| x.len()` (OPEN_QUESTIONS P5).";
+        IMPLEMENTATION_HEAD_TAKEN = "E0321", "implementation_head_taken",
+            "A second `impl` of an interface for a generic type with other type arguments, as `impl I for Pair[Text, Text]` beside `impl I for Pair[Int, Int]`. A generic type has one `impl` of each interface (OPEN_QUESTIONS P5).";
 
         // E0412, E0414, E0601 and E0602 are reserved for later phases: the §F
         // goldens already expect them.
@@ -247,11 +249,13 @@ pub mod codes {
         NOT_IMPLEMENTED = "E0901", "not_implemented",
             "A construct the language has that this implementation does not support yet.";
         NESTING_TOO_DEEP = "E0902", "nesting_too_deep",
-            "Expressions and blocks nest at most 1,000 levels deep, and their types 5,000, in this implementation (OPEN_QUESTIONS P5).";
+            "Expressions and blocks nest at most 1,000 levels deep in this implementation (OPEN_QUESTIONS P5).";
         MATCH_TOO_COMPLEX = "E0903", "match_too_complex",
             "A `match` whose exhaustiveness takes too many steps to check (OPEN_QUESTIONS P5).";
         EXPANDING_TYPE = "E0904", "expanding_type",
             "A generic type that recurses through a growing type argument of itself (OPEN_QUESTIONS P5).";
+        TYPE_TOO_DEEP = "E0905", "type_too_deep",
+            "An expression whose type nests more than 5,000 levels deep, as `let`s that each wrap the one before can build (OPEN_QUESTIONS P5).";
     }
 
     pub fn find(id: &str) -> Option<Code> {
