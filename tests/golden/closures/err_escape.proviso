@@ -72,7 +72,16 @@ fn escape_block(flag: Bool) -> Int {
     } else {
         |x: Int| x
     }
-    return f(1) + g(2)
+    let h = if flag {
+        let deep = 4
+        match flag {                                // <- E0509
+            true => |x: Int| x + deep
+            false => |x: Int| x
+        }
+    } else {
+        |x: Int| x
+    }
+    return f(1) + g(2) + h(3)
 }
 
 fn escape_pattern(o: Option[Int]) -> Int {
