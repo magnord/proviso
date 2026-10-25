@@ -2,7 +2,7 @@
 // expect-error: E0901
 // What collections still lack is reported as not implemented, and what it would have
 // given isn't reported again (§15.1). `Set` has no literal or constructor yet (OPEN_QUESTIONS
-// Q37), and `Array` comes later in phase 2. The operations that take a closure wait for
+// Q37), and `Array` isn't scheduled yet. The operations that take a closure wait for
 // effect variables (STD.md). STD.md declares no `swap` (§5.3) and none of the predicates of
 // §8.1, and `split` is one of the `Text` functions of §12.3 it doesn't declare.
 fn sets(s: Set[Int]) -> Int {                       // <- E0901

@@ -79,7 +79,7 @@ impl std::fmt::Display for Phase {
 /// (OPEN_QUESTIONS P5).
 pub mod exit {
     pub const OK: i32 = 0;
-    /// `main` failed with an error, or an example failed.
+    /// `main` failed with an error, or an example or test failed.
     pub const FAILED: i32 = 1;
     pub const USAGE: i32 = 64;
     /// `check` found errors, so nothing ran.

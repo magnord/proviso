@@ -5,7 +5,7 @@
 // does an `Abandon` constraint (OPEN_QUESTIONS §G). A refinement that reads a resource
 // field may run again after the field moved, so moving it out waits too. A map keeps the key
 // it has when `set` meets an equal one, which would drop a resource, so a resource as a map
-// key waits too. Interface methods that take `inout self` come later.
+// key waits too. Interface methods that take `inout self` aren't scheduled yet.
 resource record Probe {
     name: Text
 }

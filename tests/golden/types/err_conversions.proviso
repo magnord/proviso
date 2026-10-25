@@ -14,11 +14,13 @@
 // `ConversionError` comes from `std.num`. A distinct type isn't a number.
 type Cents = distinct Int
 
-fn lossy(a: Int, b: UInt8, c: Int8, d: Float, e: Float32) {
+fn lossy(a: Int, b: UInt8, c: Int8, d: Float, e: Float32, w: Int32, v: UInt32) {
     let n = Int32(a)                                // <- E0301
     let s = Int8(b)                                 // <- E0301
     let u = UInt64(c)                               // <- E0301
     let f = Float(a)                                // <- E0301
+    let g = Float32(w)                              // <- E0301
+    let x = Float(v)
     let i = Int(d)                                  // <- E0301
     let h = Float32(d)                              // <- E0301
     let k = Int64(Cents(1))                         // <- E0301

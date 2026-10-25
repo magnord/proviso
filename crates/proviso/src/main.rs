@@ -10,19 +10,19 @@ usage: proviso <command> [options]
 
 commands:
   check [--incomplete] [--json | --examples] <file>
-                                         type-check a file, then run its examples
+                                         type-check a file
   run [--incomplete] <file>              check a file, then run its `main`
   test [--incomplete] <file>             check a file, then run its examples and tests
   explain <code>                         describe a diagnostic code, such as E0301
   version                                print the version and implemented phase
 
 --incomplete accepts `todo` holes. --json prints one diagnostic per line as JSON on stdout.
---examples runs the file's examples once it checks, but not its tests.
+--examples also runs the file's examples once it checks, but not its tests.
 A program writes to stdout; its `debug` output, failures and defects go to stderr.
 `test` and `check --examples` write each result and a count to stdout; defects still go
 to stderr.
 
-exit codes: 0 success, 1 `main` or an example failed, 64 usage, 65 check errors,
+exit codes: 0 success, 1 `main`, an example or a test failed, 64 usage, 65 check errors,
 66 unreadable file, 70 defect, 101 internal error
 ";
 
@@ -85,7 +85,7 @@ fn check_or_run(command: Command, args: &[String]) -> i32 {
             "--json" if is_check => json = true,
             "--examples" if is_check => examples = true,
             "--examples" => {
-                err("proviso: `--examples` applies only to `check`; `test` runs the examples already\n");
+                err("proviso: `--examples` applies only to `check`\n");
                 return exit::USAGE;
             }
             // `run` and `test` print their output on stdout, which JSON would mix with.

@@ -188,7 +188,7 @@ impl Int {
 
 Every integer type has the same `parse`. It fails with `ParseError.Empty` on empty text, with `ParseError.Invalid` on other text that isn't of that form, and with `ParseError.OutOfRange` when the value doesn't fit the type.
 
-`derives` on a distinct type also takes `Add`, `Sub`, `Mul`, `Div` and `Neg` when the wrapped type has the operator, which then works on two values of the distinct type (REFERENCE §4.6). These interfaces have no methods that phase 2 code calls or implements.
+`derives` on a distinct type also takes `Add`, `Sub`, `Mul`, `Div` and `Neg` when the wrapped type has the operator, which then works on values of the distinct type (REFERENCE §4.6). These interfaces have no methods that phase 2 code calls or implements.
 
 ### Conversions
 
@@ -210,7 +210,7 @@ impl Float {
 }
 ```
 
-Every integer type has `try_from` and `wrapping_from`, and each takes a value of any integer type. `Float32` has `from` and `to_int` too. Calling a numeric type as a function, as in `Int64(x)`, converts only when the target holds every value of the source type, as `Int64` holds every `Int32` and `Int16` every `UInt8`, and `Float` every `Float32`. Other conversions are a type error that names the function to use. `ConversionError` is in `std.num`.
+Every integer type has `try_from` and `wrapping_from`, and `Float` and `Float32` have `from` and `to_int`. `try_from`, `wrapping_from` and `from` each take a value of any integer type. Calling a numeric type as a function, as in `Int64(x)`, converts only when the target holds every value of the source type, as `Int64` holds every `Int32`, `Int16` every `UInt8`, `Float` every `Int32` and every `Float32`, and `Float32` every `UInt16`. Other conversions are a type error that names the function to use. `ConversionError` is in `std.num`.
 
 ## std.io
 

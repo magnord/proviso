@@ -6103,6 +6103,12 @@ impl Checker<'_> {
         let lossless = match (&ty, &target) {
             _ if ty.is_unknown() || ty == target => true,
             (Ty::Int(from), Ty::Int(to)) => to.min() <= from.min() && from.max() <= to.max(),
+            // A float holds every integer up to 2^24 or 2^53 exactly, by the bits of its
+            // significand.
+            (Ty::Int(from), Ty::Float(to)) => {
+                let exact: i128 = if *to == FloatTy::F32 { 1 << 24 } else { 1 << 53 };
+                -exact <= from.min() && from.max() <= exact
+            }
             (Ty::Float(FloatTy::F32), Ty::Float(FloatTy::F64)) => true,
             _ => false,
         };

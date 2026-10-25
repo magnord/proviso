@@ -3,8 +3,8 @@
 // A `test "name" { … }` block runs under `proviso test`, with examples, in file order
 // (REFERENCE §14). Its body is statements, and `expect` asserts: `expect c` that `c` holds,
 // `expect f(…) == v` that the call returns `v`, and `expect f(…) fails P` that it fails with
-// an error that matches `P`. The last two mark the calls of their postfix chain, as an
-// example does. A test sees private items, and may use locals, loops, closures and every
+// an error that matches `P`. The last two mark the calls of their postfix chain, and an
+// `else` after `v` belongs to `v`, as in an example. A test sees private items, and may use locals, loops, closures and every
 // kind of value. Each passing test writes one line, and the count counts both kinds
 // (OPEN_QUESTIONS P5).
 use std.text { ParseError }
@@ -34,6 +34,7 @@ example parse_score("4") == Score(4)
 test "scores parse and order" {
     expect parse_score("12") == Score(12)
     expect parse_score("x") fails ParseError.Invalid
+    expect parse_score("7") == parse_score("x") else Score(7)
     expect (parse_score("1") else Score(0)) < (parse_score("2") else Score(0))
     let scores = [Score(3), Score(1)]
     var total = 0

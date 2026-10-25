@@ -1624,12 +1624,39 @@ impl Parser<'_> {
                 self.bump();
                 let value = self.expr()?;
                 // `expect v == w` compares as an example does, and reports both values.
-                if self.eat(T::Keyword(Kw::Fails)) {
+                if self.at_kw(Kw::Fails) {
+                    // As in an example, `fails` follows the call alone.
+                    if !matches!(self.m.exprs[value].kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. }) {
+                        let span = self.span_of(value);
+                        let message = "`expect … fails P` tests a function or method call, as in `expect f(…) fails P`";
+                        self.error(codes::UNEXPECTED_TOKEN, span, message);
+                        return Err(());
+                    }
+                    self.bump();
                     StmtKind::Expect { value, expect: Some(Expectation::Fails(self.pattern()?)) }
-                } else if let ExprKind::Binary { op: BinOp::Eq, lhs, rhs } = self.m.exprs[value].kind {
-                    StmtKind::Expect { value: lhs, expect: Some(Expectation::Equals(rhs)) }
                 } else {
-                    StmtKind::Expect { value, expect: None }
+                    let compared = match self.m.exprs[value].kind {
+                        ExprKind::Else { value: compared, .. } => compared,
+                        _ => value,
+                    };
+                    match self.m.exprs[compared].kind {
+                        ExprKind::Binary { op: BinOp::Eq, lhs, rhs } if compared == value => {
+                            StmtKind::Expect { value: lhs, expect: Some(Expectation::Equals(rhs)) }
+                        }
+                        // `else` binds looser than `==`, but as in an example, `f(x) == o else
+                        // 0` compares with `o else 0` (OPEN_QUESTIONS P5). So the `else` takes
+                        // the place of `==`'s right side.
+                        ExprKind::Binary { op: BinOp::Eq, lhs, rhs } => {
+                            let span = self.span_of(rhs).to(self.span_of(value));
+                            let expected = &mut self.m.exprs[value];
+                            expected.span = span;
+                            if let ExprKind::Else { value: left, .. } = &mut expected.kind {
+                                *left = rhs;
+                            }
+                            StmtKind::Expect { value: lhs, expect: Some(Expectation::Equals(value)) }
+                        }
+                        _ => StmtKind::Expect { value, expect: None },
+                    }
                 }
             }
             T::Ident
@@ -2236,6 +2263,7 @@ impl Parser<'_> {
                         | Kw::Continue
                         | Kw::Check
                         | Kw::Assert
+                        | Kw::Expect
                         | Kw::For
                         | Kw::While
                         | Kw::Loop

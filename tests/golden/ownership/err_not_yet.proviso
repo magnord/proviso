@@ -1,8 +1,9 @@
 // phase: 2.7
 // expect-error: E0901
-// Interface methods that take `inout self` come in a later slice of phase 2. Two `&` arguments to elements of one list are
-// disjoint when a fact such as `i != j` is in scope (§5.3), and facts come with the
-// verifier in phase 5. Indices that are the same variable or literals need no fact.
+// Interface methods that take `inout self` aren't scheduled yet. Two `&` arguments to
+// elements of one list are disjoint when a fact such as `i != j` is in scope (§5.3), and
+// facts come with the verifier in phase 5. Indices that are the same variable or literals
+// need no fact.
 
 interface Grow {
     fn grow(inout self)                             // <- E0901
