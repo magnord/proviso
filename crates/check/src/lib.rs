@@ -2739,12 +2739,14 @@ impl Checker<'_> {
         let target = self.resolve_type(decl.target);
         self.impl_scope();
         // Only the target gives the block's type parameters, so one it doesn't name could
-        // be any type at each call (OPEN_QUESTIONS P5). It stands for an unknown type.
+        // be any type at each call (OPEN_QUESTIONS P5). It stands for an unknown type. A
+        // target without an error names no parameter whose constraint was rejected, which
+        // is reported too (issue #53).
         if !mentions_error(&target) {
             let mut used = Vec::new();
             params_in(&target, &mut used);
             for (i, param) in decl.generics.iter().enumerate() {
-                if self.impl_generics[i].rejected || self.impl_generics[i].sym.is_none() || used.contains(&(i as u32)) {
+                if self.impl_generics[i].sym.is_none() || used.contains(&(i as u32)) {
                     continue;
                 }
                 let message = format!(
@@ -3238,11 +3240,14 @@ impl Checker<'_> {
                     }
                     return Ty::Error;
                 }
-                if self.generic_scope.iter().any(|(sym, _)| *sym == name.sym)
-                    || self.iface_names.contains_key(&name.sym)
-                    || IfaceId::prelude(text).is_some()
-                {
+                if self.generic_scope.iter().any(|(sym, _)| *sym == name.sym) {
                     self.error(codes::UNKNOWN_TYPE, te.span, format!("`{text}` takes no type arguments"));
+                    return Ty::Error;
+                }
+                // `x: Show[Int]` means `[T: Show[Int]]`, which the parser reports (REFERENCE
+                // §4.9; issue #53).
+                if self.iface_names.contains_key(&name.sym) || IfaceId::prelude(text).is_some() {
+                    self.not_implemented(te.span, "generic interfaces", Planned::Unscheduled);
                     return Ty::Error;
                 }
                 if let Some(id) = self.generic_adt(name.sym) {
@@ -5699,8 +5704,20 @@ impl Checker<'_> {
             return None;
         }
         let id = self.adt_named(type_name.sym)?;
-        let entry = self.inherent.get(&id)?.iter().find(|entry| entry.name == name)?;
-        Some((id, self.p.fns[entry.f].receiver.is_some()))
+        if let Some(entry) = self.inherent.get(&id).and_then(|entries| entries.iter().find(|entry| entry.name == name))
+        {
+            return Some((id, self.p.fns[entry.f].receiver.is_some()));
+        }
+        // An interface's method, which takes `self`, of a type that derives the interface or
+        // has an `impl` of it (issue #50).
+        let text = self.m.text(name);
+        let def = self.p.decls.adt(id);
+        let own = Ty::Adt(id, (0..def.params as u32).map(Ty::Param).collect());
+        let named = self.p.decls.ifaces().any(|(iface, idef)| {
+            idef.method(text).is_some()
+                && (def.derives.contains(&iface) || self.p.decls.impl_for(iface, &own).is_some())
+        });
+        named.then_some((id, true))
     }
 
     /// Whether a value of type `ty` has a method `name`, its own, built in or from an

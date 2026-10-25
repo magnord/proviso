@@ -1683,7 +1683,14 @@ impl Parser<'_> {
                         // 0` compares with `o else 0` (OPEN_QUESTIONS P5). So the `else` takes
                         // the place of `==`'s right side.
                         ExprKind::Binary { op: BinOp::Eq, lhs, rhs } => {
-                            let span = self.span_of(rhs).to(self.span_of(value));
+                            // From `==`'s right side to the fallback's end, without parentheses
+                            // around the whole (issue #55).
+                            let end = match &self.m.exprs[value].kind {
+                                ExprKind::Else { fallback: Fallback::Value(x), .. } => self.span_of(*x).hi,
+                                ExprKind::Else { fallback: Fallback::Block(block), .. } => block.span.hi,
+                                _ => self.span_of(value).hi,
+                            };
+                            let span = Span { lo: self.span_of(rhs).lo, hi: end };
                             let expected = &mut self.m.exprs[value];
                             expected.span = span;
                             if let ExprKind::Else { value: left, .. } = &mut expected.kind {

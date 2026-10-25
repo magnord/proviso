@@ -687,3 +687,15 @@ fn recovery_from_deep_nesting_is_linear() {
     assert_eq!(errors.matches("error[").count(), 1, "{errors}");
     assert!(errors.contains("error[E0902]"), "{errors}");
 }
+
+/// An `else` that takes the place of `==`'s right side in an `expect` is reported from that
+/// side to the fallback's end, not from a parenthesis around the whole (issue #55).
+#[test]
+fn an_expect_else_is_reported_at_its_own_span() {
+    let text = "fn sure(n: Int) -> Int {\n    return n\n}\n\ntest \"span\" {\n    expect (sure(1) == 1 else true)\n}\n";
+    let file = source("expect_else_span.proviso", text);
+    let output = run(&["check"], &file);
+    let errors = stderr(&output);
+    assert!(errors.contains("expect_else_span.proviso:6:24: error[E0707]"), "{errors}");
+    assert_eq!(errors.matches("error[").count(), 1, "{errors}");
+}

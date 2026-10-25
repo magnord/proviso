@@ -1,0 +1,55 @@
+// phase: 2
+// expect-error: E0001
+// expect-error: E0307
+// expect-error: E0312
+// expect-error: E0320
+// expect-error: E0901
+// A doubled `&` before an argument is one error, which asks for one `&` (§5.2), while `&&`
+// after an operand asks for `and` (H2; issue #44). An interface method named on its type,
+// as `Shape.show`, is a method used as a value, whether the type derives the interface or
+// has an `impl` of it (OPEN_QUESTIONS P5; issue #50). A block's type parameter that its
+// target doesn't name is E0312 also when its constraint is rejected, and an interface with
+// type arguments is a generic interface wherever it is written (REFERENCE §4.9; issue #53).
+
+fn bump(n: inout Int) {
+    n = n + 1
+}
+
+fn doubled(a: Bool, b: Bool) -> Bool {
+    var v = 1
+    bump(n: &&v)                                    // <- E0001
+    return a && b                                   // <- E0001
+}
+
+enum Shape {
+    Dot
+}
+
+impl Show for Shape {
+    fn show(self) -> Text {
+        return "dot"
+    }
+}
+
+record Point derives(Show) {
+    x: Int
+}
+
+fn method_values() {
+    let a = Shape.show                              // <- E0320
+    let b = Point.show                              // <- E0320
+}
+
+record Crate[T] {
+    item: T
+}
+
+impl[U: Nope] Crate[Int] {                          // <- E0312, E0307
+    fn n(self) -> Int {
+        return 0
+    }
+}
+
+fn shown(x: Show[Int]) {}                           // <- E0901
+
+fn bounded[T: Show[Int]](x: T) {}                   // <- E0901
