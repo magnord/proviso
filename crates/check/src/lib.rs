@@ -4188,10 +4188,12 @@ impl Checker<'_> {
         self.error(codes::NOT_COPYABLE, span, message);
     }
 
-    /// A type parameter in `ty` that isn't `Copy`.
+    /// A type parameter in `ty` that isn't `Copy`, outside a handle, which neither holds nor
+    /// reaches its element (STD.md).
     fn uncopyable(&self, ty: &Ty) -> Option<u32> {
         match ty {
             Ty::Param(i) if !self.f.bounds.get(*i as usize).is_some_and(|b| b.contains(&IfaceId::COPY)) => Some(*i),
+            Ty::Adt(AdtId::HANDLE, _) => None,
             Ty::Adt(_, args) => args.iter().find_map(|arg| self.uncopyable(arg)),
             _ => None,
         }

@@ -475,3 +475,17 @@ fn rejected_impl_constraints_keep_their_parameter_names() {
     assert!(errors.contains("error[E0303]: `Crate[T]` has no method `nothing`"), "{errors}");
     assert_eq!(errors.matches("error[").count(), 3, "{errors}");
 }
+
+/// A borrowed value whose copy needs a type parameter to be `Copy` names that parameter,
+/// not one in a handle, which neither holds nor reaches its element (REFERENCE §4.8).
+#[test]
+fn copies_of_borrows_name_the_parameter_that_needs_copy() {
+    let text = "use std.pool { Handle }\n\nrecord Two[A, B] {\n    a: A\n    b: B\n}\n\nrecord Phantom[T] {\n    n: Int\n}\n\n\
+        fn f[T, U](x: Two[Handle[T], Phantom[U]], y: Two[Handle[T], U]) {\n    let a = x\n    let b = y\n}\n";
+    let file = source("copy_names.proviso", text);
+    let output = proviso().arg("check").arg(&file).output().unwrap();
+    let errors = stderr(&output);
+    assert_eq!(output.status.code(), Some(65), "{errors}");
+    assert_eq!(errors.matches("which needs `U: Copy`").count(), 2, "{errors}");
+    assert_eq!(errors.matches("error[").count(), 2, "{errors}");
+}
