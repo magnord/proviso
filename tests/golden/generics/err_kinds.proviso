@@ -82,6 +82,15 @@ fn leaks(p: take Probe, q: take Probe) {
     let s = Slot.Full(Box(item: q))                 // <- E0507
 }
 
+// A record nested in itself with other type arguments is another type, which holds what
+// the inner one does.
+fn nested_leaks(p: take Probe, q: take Probe, r: take Probe) {
+    let b = Box(item: Box(item: p))                 // <- E0507
+    let c = Box(item: (1, Box(item: (q, 2))))       // <- E0507
+    let d = Box(item: Box(item: r))
+    d.item.item.abandon()
+}
+
 fn lent[T](x: Box[T], y: Slot[T]) -> Box[T] {
     let z = y                                       // <- E0503
     return x                                        // <- E0503

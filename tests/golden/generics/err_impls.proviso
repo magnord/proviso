@@ -1,8 +1,10 @@
 // phase: 2.10
 // expect-error: E0203
+// expect-error: E0301
 // expect-error: E0204
 // expect-error: E0210
 // expect-error: E0303
+// expect-error: E0306
 // expect-error: E0307
 // expect-error: E0309
 // expect-error: E0312
@@ -190,6 +192,43 @@ impl[T] Box[T] {
     }
 }
 
+impl Box[Int] {
+    fn big(self) -> Int {
+        return self.item * 1000
+    }
+}
+
+interface Twice {
+    fn twice(self) -> Int
+}
+
+record Duo[A, B] {
+    first: A
+    second: B
+}
+
+impl[A: Copy] Twice for Duo[A, A] {
+    fn twice(self) -> Int {
+        return 2
+    }
+}
+
+record Crate[T] {
+    item: T
+}
+
+impl[T: Nope] Crate[T] {                            // <- E0307
+    fn k(self) -> Int {
+        return 1
+    }
+}
+
+impl[T: Nope] Count for Crate[T] {                  // <- E0307
+    fn count(self) -> Int {
+        return 1
+    }
+}
+
 interface Anything {
     fn whatever(self) -> Int
 }
@@ -206,6 +245,43 @@ fn describe_all[T: Describe](x: T) -> Text {
 
 fn counted[T: Count](x: T) -> Int {
     return x.count()
+}
+
+fn twice_of[T: Twice](x: T) -> Int {
+    return x.twice()
+}
+
+fn boxed[E: Copy](e: E) -> Box[E] fails E {
+    return Box(item: e)
+}
+
+fn small() -> Int8 {
+    return 5
+}
+
+// A `Never` part of the receiver gives way to the other parts that the same type parameter
+// stands for, and a receiver's error type that settles later must still match the target.
+fn never_parts() -> Bool {
+    let n: Option[Never] = None
+    let a = Pair(first: n, second: Some(Token(id: 1))).swap() // <- E0309
+    let b = Pair(first: Some(Token(id: 2)), second: n).swap() // <- E0309
+    let c = Duo(first: n, second: Some(Token(id: 3))).twice() // <- E0309
+    let d = twice_of(x: Duo(first: Some(Token(id: 4)), second: n)) // <- E0309
+    let t: Text = match Pair(first: n, second: Some(5)).swap().first {
+        Some(x) => x                                           // <- E0301
+        None => "none"
+    }
+    let e = Err(small()) == attempt boxed(e: 5).big()          // <- E0303
+    let f = attempt boxed(e: 5).big() == Err(small())          // <- E0301
+    return e
+}
+
+// A block whose type parameter has a rejected constraint is still for `Crate[T]`, so its
+// methods and interface are known, and others aren't.
+fn rejected_bounds(c: Crate[Int]) -> Text {
+    let n = c.k() + counted(x: c)
+    let m = c.h()                                   // <- E0303
+    return f"{c}"                                   // <- E0306
 }
 
 fn calls() -> Int {

@@ -183,5 +183,7 @@ pub fn main(sys: keep System) fails IoError {
     var pool: Pool[Int] = Pool.new()
     let h = pool.insert(5)
     let m: Map[Text, Int] = ["a": 1]
+    let n: Option[Never] = None
     try sys.stdout.write_line(f"{h.describe()} {describe_all(x: h)} {m.describe()} {describe_all(x: m)}")
+    try sys.stdout.write_line(f"{Pair(first: n, second: Some(3)).swap()} {Pair(first: Some('x'), second: n).swap()}")
 }

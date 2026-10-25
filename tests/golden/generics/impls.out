@@ -8,3 +8,4 @@ some int 7 no int some int 8
 9 13
 0 box of 5 box of Some('c')
 handle handle 1 entries 1 entries
+Pair(first: Some(3), second: None) Pair(first: None, second: Some('x'))

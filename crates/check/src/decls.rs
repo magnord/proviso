@@ -422,8 +422,8 @@ pub fn matches_target(pattern: &Ty, ty: &Ty, binds: &mut [Option<Ty>]) -> bool {
         (Ty::Param(i), ty) => match &binds[*i as usize] {
             Some(bound) => {
                 let agree = compatible(bound, ty, &mut HashSet::new());
-                if agree && *bound == Ty::Never {
-                    binds[*i as usize] = Some(ty.clone());
+                if agree {
+                    binds[*i as usize] = Some(join(bound, ty));
                 }
                 agree
             }
@@ -439,6 +439,22 @@ pub fn matches_target(pattern: &Ty, ty: &Ty, binds: &mut [Option<Ty>]) -> bool {
                 && pargs.iter().zip(targs.iter()).all(|(p, t)| matches_target(p, t, binds))
         }
         (pattern, ty) => pattern == ty,
+    }
+}
+
+/// The type that two [`compatible`] types both describe, which takes each part where one of
+/// them has `Never` from the other, so `Pair[Option[Never], Int]` and `Pair[Option[Int], Int]`
+/// join as the second. An open variable or an unknown part stays as it is.
+fn join(a: &Ty, b: &Ty) -> Ty {
+    match (a, b) {
+        (Ty::Never, other) => other.clone(),
+        (Ty::Adt(x, xs), Ty::Adt(_, ys)) if !Arc::ptr_eq(xs, ys) => {
+            Ty::Adt(*x, xs.iter().zip(ys.iter()).map(|(x, y)| join(x, y)).collect())
+        }
+        (Ty::Fn(modes, xs), Ty::Fn(_, ys)) if !Arc::ptr_eq(xs, ys) => {
+            Ty::Fn(modes.clone(), xs.iter().zip(ys.iter()).map(|(x, y)| join(x, y)).collect())
+        }
+        (a, _) => a.clone(),
     }
 }
 

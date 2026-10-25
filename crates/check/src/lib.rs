@@ -2339,7 +2339,16 @@ impl Checker<'_> {
         let m = self.m;
         let target_span = m.types[decl.target].span;
         let header = span.to(target_span);
+        // A parameter with a rejected constraint still has its place in the target, so the
+        // block is for `Box[T]`, any box, and not for an unknown type (§15.1). It stands for
+        // an unknown type in the block's signatures and at each call.
+        for (sym, index) in self.generic_scope.iter_mut() {
+            if let Some(i) = self.impl_generics.iter().position(|g| g.sym == Some(*sym)) {
+                index.get_or_insert(i as u32);
+            }
+        }
         let target = self.resolve_type(decl.target);
+        self.impl_scope();
         // Only the target gives the block's type parameters, so one it doesn't name could
         // be any type at each call (OPEN_QUESTIONS P5). It stands for an unknown type.
         if !mentions_error(&target) {
@@ -5376,21 +5385,24 @@ impl Checker<'_> {
                 }
             }
         }
-        if let (Some(receiver), Some(owner)) = (receiver, &owner)
-            && own > 0
-        {
-            let mut binds = vec![None; own];
-            if matches_target(owner, &self.vars.resolve(receiver), &mut binds) {
-                for (slot, bind) in tvars.iter_mut().zip(binds) {
-                    if let Some(ty) = bind {
-                        slot.get_or_insert(ty);
-                    }
-                }
-            }
-        }
-        let tvars: Vec<Ty> = (tvars.into_iter().enumerate())
+        let mut tvars: Vec<Ty> = (tvars.into_iter().enumerate())
             .map(|(param, ty)| ty.unwrap_or_else(|| self.vars.fresh(Kind::Any, Origin::Call { f, param, span })))
             .collect();
+        // The receiver is an argument of the block's target type, so its type gives the
+        // block's parameters as an argument's does, with a `Never` part giving way to the
+        // others. An open part of it that settles on another type doesn't match the target.
+        if let (Some(receiver), Some(owner)) = (receiver, &owner)
+            && !self.vars.subsume(&owner.subst(&tvars), receiver)
+        {
+            let names: Vec<Box<str>> = self.p.fns[f].generics.iter().map(|g| g.name.clone()).collect();
+            let message = format!(
+                "`{}` has no method `{name}`; the `impl` that declares it is for `{}`",
+                self.show(receiver),
+                self.p.decls.display_in(owner, &names)
+            );
+            self.error(codes::UNKNOWN_MEMBER, span, message);
+            tvars[..own].fill(Ty::Error);
+        }
         Some(tvars)
     }
 

@@ -637,9 +637,10 @@ impl Walk<'_> {
         self.released_within(local, path, ty, &mut Vec::new())
     }
 
-    /// [`Walk::released_fully`] inside the records in `within`. A record that holds itself
-    /// has no values, so it holds no resource.
-    fn released_within(&self, local: LocalId, path: &mut Path, ty: &Ty, within: &mut Vec<AdtId>) -> bool {
+    /// [`Walk::released_fully`] inside the record types in `within`. A record type that holds
+    /// itself has no values, so it holds no resource. A generic record may hold itself with
+    /// other type arguments, as `Outer[Outer[Probe]]` does, which is another type.
+    fn released_within(&self, local: LocalId, path: &mut Path, ty: &Ty, within: &mut Vec<Ty>) -> bool {
         let Some(state) = &self.state else { return true };
         if state.is_released(local, path) || !self.is_resource(ty) {
             return true;
@@ -650,10 +651,10 @@ impl Walk<'_> {
         if def.is_enum() || def.is_native() || (def.resource_base && !own_self) {
             return false;
         }
-        if within.contains(id) {
+        if within.contains(ty) {
             return true;
         }
-        within.push(*id);
+        within.push(ty.clone());
         let released = def.field_types(VariantIdx::RECORD, args).iter().enumerate().all(|(i, field)| {
             path.push(i as u32);
             let released = self.released_within(local, path, field, within);
