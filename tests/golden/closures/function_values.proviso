@@ -5,8 +5,9 @@
 // or by `::[…]` (§4.8). A function value is called without labels (§3), with `&` for an
 // `inout` parameter (§5.2), and a call through a type with `fails E` is marked like any
 // call that can fail (§7.2). A function that can't fail, or fails with `Never`, is a value
-// of the type that adds `fails E` (OPEN_QUESTIONS P5). `debug` writes a function value as
-// its type.
+// of the type that adds `fails E`, and one whose parameter is wider is a value of the type
+// with the narrower parameter (OPEN_QUESTIONS P5). `debug` writes a function value as its
+// type.
 use std.io { IoError }
 
 enum Stop derives(Show) {
@@ -75,6 +76,14 @@ fn guarded(f: fn(Int) -> Int fails Stop, x: Int) -> Text {
     return f"{r}"
 }
 
+fn lenient(f: fn(Int) -> Int fails Stop) -> Int {
+    return f(1) else 0
+}
+
+fn higher(g: fn(fn(Int) -> Int) -> Int) -> Int {
+    return g(double)
+}
+
 fn locals() -> Text {
     let f = double
     let g: fn(Int, Int) -> Int = add
@@ -114,6 +123,7 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(locals())
     try sys.stdout.write_line(f"{from_param(f: double)} {branches(flag: true)} {branches(flag: false)}")
     try sys.stdout.write_line(modes())
+    try sys.stdout.write_line(f"{higher(g: lenient)}")
     let shown = failing() else "failed"
     try sys.stdout.write_line(shown)
 }

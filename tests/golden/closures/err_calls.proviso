@@ -62,7 +62,16 @@ fn calls(f: fn(Int) -> Int, g: fn(inout Int), h: fn(Int) -> Int fails Stop) -> I
     return a
 }
 
+fn strict(f: fn(Int) -> Int) -> Int {
+    return f(1)
+}
+
+fn wider(g: fn(fn(Int) -> Int fails Stop) -> Int) -> Int {
+    return 0
+}
+
 fn values() {
+    let w = wider(g: strict)                        // <- E0301
     let a = apply(f: length, x: 1)                  // <- E0301
     let b = apply(f: half, x: 1)                    // <- E0301
     run(f: bump)                                    // <- E0301
