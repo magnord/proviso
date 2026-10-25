@@ -651,7 +651,9 @@ impl Walk<'_> {
         if def.is_enum() || def.is_native() || (def.resource_base && !own_self) {
             return false;
         }
-        if within.contains(ty) {
+        // A record whose type argument grows has no finite parts, and it has been reported
+        // (E0904; §15.1).
+        if def.unknown_variants || within.contains(ty) {
             return true;
         }
         within.push(ty.clone());

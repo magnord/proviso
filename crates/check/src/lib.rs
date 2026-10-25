@@ -2339,16 +2339,22 @@ impl Checker<'_> {
         let m = self.m;
         let target_span = m.types[decl.target].span;
         let header = span.to(target_span);
-        // A parameter with a rejected constraint still has its place in the target, so the
-        // block is for `Box[T]`, any box, and not for an unknown type (§15.1). It stands for
-        // an unknown type in the block's signatures and at each call.
+        // A parameter with a rejected constraint still has its place in the target, as an
+        // unknown type, so the block is for `Box[_]`, any box, and not for an unknown type
+        // (§15.1). One that names a type may have meant it, so it leaves the target unknown.
+        let unscoped: Vec<(Symbol, u32)> = (self.impl_generics.iter().enumerate())
+            .filter(|(_, g)| g.rejected)
+            .filter_map(|(i, g)| Some((g.sym?, i as u32)))
+            .filter(|&(sym, _)| !self.names_type(sym))
+            .collect();
         for (sym, index) in self.generic_scope.iter_mut() {
-            if let Some(i) = self.impl_generics.iter().position(|g| g.sym == Some(*sym)) {
-                index.get_or_insert(i as u32);
+            if let Some(&(_, i)) = unscoped.iter().find(|(s, _)| s == sym) {
+                index.get_or_insert(i);
             }
         }
         let target = self.resolve_type(decl.target);
         self.impl_scope();
+        let target = unknown_params(&target, &unscoped);
         // Only the target gives the block's type parameters, so one it doesn't name could
         // be any type at each call (OPEN_QUESTIONS P5). It stands for an unknown type.
         if !mentions_error(&target) {
@@ -2504,13 +2510,11 @@ impl Checker<'_> {
         if let Some(earlier) = self.p.decls.impl_of(iface, key) {
             // A generic type has one `impl` of each interface, whatever the targets' type
             // arguments are (OPEN_QUESTIONS P5, §G).
-            let (code, message) = if earlier.target == target {
+            let (code, message) = if same_target(&earlier.target, &target) {
+                self.p.decls.mark_taken(iface, key, target.clone(), self.impl_generics.len());
                 (codes::DUPLICATE_IMPLEMENTATION, format!("`{target_text}` already implements `{iface_text}`"))
             } else {
-                let names: Vec<Box<str>> = (earlier.methods.iter().flatten().next())
-                    .map(|&f| self.p.fns[f].generics.iter().map(|g| g.name.clone()).collect())
-                    .unwrap_or_default();
-                let earlier = self.p.decls.display_in(&earlier.target, &names).to_string();
+                let earlier = self.p.decls.display_in(&earlier.target, &earlier.names).to_string();
                 let head = match &target {
                     Ty::Adt(id, _) if self.p.decls.adt(*id).tuple => "a tuple type".to_string(),
                     Ty::Adt(id, _) => format!("`{}`", self.p.decls.name(*id)),
@@ -2576,7 +2580,8 @@ impl Checker<'_> {
             self.error(codes::IMPL_MISMATCH, header, message);
         }
         let bounds = self.impl_generics.iter().map(|g| g.bounds.clone()).collect();
-        self.p.decls.add_impl(iface, key, ImplDef { methods: fns, target: target.clone(), bounds });
+        let names = self.impl_generics.iter().map(|g| g.name.clone()).collect();
+        self.p.decls.add_impl(iface, key, ImplDef { methods: fns, target: target.clone(), bounds, names });
     }
 
     /// Records an `impl` block for `target` that names an interface it can't implement.
@@ -7746,4 +7751,37 @@ fn strongly_connected<E>(edges: &[Vec<(usize, bool, E)>]) -> Vec<Vec<usize>> {
         }
     }
     components
+}
+
+/// `ty` with each type parameter in `params` replaced by an unknown type, part by part, so
+/// `Box[T]` becomes `Box[_]` rather than an unknown type as a whole.
+fn unknown_params(ty: &Ty, params: &[(Symbol, u32)]) -> Ty {
+    match ty {
+        Ty::Param(i) if params.iter().any(|&(_, p)| p == *i) => Ty::Error,
+        Ty::Adt(id, args) if !params.is_empty() => {
+            Ty::Adt(*id, args.iter().map(|arg| unknown_params(arg, params)).collect())
+        }
+        ty => ty.clone(),
+    }
+}
+
+/// Whether two `impl` targets are the same up to the names of their blocks' type parameters,
+/// as `Pair[A, B]` in `impl[A, B]` and in `impl[B, A]` are.
+fn same_target(a: &Ty, b: &Ty) -> bool {
+    fn walk(a: &Ty, b: &Ty, pairs: &mut Vec<(u32, u32)>) -> bool {
+        match (a, b) {
+            (Ty::Param(x), Ty::Param(y)) => match pairs.iter().find(|(p, q)| p == x || q == y) {
+                Some(pair) => *pair == (*x, *y),
+                None => {
+                    pairs.push((*x, *y));
+                    true
+                }
+            },
+            (Ty::Adt(x, xs), Ty::Adt(y, ys)) => {
+                x == y && xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(a, b)| walk(a, b, pairs))
+            }
+            (a, b) => a == b,
+        }
+    }
+    walk(a, b, &mut Vec::new())
 }

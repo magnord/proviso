@@ -64,3 +64,20 @@ fn calls(n: Nested[Int], g: Grow[Int], p: Ping[Text], s: Swap[Int, Text], u: Use
     }
     return a + b + c + u.w.wrapped.first.first.wrapped.first.second
 }
+
+resource record Probe {
+    id: Int
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+record Hold[T] {
+    item: T
+    next: Hold[Pair[T, T]]                          // <- E0904
+}
+
+fn partly(h: take Hold[Probe]) {
+    h.item.abandon()
+}

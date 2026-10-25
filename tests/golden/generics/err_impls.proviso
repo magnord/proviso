@@ -231,14 +231,96 @@ record Crate[T] {
 
 impl[T: Nope] Crate[T] {                            // <- E0307
     fn k(self) -> Int {
-        return 1
+        return self.item.len() + self.item
     }
 }
 
 impl[T: Nope] Count for Crate[T] {                  // <- E0307
     fn count(self) -> Int {
+        return self.item.count()
+    }
+}
+
+// A type parameter named like a type may have meant the type, so the block is for an
+// unknown type, and another block for the head doesn't clash with it.
+record Tray[T] {
+    item: T
+}
+
+impl[Point] Count for Tray[Point] {                 // <- E0203
+    fn count(self) -> Int {
+        return self.item.x
+    }
+}
+
+impl Count for Tray[Text] {
+    fn count(self) -> Int {
+        return 2
+    }
+}
+
+// The blocks a type head already has may have other constraints than a rejected one, or name
+// their type parameters in another order.
+enum Bin[T] {
+    Full(value: T)
+    Empty
+}
+
+impl[T: Copy] Count for Bin[T] {
+    fn count(self) -> Int {
         return 1
     }
+}
+
+impl Count for Bin[Token] {                         // <- E0321
+    fn count(self) -> Int {
+        return 2
+    }
+}
+
+record Cart[T] {
+    item: T
+}
+
+impl[T: Show] Count for Cart[T] {
+    fn count(self) -> Int {
+        return 1
+    }
+}
+
+impl[T] Count for Cart[T] {                         // <- E0313
+    fn count(self) -> Int {
+        return 2
+    }
+}
+
+impl[A, B] Describe for Duo[A, B] {
+    fn describe(self) -> Text {
+        return "duo"
+    }
+
+    fn same(self, other: Self) -> Bool {
+        return true
+    }
+}
+
+impl[B, A] Describe for Duo[A, B] {                 // <- E0313
+    fn describe(self) -> Text {
+        return "duo"
+    }
+
+    fn same(self, other: Self) -> Bool {
+        return false
+    }
+}
+
+interface Marker {
+}
+
+impl[T] Marker for Duo[T, T] {
+}
+
+impl Marker for Duo[Int, Text] {                    // <- E0321
 }
 
 interface Anything {
@@ -292,6 +374,9 @@ fn never_parts() -> Bool {
 // matches, and only for those.
 fn taken_heads() -> Int {
     let a = counted(x: ["a"]) + ["b"].count() + [1].count()
+    let t: Bin[Token] = Bin.Full(Token(id: 5))
+    let n = counted(x: t) + Tray(item: Point(x: 1)).count() + Tray(item: "a").count()
+    let m = counted(x: Cart(item: Point(x: 2))) + Cart(item: Point(x: 3)).count()
     let b = [1.5].count()                           // <- E0303
     let c = counted(x: [true])                      // <- E0309
     return a

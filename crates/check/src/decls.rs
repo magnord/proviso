@@ -153,12 +153,14 @@ pub struct ImplDef {
     /// The constraints of each of the block's type parameters, which the type arguments
     /// that match them must meet.
     pub bounds: Vec<Vec<IfaceId>>,
+    /// The names of the block's type parameters, for messages.
+    pub names: Vec<Box<str>>,
 }
 
 impl ImplDef {
     /// The `impl` of a type without type parameters of its own.
     pub fn plain(methods: Vec<Option<usize>>, target: Ty) -> ImplDef {
-        ImplDef { methods, target, bounds: Vec::new() }
+        ImplDef { methods, target, bounds: Vec::new(), names: Vec::new() }
     }
 }
 
@@ -418,12 +420,17 @@ impl Kinds {
 /// subtype of every type, matches anything, and so do an open variable and an unknown type,
 /// which could be anything.
 pub fn matches_target(pattern: &Ty, ty: &Ty, binds: &mut [Option<Ty>]) -> bool {
+    matches_in(pattern, ty, binds, &mut HashMap::new())
+}
+
+/// [`matches_target`], where `joins` holds the joins of the argument lists already joined.
+fn matches_in(pattern: &Ty, ty: &Ty, binds: &mut [Option<Ty>], joins: &mut Joins) -> bool {
     match (pattern, ty) {
         (Ty::Param(i), ty) => match &binds[*i as usize] {
             Some(bound) => {
                 let agree = compatible(bound, ty, &mut HashSet::new());
                 if agree {
-                    binds[*i as usize] = Some(join(bound, ty));
+                    binds[*i as usize] = Some(join(bound, ty, joins));
                 }
                 agree
             }
@@ -436,7 +443,7 @@ pub fn matches_target(pattern: &Ty, ty: &Ty, binds: &mut [Option<Ty>]) -> bool {
         (Ty::Adt(a, pargs), Ty::Adt(b, targs)) => {
             a == b
                 && pargs.len() == targs.len()
-                && pargs.iter().zip(targs.iter()).all(|(p, t)| matches_target(p, t, binds))
+                && pargs.iter().zip(targs.iter()).all(|(p, t)| matches_in(p, t, binds, joins))
         }
         (pattern, ty) => pattern == ty,
     }
@@ -444,19 +451,28 @@ pub fn matches_target(pattern: &Ty, ty: &Ty, binds: &mut [Option<Ty>]) -> bool {
 
 /// The type that two [`compatible`] types both describe, which takes each part where one of
 /// them has `Never` from the other, so `Pair[Option[Never], Int]` and `Pair[Option[Int], Int]`
-/// join as the second. An open variable or an unknown part stays as it is.
-fn join(a: &Ty, b: &Ty) -> Ty {
+/// join as the second. An open variable or an unknown part stays as it is. `joins` holds
+/// the joins of the argument lists already joined, by address, so equal types that share no
+/// part cost each pair of parts once.
+fn join(a: &Ty, b: &Ty, joins: &mut Joins) -> Ty {
     match (a, b) {
         (Ty::Never, other) => other.clone(),
         (Ty::Adt(x, xs), Ty::Adt(_, ys)) if !Arc::ptr_eq(xs, ys) => {
-            Ty::Adt(*x, xs.iter().zip(ys.iter()).map(|(x, y)| join(x, y)).collect())
-        }
-        (Ty::Fn(modes, xs), Ty::Fn(_, ys)) if !Arc::ptr_eq(xs, ys) => {
-            Ty::Fn(modes.clone(), xs.iter().zip(ys.iter()).map(|(x, y)| join(x, y)).collect())
+            let key = (Arc::as_ptr(xs) as *const Ty as usize, Arc::as_ptr(ys) as *const Ty as usize);
+            if let Some(joined) = joins.get(&key) {
+                return joined.0.clone();
+            }
+            let joined = Ty::Adt(*x, xs.iter().zip(ys.iter()).map(|(x, y)| join(x, y, joins)).collect());
+            joins.insert(key, (joined.clone(), xs.clone(), ys.clone()));
+            joined
         }
         (a, _) => a.clone(),
     }
 }
+
+/// The joins of pairs of argument lists, by their addresses, with the lists, which keeps the
+/// addresses from being reused.
+type Joins = HashMap<(usize, usize), (Ty, Arc<[Ty]>, Arc<[Ty]>)>;
 
 /// Whether `a` and `b` are the same type, where `Never`, an open variable or an unknown type
 /// on either side agrees with anything. `seen` holds the pairs of argument lists already
@@ -493,7 +509,8 @@ pub struct Decls {
     unknown: HashSet<ImplKey>,
     /// The targets of `impl` blocks rejected because their type head had an `impl` of the
     /// interface already, with the number of type parameters each block declares. Each may
-    /// have been meant for the types it matches, so their uses aren't reported (§15.1).
+    /// have been meant for the types it matches, with other constraints than the accepted
+    /// one, so their uses aren't reported (§15.1).
     taken: HashMap<(IfaceId, ImplKey), Vec<(Ty, usize)>>,
     /// Whether the module declares a resource, without which no type is one.
     any_resource: bool,
@@ -696,7 +713,7 @@ impl Decls {
     }
 
     /// Notes that an `impl` block of `iface` for `target`, with `params` type parameters, was
-    /// rejected because `key`, its type head, has one already.
+    /// rejected because `key`, its type head, has one already, for that target or another.
     pub fn mark_taken(&mut self, iface: IfaceId, key: ImplKey, target: Ty, params: usize) {
         self.taken.entry((iface, key)).or_default().push((target, params));
     }
@@ -848,14 +865,13 @@ impl Decls {
         }
         let Some(def) = self.impls.get(&(iface, key)) else { return false };
         let mut binds = vec![None; def.bounds.len()];
-        if !matches_target(&def.target, ty, &mut binds) {
-            let taken = self.taken.get(&(iface, key)).map_or(&[][..], |targets| targets.as_slice());
-            return taken.iter().any(|(target, params)| matches_target(target, ty, &mut vec![None; *params]));
-        }
-        binds.iter().zip(&def.bounds).all(|(bind, bounds)| match bind {
-            Some(Ty::Never | Ty::Var(_) | Ty::Error) | None => true,
-            Some(arg) => bounds.iter().all(|&b| self.implements_in(arg, b, params, memo)),
-        })
+        let applies = matches_target(&def.target, ty, &mut binds)
+            && binds.iter().zip(&def.bounds).all(|(bind, bounds)| match bind {
+                Some(Ty::Never | Ty::Var(_) | Ty::Error) | None => true,
+                Some(arg) => bounds.iter().all(|&b| self.implements_in(arg, b, params, memo)),
+            });
+        let taken = self.taken.get(&(iface, key)).map_or(&[][..], |targets| targets.as_slice());
+        applies || taken.iter().any(|(target, params)| matches_target(target, ty, &mut vec![None; *params]))
     }
 
     /// The `impl` of `iface` for `ty`'s name, whose target `ty` matches, with the type

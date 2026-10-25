@@ -387,11 +387,20 @@ fn types_that_double_check_fast_and_show_in_short() {
     let dup = "fn dup[T: Copy](x: T) -> Result[T, T] {\n    return Ok(x)\n}\n\n";
     let pairs: String = (1..=60).map(|i| format!("    let p{i} = P(a: p{}, b: p{})\n", i - 1, i - 1)).collect();
     let pair = "record P[A, B] {\n    a: A\n    b: B\n}\n\n";
+    // Two equal types built apart share no part, and an `impl` for `P[A, A]` matches them.
+    let twins: String = (1..=40).map(|i| format!("    let r{i} = P(a: r{}, b: r{})\n", i - 1, i - 1)).collect();
+    let twice = "interface Twice {\n    fn twice(self) -> Int\n}\n\nimpl[A: Copy] Twice for P[A, A] {\n    fn twice(self) -> Int {\n        return 2\n    }\n}\n\nfn twice_of[T: Twice](x: T) -> Int {\n    return x.twice()\n}\n\n";
     let cases = [
         (format!("{dup}fn f() -> Int {{\n    let x = {}\n    return 1\n}}\n", calls(60)), 0),
         (format!("{dup}fn f() -> Int {{\n    let x: Int = {}\n    return x\n}}\n", calls(60)), 65),
         (format!("{pair}fn f() -> Int {{\n    let p0 = 1\n{pairs}    let q = p60.a.b\n    return 1\n}}\n"), 0),
         (format!("{pair}fn f() -> Int {{\n    let p0 = 1\n{pairs}    let x: Int = p60\n    return x\n}}\n"), 65),
+        (
+            format!(
+                "{pair}{twice}fn f() -> Int {{\n    let p0 = 1\n{pairs}    let r0 = 1\n{twins}    let q = P(a: p40, b: r40)\n    return q.twice() + twice_of(x: q)\n}}\n"
+            ),
+            0,
+        ),
     ];
     for (i, (text, code)) in cases.into_iter().enumerate() {
         let file = source(&format!("doubling_{i}.proviso"), &text);
