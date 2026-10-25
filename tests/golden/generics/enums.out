@@ -1,0 +1,6 @@
+4 16 Tree.Node(left: Tree.Leaf, value: "a", right: Tree.Leaf)
+false true
+Either.Left(value: 3) Either.Right(value: 3) Tree.Node(left: Tree.Leaf, value: [Either.Left(value: 1), Either.Right(value: "x")], right: Tree.Leaf)
+text hi
+bool true
+1 false

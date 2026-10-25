@@ -1,0 +1,38 @@
+// phase: 2.10
+// expect-error: E0201
+// expect-error: E0301
+// expect-error: E0312
+// A generic record or variant whose type arguments neither its fields nor its expected type
+// give is an error, reported once, at the value that first leaves one open, also inside
+// another value or call (REFERENCE §4.8; OPEN_QUESTIONS P5). A field or a part that a
+// rejected expression would have given isn't reported again, and fields that disagree are
+// one mismatch (§15.1).
+record Duo[T] {
+    a: T
+    b: T
+}
+
+enum Tree[T] {
+    Leaf
+    Node(left: Tree[T], value: T, right: Tree[T])
+}
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn open() {
+    let a = Duo(a: None, b: None)                   // <- E0312
+    let b = Tree.Node(left: Tree.Leaf, value: None, right: Tree.Leaf) // <- E0312
+    let c = first(a: Tree.Leaf, b: Tree.Leaf)       // <- E0312
+    let d = Duo(a: Tree.Leaf, b: Tree.Leaf) == Duo(a: Tree.Leaf, b: Tree.Leaf) // <- E0312
+    let e = [Duo(a: [], b: [])]                     // <- E0312
+    let f = (Duo(a: None, b: Some(1)), Tree.Leaf)   // <- E0312
+}
+
+fn rejected() {
+    let a = Duo(a: nosuch, b: None)                 // <- E0201
+    let b = Tree.Node(left: Tree.Leaf, value: missing(), right: Tree.Leaf) // <- E0201
+    let c = Duo(a: 1, b: "x")                       // <- E0301
+    let d = Duo(a: Some(1), b: Some("x"))           // <- E0301
+}

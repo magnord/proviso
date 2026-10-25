@@ -1,0 +1,41 @@
+// phase: 2.10
+// expect-error: E0301
+// expect-error: E0302
+// expect-error: E0303
+// expect-error: E0312
+// expect-error: E0317
+// A generic record or variant takes its type arguments from its fields and its expected
+// type, never from `::[…]` (REFERENCE §4.8; OPEN_QUESTIONS P5). One that neither gives is
+// an error, reported once, at the value that leaves it open. Fields that disagree about a
+// type argument, or disagree with the expected type, are mismatches, and `with` keeps the
+// record's type arguments, so it can't change a field's type.
+record Pair[A, B] {
+    first: A
+    second: B
+}
+
+record Phantom[T] {
+    n: Int
+}
+
+enum Tree[T] {
+    Leaf
+    Node(left: Tree[T], value: T, right: Tree[T])
+}
+
+fn give(small: Int8) -> Int {
+    let a = Tree.Leaf                               // <- E0312
+    let b = Phantom(n: 1)                           // <- E0312
+    let c = Pair(first: None, second: 1)            // <- E0312
+    let d = Pair::[Int, Int](first: 1, second: 2)   // <- E0317
+    let e = Tree.Node::[Int](left: Tree.Leaf, value: 1, right: Tree.Leaf) // <- E0317
+    let f: Phantom[Text] = Phantom(n: 2)
+    let g: Pair[Int, Text] = Pair(first: 1, second: 2) // <- E0301
+    let h = Pair(first: 1, second: "a").with(second: 2) // <- E0301
+    let i: Pair[Int8, Int8] = Pair(first: small, second: 300) // <- E0302
+    let j = Tree.Node(left: Tree.Leaf, value: 1, right: Tree.Node(left: Tree.Leaf, value: "a", right: Tree.Leaf)) // <- E0301
+    let k: Tree[Int] = Tree.Node(left: Tree.Leaf, value: 1.5, right: Tree.Leaf) // <- E0301
+    let l = Pair(first: 1, second: 2).third         // <- E0303
+    let m = Tree.Node(left: Tree.Leaf, value: Tree.Leaf, right: Tree.Leaf) // <- E0312
+    return f.n
+}

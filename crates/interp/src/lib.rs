@@ -2313,10 +2313,12 @@ fn impl_key(value: &Value) -> ImplKey {
         Value::Unit => ImplKey::Unit,
         Value::IoError(_) => ImplKey::IoError,
         Value::Adt(adt) => ImplKey::Adt(adt.def),
+        // A module may implement its interface for a standard type, as `List[Int]` (§4.9).
+        Value::List(_) => ImplKey::Adt(AdtId::LIST),
+        Value::Map(_) => ImplKey::Adt(AdtId::MAP),
+        Value::Pool(_) => ImplKey::Adt(AdtId::POOL),
+        Value::Handle(_) => ImplKey::Adt(AdtId::HANDLE),
         Value::Cap(_) | Value::Fn(_) => unreachable!("capabilities and function values implement no interface"),
-        Value::List(_) | Value::Map(_) | Value::Pool(_) | Value::Handle(_) => {
-            unreachable!("the standard library's types implement interfaces only as STD.md does")
-        }
     }
 }
 

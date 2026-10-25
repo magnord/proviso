@@ -1,0 +1,19 @@
+// phase: 2.10
+// expect-exit: 70
+// expect-report: defect refinement_failed
+// A field refinement of a generic enum's variant is checked when the variant is built,
+// whatever the enum's type arguments are (REFERENCE §4.5, §8.2).
+enum Counted[T] {
+    Many(items: List[T], count: Int where count >= 0)
+    Empty
+}
+
+fn counted[T](items: take List[T], count: Int) -> Counted[T] {
+    return Counted.Many(items: items, count: count)
+}
+
+pub fn main(sys: keep System) {
+    let a = counted(items: ["a"], count: 1)
+    let b: Counted[Bool] = Counted.Empty
+    let c = counted(items: [Counted.Empty, a], count: -1)
+}

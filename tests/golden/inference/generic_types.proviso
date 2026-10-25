@@ -1,0 +1,96 @@
+// phase: 2.10
+// A generic record's or variant's type arguments come from its expected type and all of its
+// fields together, whatever their order and spelling, as a generic call's do (REFERENCE
+// §4.8; OPEN_QUESTIONS P5). Each group is one value and its rewrites, which are swapped fields, a
+// literal or `None` beside a value that fixes the type, one more level of nesting, a tuple
+// field, a recursive variant, and branches, list elements and operands that meet. Every
+// rewrite checks, so each type argument is the one `small` gives.
+use std.io { IoError }
+
+record Pair[A, B] derives(Eq, Show) {
+    first: A
+    second: B
+}
+
+record Duo[T] derives(Eq, Show) {
+    a: T
+    b: T
+}
+
+enum Tree[T] derives(Eq, Show) {
+    Leaf
+    Node(left: Tree[T], value: T, right: Tree[T])
+}
+
+fn first[T: Copy](a: T, b: T) -> T {
+    return a
+}
+
+fn duo8(d: Duo[Int8]) -> Int8 {
+    return d.a + d.b
+}
+
+fn opt8(d: Duo[Option[Int8]]) -> Duo[Option[Int8]] {
+    return d
+}
+
+fn tree8(t: Tree[Int8]) -> Tree[Int8] {
+    return t
+}
+
+fn fields(c: Bool, small: Int8) -> Text {
+    let a1 = Duo(a: 1, b: small)
+    let a2 = Duo(a: small, b: 1)
+    let a3 = Duo(a: if c { 1 } else { 2 }, b: small)
+    let a4 = Duo(a: small, b: match c { true => 1, false => 2 })
+    let a5 = Duo(a: None, b: Some(small))
+    let a6 = Duo(a: Some(small), b: None)
+    let a7 = Duo(a: Duo(a: 1, b: 2), b: Duo(a: small, b: 3))
+    let a8 = Duo(a: (small, None), b: (1, Some("x")))
+    let a9 = Duo(a: (1, Some("x")), b: (small, None))
+    let n = duo8(a1) + duo8(a2) + duo8(a3) + duo8(a4) + duo8(a7.a) + duo8(a7.b)
+    let (x, _) = first(a: a8, b: a9).b
+    return f"{n} {opt8(a5)} {opt8(a6)} {a8} {x + small}"
+}
+
+fn variants(small: Int8) -> Text {
+    let t1 = Tree.Node(left: Tree.Leaf, value: 1, right: Tree.Node(left: Tree.Leaf, value: small, right: Tree.Leaf))
+    let t2 = Tree.Node(left: Tree.Node(left: Tree.Leaf, value: small, right: Tree.Leaf), value: 1, right: Tree.Leaf)
+    let t3 = Tree.Node(left: Tree.Leaf, value: small, right: Tree.Leaf)
+    let t4 = Tree.Node(left: Tree.Node(left: Tree.Leaf, value: 2, right: Tree.Leaf), value: small, right: Tree.Leaf)
+    let p1 = Duo(a: Tree.Leaf, b: t3)
+    let p2 = Duo(a: t3, b: Tree.Leaf)
+    return f"{tree8(t1)} {tree8(t2)} {tree8(p1.a)} {tree8(p2.b)} {t4 == t2}"
+}
+
+fn meeting(c: Bool, small: Int8) -> Text {
+    let m1 = if c { Duo(a: 1, b: 2) } else { Duo(a: small, b: small) }
+    let m2 = if c { Duo(a: small, b: small) } else { Duo(a: 1, b: 2) }
+    let m3 = if c { Pair(first: None, second: 1) } else { Pair(first: Some("x"), second: small) }
+    let m4 = if c { Pair(first: Some("x"), second: small) } else { Pair(first: None, second: 1) }
+    let m5 = [Tree.Leaf, Tree.Node(left: Tree.Leaf, value: small, right: Tree.Leaf)]
+    let m6 = [Tree.Node(left: Tree.Leaf, value: small, right: Tree.Leaf), Tree.Leaf]
+    let m7 = Duo(a: 1, b: 2) == Duo(a: small, b: small)
+    let m8 = Duo(a: small, b: small) == Duo(a: 1, b: 2)
+    let m9 = first(a: Duo(a: None, b: None), b: Duo(a: Some(small), b: None))
+    let n = duo8(m1) + duo8(m2) + m3.second + m4.second
+    return f"{n} {m3} {tree8(m5[1])} {tree8(m6[0])} {m7} {m8} {opt8(m9)}"
+}
+
+fn expected(small: Int8) -> Text {
+    let e1: Duo[Int8] = Duo(a: 100, b: 27)
+    let e2: Pair[Option[Int8], Tree[Text]] = Pair(first: None, second: Tree.Leaf)
+    let e3: Option[Duo[Int8]] = Some(Duo(a: 1, b: 2))
+    let e4: List[Tree[Int8]] = [Tree.Leaf]
+    let e5: Pair[Duo[Option[Int8]], Int8] = Pair(first: Duo(a: None, b: Some(1)), second: 3)
+    return f"{duo8(e1)} {e2} {e3} {e4} {e5}"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let small: Int8 = 7
+    try sys.stdout.write_line(fields(c: true, small: small))
+    try sys.stdout.write_line(variants(small))
+    try sys.stdout.write_line(meeting(c: true, small: small))
+    try sys.stdout.write_line(meeting(c: false, small: small))
+    try sys.stdout.write_line(expected(small))
+}

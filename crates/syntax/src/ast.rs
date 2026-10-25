@@ -145,6 +145,9 @@ pub struct Receiver {
 
 /// `impl Span { … }` or `impl Show for Span { … }` (REFERENCE §3, §4.9).
 pub struct ImplDecl {
+    /// The type parameters of a generic block, as in `impl[T: Show] Show for Box[T]`, which
+    /// its target names (REFERENCE §4.8).
+    pub generics: Vec<GenericParam>,
     /// The interface it implements, or `None` for the type's own methods.
     pub iface: Option<Ident>,
     pub target: TypeId,
@@ -188,6 +191,8 @@ pub enum ParamMode {
 /// `record Span derives(Eq) { lo: Int, hi: Int } where lo <= hi` (REFERENCE §4.4).
 pub struct RecordDecl {
     pub name: Ident,
+    /// The type parameters of a generic record, as in `record Pair[A, B]` (REFERENCE §4.8).
+    pub generics: Vec<GenericParam>,
     /// Declared `unique record`, so its values move instead of being copied (REFERENCE §5.1).
     pub unique: bool,
     /// Declared `resource record`, a base resource whose values must be consumed (§10).
@@ -202,6 +207,8 @@ pub struct RecordDecl {
 /// `enum Shape derives(Show) { Circle(radius: Float), Empty }` (REFERENCE §4.5).
 pub struct EnumDecl {
     pub name: Ident,
+    /// The type parameters of a generic enum, as in `enum Tree[T]`.
+    pub generics: Vec<GenericParam>,
     pub derives: Vec<Ident>,
     pub variants: Vec<VariantDecl>,
 }

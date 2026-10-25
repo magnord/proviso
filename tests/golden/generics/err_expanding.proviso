@@ -1,0 +1,83 @@
+// phase: 2.10
+// expect-error: E0904
+// A generic type may recurse through itself only with type arguments that don't grow, since
+// each instance would need another, bigger one, and the toolchain could never list them
+// all (REFERENCE §4.8; OPEN_QUESTIONS P5). So `Nested[T]` can't hold a `Nested[List[T]]`,
+// directly or through another generic type, but it may pass its parameters on in another
+// order, hold itself inside another type, or hold a bigger instance of a type that doesn't
+// lead back to it. The error is reported once for each cycle, at the first field whose type
+// argument grows, and uses of the type aren't reported again (§15.1).
+record Pair[A, B] {
+    first: A
+    second: B
+}
+
+enum Nested[T] {
+    Deep(inner: Nested[List[T]])                    // <- E0904
+    Flat(value: T)
+}
+
+record Grow[T] {
+    next: Option[Grow[Pair[T, T]]]                  // <- E0904
+}
+
+enum Ping[T] {
+    P(pong: Pong[T])
+    Stop
+}
+
+enum Pong[T] {
+    Q(ping: Ping[Option[T]])                        // <- E0904
+}
+
+enum Swap[A, B] {
+    S(next: Swap[B, A])
+    End(a: A, b: B)
+}
+
+record Forest[T] {
+    trees: List[Forest[T]]
+    value: T
+}
+
+record Wide[T] {
+    wrapped: Pair[Pair[T, T], Option[List[T]]]
+}
+
+record Uses[T] {
+    w: Wide[Wide[T]]
+    f: Option[Forest[Pair[T, T]]]
+}
+
+fn calls(n: Nested[Int], g: Grow[Int], p: Ping[Text], s: Swap[Int, Text], u: Uses[Int]) -> Int {
+    let a = match n {
+        Deep(_) => 0
+        Flat(v) => v
+    }
+    let b = match p {
+        P(Q(_)) => 1
+        Stop => 2
+    }
+    let c = match s {
+        S(S(End(a: x, b: y))) => x + y.byte_len()
+        _ => 0
+    }
+    return a + b + c + u.w.wrapped.first.first.wrapped.first.second
+}
+
+resource record Probe {
+    id: Int
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+record Hold[T] {
+    item: T
+    next: Hold[Pair[T, T]]                          // <- E0904
+}
+
+fn partly(h: take Hold[Probe]) {
+    h.item.abandon()
+}

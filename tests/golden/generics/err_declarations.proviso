@@ -1,0 +1,79 @@
+// phase: 2.10
+// expect-error: E0203
+// expect-error: E0204
+// expect-error: E0210
+// expect-error: E0307
+// expect-error: E0901
+// A generic type's parameters are PascalCase, distinct, and named unlike any type in scope
+// (REFERENCE §2, §3). A generic type is written with all of its type arguments and a
+// non-generic one with none (§4.8). Constraints on a type's own parameters aren't scheduled,
+// so they go on the `impl` blocks and functions that need them, and neither is a generic
+// `resource record`, whose `impl Abandon` would be generic code that may drop a resource,
+// nor a generic interface (OPEN_QUESTIONS P5). Uses of a rejected declaration aren't
+// reported again (§15.1).
+record Point {
+    x: Int
+}
+
+record Pair[A, B] {
+    first: A
+    second: B
+}
+
+record Lower[t] {                                   // <- E0204
+    x: t
+}
+
+enum Twice[T, T] {                                  // <- E0210
+    One(x: T)
+}
+
+record Shadow[Point] {                              // <- E0203
+    x: Point
+}
+
+enum Prelude[Text] {                                // <- E0203
+    Only(t: Text)
+}
+
+record Sorted[T: Ord] {                             // <- E0901
+    items: List[T]
+}
+
+enum Shown[T: Show] {                               // <- E0901
+    Shown(value: T)
+}
+
+resource record Guard[T] {                          // <- E0901
+    item: T
+}
+
+interface Convert[T] {                              // <- E0901
+    fn convert(self) -> T
+}
+
+record Holds {
+    p: Pair                                         // <- E0307
+}
+
+fn bare(a: Pair) {}                                 // <- E0307
+
+fn fewer(b: Pair[Int]) {}                           // <- E0307
+
+fn more(c: Option[Pair[Int, Int, Int]]) {}          // <- E0307
+
+fn plain(x: Point[Int]) {}                          // <- E0307
+
+fn unknown(x: Pair[Int, Nope]) {}                   // <- E0307
+
+fn rejected(a: Lower[Int], b: Twice[Int], c: Sorted[Int], d: Shown[Int], e: Guard[Int], h: Holds) -> Int {
+    let s = Sorted(items: [1, 2])
+    let g = Guard(item: 1)
+    let n = match d {
+        Shown(v) => v
+    }
+    let m = match b {
+        One(x) => x
+    }
+    return a.x + s.items.len() + n + m + h.p.first
+}

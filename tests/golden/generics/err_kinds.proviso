@@ -1,0 +1,170 @@
+// phase: 2.10
+// expect-error: E0309
+// expect-error: E0501
+// expect-error: E0503
+// expect-error: E0507
+// expect-error: E0509
+// A generic record or enum that holds a unique value moves, and one that holds a resource
+// must be consumed, as any aggregate (REFERENCE §5.1, §10). Neither meets a `Copy`
+// constraint, at any depth, and nor does a `unique record` whatever its type arguments. A
+// value built from a type parameter without `Copy` can't be copied out of a borrow (§4.8).
+// A function type can't be a type argument of a generic type, whether written or inferred
+// (§6.7, OPEN_QUESTIONS Q34). A type argument gives reach even when no field holds a value
+// of it, so `Phantom[Out]` isn't `Copy`, nor is a record with a field of that type, though
+// a handle is whatever its element (§5.1). A borrowed `Phantom[T]` can't be copied unless
+// `T: Copy`, since `T` may have reach.
+use std.io { Out }
+use std.pool { Pool, Handle }
+
+unique record Token {
+    id: Int
+}
+
+resource record Probe {
+    id: Int
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+    }
+}
+
+record Box[T] {
+    item: T
+}
+
+unique record Cell[T] {
+    value: T
+}
+
+record Ref[T] {
+    h: Handle[T]
+}
+
+record Phantom[T] {
+    n: Int
+}
+
+enum Slot[T] {
+    Full(value: T)
+    Vacant
+}
+
+record Holder {
+    f: Box[fn(Int) -> Int]                          // <- E0509
+}
+
+fn dup[T: Copy](x: T) -> T {
+    return x
+}
+
+fn moves(t: take Token, u: take Token) -> Int {
+    let a = Box(item: t)
+    let b = a
+    let c = a.item.id                               // <- E0501
+    let m = Cell(value: 1)
+    let n = m
+    let o = m.value                                 // <- E0501
+    let s = Slot.Full(u)
+    let v = s
+    let w = s is Vacant                             // <- E0501
+    return b.item.id + n.value
+}
+
+fn copies(pool: Pool[Token], h: Handle[Token]) {
+    let a = dup(x: Box(item: 1))
+    let b = dup(x: Cell(value: 1))                  // <- E0309
+    let c = dup(x: Box(item: Token(id: 1)))         // <- E0309
+    let d = dup(x: Slot.Full(Box(item: Token(id: 2)))) // <- E0309
+    let e = dup(x: Box(item: Ref(h: h)))
+}
+
+fn leaks(p: take Probe, q: take Probe) {
+    let b = Box(item: p)                            // <- E0507
+    let s = Slot.Full(Box(item: q))                 // <- E0507
+}
+
+// A record nested in itself with other type arguments is another type, which holds what
+// the inner one does.
+fn nested_leaks(p: take Probe, q: take Probe, r: take Probe) {
+    let b = Box(item: Box(item: p))                 // <- E0507
+    let c = Box(item: (1, Box(item: (q, 2))))       // <- E0507
+    let d = Box(item: Box(item: r))
+    d.item.item.abandon()
+}
+
+fn lent[T](x: Box[T], y: Slot[T]) -> Box[T] {
+    let z = y                                       // <- E0503
+    return x                                        // <- E0503
+}
+
+fn functions(f: fn(Int) -> Int) {
+    let b = Box(item: f)                            // <- E0509
+    let s = Slot.Full(f)                            // <- E0509
+    let n = Box(item: Box(item: f))                 // <- E0509
+}
+
+fn written(b: Box[fn()], s: Slot[Option[fn()]]) {}  // <- E0509, E0509
+
+fn phantoms(p: Phantom[Out], q: Phantom[Option[Out]], h: Handle[Out], r: Ref[Out]) {
+    let a = dup(x: p)                               // <- E0309
+    let b = dup(x: q)                               // <- E0309
+    let c = dup(x: h)
+    let d = dup(x: r)                               // <- E0309
+}
+
+fn phantom_params[T, U: Copy](p: Phantom[T], q: Phantom[U]) {
+    let a = dup(x: p)                               // <- E0309
+    let b = dup(x: q)
+}
+
+// A record or enum with a field whose type argument gives reach has that reach too, at any
+// depth and for a type declared later, but not through a handle.
+record Keeps {
+    item: Phantom[System]
+}
+
+enum MaybeKeeps {
+    Kept(p: Phantom[Out])
+    Nothing
+}
+
+record KeepsKeeps {
+    k: Option[Keeps]
+}
+
+record KeepsLater {
+    item: Phantom[Later]
+}
+
+record Later {
+    out: Out
+}
+
+record Points {
+    h: Handle[Out]
+}
+
+fn containers(k: Keeps, m: MaybeKeeps, kk: KeepsKeeps, l: KeepsLater, p: Points) {
+    let a = dup(x: k)                               // <- E0309
+    let b = dup(x: m)                               // <- E0309
+    let c = dup(x: kk)                              // <- E0309
+    let d = dup(x: l)                               // <- E0309
+    let e = dup(x: p)
+}
+
+// A borrowed value that may have reach through a type parameter can't be copied out of the
+// borrow unless the parameter is `Copy`, as one that may hold a unique value can't (§4.8).
+fn phantom_copies[T, U: Copy](p: Phantom[T], r: Ref[T], h: Handle[T], q: Phantom[U]) -> Phantom[T] {
+    let a = p                                       // <- E0503
+    let b = r                                       // <- E0503
+    let c = h
+    let d = q
+    return p                                        // <- E0503
+}
+
+impl[T] Phantom[T] {
+    fn twice(self) -> (Phantom[T], Phantom[T]) {
+        return (self, self)                         // <- E0503, E0503
+    }
+}

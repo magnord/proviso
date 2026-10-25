@@ -1,0 +1,15 @@
+// phase: 2.10
+// expect-error: E0905
+// A type may nest 5,000 levels, counting each type argument (OPEN_QUESTIONS P5, Nesting
+// limit). A generic function whose result wraps its type parameter 50 levels deep, called
+// in its own argument 101 times, gives the outer calls types deeper than that. The first one
+// too deep is reported, and the calls around it, whose types hold it, are not (§15.1).
+fn deep[T](x: take T) -> Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[Option[T]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]] {
+    return Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(Some(x))))))))))))))))))))))))))))))))))))))))))))))))))
+}
+
+fn calls() -> Int {
+    let shallow = deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: 1)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+    let s = deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: deep(x: 1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))) // <- E0905
+    return 1
+}

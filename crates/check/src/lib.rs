@@ -27,7 +27,7 @@ use proviso_syntax::source::Span;
 
 use crate::decls::{
     AdtDef, AdtId, AdtKind, Decls, FieldDef, FieldIdx, IfaceDef, IfaceId, IfaceMethod, ImplDef, ImplKey, Inhabited,
-    Pred, VariantDef, VariantIdx,
+    Pred, VariantDef, VariantIdx, matches_target,
 };
 use crate::exhaust::{Ctor, Space};
 use crate::infer::{Kind, Origin, Vars};
@@ -145,8 +145,12 @@ pub struct FnInfo {
     /// The method's index in the `impl` block at `item`, or `None` for a module's function.
     pub method: Option<usize>,
     pub name: Symbol,
-    /// The type parameters, which its types write as `Ty::Param(i)` (REFERENCE §4.8).
+    /// The type parameters, which its types write as `Ty::Param(i)` (REFERENCE §4.8). A
+    /// method of a generic `impl` has the block's first.
     pub generics: Vec<GenericInfo>,
+    /// How many of `generics` are its `impl` block's, which the receiver's type gives by
+    /// matching `owner` rather than `::[…]` (OPEN_QUESTIONS P5).
+    pub impl_params: usize,
     /// The type of `self`, which is local 0, for a method; `None` for a function or an
     /// associated function.
     pub receiver: Option<Ty>,
@@ -176,6 +180,7 @@ struct Rejected {
 }
 
 /// A type parameter.
+#[derive(Clone)]
 pub struct GenericInfo {
     /// How diagnostics write it: its name, or for a parameter of interface type such as
     /// `x: Show`, `type of x`.
@@ -319,6 +324,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         self_ty: None,
         generic_scope: Vec::new(),
         param_names: Vec::new(),
+        impl_generics: Vec::new(),
         copying: false,
         consumed: HashSet::new(),
         rejected: HashSet::new(),
@@ -345,7 +351,9 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     checker.adt_names();
     checker.iface_names();
     checker.unknown_impl_targets();
+    checker.adt_generics();
     checker.adt_fields();
+    checker.expanding_types();
     checker.p.decls.settle_kinds();
     checker.inhabited = Some(checker.p.decls.inhabited());
     checker.iface_methods();
@@ -362,8 +370,11 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         checker.body(id);
     }
     checker.examples();
+    // Parts shared between expressions are walked once, so a chain of `let`s that each wrap
+    // the one before costs each its own level.
+    let mut seen = HashSet::new();
     debug_assert!(
-        !checker.p.expr_ty.values().any(|ty| holds_var(ty, &mut HashSet::new())),
+        !checker.p.expr_ty.values().any(|ty| holds_var(ty, &mut seen)),
         "an inference variable was left in `expr_ty`"
     );
     checker.p
@@ -394,6 +405,8 @@ struct AdtSrc<'a> {
     id: AdtId,
     name: Ident,
     vis: Visibility,
+    /// Its type parameters, as declared (REFERENCE §4.8).
+    generics: &'a [GenericParam],
     derives: &'a [Ident],
     /// The variants the declaration keeps, in order: a record's one, named like it, or the
     /// first of each name in an enum.
@@ -470,6 +483,9 @@ struct FnState {
     example: bool,
     /// The interfaces each of the function's type parameters implements.
     bounds: Vec<Vec<IfaceId>>,
+    /// Whether each of the function's type parameters has a rejected declaration or
+    /// constraint, so a field of its type is unknown (§15.1).
+    rejected: Vec<bool>,
     /// For each type parameter that a parameter of interface type stands for, that
     /// parameter's name and the interface, which diagnostics suggest a declaration with.
     anonymous: Vec<Option<(Box<str>, Box<str>)>>,
@@ -501,6 +517,7 @@ impl FnState {
             example: false,
             bounds: Vec::new(),
             anonymous: Vec::new(),
+            rejected: Vec::new(),
             closures: Vec::new(),
             debugged: Vec::new(),
             late_captures: Vec::new(),
@@ -606,6 +623,8 @@ struct Checker<'a> {
     generic_scope: Vec<(Symbol, Option<u32>)>,
     /// How diagnostics write each type parameter in scope.
     param_names: Vec<Box<str>>,
+    /// The type parameters of the `impl` block being declared, which its methods' come after.
+    impl_generics: Vec<GenericInfo>,
     /// Set while checking an expression whose value is copied: bound to a name, stored in a
     /// value or returned (REFERENCE §4.8).
     copying: bool,
@@ -1109,27 +1128,33 @@ impl Checker<'_> {
                         span,
                         format!(
                             "the {noun} of this `{name}` can't be inferred; give the binding a type, such as `{}`",
-                            example_type(&name)
+                            self.example_of(adt)
                         ),
                     )
                 }
                 Origin::Call { f, span, .. } => {
                     let info = &self.p.fns[f];
                     let name = self.m.text(info.name);
-                    let missing: Vec<String> = (unknown.iter())
+                    let params: Vec<usize> = (unknown.iter())
                         .filter_map(|o| match o {
-                            Origin::Call { param, span: s, .. } if *s == span => {
-                                Some(format!("`{}`", info.generics[*param].name))
-                            }
+                            Origin::Call { param, span: s, .. } if *s == span => Some(*param),
                             _ => None,
                         })
                         .collect();
+                    let missing: Vec<String> =
+                        params.iter().map(|&param| format!("`{}`", info.generics[param].name)).collect();
                     let noun = if missing.len() == 1 { "type argument" } else { "type arguments" };
+                    // `::[…]` gives only the function's own type parameters, not its `impl`'s.
+                    let fix = if params.iter().all(|&param| param < info.impl_params) {
+                        String::new()
+                    } else {
+                        format!(", or write `{name}::[…](…)`")
+                    };
                     reported.push(span);
                     (
                         span,
                         format!(
-                            "the {noun} {} of `{name}` can't be inferred; give the binding a type, or write `{name}::[…](…)`",
+                            "the {noun} {} of `{name}` can't be inferred; give the binding a type{fix}",
                             missing.join(", ")
                         ),
                     )
@@ -1431,9 +1456,11 @@ impl Checker<'_> {
     fn adt_names(&mut self) {
         let m = self.m;
         for item in &m.items {
-            let (name, derives, refinement, kind) = match &item.kind {
-                ItemKind::Record(decl) => (decl.name, &decl.derives[..], decl.refinement, AdtKind::Record),
-                ItemKind::Enum(decl) => (decl.name, &decl.derives[..], None, AdtKind::Enum),
+            let (name, generics, derives, refinement, kind) = match &item.kind {
+                ItemKind::Record(decl) => {
+                    (decl.name, &decl.generics[..], &decl.derives[..], decl.refinement, AdtKind::Record)
+                }
+                ItemKind::Enum(decl) => (decl.name, &decl.generics[..], &decl.derives[..], None, AdtKind::Enum),
                 _ => continue,
             };
             let text = m.text(name.sym);
@@ -1471,8 +1498,9 @@ impl Checker<'_> {
             // A resource moves as a unique value does, and must also be consumed (§5.1, §10).
             def.resource_base = matches!(&item.kind, ItemKind::Record(decl) if decl.resource);
             def.unique = def.resource_base || matches!(&item.kind, ItemKind::Record(decl) if decl.unique);
+            def.params = generics.len();
             let id = self.p.decls.push(def);
-            self.adts.push(AdtSrc { id, name, vis: item.vis, derives, variants, refinement });
+            self.adts.push(AdtSrc { id, name, vis: item.vis, generics, derives, variants, refinement });
             // A rejected name is reported once. Its uses, and what it collides with, are not.
             let cased = self.pascal_case(name, "type");
             if !cased || prelude_type(text) {
@@ -1494,12 +1522,51 @@ impl Checker<'_> {
         }
     }
 
+    /// Checks the type parameters of each generic record and enum, once every type has a
+    /// name: PascalCase, distinct, and unlike any type's name (REFERENCE §2, §3, H4). A type
+    /// whose parameters are rejected may have meant any of them, so its uses aren't checked
+    /// (§15.1).
+    fn adt_generics(&mut self) {
+        let m = self.m;
+        for k in 0..self.adts.len() {
+            let (name, generics) = (self.adts[k].name, self.adts[k].generics);
+            let mut seen: Vec<Symbol> = Vec::new();
+            let mut rejected = false;
+            for param in generics {
+                let text = m.text(param.name.sym);
+                let cased = self.pascal_case(param.name, "type parameter");
+                if seen.contains(&param.name.sym) {
+                    if cased {
+                        self.error(
+                            codes::DUPLICATE_NAME,
+                            param.name.span,
+                            format!("type parameter `{text}` is declared twice"),
+                        );
+                    }
+                    rejected = true;
+                } else if cased && self.names_type(param.name.sym) {
+                    let message = format!("type parameter `{text}` would shadow the type `{text}` (H4)");
+                    self.error(codes::SHADOWING, param.name.span, message);
+                    rejected = true;
+                }
+                seen.push(param.name.sym);
+            }
+            if rejected {
+                self.poisoned.insert(name.sym);
+            }
+        }
+    }
+
     /// Resolves the fields of every variant once every record and enum has a name, so a
-    /// field's type may be declared later in the file (OPEN_QUESTIONS P5).
+    /// field's type may be declared later in the file (OPEN_QUESTIONS P5). A generic type's
+    /// fields name its type parameters, which they write as `Ty::Param(i)`.
     fn adt_fields(&mut self) {
         let m = self.m;
         for k in 0..self.adts.len() {
             let (id, name, vis) = (self.adts[k].id, self.adts[k].name, self.adts[k].vis);
+            let generics = self.adts[k].generics;
+            self.generic_scope = generics.iter().enumerate().map(|(i, g)| (g.name.sym, Some(i as u32))).collect();
+            self.param_names = generics.iter().map(|g| m.text(g.name.sym).into()).collect();
             for v in 0..self.adts[k].variants.len() {
                 let decls = self.adts[k].variants[v].1;
                 let mut fields: Vec<FieldDef> = Vec::new();
@@ -1525,6 +1592,96 @@ impl Checker<'_> {
                 let variant = &mut self.p.decls.adt_mut(id).variants[v];
                 variant.locals = fields.len();
                 variant.fields = fields;
+            }
+        }
+        self.generic_scope.clear();
+        self.param_names.clear();
+    }
+
+    /// Reports each generic type that holds itself, directly or through other generic types,
+    /// with a type argument that grows, such as `Nested[List[T]]` in `enum Nested[T]`
+    /// (E0904). Each of its instances would need a bigger one, so they would never end
+    /// (REFERENCE §4.8). This is the expanding-cycle rule of ECMA-335 II.9.2. A node is a
+    /// type parameter of one of the module's generic types. A field's type argument gives an
+    /// edge from each type parameter in it to the parameter it fills, which grows unless the
+    /// argument is that type parameter itself. A cycle with a growing edge is the error,
+    /// reported once at the first field whose type argument grows. Its types are taken to
+    /// have every variant's values, so nothing that depends on them is reported (§15.1).
+    fn expanding_types(&mut self) {
+        let m = self.m;
+        let mut first = vec![usize::MAX; self.adts.len()];
+        let mut index: HashMap<AdtId, usize> = HashMap::new();
+        let mut count = 0;
+        for (k, adt) in self.adts.iter().enumerate() {
+            let params = self.p.decls.adt(adt.id).params;
+            if params > 0 {
+                first[k] = count;
+                index.insert(adt.id, k);
+                count += params;
+            }
+        }
+        if count == 0 {
+            return;
+        }
+        // Each edge's target, whether it grows, and where the field's type is written.
+        let mut edges: Vec<Vec<(usize, bool, Span)>> = vec![Vec::new(); count];
+        for (k, adt) in self.adts.iter().enumerate() {
+            if first[k] == usize::MAX {
+                continue;
+            }
+            let def = self.p.decls.adt(adt.id);
+            for (variant, (_, decls)) in def.variants.iter().zip(&adt.variants) {
+                for (field, decl) in variant.fields.iter().zip(kept_fields(decls)) {
+                    let span = m.types[decl.ty].span;
+                    let mut stack = vec![&field.ty];
+                    while let Some(ty) = stack.pop() {
+                        let Ty::Adt(id, args) = ty else { continue };
+                        if let Some(&j) = index.get(id) {
+                            for (p, arg) in args.iter().enumerate() {
+                                let mut params = Vec::new();
+                                params_in(arg, &mut params);
+                                for i in params {
+                                    let grows = *arg != Ty::Param(i);
+                                    edges[first[k] + i as usize].push((first[j] + p, grows, span));
+                                }
+                            }
+                        }
+                        stack.extend(args.iter());
+                    }
+                }
+            }
+        }
+        let components = strongly_connected(&edges);
+        let owner = |node: usize| {
+            (0..self.adts.len()).rfind(|&k| first[k] != usize::MAX && first[k] <= node).expect("every node has a type")
+        };
+        let mut reports: Vec<(Span, Vec<usize>)> = Vec::new();
+        for component in components {
+            let growing = (component.iter())
+                .flat_map(|&node| edges[node].iter())
+                .filter(|(to, grows, _)| *grows && component.contains(to))
+                .map(|&(_, _, span)| span)
+                .min_by_key(|span| span.lo);
+            if let Some(span) = growing {
+                let mut types: Vec<usize> = component.iter().map(|&node| owner(node)).collect();
+                types.sort_unstable();
+                types.dedup();
+                reports.push((span, types));
+            }
+        }
+        reports.sort_by_key(|(span, _)| span.lo);
+        for (span, types) in reports {
+            let names: Vec<String> = types.iter().map(|&k| format!("`{}`", m.text(self.adts[k].name.sym))).collect();
+            let holds = match names.as_slice() {
+                [one] => format!("each time {one} holds itself"),
+                _ => format!("on each turn of the cycle of {}", names.join(" and ")),
+            };
+            let message = format!(
+                "this type argument grows {holds}, so its instances would never end; a generic type may hold itself only with its own type parameters (§4.8)"
+            );
+            self.error(codes::EXPANDING_TYPE, span, message);
+            for k in types {
+                self.p.decls.adt_mut(self.adts[k].id).unknown_variants = true;
             }
         }
     }
@@ -1769,10 +1926,14 @@ impl Checker<'_> {
             let adt = &self.adts[k];
             let def = self.p.decls.adt(adt.id);
             let mut missing = Vec::new();
+            self.param_names = adt.generics.iter().map(|g| m.text(g.name.sym).into()).collect();
             for &iface in &def.derives {
+                // A generic type derives it for the type arguments that implement it, so each
+                // type parameter is taken to (OPEN_QUESTIONS P5).
+                let params = vec![vec![iface]; def.params];
                 for (variant, (_, decls)) in def.variants.iter().zip(&adt.variants) {
                     for (field, field_decl) in variant.fields.iter().zip(kept_fields(decls)) {
-                        if !field.ty.is_unknown() && !self.p.decls.implements(&field.ty, iface, &[]) {
+                        if !field.ty.is_unknown() && !self.p.decls.implements(&field.ty, iface, &params) {
                             let message = format!(
                                 "field `{}` has type `{}`, which does not implement `{}`, so `{}` cannot derive it",
                                 field.name,
@@ -1789,17 +1950,24 @@ impl Checker<'_> {
                 self.error(codes::MISSING_IMPLEMENTATION, span, message);
             }
         }
+        self.param_names.clear();
     }
 
     /// Checks each refinement as a `Bool` in a scope of the fields it sees: its own field for
     /// a field's `where`, every field for a record's (OPEN_QUESTIONS P5).
     fn adt_predicates(&mut self) {
+        let m = self.m;
         for k in 0..self.adts.len() {
             let id = self.adts[k].id;
+            // A generic type's refinements see its type parameters, which implement nothing.
+            let generics = self.adts[k].generics;
+            self.generic_scope = generics.iter().enumerate().map(|(i, g)| (g.name.sym, Some(i as u32))).collect();
+            self.param_names = generics.iter().map(|g| m.text(g.name.sym).into()).collect();
             for v in 0..self.adts[k].variants.len() {
                 let kept = kept_fields(self.adts[k].variants[v].1);
                 let fields = &self.p.decls.adt(id).variants[v].fields;
                 let mut state = FnState::new(Ty::Unit, None);
+                state.bounds = vec![Vec::new(); generics.len()];
                 state.returns = false;
                 state.refinement = true;
                 state.params = fields.len();
@@ -1834,6 +2002,8 @@ impl Checker<'_> {
                 variant.read_fields = (0..variant.fields.len()).map(|i| read.contains(&LocalId(i as u32))).collect();
             }
         }
+        self.generic_scope.clear();
+        self.param_names.clear();
     }
 
     /// What the move pass needs to know of the body just checked, whose diagnostics begin at
@@ -1890,6 +2060,7 @@ impl Checker<'_> {
                 method: None,
                 name: decl.name.sym,
                 generics: sig.generics,
+                impl_params: 0,
                 receiver: None,
                 self_mode: ParamMode::Borrow,
                 owner: None,
@@ -1903,13 +2074,18 @@ impl Checker<'_> {
         }
     }
 
-    /// Resolves the signature of a function, or of a method of an `impl` block for `owner`,
-    /// and reports a type that a declaration with `vis` may not mention.
-    fn signature(&mut self, decl: &FnDecl, vis: Visibility, owner: Option<Ty>) -> Signature {
+    /// Declares type parameters `params`, after those in `generics`, and puts them in scope.
+    /// Their constraints are those of `item`, declared with `vis`, or of an `impl` block when
+    /// `item` is `None` (REFERENCE §4.8).
+    fn declare_generics(
+        &mut self,
+        params: &[GenericParam],
+        item: Option<Ident>,
+        vis: Visibility,
+        generics: &mut Vec<GenericInfo>,
+    ) {
         let m = self.m;
-        let mut generics: Vec<GenericInfo> = Vec::new();
-        self.generic_scope.clear();
-        for param in &decl.generics {
+        for param in params {
             let text = m.text(param.name.sym);
             // A wrongly cased name is reported once, not again for what it collides with.
             let cased = self.pascal_case(param.name, "type parameter");
@@ -1935,7 +2111,7 @@ impl Checker<'_> {
             let mut bounds = Vec::new();
             let mut rejected = false;
             for &bound in &param.bounds {
-                match self.bound(bound, decl.name, vis) {
+                match self.bound(bound, item.unwrap_or(param.name), vis) {
                     Some(iface) if !bounds.contains(&iface) => bounds.push(iface),
                     Some(_) => {}
                     None => rejected = true,
@@ -1945,6 +2121,24 @@ impl Checker<'_> {
             self.generic_scope.push((param.name.sym, (!rejected).then_some(index)));
             generics.push(GenericInfo { name: text.into(), sym: Some(param.name.sym), param: None, bounds, rejected });
         }
+    }
+
+    /// Puts the type parameters of the `impl` block being declared in scope, and only them.
+    fn impl_scope(&mut self) {
+        self.generic_scope = (self.impl_generics.iter().enumerate())
+            .filter_map(|(i, g)| Some((g.sym?, (!g.rejected).then_some(i as u32))))
+            .collect();
+        self.param_names = self.impl_generics.iter().map(|g| g.name.clone()).collect();
+    }
+
+    /// Resolves the signature of a function, or of a method of an `impl` block for `owner`,
+    /// and reports a type that a declaration with `vis` may not mention.
+    fn signature(&mut self, decl: &FnDecl, vis: Visibility, owner: Option<Ty>) -> Signature {
+        let m = self.m;
+        // A method of a generic `impl` has the block's type parameters first.
+        let mut generics: Vec<GenericInfo> = self.impl_generics.clone();
+        self.impl_scope();
+        self.declare_generics(&decl.generics, Some(decl.name), vis, &mut generics);
         self.param_names = generics.iter().map(|g| g.name.clone()).collect();
         // A type such as `Map[K, V]` asks what its type arguments implement.
         let outer_bounds = std::mem::replace(&mut self.f.bounds, generics.iter().map(|g| g.bounds.clone()).collect());
@@ -2005,8 +2199,7 @@ impl Checker<'_> {
         for (ty, at) in types {
             self.exposes(decl.name, vis, &ty, at);
         }
-        self.generic_scope.clear();
-        self.param_names.clear();
+        self.impl_scope();
         self.f.bounds = outer_bounds;
         self.self_ty = None;
         Signature { generics, receiver, self_mode, params, ret, fails, rejected }
@@ -2132,11 +2325,59 @@ impl Checker<'_> {
         }
     }
 
+    /// Declares an `impl` block, whose type parameters its target and its methods name.
     fn impl_block(&mut self, item: usize, span: Span, decl: &ImplDecl) {
+        let mut generics = Vec::new();
+        self.declare_generics(&decl.generics, None, Visibility::Private, &mut generics);
+        self.impl_generics = generics;
+        self.impl_scope();
+        let outer =
+            std::mem::replace(&mut self.f.bounds, self.impl_generics.iter().map(|g| g.bounds.clone()).collect());
+        self.impl_members(item, span, decl);
+        self.impl_generics.clear();
+        self.impl_scope();
+        self.f.bounds = outer;
+    }
+
+    fn impl_members(&mut self, item: usize, span: Span, decl: &ImplDecl) {
         let m = self.m;
         let target_span = m.types[decl.target].span;
         let header = span.to(target_span);
+        // A parameter with a rejected constraint still has its place in the target, so the
+        // block is for `Box[T]`, any box, and not for an unknown type (§15.1). Matching takes
+        // it to meet any constraint, and a field of its type is unknown in the block's bodies.
+        // One that names a type may have meant the type, so it leaves the target unknown.
+        let unscoped: Vec<(Symbol, u32)> = (self.impl_generics.iter().enumerate())
+            .filter(|(_, g)| g.rejected)
+            .filter_map(|(i, g)| Some((g.sym?, i as u32)))
+            .filter(|&(sym, _)| !self.names_type(sym))
+            .collect();
+        for (sym, index) in self.generic_scope.iter_mut() {
+            if let Some(&(_, i)) = unscoped.iter().find(|(s, _)| s == sym) {
+                index.get_or_insert(i);
+            }
+        }
         let target = self.resolve_type(decl.target);
+        self.impl_scope();
+        // Only the target gives the block's type parameters, so one it doesn't name could
+        // be any type at each call (OPEN_QUESTIONS P5). It stands for an unknown type.
+        if !mentions_error(&target) {
+            let mut used = Vec::new();
+            params_in(&target, &mut used);
+            for (i, param) in decl.generics.iter().enumerate() {
+                if self.impl_generics[i].rejected || self.impl_generics[i].sym.is_none() || used.contains(&(i as u32)) {
+                    continue;
+                }
+                let message = format!(
+                    "type parameter `{}` doesn't appear in the target `{}`, so nothing gives it; a block's type parameters are those its target names",
+                    m.text(param.name.sym),
+                    self.show(&target)
+                );
+                self.error(codes::CANNOT_INFER, param.name.span, message);
+                self.impl_generics[i].rejected = true;
+            }
+            self.impl_scope();
+        }
         if target == Ty::Error {
             if let TypeExprKind::Named(name) | TypeExprKind::Applied { name, .. } = m.types[decl.target].kind {
                 self.unknown_target(name.sym);
@@ -2270,9 +2511,26 @@ impl Checker<'_> {
             self.declare_rejected(item, decl, &target);
             return;
         }
-        if self.p.decls.impl_of(iface, key).is_some() {
-            let message = format!("`{target_text}` already implements `{iface_text}`");
-            self.error(codes::DUPLICATE_IMPLEMENTATION, header, message);
+        if let Some(earlier) = self.p.decls.impl_of(iface, key) {
+            // A generic type has one `impl` of each interface, whatever the targets' type
+            // arguments are (OPEN_QUESTIONS P5, §G).
+            let (code, message) = if same_target(&earlier.target, &target) {
+                self.p.decls.mark_taken(iface, key, target.clone(), self.impl_generics.len());
+                (codes::DUPLICATE_IMPLEMENTATION, format!("`{target_text}` already implements `{iface_text}`"))
+            } else {
+                let earlier = self.p.decls.display_in(&earlier.target, &earlier.names).to_string();
+                let head = match &target {
+                    Ty::Adt(id, _) if self.p.decls.adt(*id).tuple => "a tuple type".to_string(),
+                    Ty::Adt(id, _) => format!("`{}`", self.p.decls.name(*id)),
+                    _ => format!("`{target_text}`"),
+                };
+                let message = format!(
+                    "`{earlier}` already implements `{iface_text}`, and {head} has one `impl` of each interface, whatever its type arguments"
+                );
+                self.p.decls.mark_taken(iface, key, target.clone(), self.impl_generics.len());
+                (codes::IMPLEMENTATION_HEAD_TAKEN, message)
+            };
+            self.error(code, header, message);
             self.declare_rejected(item, decl, &target);
             return;
         }
@@ -2325,7 +2583,10 @@ impl Checker<'_> {
             );
             self.error(codes::IMPL_MISMATCH, header, message);
         }
-        self.p.decls.add_impl(iface, key, ImplDef { methods: fns });
+        let bounds =
+            (self.impl_generics.iter()).map(|g| if g.rejected { Vec::new() } else { g.bounds.clone() }).collect();
+        let names = self.impl_generics.iter().map(|g| g.name.clone()).collect();
+        self.p.decls.add_impl(iface, key, ImplDef { methods: fns, target: target.clone(), bounds, names });
     }
 
     /// Records an `impl` block for `target` that names an interface it can't implement.
@@ -2416,6 +2677,7 @@ impl Checker<'_> {
             method: Some(index),
             name: method.decl.name.sym,
             generics: sig.generics,
+            impl_params: self.impl_generics.len(),
             receiver: sig.receiver,
             self_mode: sig.self_mode,
             owner: Some(owner.clone()),
@@ -2453,7 +2715,7 @@ impl Checker<'_> {
             (Some(want), Some(have)) => same(want, have),
             _ => false,
         };
-        if info.generics.is_empty()
+        if info.generics.len() == info.impl_params
             && info.receiver.is_some()
             && info.self_mode == want.self_mode
             && params_agree
@@ -2462,7 +2724,7 @@ impl Checker<'_> {
         {
             return true;
         }
-        let decls = &self.p.decls;
+        let (decls, names) = (&self.p.decls, &self.param_names);
         let receiver = if want.self_mode == ParamMode::Take { "take self" } else { "self" };
         let mut declared = format!("fn {}({receiver}", want.name);
         for ((param, ty), mode) in want.params.iter().zip(&want.modes) {
@@ -2472,20 +2734,20 @@ impl Checker<'_> {
                 ParamMode::Take => "take ",
                 ParamMode::Inout | ParamMode::InoutPartial => "inout ",
             };
-            declared.push_str(&format!(", {param}: {mode}{}", decls.display(&ty.subst(&args))));
+            declared.push_str(&format!(", {param}: {mode}{}", decls.display_in(&ty.subst(&args), names)));
         }
         declared.push(')');
         if want.ret != Ty::Unit {
-            declared.push_str(&format!(" -> {}", decls.display(&want.ret.subst(&args))));
+            declared.push_str(&format!(" -> {}", decls.display_in(&want.ret.subst(&args), names)));
         }
         if let Some(err) = &want.fails {
-            declared.push_str(&format!(" fails {}", decls.display(&err.subst(&args))));
+            declared.push_str(&format!(" fails {}", decls.display_in(&err.subst(&args), names)));
         }
         let message = format!(
             "`{}` must be declared as `{}` declares it, with `Self` as `{}`: `{declared}`",
             m.text(name.sym),
             decls.iface(iface).name,
-            decls.display(target)
+            decls.display_in(target, names)
         );
         self.error(codes::IMPL_MISMATCH, name.span, message);
         false
@@ -2679,14 +2941,14 @@ impl Checker<'_> {
         if let Some(ty) = builtin_type(text) {
             return ty;
         }
-        if let Some(&id) = self.adt_names.get(&name.sym) {
-            return Ty::adt(id);
-        }
         if let Some(id) = self.generic_adt(name.sym) {
-            let def = self.p.decls.adt(id);
-            let message = format!("`{text}` takes {}, as in `{}`", type_args(def.params), example_type(&def.name));
+            let message =
+                format!("`{text}` takes {}, as in `{}`", type_args(self.p.decls.adt(id).params), self.example_of(id));
             self.error(codes::UNKNOWN_TYPE, name.span, message);
             return Ty::Error;
+        }
+        if let Some(&id) = self.adt_names.get(&name.sym) {
+            return Ty::adt(id);
         }
         match self.imports.get(&name.sym) {
             Some(Import::Type(ty)) => return ty.clone(),
@@ -2710,12 +2972,23 @@ impl Checker<'_> {
         Ty::Error
     }
 
-    /// The generic type `sym` names, which a use gives type arguments: the prelude's, or one
-    /// imported from the standard library, such as `Pool`.
+    /// How a message writes generic type `id` with its type parameters, as in `Pair[A, B]`.
+    fn example_of(&self, id: AdtId) -> String {
+        match self.adts.iter().find(|adt| adt.id == id) {
+            Some(adt) => {
+                let params: Vec<&str> = adt.generics.iter().map(|g| self.m.text(g.name.sym)).collect();
+                format!("{}[{}]", self.m.text(adt.name.sym), params.join(", "))
+            }
+            None => example_type(&self.p.decls.adt(id).name).to_string(),
+        }
+    }
+
+    /// The generic type `sym` names, which a use gives type arguments: the module's, the
+    /// prelude's, or one imported from the standard library, such as `Pool`.
     fn generic_adt(&self, sym: Symbol) -> Option<AdtId> {
         let text = self.m.text(sym);
-        if self.adt_names.contains_key(&sym) {
-            return None;
+        if let Some(&id) = self.adt_names.get(&sym) {
+            return (self.p.decls.adt(id).params > 0).then_some(id);
         }
         match self.imports.get(&sym) {
             Some(Import::Type(Ty::Adt(id, args))) if args.is_empty() && self.p.decls.adt(*id).params > 0 => Some(*id),
@@ -2763,7 +3036,11 @@ impl Checker<'_> {
             return;
         }
         let mut state = FnState::new(info.ret.clone(), info.fails.clone());
-        state.bounds = info.generics.iter().map(|g| g.bounds.clone()).collect();
+        // A type parameter with a rejected declaration or constraint may have been `Copy`, so
+        // copying a value whose type has it isn't reported (§15.1).
+        state.bounds =
+            (info.generics.iter()).map(|g| if g.rejected { vec![IfaceId::COPY] } else { g.bounds.clone() }).collect();
+        state.rejected = info.generics.iter().map(|g| g.rejected).collect();
         state.anonymous = (info.generics.iter())
             .map(|g| Some((m.text(g.param?).into(), self.iface_name(*g.bounds.first()?).into())))
             .collect();
@@ -3811,6 +4088,7 @@ impl Checker<'_> {
         let (before, outer) = (self.errors, std::mem::replace(&mut self.inner_errors, 0));
         let ty = self.expr_kind(e, expected.as_ref(), chain, copying);
         let ty = self.vars.resolve(&ty);
+        let ty = self.shallow(e, ty, before);
         if copying {
             self.copied(e, &ty);
             self.consumed.insert(e);
@@ -3842,6 +4120,31 @@ impl Checker<'_> {
         ty
     }
 
+    /// `ty`, the type of `e`, or an error once it is reported for nesting more than
+    /// [`MAX_TYPE_DEPTH`] levels deep. Each walk of a type and each message about it then
+    /// stays bounded however a generic function nests its type parameter (OPEN_QUESTIONS
+    /// P5; issues #17, #18). Once a part of `e` has an error, from `before` on, the type may
+    /// be deep because of it, so it isn't reported (§15.1).
+    fn shallow(&mut self, e: ExprId, ty: Ty, before: usize) -> Ty {
+        if ty.parts().is_none() {
+            return ty;
+        }
+        // One with an error in it was rejected where the error was, and the walk stops at
+        // the limit, so a type too deep for one is reported however much deeper it is.
+        let error = match self.vars.depth(&ty, MAX_TYPE_DEPTH) {
+            Some(_) => return ty,
+            None => before < self.errors,
+        };
+        if !error {
+            let message = format!(
+                "the type of this nests more than {MAX_TYPE_DEPTH} levels deep, as `{}`, which is more than a type may",
+                self.show(&ty)
+            );
+            self.error(codes::TYPE_TOO_DEEP, self.span(e), message);
+        }
+        Ty::Error
+    }
+
     /// Writes `ty` as the type of `e`. One with a variable in it is zonked when the body is
     /// settled, so the interpreter never sees the variable.
     fn record(&mut self, e: ExprId, ty: Ty) {
@@ -3864,7 +4167,7 @@ impl Checker<'_> {
         let ty = &self.vars.zonk(ty);
         // A type that moves whatever its parameters are, such as `Pool[T]`, is a move of a
         // lent value, which the move pass reports (E0504).
-        if !self.p.decls.moves_by_param(ty, &self.f.bounds) {
+        if !self.p.decls.copy_needs_param(ty, &self.f.bounds) {
             return;
         }
         let Some(param) = self.uncopyable(ty) else { return };
@@ -3885,10 +4188,12 @@ impl Checker<'_> {
         self.error(codes::NOT_COPYABLE, span, message);
     }
 
-    /// A type parameter in `ty` that isn't `Copy`.
+    /// A type parameter in `ty` that isn't `Copy`, outside a handle, which neither holds nor
+    /// reaches its element (STD.md).
     fn uncopyable(&self, ty: &Ty) -> Option<u32> {
         match ty {
             Ty::Param(i) if !self.f.bounds.get(*i as usize).is_some_and(|b| b.contains(&IfaceId::COPY)) => Some(*i),
+            Ty::Adt(AdtId::HANDLE, _) => None,
             Ty::Adt(_, args) => args.iter().find_map(|arg| self.uncopyable(arg)),
             _ => None,
         }
@@ -4514,16 +4819,16 @@ impl Checker<'_> {
         let m = self.m;
         if let Some(id) = self.fn_named(callee) {
             self.p.res.insert(callee, Res::Fn(id));
-            return self.fn_call(e, id, targs, args, span, chain, expected);
+            return self.fn_call(e, id, None, targs, args, span, chain, expected);
         }
         // A variant or record takes no type arguments. A name that resolves to nothing or to
         // a rejected declaration may have, and a call of a local is a later phase's (§15.1).
         if let ExprKind::Name(name) = m.exprs[callee].kind
             && !self.poisoned.contains(&name.sym)
             && self.lookup_local(name.sym).is_none()
-            && (bare_variant(m.text(name.sym)).is_some() || self.adt_named(name.sym).is_some())
+            && let Some(id) = bare_variant(m.text(name.sym)).or_else(|| self.adt_named(name.sym))
         {
-            self.no_targs(targs, m.text(name.sym), span);
+            self.ctor_targs(targs, id, m.text(name.sym), span);
         }
         if let ExprKind::Name(name) = m.exprs[callee].kind
             && self.lookup_local(name.sym).is_none()
@@ -4556,7 +4861,7 @@ impl Checker<'_> {
                 self.rejected_args(args);
                 return Ty::Error;
             }
-            return self.construct(callee, id, args, span);
+            return self.construct(callee, id, args, span, expected);
         }
         let callee_span = self.span(callee);
         match m.exprs[callee].kind {
@@ -4601,7 +4906,7 @@ impl Checker<'_> {
             return Ty::Error;
         }
         self.p.res.insert(e, Res::Fn(f));
-        let Some(tvars) = self.call_targs(f, targs, span) else { return Ty::Error };
+        let Some(tvars) = self.call_targs(f, targs, None, span) else { return Ty::Error };
         self.targ_bounds(f, &tvars, span);
         let info = &self.p.fns[f];
         let modes = info.params.iter().map(|p| p.mode).collect();
@@ -4964,6 +5269,24 @@ impl Checker<'_> {
         self.error(codes::TYPE_ARGUMENT_COUNT, span, format!("`{what}` takes no type arguments"));
     }
 
+    /// Reports type arguments given to a constructor of `id`. A generic one takes them from
+    /// its fields and the expected type (OPEN_QUESTIONS P5).
+    fn ctor_targs(&mut self, targs: Option<&[TypeId]>, id: AdtId, what: &str, span: Span) {
+        if self.p.decls.adt(id).params == 0 {
+            return self.no_targs(targs, what, span);
+        }
+        let Some(targs) = targs else { return };
+        let m = self.m;
+        let span = match (targs.first(), targs.last()) {
+            (Some(&first), Some(&last)) => m.types[first].span.to(m.types[last].span),
+            _ => span,
+        };
+        let message = format!(
+            "`{what}` takes its type arguments from its fields and the type it is expected to have, not from `::[…]`; give the binding a type instead"
+        );
+        self.error(codes::TYPE_ARGUMENT_COUNT, span, message);
+    }
+
     /// A call of function `f`, a module's or a method. Its type arguments come from
     /// `targs`, or else from the type the call is expected to have and then from the
     /// arguments, and each must implement its parameter's constraints (REFERENCE §4.8;
@@ -4986,6 +5309,7 @@ impl Checker<'_> {
         &mut self,
         e: ExprId,
         f: FnId,
+        receiver: Option<&Ty>,
         targs: Option<&[TypeId]>,
         args: &[Arg],
         span: Span,
@@ -5002,7 +5326,7 @@ impl Checker<'_> {
         let params: Vec<(&str, Ty)> = info.params.iter().map(|p| (m.text(p.name), p.ty.clone())).collect();
         let modes: Vec<ParamMode> = info.params.iter().map(|p| p.mode).collect();
         let (ret, fails) = (info.ret.clone(), info.fails.clone());
-        let Some(tvars) = self.call_targs(f, targs, span) else {
+        let Some(tvars) = self.call_targs(f, targs, receiver, span) else {
             self.rejected_args(args);
             return Ty::Error;
         };
@@ -5032,20 +5356,23 @@ impl Checker<'_> {
     /// The type arguments of a call or a use as a value of function `f`: from `targs`, or else
     /// fresh variables that the expected type and the arguments give. A parameter whose
     /// declaration or constraint is rejected stands for an unknown type. `None` when `targs`
-    /// gives the wrong number, which is reported.
-    fn call_targs(&mut self, f: FnId, targs: Option<&[TypeId]>, span: Span) -> Option<Vec<Ty>> {
+    /// gives the wrong number, which is reported. A method's `impl` parameters come from
+    /// matching the type of its `receiver` with the block's target (OPEN_QUESTIONS P5).
+    fn call_targs(&mut self, f: FnId, targs: Option<&[TypeId]>, receiver: Option<&Ty>, span: Span) -> Option<Vec<Ty>> {
         let m = self.m;
         let info = &self.p.fns[f];
         let name = m.text(info.name);
+        let (own, owner) = (info.impl_params, info.owner.clone());
         // A parameter whose declaration or constraint is rejected stands for an unknown type,
         // and any other is a variable until `::[…]`, the expected type or an argument gives it.
         let rejected: Vec<bool> = info.generics.iter().map(|g| g.rejected).collect();
         let mut tvars: Vec<Option<Ty>> = rejected.iter().map(|&rejected| rejected.then_some(Ty::Error)).collect();
-        // `::[…]` gives the declared parameters, which come before those of interface types.
-        let declared = info.generics.iter().filter(|g| g.param.is_none()).count();
+        // `::[…]` gives the declared parameters, which come before those of interface types,
+        // and after the `impl` block's.
+        let declared = info.generics[own..].iter().filter(|g| g.param.is_none()).count();
         // A parameter declared twice may have been meant as one, so a count without it is
         // also right.
-        let duplicates = info.generics.iter().filter(|g| g.sym.is_none() && g.param.is_none()).count();
+        let duplicates = info.generics[own..].iter().filter(|g| g.sym.is_none() && g.param.is_none()).count();
         if let Some(targs) = targs {
             let tys: Vec<Ty> = targs.iter().map(|&t| self.part_type(t, "a type argument")).collect();
             let fewest = declared - duplicates;
@@ -5057,6 +5384,9 @@ impl Checker<'_> {
                     _ => span,
                 };
                 let message = match (declared, tys.len() < fewest) {
+                    (0, _) if own > 0 => format!(
+                        "`{name}` takes no type arguments of its own, and its `impl`'s come from its receiver, its arguments or the type it is expected to have"
+                    ),
                     (0, _) => format!("`{name}` takes no type arguments"),
                     (n, short) => {
                         let verb = if tys.len() == 1 { "was" } else { "were" };
@@ -5067,14 +5397,29 @@ impl Checker<'_> {
                 self.error(codes::TYPE_ARGUMENT_COUNT, at, message);
                 return None;
             } else {
-                for (slot, ty) in tvars.iter_mut().zip(tys) {
+                for (slot, ty) in tvars[own..].iter_mut().zip(tys) {
                     slot.get_or_insert(ty);
                 }
             }
         }
-        let tvars: Vec<Ty> = (tvars.into_iter().enumerate())
+        let mut tvars: Vec<Ty> = (tvars.into_iter().enumerate())
             .map(|(param, ty)| ty.unwrap_or_else(|| self.vars.fresh(Kind::Any, Origin::Call { f, param, span })))
             .collect();
+        // The receiver is an argument of the block's target type, so its type gives the
+        // block's parameters as an argument's does, with a `Never` part giving way to the
+        // others. An open part of it that settles on another type doesn't match the target.
+        if let (Some(receiver), Some(owner)) = (receiver, &owner)
+            && !self.vars.subsume(&owner.subst(&tvars), receiver)
+        {
+            let names: Vec<Box<str>> = self.p.fns[f].generics.iter().map(|g| g.name.clone()).collect();
+            let message = format!(
+                "`{}` has no method `{name}`; the `impl` that declares it is for `{}`",
+                self.show(receiver),
+                self.p.decls.display_in(owner, &names)
+            );
+            self.error(codes::UNKNOWN_MEMBER, span, message);
+            tvars[..own].fill(Ty::Error);
+        }
         Some(tvars)
     }
 
@@ -5168,13 +5513,16 @@ impl Checker<'_> {
 
     /// A record's constructor takes its fields as parameters, so a construction follows the
     /// rules of a call (REFERENCE §4.4). It stores its arguments, so it copies them.
-    fn construct(&mut self, callee: ExprId, id: AdtId, args: &[Arg], span: Span) -> Ty {
+    /// A generic record takes its type arguments from its fields and the expected type
+    /// together, as a variant does (OPEN_QUESTIONS P5).
+    fn construct(&mut self, callee: ExprId, id: AdtId, args: &[Arg], span: Span, expected: Option<&Ty>) -> Ty {
         self.p.res.insert(callee, Res::Ctor(id, VariantIdx::RECORD));
         let def = self.p.decls.adt(id);
         let name = def.name.clone();
         let params: Vec<(Box<str>, Ty)> = def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-        self.generic_args(&name, &params, &[], args, span, Modes::Take);
-        Ty::adt(id)
+        let targs = self.variant_args(id, expected, span);
+        let counted = self.generic_args(&name, &params, &targs, args, span, Modes::Take);
+        self.variant_type(id, targs, expected, span, !counted)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5194,8 +5542,9 @@ impl Checker<'_> {
         if let Some(id) = self.enum_named(receiver)
             && (self.p.decls.adt(id).variant_named(name).is_some() || is_pascal(name))
         {
-            if self.p.decls.adt(id).variant_named(name).is_some() {
-                self.no_targs(targs, name, span);
+            if let Some((v, _)) = self.p.decls.adt(id).variant_named(name) {
+                let ctor = self.p.decls.ctor_name(id, v);
+                self.ctor_targs(targs, id, &ctor, span);
             }
             return self.construct_variant(e, id, method, args, span, expected);
         }
@@ -5265,7 +5614,7 @@ impl Checker<'_> {
                 self.consumed.insert(receiver);
                 self.element_taken(receiver, &receiver_ty);
             }
-            self.with_args(e, *id, args, span);
+            self.with_args(e, &receiver_ty, args, span);
             return receiver_ty;
         }
         // The `Text` methods of §12.3 that STD.md doesn't declare yet.
@@ -5326,7 +5675,7 @@ impl Checker<'_> {
                     }
                     _ => {}
                 }
-                self.fn_call(e, f, targs, args, span, chain, expected)
+                self.fn_call(e, f, Some(&receiver_ty), targs, args, span, chain, expected)
             }
             Some(Callee::Iface(iface, j)) => {
                 self.dispatch_call(e, iface, j, (receiver, &receiver_ty), method, targs, args, span, chain, false)
@@ -5391,6 +5740,8 @@ impl Checker<'_> {
             return None;
         }
         let mut found: Vec<Callee> = Vec::new();
+        // A method of the type's whose `impl` target the type doesn't match.
+        let mut elsewhere: Option<FnId> = None;
         if let Ty::Adt(id, _) = ty
             && let Some(entries) = self.inherent.get(id)
         {
@@ -5400,8 +5751,16 @@ impl Checker<'_> {
             if named.clone().any(|e| e.rejected) {
                 return None;
             }
+            // A method of a generic `impl` is one of the types its target matches (OPEN_QUESTIONS
+            // P5).
             if let Some(entry) = named.next() {
-                found.push(Callee::Fn(entry.f));
+                let info = &self.p.fns[entry.f];
+                let mut binds = vec![None; info.impl_params];
+                if info.owner.as_ref().is_none_or(|owner| matches_target(owner, ty, &mut binds)) {
+                    found.push(Callee::Fn(entry.f));
+                } else {
+                    elsewhere = Some(entry.f);
+                }
             }
         }
         // A rejected `impl` block or method declaration may have declared the method.
@@ -5410,8 +5769,16 @@ impl Checker<'_> {
         // so only its own method is known to exist.
         let interfaces_known = !self.unknown_interfaces(ty);
         unknown |= !interfaces_known;
+        // An interface whose `impl` matches the type but whose constraints it doesn't meet.
+        let mut unmet: Option<IfaceId> = None;
         for (iface, def) in self.p.decls.ifaces() {
-            if !self.implements(ty, iface) || (!interfaces_known && !found.is_empty()) {
+            if !self.implements(ty, iface) {
+                if unmet.is_none() && def.method(name).is_some() && self.p.decls.impl_for(iface, ty).is_some() {
+                    unmet = Some(iface);
+                }
+                continue;
+            }
+            if !interfaces_known && !found.is_empty() {
                 continue;
             }
             unknown |= def.incomplete;
@@ -5420,6 +5787,22 @@ impl Checker<'_> {
             }
         }
         match found.as_slice() {
+            [] if !unknown && let Some(iface) = unmet => {
+                self.unmet_impl(ty, shown, iface, method.span);
+                None
+            }
+            [] if !unknown && let Some(f) = elsewhere => {
+                let info = &self.p.fns[f];
+                let names: Vec<Box<str>> = info.generics.iter().map(|g| g.name.clone()).collect();
+                let owner = info.owner.as_ref().expect("a method has an owner");
+                let message = format!(
+                    "`{}` has no method `{name}`; the `impl` that declares it is for `{}`",
+                    self.show(shown),
+                    self.p.decls.display_in(owner, &names)
+                );
+                self.error(codes::UNKNOWN_MEMBER, method.span, message);
+                None
+            }
             [] => {
                 if !unknown {
                     let message = format!("`{}` has no method `{name}`", self.show(shown));
@@ -5460,6 +5843,27 @@ impl Checker<'_> {
         }
     }
 
+    /// Reports that `ty`, written as `shown`, doesn't implement `iface`, whose generic `impl`
+    /// matches it, because a type argument doesn't meet the block's constraints (E0309).
+    fn unmet_impl(&mut self, ty: &Ty, shown: &Ty, iface: IfaceId, span: Span) {
+        let Some((def, binds)) = self.p.decls.impl_for(iface, ty) else { return };
+        let unmet = binds.iter().zip(&def.bounds).find_map(|(bind, bounds)| {
+            let arg = bind.as_ref()?;
+            Some((arg.clone(), self.unmet_bound(arg, bounds)?))
+        });
+        let iface_text = self.iface_name(iface).to_string();
+        let message = match unmet {
+            Some((arg, need)) => format!(
+                "`{}` does not implement `{iface_text}`, since its `impl` needs `{}` to implement `{}`",
+                self.show(shown),
+                self.show(&arg),
+                self.iface_name(need)
+            ),
+            None => format!("`{}` does not implement `{iface_text}`", self.show(shown)),
+        };
+        self.error(codes::MISSING_IMPLEMENTATION, span, message);
+    }
+
     /// `Span.unit(…)`: an associated function, which takes no `self` (REFERENCE §3).
     #[allow(clippy::too_many_arguments)]
     fn associated_call(
@@ -5486,7 +5890,7 @@ impl Checker<'_> {
             Some(_) if rejected => {}
             Some(f) if self.p.fns[f].receiver.is_none() => {
                 self.p.res.insert(e, Res::Fn(f));
-                return self.fn_call(e, f, targs, args, span, chain, expected);
+                return self.fn_call(e, f, None, targs, args, span, chain, expected);
             }
             Some(_) => {
                 let message =
@@ -5643,6 +6047,21 @@ impl Checker<'_> {
         let ret = def.ret.subst(&receiver);
         let fails = def.fails.as_ref().map(|t| t.subst(&receiver));
         self.p.res.insert(e, Res::Dispatch { iface, method: j, qualified });
+        // A generic `impl`'s method may drop a value of its type parameter, as a generic
+        // function may (OPEN_QUESTIONS P5, Resources in generic code).
+        let found = self.vars.zonk(&receiver[0]);
+        if let Some((def, binds)) = self.p.decls.impl_for(iface, &found)
+            && let Some(i) = binds.iter().position(|bind| bind.as_ref().is_some_and(|ty| self.p.decls.is_resource(ty)))
+        {
+            let param = match def.methods[j] {
+                Some(f) => self.p.fns[f].generics[i].name.clone(),
+                None => "_".into(),
+            };
+            let ty = binds[i].clone().expect("a resource was bound");
+            self.resource_targ(&ty, name, &param, span);
+            self.rejected_args(args);
+            return ret;
+        }
         self.generic_args(name, &params, &[], args, span, Modes::Each(&modes));
         if let Some(err) = fails {
             self.fallible_call(e, name, &err, span, chain);
@@ -5650,12 +6069,25 @@ impl Checker<'_> {
         ret
     }
 
+    /// The type arguments `args` of a value's type, with each type parameter of the function
+    /// whose declaration or constraint is rejected unknown, as in the bodies of `impl[T: Nope]
+    /// Box[T]`, so the parts of that type aren't reported (§15.1).
+    fn known_args(&self, args: &[Ty]) -> Vec<Ty> {
+        if !self.f.rejected.contains(&true) {
+            return args.to_vec();
+        }
+        let unknown: Vec<Ty> = (self.f.rejected.iter().enumerate())
+            .map(|(i, &rejected)| if rejected { Ty::Error } else { Ty::Param(i as u32) })
+            .collect();
+        args.iter().map(|arg| arg.subst(&unknown)).collect()
+    }
+
     fn field(&mut self, e: ExprId, base_ty: &Ty, name: Ident) -> Ty {
         let text = self.m.text(name.sym);
-        if let Ty::Adt(id, _) = base_ty
+        if let Ty::Adt(id, args) = base_ty
             && let Some((i, field)) = self.p.decls.adt(*id).field(text)
         {
-            let ty = field.ty.clone();
+            let ty = field.ty.subst(&self.known_args(args));
             self.p.res.insert(e, Res::Field(i));
             return ty;
         }
@@ -5687,11 +6119,16 @@ impl Checker<'_> {
     /// Checks the arguments of `with`. They label the fields they replace, at least one, once
     /// each and in declaration order, even on a one-field record (OPEN_QUESTIONS P5). One
     /// label problem is reported per call.
-    fn with_args(&mut self, e: ExprId, id: AdtId, args: &[Arg], span: Span) {
+    /// A generic record keeps its type arguments, so a field it replaces keeps its type.
+    fn with_args(&mut self, e: ExprId, record_ty: &Ty, args: &[Arg], span: Span) {
         let m = self.m;
+        let Ty::Adt(id, targs) = record_ty else { return };
+        let id = *id;
+        let targs = self.known_args(targs);
         let def = self.p.decls.adt(id);
         let record = def.name.clone();
-        let fields: Vec<(Box<str>, Ty)> = def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+        let fields: Vec<(Box<str>, Ty)> =
+            def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.subst(&targs))).collect();
         if args.is_empty() {
             let message = format!("`with` names at least one field of `{record}` to replace");
             self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
@@ -6763,8 +7200,9 @@ impl Checker<'_> {
             return self.unknown_parts(fields);
         }
         let ctor = def.ctor_name(v);
+        let targs = self.known_args(targs);
         let declared: Vec<(Box<str>, Ty)> =
-            variant.fields.iter().map(|f| (f.name.clone(), f.ty.subst(targs))).collect();
+            variant.fields.iter().map(|f| (f.name.clone(), f.ty.subst(&targs))).collect();
         let Some(fields) = fields else {
             if declared.is_empty() {
                 self.p.pat_ctor.insert(pat, CtorPat { adt: id, variant: v, fields: Box::new([]) });
@@ -7263,4 +7701,101 @@ fn is_snake(name: &str) -> bool {
 
 fn is_pascal(name: &str) -> bool {
     name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && name.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// How deeply the type of an expression may nest, counting each type argument as a level
+/// (OPEN_QUESTIONS P5, Nesting limit). `let`s that each wrap the one before nest a type
+/// deeper than any expression, as `collections/deep` does 3,000 levels. A debug build drops
+/// a type 10,000 deep on the main thread's 8 MiB stack, so this keeps half of that.
+pub const MAX_TYPE_DEPTH: u32 = 5_000;
+
+/// Whether `ty` has an error in it.
+fn mentions_error(ty: &Ty) -> bool {
+    *ty == Ty::Error || ty.parts().is_some_and(|parts| parts.iter().any(mentions_error))
+}
+
+/// Pushes the index of each type parameter `ty` mentions to `found`, once each.
+fn params_in(ty: &Ty, found: &mut Vec<u32>) {
+    match ty {
+        Ty::Param(i) if !found.contains(i) => found.push(*i),
+        ty => {
+            for part in ty.parts().into_iter().flat_map(|parts| parts.iter()) {
+                params_in(part, found);
+            }
+        }
+    }
+}
+
+/// The strongly connected components of the graph whose node `i` has an edge to each
+/// target in `edges[i]`, by Tarjan's algorithm with an explicit stack, so a long chain of
+/// types can't overflow the native one.
+fn strongly_connected<E>(edges: &[Vec<(usize, bool, E)>]) -> Vec<Vec<usize>> {
+    let n = edges.len();
+    let (mut index, mut low, mut on_stack) = (vec![usize::MAX; n], vec![0; n], vec![false; n]);
+    let (mut next, mut stack, mut components) = (0, Vec::new(), Vec::new());
+    for root in 0..n {
+        if index[root] != usize::MAX {
+            continue;
+        }
+        // Each frame is a node and how many of its edges it has followed.
+        let mut frames = vec![(root, 0)];
+        index[root] = next;
+        low[root] = next;
+        next += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(&mut (node, ref mut edge)) = frames.last_mut() {
+            if let Some(&(to, ..)) = edges[node].get(*edge) {
+                *edge += 1;
+                if index[to] == usize::MAX {
+                    index[to] = next;
+                    low[to] = next;
+                    next += 1;
+                    stack.push(to);
+                    on_stack[to] = true;
+                    frames.push((to, 0));
+                } else if on_stack[to] {
+                    low[node] = low[node].min(index[to]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == index[node] {
+                let mut component = Vec::new();
+                while let Some(top) = stack.pop() {
+                    on_stack[top] = false;
+                    component.push(top);
+                    if top == node {
+                        break;
+                    }
+                }
+                components.push(component);
+            }
+        }
+    }
+    components
+}
+
+/// Whether two `impl` targets are the same up to the names of their blocks' type parameters,
+/// as `Pair[A, B]` in `impl[A, B]` and in `impl[B, A]` are.
+fn same_target(a: &Ty, b: &Ty) -> bool {
+    fn walk(a: &Ty, b: &Ty, pairs: &mut Vec<(u32, u32)>) -> bool {
+        match (a, b) {
+            (Ty::Param(x), Ty::Param(y)) => match pairs.iter().find(|(p, q)| p == x || q == y) {
+                Some(pair) => *pair == (*x, *y),
+                None => {
+                    pairs.push((*x, *y));
+                    true
+                }
+            },
+            (Ty::Adt(x, xs), Ty::Adt(y, ys)) => {
+                x == y && xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(a, b)| walk(a, b, pairs))
+            }
+            (a, b) => a == b,
+        }
+    }
+    walk(a, b, &mut Vec::new())
 }

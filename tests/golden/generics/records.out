@@ -1,0 +1,6 @@
+Pair(first: 1, second: "a") Pair(first: 1, second: None) 2
+a Some(2.5) Pair(first: Pair(first: 1, second: "b"), second: Some(2.5))
+Pair(first: "a", second: 1) Pair(first: 'c', second: 'c') Some(2.5)
+false true true
+Named(name: "xs", value: [1, 2, 3]) 3 true
+a 1

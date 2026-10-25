@@ -1,0 +1,11 @@
+Pair(first: 2, second: 1) Pair(first: 2, second: 1) three=3
+Pair(first: 2, second: "x") Pair(first: 1, second: 5)
+3 1 ((. 1 .) 2 (. 3 .)) (. w .) 6 6
+box of 4 box of Some("s") box of ((. 1 .) 2 (. 3 .))
+true true false
+some int 7 no int some int 8
+2 ints 1 and one Pair(first: 1, second: 2) and 2.5
+9 13
+0 box of 5 box of Some('c')
+handle handle 1 entries 1 entries
+Pair(first: Some(3), second: None) Pair(first: None, second: Some('x'))

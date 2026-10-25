@@ -1,0 +1,457 @@
+// phase: 2.10
+// expect-error: E0203
+// expect-error: E0301
+// expect-error: E0204
+// expect-error: E0210
+// expect-error: E0303
+// expect-error: E0306
+// expect-error: E0307
+// expect-error: E0309
+// expect-error: E0312
+// expect-error: E0313
+// expect-error: E0314
+// expect-error: E0315
+// expect-error: E0317
+// expect-error: E0321
+// expect-error: E0901
+// A generic `impl`'s methods apply only to values whose type matches its target, and its
+// constraints must hold for the type arguments (REFERENCE §4.8, §4.9). Each of its type
+// parameters must appear in the target, which it can't name otherwise. A type implements an
+// interface with one `impl`, so two blocks for one interface and one generic type clash
+// even when no type matches both (E0321), and a type's methods have distinct names across all of
+// its blocks (OPEN_QUESTIONS §G, P5). An `impl` lives in the module of the interface or of
+// the type, and a type's module is that of its outermost type, so `impl Show for
+// Option[Point]` is an orphan, and a tuple belongs to no module. An `impl` for every type,
+// `impl[T] I for T`, isn't scheduled. `::[…]` can't give a block's type parameters, which
+// an associated function takes from its arguments and its expected type. A resource as a
+// type argument of a generic `impl`'s method waits for the answer that generic functions do
+// (§G). Rejected blocks still give their methods, so calls of them aren't reported again
+// (§15.1).
+interface Describe {
+    fn describe(self) -> Text
+    fn same(self, other: Self) -> Bool
+}
+
+interface Count {
+    fn count(self) -> Int
+}
+
+unique record Token {
+    id: Int
+}
+
+resource record Probe {
+    id: Int
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+    }
+}
+
+record Point {
+    x: Int
+}
+
+record Pair[A, B] {
+    first: A
+    second: B
+}
+
+record Box[T] {
+    item: T
+}
+
+enum Slot[T] {
+    Full(value: T)
+    Vacant
+}
+
+record Lone[T] {
+    item: T
+}
+
+impl[A: Copy] Pair[A, A] {
+    fn swap(self) -> Pair[A, A] {
+        return Pair(first: self.second, second: self.first)
+    }
+
+    fn left(self) -> A {
+        return self.first
+    }
+
+    fn same(x: A) -> Pair[A, A] {
+        return Pair(first: x, second: x)
+    }
+}
+
+impl Pair[Int, Text] {
+    fn left(self) -> Int {                          // <- E0210
+        return self.first
+    }
+}
+
+impl[T] Pair[Int, Int] {                            // <- E0312
+    fn sum(self) -> Int {
+        return self.first + self.second
+    }
+}
+
+impl[T: Show] Describe for Box[T] {
+    fn describe(self) -> Text {
+        return f"{self.item}"
+    }
+
+    fn same(self, other: Box[Int]) -> Bool {        // <- E0314
+        return true
+    }
+}
+
+impl Describe for Box[Int] {                        // <- E0321
+    fn describe(self) -> Text {
+        return "int box"
+    }
+
+    fn same(self, other: Self) -> Bool {
+        return true
+    }
+}
+
+impl Count for Pair[Int, Int] {
+    fn count(self) -> Int {
+        return 2
+    }
+}
+
+impl Count for Pair[Text, Text] {                   // <- E0321
+    fn count(self) -> Int {
+        return 2
+    }
+}
+
+impl[T] Count for Slot[T] {
+    fn count(self) -> Int {
+        return match self {
+            Full(_) => 1
+            Vacant => 0
+        }
+    }
+}
+
+impl[U] Count for Slot[U] {                         // <- E0313
+    fn count(self) -> Int {
+        return 0
+    }
+}
+
+impl Show for Option[Point] {                       // <- E0315
+    fn show(self) -> Text {
+        return "point"
+    }
+}
+
+impl Option[Int] {                                  // <- E0315
+    fn or_zero(self) -> Int {
+        return 0
+    }
+}
+
+impl (Int, Text) {                                  // <- E0315
+    fn number(self) -> Int {
+        return 1
+    }
+}
+
+impl Lone[Int, Int] {                               // <- E0307
+    fn odd(self) -> Int {
+        return 1
+    }
+}
+
+impl[t] Box[t] {                                    // <- E0204
+    fn lower(self) -> Int {
+        return 1
+    }
+}
+
+impl[Point] Slot[Point] {                           // <- E0203
+    fn shadow(self) -> Int {
+        return 1
+    }
+}
+
+impl[T, T] Pair[T, T] {                             // <- E0210
+    fn twice(self) -> Int {
+        return 1
+    }
+}
+
+impl[T] Box[T] {
+    fn empty() -> Box[List[T]] {
+        return Box(item: [])
+    }
+}
+
+impl Box[Int] {
+    fn big(self) -> Int {
+        return self.item * 1000
+    }
+}
+
+interface Twice {
+    fn twice(self) -> Int
+}
+
+record Duo[A, B] {
+    first: A
+    second: B
+}
+
+impl[A: Copy] Twice for Duo[A, A] {
+    fn twice(self) -> Int {
+        return 2
+    }
+}
+
+impl Count for List[Int] {
+    fn count(self) -> Int {
+        return self.len()
+    }
+}
+
+impl Count for List[Text] {                         // <- E0321
+    fn count(self) -> Int {
+        return self.len()
+    }
+}
+
+record Crate[T] {
+    item: T
+}
+
+impl[T: Nope] Crate[T] {                            // <- E0307
+    fn k(self) -> Int {
+        let c = self
+        let d = self.with(item: 5)
+        let a = self.item
+        let b = self.item
+        return self.item.len() + self.item
+    }
+}
+
+impl[T: Nope, U] Crate[T] {                         // <- E0307, E0312
+    fn u(self) -> Int {
+        return 1
+    }
+}
+
+impl[T: Nope] Count for Crate[T] {                  // <- E0307
+    fn count(self) -> Int {
+        return self.item.count()
+    }
+}
+
+record Tote[T] {
+    item: T
+}
+
+impl[T: Nope + Show] Count for Tote[T] {            // <- E0307
+    fn count(self) -> Int {
+        return 1
+    }
+}
+
+// A type parameter named like a type may have meant the type, so the block is for an
+// unknown type, and another block for the head doesn't clash with it.
+record Tray[T] {
+    item: T
+}
+
+impl[Point] Count for Tray[Point] {                 // <- E0203
+    fn count(self) -> Int {
+        return self.item.x
+    }
+}
+
+impl Count for Tray[Text] {
+    fn count(self) -> Int {
+        return 2
+    }
+}
+
+// The blocks a type head already has may have other constraints than a rejected one, or name
+// their type parameters in another order.
+enum Bin[T] {
+    Full(value: T)
+    Empty
+}
+
+impl[T: Copy] Count for Bin[T] {
+    fn count(self) -> Int {
+        return 1
+    }
+}
+
+impl[T: Nope] Bin[T] {                              // <- E0307
+    fn peek(self) -> Int {
+        return match self {
+            Full(v) => v.len() + v
+            Empty => 0
+        }
+    }
+}
+
+impl Count for Bin[Token] {                         // <- E0321
+    fn count(self) -> Int {
+        return 2
+    }
+}
+
+record Cart[T] {
+    item: T
+}
+
+impl[T: Show] Count for Cart[T] {
+    fn count(self) -> Int {
+        return 1
+    }
+}
+
+impl[T] Count for Cart[T] {                         // <- E0313
+    fn count(self) -> Int {
+        return 2
+    }
+}
+
+impl[A, B] Describe for Duo[A, B] {
+    fn describe(self) -> Text {
+        return "duo"
+    }
+
+    fn same(self, other: Self) -> Bool {
+        return true
+    }
+}
+
+impl[B, A] Describe for Duo[A, B] {                 // <- E0313
+    fn describe(self) -> Text {
+        return "duo"
+    }
+
+    fn same(self, other: Self) -> Bool {
+        return false
+    }
+}
+
+interface Marker {
+}
+
+impl[T] Marker for Duo[T, T] {
+}
+
+impl Marker for Duo[Int, Text] {                    // <- E0321
+}
+
+impl[T] Marker for Crate[T] {
+}
+
+impl[T: Nope] Marker for Crate[T] {                 // <- E0313, E0307
+}
+
+interface Anything {
+    fn whatever(self) -> Int
+}
+
+impl[T] Anything for T {                            // <- E0901
+    fn whatever(self) -> Int {
+        return 1
+    }
+}
+
+fn describe_all[T: Describe](x: T) -> Text {
+    return x.describe()
+}
+
+fn counted[T: Count](x: T) -> Int {
+    return x.count()
+}
+
+fn twice_of[T: Twice](x: T) -> Int {
+    return x.twice()
+}
+
+fn boxed[E: Copy](e: E) -> Box[E] fails E {
+    return Box(item: e)
+}
+
+fn small() -> Int8 {
+    return 5
+}
+
+// A `Never` part of the receiver gives way to the other parts that the same type parameter
+// stands for, and a receiver's error type that settles later must still match the target.
+fn never_parts() -> Bool {
+    let n: Option[Never] = None
+    let a = Pair(first: n, second: Some(Token(id: 1))).swap() // <- E0309
+    let b = Pair(first: Some(Token(id: 2)), second: n).swap() // <- E0309
+    let c = Duo(first: n, second: Some(Token(id: 3))).twice() // <- E0309
+    let d = twice_of(x: Duo(first: Some(Token(id: 4)), second: n)) // <- E0309
+    let t: Text = match Pair(first: n, second: Some(5)).swap().first {
+        Some(x) => x                                           // <- E0301
+        None => "none"
+    }
+    let e = Err(small()) == attempt boxed(e: 5).big()          // <- E0303
+    let f = attempt boxed(e: 5).big() == Err(small())          // <- E0301
+    return e
+}
+
+// A block rejected because its type head has one may have been meant for the types it
+// matches, and only for those.
+fn taken_heads() -> Int {
+    let a = counted(x: ["a"]) + ["b"].count() + [1].count()
+    let t: Bin[Token] = Bin.Full(Token(id: 5))
+    let n = counted(x: t) + Tray(item: Point(x: 1)).count() + Tray(item: "a").count()
+    let m = counted(x: Cart(item: Point(x: 2))) + Cart(item: Point(x: 3)).count()
+    let b = [1.5].count()                           // <- E0303
+    let c = counted(x: [true])                      // <- E0309
+    return a
+}
+
+// A block whose type parameter has a rejected constraint is still for `Crate[T]`, so its
+// methods and interface are known, and others aren't.
+fn rejected_bounds(c: Crate[Int]) -> Text {
+    let n = c.k() + counted(x: c) + counted(x: Tote(item: Point(x: 1)))
+    let m = c.h()                                   // <- E0303
+    return f"{c}"                                   // <- E0306
+}
+
+fn calls() -> Int {
+    let p = Pair(first: 1, second: 2)
+    let a = p.swap().first + p.sum() + Some(1).or_zero() + (1, "a").number()
+    let b = Pair(first: "a", second: 1).swap()      // <- E0303
+    let c = Pair(first: 1.5, second: 2).swap()      // <- E0303
+    let d = Pair(first: Token(id: 1), second: Token(id: 2)).swap() // <- E0309
+    let e = describe_all(x: Box(item: 1))
+    let f = describe_all(x: Box(item: p))           // <- E0309
+    let g = Box(item: p).describe()                 // <- E0309
+    let h = counted(x: p) + counted(x: Slot.Full(Token(id: 3))) + p.count()
+    let i = counted(x: Pair(first: 1, second: "x")) // <- E0309
+    let j = Pair(first: 'a', second: 'b').count()   // <- E0303
+    let k = Box.empty()                             // <- E0312
+    let l = Pair.same::[Int](x: 1)                  // <- E0317
+    return a + h
+}
+
+fn sink(s: take Slot[Probe]) {
+    match s {
+        Full(p) => p.abandon()
+        Vacant => {}
+    }
+}
+
+fn resources(p: take Probe) -> Int {
+    let s = Slot.Full(p)
+    let n = s.count()                               // <- E0901
+    sink(s: s)
+    return n
+}

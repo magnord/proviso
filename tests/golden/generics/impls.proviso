@@ -1,0 +1,189 @@
+// phase: 2.10
+// An `impl` block may take type parameters, which its target names, as `impl[A: Copy]
+// Pair[A, A]` (REFERENCE §4.8, §4.9). Its methods apply to the values whose type matches
+// the target, so `swap` is a method of `Pair[Int, Int]` and not of `Pair[Int, Text]`, and
+// the block's constraints must hold for the matching type arguments. A target may also be a
+// type with given type arguments, as `Pair[Int, Text]`, `Option[Int]` or `Handle[Int]`, or a
+// tuple type.
+// An interface implemented by a generic `impl` holds for the types its target matches, so
+// `Box[Int]` is `Describe` because `Int` is `Show`, and a generic function's parameter
+// meets a constraint through the block's own. `::[…]` on such a method gives only the
+// method's own type parameters, and an associated function of the block takes the block's
+// from its arguments and its expected type. Each value runs the implementation for its own
+// type (OPEN_QUESTIONS P5).
+use std.io { IoError }
+use std.pool { Pool, Handle }
+
+interface Describe {
+    fn describe(self) -> Text
+}
+
+interface Total {
+    fn total(self) -> Int
+}
+
+record Pair[A, B] derives(Show) {
+    first: A
+    second: B
+}
+
+record Box[T] {
+    item: T
+}
+
+enum Tree[T] {
+    Leaf
+    Node(left: Tree[T], value: T, right: Tree[T])
+}
+
+impl[A: Copy] Pair[A, A] {
+    fn swap(self) -> Pair[A, A] {
+        return Pair(first: self.second, second: self.first)
+    }
+
+    fn pick[B: Copy](self, b: B, first: Bool) -> Pair[A, B] {
+        return Pair(first: if first { self.first } else { self.second }, second: b)
+    }
+}
+
+impl Pair[Int, Text] {
+    fn label(self) -> Text {
+        return f"{self.second}={self.first}"
+    }
+}
+
+impl[T] Tree[T] {
+    fn empty() -> Tree[T] {
+        return Tree.Leaf
+    }
+
+    fn size(self) -> Int {
+        return match self {
+            Leaf => 0
+            Node(left, value: _, right) => left.size() + 1 + right.size()
+        }
+    }
+}
+
+impl[T] Box[T] {
+    fn wrap(item: take T) -> Box[T] {
+        return Box(item: item)
+    }
+}
+
+impl[T: Show] Describe for Box[T] {
+    fn describe(self) -> Text {
+        return f"box of {self.item}"
+    }
+}
+
+impl[T: Eq] Eq for Box[T] {
+    fn eq(self, other: Self) -> Bool {
+        return self.item == other.item
+    }
+}
+
+impl[T: Show] Show for Tree[T] {
+    fn show(self) -> Text {
+        return match self {
+            Leaf => "."
+            Node(left, value, right) => f"({left} {value} {right})"
+        }
+    }
+}
+
+impl Total for Tree[Int] {
+    fn total(self) -> Int {
+        return match self {
+            Leaf => 0
+            Node(left, value, right) => left.total() + value + right.total()
+        }
+    }
+}
+
+impl Describe for Option[Int] {
+    fn describe(self) -> Text {
+        return match self {
+            Some(n) => f"some int {n}"
+            None => "no int"
+        }
+    }
+}
+
+impl Describe for List[Int] {
+    fn describe(self) -> Text {
+        return f"{self.len()} ints"
+    }
+}
+
+impl Describe for Handle[Int] {
+    fn describe(self) -> Text {
+        return "handle"
+    }
+}
+
+impl Describe for Map[Text, Int] {
+    fn describe(self) -> Text {
+        return f"{self.len()} entries"
+    }
+}
+
+impl[A: Show, B: Show] Describe for (A, B) {
+    fn describe(self) -> Text {
+        let (a, b) = self
+        return f"{a} and {b}"
+    }
+}
+
+impl Total for (Int, Int) {
+    fn total(self) -> Int {
+        let (a, b) = self
+        return a + b
+    }
+}
+
+fn describe_all[T: Describe](x: T) -> Text {
+    return x.describe()
+}
+
+fn total_of[T: Total](x: T) -> Int {
+    return x.total()
+}
+
+fn swapped[T: Copy](p: Pair[T, T]) -> Pair[T, T] {
+    return p.swap()
+}
+
+fn boxed[T: Show](x: take T) -> Text {
+    return Box(item: x).describe()
+}
+
+fn leaf(v: Int) -> Tree[Int] {
+    return Tree.Node(left: Tree.Leaf, value: v, right: Tree.Leaf)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let p = Pair(first: 1, second: 2)
+    let q = Pair(first: 3, second: "three")
+    try sys.stdout.write_line(f"{p.swap()} {swapped(p: p)} {q.label()}")
+    let picked: Pair[Int, Int8] = p.pick::[Int8](b: 5, first: true)
+    try sys.stdout.write_line(f"{p.pick(b: "x", first: false)} {picked}")
+    let t = Tree.Node(left: leaf(v: 1), value: 2, right: leaf(v: 3))
+    let words = Tree.Node(left: Tree.Leaf, value: "w", right: Tree.Leaf)
+    try sys.stdout.write_line(f"{t.size()} {words.size()} {t} {words} {t.total()} {total_of(x: t)}")
+    let b = Box(item: 4)
+    try sys.stdout.write_line(f"{b.describe()} {boxed(x: Some("s"))} {describe_all(x: Box(item: t))}")
+    try sys.stdout.write_line(f"{b == Box(item: 4)} {b != Box(item: 5)} {Box(item: "a") == Box(item: "b")}")
+    let none: Option[Int] = None
+    try sys.stdout.write_line(f"{Some(7).describe()} {describe_all(x: none)} {Describe.describe(Some(8))}")
+    try sys.stdout.write_line(f"{[1, 2].describe()} {(1, "one").describe()} {describe_all(x: (p, 2.5))}")
+    try sys.stdout.write_line(f"{(4, 5).total()} {total_of(x: (6, 7))}")
+    let e: Tree[Text] = Tree.empty()
+    try sys.stdout.write_line(f"{e.size()} {Box.wrap(item: 5).describe()} {Box.wrap(item: Some('c')).describe()}")
+    var pool: Pool[Int] = Pool.new()
+    let h = pool.insert(5)
+    let m: Map[Text, Int] = ["a": 1]
+    let n: Option[Never] = None
+    try sys.stdout.write_line(f"{h.describe()} {describe_all(x: h)} {m.describe()} {describe_all(x: m)}")
+    try sys.stdout.write_line(f"{Pair(first: n, second: Some(3)).swap()} {Pair(first: Some('x'), second: n).swap()}")
+}

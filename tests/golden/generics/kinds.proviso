@@ -1,0 +1,101 @@
+// phase: 2.10
+// A generic type's kind comes from its declaration and its type arguments (REFERENCE §5.1).
+// `Box[Token]` is unique because it holds a unique `Token`, and `Box[Int]` is copyable. A
+// `unique record Cell[T]` is unique whatever `T` is. A type argument that the type only
+// reaches through a `Handle` doesn't count, so `Ref[Token]` is copyable. A generic record
+// or enum may hold a resource, and is then a resource that abandons what it holds, its
+// fields last first (§10 rule 4; OPEN_QUESTIONS P5).
+use std.io { Out, IoError }
+use std.pool { Pool, Handle }
+
+unique record Token {
+    id: Int
+}
+
+resource record Probe {
+    name: Text
+    out: Out
+}
+
+impl Probe {
+    fn close(take self) {
+        say(out: self.out, line: f"close {self.name}")
+    }
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {
+        say(out: self.out, line: f"abandon {self.name}")
+    }
+}
+
+record Box[T] {
+    item: T
+}
+
+unique record Cell[T] derives(Show) {
+    value: T
+}
+
+record Ref[T] {
+    h: Handle[T]
+}
+
+enum Slot[T] {
+    Full(first: T, second: T)
+    Vacant
+}
+
+enum Stop {
+    Halt
+}
+
+fn say(out: Out, line: Text) {
+    let _ = attempt out.write_line(line)
+}
+
+fn dup[T: Copy](x: T) -> T {
+    return x
+}
+
+fn open(name: Text, out: keep Out) -> Probe {
+    return Probe(name: name, out: out)
+}
+
+
+fn held(out: keep Out) fails Stop {
+    let boxed = Box(item: open(name: "boxed", out: out))
+    let slot = Slot.Full(first: open(name: "first", out: out), second: open(name: "second", out: out))
+    let nested = Box(item: Box(item: open(name: "nested", out: out)))
+    fail Stop.Halt
+}
+
+fn consumed(out: keep Out) {
+    let slot = Slot.Full(first: open(name: "a", out: out), second: open(name: "b", out: out))
+    match slot {
+        Full(first, second) => {
+            second.close()
+            first.close()
+        }
+        Vacant => {}
+    }
+    let boxed = Box(item: open(name: "c", out: out))
+    boxed.item.close()
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let a = Box(item: Token(id: 1))
+    let b = a
+    let c = Box(item: 2)
+    let d = c
+    let e = dup(x: c)
+    let cell = Cell(value: 3)
+    let moved = cell
+    var pool: Pool[Token] = Pool.new()
+    let r = Ref(h: pool.insert(Token(id: 4)))
+    let s = dup(x: r)
+    try sys.stdout.write_line(f"{b.item.id} {c.item + d.item + e.item} {moved} {pool[s.h].id + pool[r.h].id}")
+    let outcome = attempt held(out: sys.stdout)
+    consumed(out: sys.stdout)
+    try sys.stdout.write_line("done")
+}
