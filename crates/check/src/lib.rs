@@ -1573,10 +1573,11 @@ impl Checker<'_> {
                     self.error(codes::SHADOWING, name.span, message);
                 }
                 self.poisoned.insert(name.sym);
-            } else if self.adt_names.contains_key(&name.sym) || self.imports.contains_key(&name.sym) {
-                self.error(codes::DUPLICATE_ITEM, name.span, format!("`{text}` is defined twice in this module"));
-            } else if self.aliases.contains_key(&name.sym) {
-                // Which one a use means is unclear, so its uses aren't checked.
+            } else if self.adt_names.contains_key(&name.sym)
+                || self.imports.contains_key(&name.sym)
+                || self.aliases.contains_key(&name.sym)
+            {
+                // Which one a use means is unclear, so its uses aren't checked (issue #19).
                 self.error(codes::DUPLICATE_ITEM, name.span, format!("`{text}` is defined twice in this module"));
                 self.poisoned.insert(name.sym);
             } else {
@@ -2398,6 +2399,8 @@ impl Checker<'_> {
                         format!("`{name}` is defined twice in this module"),
                     );
                 }
+                // A call may mean either function, so none is checked against one (§15.1).
+                self.poisoned.insert(decl.name.sym);
             } else {
                 self.fn_names.insert(decl.name.sym, id);
                 if name == "main" {
@@ -3196,7 +3199,11 @@ impl Checker<'_> {
             },
             TypeExprKind::Applied { name, ref args } => {
                 let text = m.text(name.sym);
+                // A rejected declaration's type arguments mean the same whichever one it was.
                 if self.poisoned.contains(&name.sym) {
+                    for &arg in args.as_deref().unwrap_or_default() {
+                        self.resolve_type(arg);
+                    }
                     return Ty::Error;
                 }
                 if self.generic_scope.iter().any(|(sym, _)| *sym == name.sym)
@@ -5219,7 +5226,7 @@ impl Checker<'_> {
             }
             return self.unit_variant(e, id, name, expected);
         }
-        if let Some(&f) = self.fn_names.get(&name.sym) {
+        if let Some(&f) = self.fn_names.get(&name.sym).filter(|_| !self.poisoned.contains(&name.sym)) {
             return self.fn_value(e, f, None, name.span);
         } else if self.unqualified_variant(name) || self.poisoned.contains(&name.sym) {
         } else if self.aliases.contains_key(&name.sym) {
@@ -5587,6 +5594,7 @@ impl Checker<'_> {
         let span = self.span(e);
         if let ExprKind::Name(name) = m.exprs[callee].kind
             && self.lookup_local(name.sym).is_none()
+            && !self.poisoned.contains(&name.sym)
             && let Some(&f) = self.fn_names.get(&name.sym)
         {
             let ty = self.fn_value(callee, f, Some(targs), span);
@@ -5689,7 +5697,7 @@ impl Checker<'_> {
     /// when a wrongly cased function has its name.
     fn fn_named(&self, callee: ExprId) -> Option<FnId> {
         let ExprKind::Name(name) = self.m.exprs[callee].kind else { return None };
-        if bare_variant(self.m.text(name.sym)).is_some() {
+        if bare_variant(self.m.text(name.sym)).is_some() || self.poisoned.contains(&name.sym) {
             return None;
         }
         self.fn_names.get(&name.sym).copied()

@@ -61,6 +61,6 @@ fn uses_them(p: Point, f: Fields, c: Commas, b: bad_name) -> Int {
     return p.x + f.later.n + c.a + b.x + d.a
 }
 
-fn applied(p: Point[Int]) -> Int {                  // <- E0307
+fn applied(p: Point[Int]) -> Int {
     return p.x
 }

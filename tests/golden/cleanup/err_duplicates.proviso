@@ -1,0 +1,105 @@
+// phase: 2
+// expect-error: E0201
+// expect-error: E0202
+// expect-error: E0301
+// expect-error: E0307
+// A use of a name declared twice may mean either declaration, so no use of it is checked
+// against one of them (REFERENCE §15.1; issue #19). This holds for records, enums, generic
+// records with different type parameters, a record and an enum, and functions, whichever
+// way the name is used. An error inside a use that doesn't depend on the declaration, or
+// inside either declaration, is still reported.
+
+record A {
+    n: Int
+}
+
+record A {                                          // <- E0202
+    m: Int
+}
+
+impl A {
+    fn get(self) -> Int {
+        return self.m
+    }
+}
+
+fn records(a: A) -> Int {
+    let b = A(m: 1)
+    let c = A(n: nosuch)                            // <- E0201
+    let d = a.with(m: 2)
+    let A(m: k) = a
+    return a.m + a.get() + b.n + k
+}
+
+enum E {
+    One
+    Two
+}
+
+enum E {                                            // <- E0202
+    Three(n: Int)
+}
+
+fn enums(e: E) -> Int {
+    let x = E.Three(n: 1)
+    let y = E.Four
+    return match e {
+        E.Three(n: n) => n
+        E.One => 1
+    }
+}
+
+record Box[T] {
+    a: T
+}
+
+record Box[T, U] {                                  // <- E0202
+    a: T
+    b: U
+}
+
+fn boxes(x: Box[Int, Int], y: Box[Int]) -> Int {
+    let b = Box(a: 1, b: 2)
+    let c = Box(a: 1)
+    let d: Box[Nope] = c                            // <- E0307
+    return x.b + y.a
+}
+
+record Shape {
+    n: Int
+}
+
+enum Shape {                                        // <- E0202
+    Dot
+}
+
+fn shapes(s: Shape) -> Int {
+    let d = Shape.Dot
+    return s.n
+}
+
+fn dup(a: Int) -> Int {
+    return a
+}
+
+fn dup[T: Copy](b: T, c: T) -> T {                  // <- E0202
+    let n: Int = "dup"                              // <- E0301
+    return c
+}
+
+fn calls() -> Int {
+    let a = dup(b: 1, c: 2)
+    let b = dup::[Text](b: "x", c: "y")
+    let c = dup(a: 1)
+    let f = dup
+    let f2: fn(Text, Text) -> Text = dup
+    let g = dup::[Int]
+    let h = dup(a: nosuch)                          // <- E0201
+    return a + c
+}
+
+pub fn main(sys: keep System) {
+}
+
+pub fn main(sys: keep System) {                     // <- E0202
+}

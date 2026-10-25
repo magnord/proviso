@@ -12,7 +12,8 @@
 // that holds a resource implements it by itself, abandoning what it holds, and a type that
 // isn't a resource has nothing to abandon, so neither takes an `impl Abandon`. A call of
 // `abandon` on a type whose implementation was rejected or is missing isn't reported, nor is
-// a second declaration of a resource left without one, and
+// a second declaration of a resource left without one, nor an `impl` for a type declared
+// twice, which may mean either declaration (issue #19), and
 // nor is the `self` of a rejected one left over, while other errors in its body are (§15.1).
 // An interface method that takes `take self` is implemented with `take self`. An error type
 // can't be a resource (§10 rule 5), whether it is one or holds one.
@@ -126,6 +127,6 @@ record Bland {                                      // <- E0202
     n: Int
 }
 
-impl Abandon for Bland {                            // <- E0319
+impl Abandon for Bland {
     fn abandon(take self) {}
 }
