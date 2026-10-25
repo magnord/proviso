@@ -2519,6 +2519,7 @@ impl Checker<'_> {
                 let message = format!(
                     "`{earlier}` already implements `{iface_text}`, and {head} has one `impl` of each interface, whatever its type arguments"
                 );
+                self.p.decls.mark_taken(iface, key, target.clone(), self.impl_generics.len());
                 (codes::IMPLEMENTATION_HEAD_TAKEN, message)
             };
             self.error(code, header, message);
@@ -4105,8 +4106,6 @@ impl Checker<'_> {
         ty
     }
 
-    /// Writes `ty` as the type of `e`. One with a variable in it is zonked when the body is
-    /// settled, so the interpreter never sees the variable.
     /// `ty`, the type of `e`, or an error once it is reported for nesting more than
     /// [`MAX_TYPE_DEPTH`] levels deep. Each walk of a type and each message about it then
     /// stays bounded however a generic function nests its type parameter (OPEN_QUESTIONS
@@ -4132,6 +4131,8 @@ impl Checker<'_> {
         Ty::Error
     }
 
+    /// Writes `ty` as the type of `e`. One with a variable in it is zonked when the body is
+    /// settled, so the interpreter never sees the variable.
     fn record(&mut self, e: ExprId, ty: Ty) {
         if self.vars.count() > 0 && self.vars.has_var(&ty) {
             self.typed.push(e);

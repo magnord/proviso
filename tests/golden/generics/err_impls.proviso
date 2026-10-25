@@ -213,6 +213,18 @@ impl[A: Copy] Twice for Duo[A, A] {
     }
 }
 
+impl Count for List[Int] {
+    fn count(self) -> Int {
+        return self.len()
+    }
+}
+
+impl Count for List[Text] {                         // <- E0321
+    fn count(self) -> Int {
+        return self.len()
+    }
+}
+
 record Crate[T] {
     item: T
 }
@@ -274,6 +286,15 @@ fn never_parts() -> Bool {
     let e = Err(small()) == attempt boxed(e: 5).big()          // <- E0303
     let f = attempt boxed(e: 5).big() == Err(small())          // <- E0301
     return e
+}
+
+// A block rejected because its type head has one may have been meant for the types it
+// matches, and only for those.
+fn taken_heads() -> Int {
+    let a = counted(x: ["a"]) + ["b"].count() + [1].count()
+    let b = [1.5].count()                           // <- E0303
+    let c = counted(x: [true])                      // <- E0309
+    return a
 }
 
 // A block whose type parameter has a rejected constraint is still for `Crate[T]`, so its

@@ -14,7 +14,7 @@ use proviso_syntax::parse_module;
 use proviso_syntax::source::{SourceFile, Span};
 
 /// How far this toolchain implements the v1 plan (OPEN_QUESTIONS P3): phase 1, and the first
-/// eight slices of phase 2.
+/// ten slices of phase 2.
 pub const IMPLEMENTED_PHASE: Phase = Phase::slice(2, 10);
 
 /// A point in the v1 plan: a whole phase, or a slice of one. A phase delivered over several

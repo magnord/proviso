@@ -491,6 +491,10 @@ pub struct Decls {
     /// `Int`. It may have given them methods and interfaces, so uses of those aren't
     /// reported. A record or enum keeps this in its [`AdtDef`].
     unknown: HashSet<ImplKey>,
+    /// The targets of `impl` blocks rejected because their type head had an `impl` of the
+    /// interface already, with the number of type parameters each block declares. Each may
+    /// have been meant for the types it matches, so their uses aren't reported (§15.1).
+    taken: HashMap<(IfaceId, ImplKey), Vec<(Ty, usize)>>,
     /// Whether the module declares a resource, without which no type is one.
     any_resource: bool,
     /// The argument lists [`Decls::is_resource`] has answered for, by address, so a deep type
@@ -568,6 +572,7 @@ impl Default for Decls {
             tuples,
             unknown_tuples: false,
             unknown: HashSet::new(),
+            taken: HashMap::new(),
             any_resource: false,
             resource_args: Mutex::default(),
         }
@@ -688,6 +693,12 @@ impl Decls {
     /// The interfaces implemented for `key` by an `impl`.
     pub fn impls_for(&self, key: ImplKey) -> impl Iterator<Item = IfaceId> + '_ {
         self.impls.keys().filter(move |(_, k)| *k == key).map(|(iface, _)| *iface)
+    }
+
+    /// Notes that an `impl` block of `iface` for `target`, with `params` type parameters, was
+    /// rejected because `key`, its type head, has one already.
+    pub fn mark_taken(&mut self, iface: IfaceId, key: ImplKey, target: Ty, params: usize) {
+        self.taken.entry((iface, key)).or_default().push((target, params));
     }
 
     /// Notes that a rejected `impl` block names `key`, so it may have methods and interfaces
@@ -838,7 +849,8 @@ impl Decls {
         let Some(def) = self.impls.get(&(iface, key)) else { return false };
         let mut binds = vec![None; def.bounds.len()];
         if !matches_target(&def.target, ty, &mut binds) {
-            return false;
+            let taken = self.taken.get(&(iface, key)).map_or(&[][..], |targets| targets.as_slice());
+            return taken.iter().any(|(target, params)| matches_target(target, ty, &mut vec![None; *params]));
         }
         binds.iter().zip(&def.bounds).all(|(bind, bounds)| match bind {
             Some(Ty::Never | Ty::Var(_) | Ty::Error) | None => true,
