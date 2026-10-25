@@ -3,7 +3,8 @@
 //! records, for enums, `match` and patterns, for `Option`, `Result`, `fail` and `attempt`,
 //! for methods, interfaces and generic functions, for tuples, `let` patterns, the `else`
 //! forms, `check`, the text operations and `example` declarations, for collections, and for
-//! kinds, moves, `take` and `inout` parameters and `std.pool`.
+//! kinds, moves, `take` and `inout` parameters and `std.pool`, and for function types,
+//! function values and closures.
 //!
 //! The checker never rewrites the tree. It records what it learns in side tables of
 //! [`Program`], which the interpreter reads.
@@ -3331,6 +3332,13 @@ impl Checker<'_> {
         let span = self.m.stmts[s].span;
         let keyword = if is_break { "break" } else { "continue" };
         let index = match label {
+            None if self.f.loops.is_empty() && !self.closure_scopes.is_empty() => {
+                let message = format!(
+                    "`{keyword}` can't leave a closure; its body ends with its value or a `return` (OPEN_QUESTIONS Q33)"
+                );
+                self.error(codes::MISPLACED_JUMP, span, message);
+                return;
+            }
             None if self.f.loops.is_empty() => {
                 self.error(codes::MISPLACED_JUMP, span, format!("`{keyword}` outside a loop"));
                 return;
@@ -3958,7 +3966,9 @@ impl Checker<'_> {
                     }
                     None => {
                         self.rejected_value(*value);
-                        let message = if self.f.returns {
+                        let message = if !self.closure_scopes.is_empty() {
+                            "`fail` in a closure whose function type has no `fails`; the type it is passed as must have one, as in `fn(Int) -> Int fails E`"
+                        } else if self.f.returns {
                             "`fail` needs a `fails` clause, and this function declares none"
                         } else if self.f.example {
                             "`fail` in an example, which has no function to fail"
@@ -4530,8 +4540,8 @@ impl Checker<'_> {
             && params.len() != closure.params.len()
         {
             let (n, given) = (params.len(), closure.params.len());
-            let noun = if n == 1 { "parameter" } else { "parameters" };
-            let message = format!("this closure takes {given}, but the function type it is passed as takes {n} {noun}");
+            let noun = if given == 1 { "parameter" } else { "parameters" };
+            let message = format!("this closure takes {given} {noun}, but the function type it is passed as takes {n}");
             self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
             self.inner_errors += 1;
             expected = None;
@@ -5609,18 +5619,18 @@ impl Checker<'_> {
         let closure = |i: &usize| matches!(m.exprs[args[*i].value].kind, ExprKind::Closure(_));
         let mut closures: Vec<usize> = (0..args.len()).filter(closure).collect();
         for i in (0..args.len()).filter(|i| !closure(i)) {
-            self.generic_arg(i, &args[i], params[i].0.as_ref(), &params[i].1, targs, modes);
+            self.generic_arg(callee, i, &args[i], (params[i].0.as_ref(), &params[i].1), targs, modes);
         }
         while !closures.is_empty() {
             let ready = closures.iter().position(|&i| self.closure_ready(&params[i].1, targs)).unwrap_or(0);
             let i = closures.remove(ready);
-            self.generic_arg(i, &args[i], params[i].0.as_ref(), &params[i].1, targs, modes);
+            self.generic_arg(callee, i, &args[i], (params[i].0.as_ref(), &params[i].1), targs, modes);
         }
         true
     }
 
     /// Checks argument `i` of a call against parameter `param` of type `ty`.
-    fn generic_arg(&mut self, i: usize, arg: &Arg, param: &str, ty: &Ty, targs: &[Ty], modes: Modes) {
+    fn generic_arg(&mut self, callee: &str, i: usize, arg: &Arg, (param, ty): (&str, &Ty), targs: &[Ty], modes: Modes) {
         let mode = match modes {
             Modes::Borrow => ParamMode::Borrow,
             Modes::Take => ParamMode::Take,
@@ -5638,9 +5648,14 @@ impl Checker<'_> {
         }
         if inout || arg.inout {
             let value = self.span(arg.value);
-            let named = format!("argument {}", i + 1);
-            let param = if param.is_empty() { named.as_str() } else { param };
-            let message = if inout {
+            let n = i + 1;
+            let message = if param.is_empty() && inout {
+                format!(
+                    "argument {n} of `{callee}` is an `inout` parameter, so it is marked with `&`, as in `{callee}(&x)`"
+                )
+            } else if param.is_empty() {
+                format!("argument {n} of `{callee}` isn't an `inout` parameter, so it takes no `&`")
+            } else if inout {
                 format!("`{param}` is an `inout` parameter, so its argument is marked with `&`, as in `{param}: &x`")
             } else {
                 format!("`{param}` isn't an `inout` parameter, so its argument takes no `&`")
@@ -5842,7 +5857,10 @@ impl Checker<'_> {
             return;
         }
         for err in errs.iter().filter(|err| **err != Ty::Never) {
-            let message = if self.f.returns {
+            let message = if !self.closure_scopes.is_empty() {
+                let err = self.show(err);
+                format!("`try` propagates `{err}`, but the function type of this closure has no `fails {err}`")
+            } else if self.f.returns {
                 let err = self.show(err);
                 format!("`try` propagates `{err}`, but this function does not declare `fails {err}`")
             } else {
