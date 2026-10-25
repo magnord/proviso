@@ -1262,7 +1262,7 @@ impl Checker<'_> {
             self.p.debug_fns.insert(e, shown);
         }
         for (id, span) in std::mem::take(&mut self.f.late_captures) {
-            if self.p.decls.has_reach(&self.f.locals[id.index()].ty) {
+            if self.may_reach(&self.f.locals[id.index()].ty) {
                 self.reaching_capture(span);
             }
         }
@@ -4796,9 +4796,23 @@ impl Checker<'_> {
         let ty = self.vars.zonk(&self.f.locals[id.index()].ty);
         if self.vars.has_open(&ty) {
             self.f.late_captures.push((id, span));
-        } else if self.p.decls.has_reach(&ty) {
+        } else if self.may_reach(&ty) {
             self.reaching_capture(span);
         }
+    }
+
+    /// Whether a value of type `ty` may hold a capability: it does, or it holds a value of a
+    /// type parameter without `Copy`, whose type argument may (REFERENCE §5.1, Q31).
+    fn may_reach(&self, ty: &Ty) -> bool {
+        fn open_param(ty: &Ty, bounds: &[Vec<IfaceId>]) -> bool {
+            match ty {
+                Ty::Param(i) => bounds.get(*i as usize).is_none_or(|b| !b.contains(&IfaceId::COPY)),
+                // A function value holds none of the values its type names.
+                Ty::Fn(..) => false,
+                _ => ty.parts().is_some_and(|parts| parts.iter().any(|part| open_param(part, bounds))),
+            }
+        }
+        self.p.decls.has_reach(ty) || open_param(ty, &self.f.bounds)
     }
 
     fn reaching_capture(&mut self, span: Span) {

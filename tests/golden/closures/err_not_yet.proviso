@@ -79,6 +79,21 @@ fn reach_resource(h: take Held) {
     run(f: || h.close())                            // <- E0901
 }
 
+fn reach_generic[T, C: Copy](x: T, xs: List[T], c: C, ys: List[C]) {
+    run(f: || debug(x))                             // <- E0901
+    run(f: || debug(xs))                            // <- E0901
+    run(f: || debug(c))
+    run(f: || debug(ys))
+}
+
+fn reach_generic_late[T](x: T, g: fn(T)) {
+    let f = |p| {
+        run(f: || debug(p))                         // <- E0901
+        g(p)
+    }
+    f(x)
+}
+
 enum Stop {
     Halt
 }
