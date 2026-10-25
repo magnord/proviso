@@ -2187,6 +2187,12 @@ impl Walk<'_> {
         for arg in args {
             if arg.inout {
                 self.indices(arg.value);
+                // A function value passed with `&` reads its captures for the call too.
+                if let Some((local, _)) = self.place(arg.value)
+                    && let Some(reads) = self.fn_reads.get(&local).cloned()
+                {
+                    self.note_reads(&mut accesses, arg.value, reads.to_vec(), Lender::Capture);
+                }
                 continue;
             }
             self.expr(arg.value);

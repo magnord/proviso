@@ -224,3 +224,45 @@ fn held_var_lent() -> Int {
     var g = || n
     return read_both(f: || g(), g: &g)              // <- E0505
 }
+
+fn change_held(n: inout Int, f: inout fn() -> Int) -> Int {
+    n = n + 1
+    return f()
+}
+
+fn held_change(f: inout fn() -> Int, n: inout Int) -> Int {
+    n = n + 1
+    return f()
+}
+
+fn held_take(f: inout fn() -> Int, t: take Token) -> Int {
+    return f()
+}
+
+record Pair {
+    a: Int
+    b: Int
+}
+
+fn change_pair(n: inout Int, f: inout fn() -> Int) -> Int {
+    return f()
+}
+
+fn lent_through_inout(other: inout fn() -> Int) -> Int {
+    var n = 1
+    var f = || n
+    let a = change_held(n: &n, f: &f)               // <- E0505
+    let b = held_change(f: &f, n: &n)               // <- E0505
+    var g = || f()
+    let c = change_held(n: &n, f: &g)               // <- E0505
+    let token = Token(id: 1)
+    var h = || token.id
+    let d = held_take(f: &h, t: token)              // <- E0505
+    var p = Pair(a: 1, b: 2)
+    var k = || p.b
+    let e = change_pair(n: &p.a, f: &k)             // <- E0505
+    var m = 3
+    let ok = change_held(n: &m, f: &f)
+    let param = change_held(n: &n, f: &other)
+    return a + b + c + d + e + ok + param
+}
