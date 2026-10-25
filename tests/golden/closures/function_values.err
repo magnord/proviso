@@ -1,0 +1,2 @@
+[debug closures/function_values.proviso:126:5] fn(Int) -> Int, fn(Int, Int) -> Int, fn(inout Int), fn(Text) -> Text, fn(Int) -> Int fails Stop, fn(), fn(take List[Int]) -> Int, fn() -> Never fails Stop
+[debug closures/function_values.proviso:117:5] fn(T) -> T

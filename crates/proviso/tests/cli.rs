@@ -206,14 +206,76 @@ fn a_deep_chain_of_blocks_is_too_deep_once() {
     }
 }
 
+/// A function type's result and error type, and a closure's declared result, nest as deep
+/// as its parameters do: past the limit, once, never past the stack (OPEN_QUESTIONS P5,
+/// Nesting limit).
+#[test]
+fn deep_function_types_are_too_deep_once() {
+    let forms = [("fn() -> ", ""), ("fn() fails ", ""), ("fn(", ")")];
+    for (open, close) in forms {
+        let ty = format!("{}fn(){}", open.repeat(40_000), close.repeat(40_000));
+        let text = format!(
+            "fn f(g: {ty}) {{}}
+
+fn h() {{
+    let c = || -> {ty} {{
+        return 0
+    }}
+}}
+"
+        );
+        let file = source("deep_fn_types.proviso", &text);
+        let output = run(&["check"], &file);
+        let errors = stderr(&output);
+        assert_eq!(output.status.code(), Some(65), "{open}: {errors}");
+        assert_eq!(errors.matches("error[").count(), 2, "{open}: {errors}");
+        assert_eq!(errors.matches("error[E0902]").count(), 2, "{open}: {errors}");
+    }
+}
+
+/// A closure bound to a local may call the ones bound before it. When the closures capture
+/// only each other, checking what each reads and reading what each captures again at a call
+/// take time in proportion to the chain, though each closure calls the two before it
+/// (OPEN_QUESTIONS P5, Closures at run time).
+#[test]
+fn a_chain_of_closures_checks_and_runs_in_linear_time() {
+    let mut text = String::from(
+        "pub fn main(sys: keep System) {
+    let c0 = |x: Int| x
+    let c1 = |x: Int| x
+",
+    );
+    for i in 2..6_000 {
+        text += &format!(
+            "    let c{i} = |x: Int| if x == 0 {{ 0 }} else {{ c{}(x) + c{}(x) }}
+",
+            i - 1,
+            i - 2
+        );
+    }
+    text += "    let n = c5999(0)
+}
+";
+    let file = source("closure_chain.proviso", &text);
+    for command in ["check", "run"] {
+        let output = within(command, &file, 20);
+        assert_eq!(output.status.code(), Some(0), "{command}: {}", stderr(&output));
+    }
+}
+
 /// Runs `proviso check` on `file`, and fails the test if it takes longer than `secs`.
 fn check_within(file: &PathBuf, secs: u64) -> Output {
-    let mut child = proviso().arg("check").arg(file).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    within("check", file, secs)
+}
+
+/// Runs `proviso <command>` on `file`, and fails the test if it takes longer than `secs`.
+fn within(command: &str, file: &PathBuf, secs: u64) -> Output {
+    let mut child = proviso().arg(command).arg(file).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let start = std::time::Instant::now();
     while child.try_wait().unwrap().is_none() {
         if start.elapsed().as_secs() >= secs {
             child.kill().unwrap();
-            panic!("checking {} took longer than {secs} s", file.display());
+            panic!("`proviso {command}` on {} took longer than {secs} s", file.display());
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }

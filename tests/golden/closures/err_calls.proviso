@@ -1,0 +1,221 @@
+// phase: 2.9
+// expect-error: E0101
+// expect-error: E0102
+// expect-error: E0105
+// expect-error: E0201
+// expect-error: E0207
+// expect-error: E0208
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0305
+// expect-error: E0306
+// expect-error: E0307
+// expect-error: E0312
+// expect-error: E0317
+// expect-error: E0320
+// expect-error: E0506
+// expect-error: E0701
+// expect-error: E0702
+// expect-error: E0705
+// A function value is called without labels, type arguments or a mode on a closure's
+// parameter, and with one argument per parameter, `&` on each `inout` one (REFERENCE §3,
+// §5.2), and a call through `fails E` is marked (§7.2). A
+// closure has the parameters, result and error type that the expected function type gives,
+// and a function value matches a function type only if its modes match and it fails with
+// the same error type or none (OPEN_QUESTIONS P5). A closure's parameter needs a type from
+// its annotation, the expected type or its body, and its `let` fixes it there. `break` and
+// `continue` can't leave a closure. Function values implement no interface, so they can't
+// be compared or interpolated. A variant with fields is not a function value (E0208), and
+// nor is a method or an associated function (E0320). Each is written with its arguments,
+// and a closure can wrap it. Only a generic function takes type arguments without a call. A closure or a function value alone is not a statement (Q33). A closure where a
+// value of another type is expected is a mismatch, and one passed to a rejected call, or
+// as a rejected function type, reports nothing more.
+enum Stop {
+    Halt
+}
+
+enum Shape {
+    Circle(radius: Int)
+    Empty
+}
+
+fn apply(f: fn(Int) -> Int, x: Int) -> Int {
+    return f(x)
+}
+
+fn run(f: fn()) {
+    f()
+}
+
+fn bump(n: inout Int) {
+    n = n + 1
+}
+
+fn half(x: Int) -> Int fails Stop {
+    return x / 2
+}
+
+fn length(t: Text) -> Int {
+    return 1
+}
+
+fn calls(f: fn(Int) -> Int, g: fn(inout Int), h: fn(Int) -> Int fails Stop) -> Int fails Stop {
+    let a = f(x: 1)                                 // <- E0207
+    let b = f(1, 2)                                 // <- E0208
+    let c = f("one")                                // <- E0301
+    var n = 1
+    g(n)                                            // <- E0506
+    let d = f(&n)                                   // <- E0506
+    let e = h(1)                                    // <- E0701
+    let ok = try h(2)
+    let i = f::[Int](1)                             // <- E0317
+    let j = |inout x: Int| x                        // <- E0101
+    return a
+}
+
+fn strict(f: fn(Int) -> Int) -> Int {
+    return f(1)
+}
+
+fn wider(g: fn(fn(Int) -> Int fails Stop) -> Int) -> Int {
+    return 0
+}
+
+fn values() {
+    let w = wider(g: strict)                        // <- E0301
+    let a = apply(f: length, x: 1)                  // <- E0301
+    let b = apply(f: half, x: 1)                    // <- E0301
+    run(f: bump)                                    // <- E0301
+    let c = apply(f: |x: Text| 1, x: 1)             // <- E0301
+    let d = apply(f: |x, y| x, x: 1)                // <- E0208
+    let e = apply(f: |x| "t", x: 1)                 // <- E0301
+    let g = apply(f: |x| {
+        return "t"                                  // <- E0301
+    }, x: 1)
+    let h = apply(f: |x| {
+        fail Stop.Halt                              // <- E0705
+    }, x: 1)
+    let i = apply(f: |x| try half(x), x: 1)         // <- E0702
+    let k = |x| x                                   // <- E0312
+}
+
+fn jumps() {
+    while true {
+        run(f: || {
+            break                                   // <- E0105
+        })
+    }
+    outer: while true {
+        run(f: || {
+            continue outer                          // <- E0105
+        })
+    }
+}
+
+fn operators(f: fn(Int) -> Int, g: fn(Int) -> Int) -> Bool {
+    let t = f"{f}"                                  // <- E0306
+    let n = f + g                                   // <- E0306
+    return f == g                                   // <- E0306
+}
+
+fn variants() {
+    let s = Shape.Circle                            // <- E0208
+    let o = Some                                    // <- E0208
+    let wrapped = |r: Int| Shape.Circle(radius: r)
+    let made = wrapped(2)
+    let none = Shape.Empty
+}
+
+record Counter {
+    n: Int
+}
+
+impl Counter {
+    fn get(self) -> Int {
+        return self.n
+    }
+
+    fn pick[T](self, x: T) -> Int {
+        return self.n
+    }
+
+    fn fresh() -> Counter {
+        return Counter(n: 0)
+    }
+}
+
+fn methods(c: Counter) {
+    let a = c.get                                   // <- E0320
+    let b = c.pick::[Int]                           // <- E0320
+    let d = Counter.fresh                           // <- E0320
+    let g = Counter.get                             // <- E0320
+    let h = c.len                                   // <- E0303
+    let n = c.n::[Int]                              // <- E0317
+    let e = |x: Int| c.pick(x)
+}
+
+fn rejected_contexts(p: Int) {
+    let a = nothing(f: |x| x.byte_len())            // <- E0201
+    let b = p.nothing(f: |x| x.byte_len())          // <- E0303
+    let c = p(|x| x.byte_len())                     // <- E0301
+    let d = apply(f: |x| x.byte_len(), x: 1, y: 2)  // <- E0208
+    let t: Text = |x| x.byte_len()                  // <- E0301
+    let stopper = || {
+        fail Stop.Halt
+    }
+    let n: Int = stopper                            // <- E0301
+}
+
+fn unknown_param(f: fn(Nope) -> Int) -> Int {       // <- E0307
+    return f(1)
+}
+
+fn unknown_expected() -> Int {
+    return unknown_param(f: |x| x.byte_len())
+}
+
+fn unmarked_body(n: Int) -> Int {
+    let c = || half(n)                              // <- E0701
+    let a = c() else 0
+    let b = (|| half(n))() else 0                   // <- E0701
+    return a + b
+}
+
+fn assigned_let(k: Int) {
+    let c = || k
+    c = || 2                                        // <- E0305
+}
+
+fn builtin_method(xs: List[Int]) {
+    let l = xs.len                                  // <- E0320
+}
+
+impl Shape {
+    fn area(self) -> Int {
+        return 0
+    }
+
+    fn origin() -> Shape {
+        return Shape.Empty
+    }
+}
+
+fn enum_methods() {
+    let a = Shape.origin                            // <- E0320
+    let b = Shape.area                              // <- E0320
+    let c = Shape.Square                            // <- E0303
+    let d = Shape.Empty::[Int]                      // <- E0317
+    let n: Option[Int] = None::[Int]                // <- E0317
+}
+
+fn same[T: Copy](x: T) -> T {
+    return x
+}
+
+fn statements(f: fn(Int) -> Int) {
+    || 1                                            // <- E0102
+    |x: Int| x + 1                                  // <- E0102
+    same::[Int]                                     // <- E0102
+    f                                               // <- E0102
+    f(1)
+}

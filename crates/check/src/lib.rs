@@ -3,7 +3,8 @@
 //! records, for enums, `match` and patterns, for `Option`, `Result`, `fail` and `attempt`,
 //! for methods, interfaces and generic functions, for tuples, `let` patterns, the `else`
 //! forms, `check`, the text operations and `example` declarations, for collections, and for
-//! kinds, moves, `take` and `inout` parameters and `std.pool`.
+//! kinds, moves, `take` and `inout` parameters and `std.pool`, and for function types,
+//! function values and closures.
 //!
 //! The checker never rewrites the tree. It records what it learns in side tables of
 //! [`Program`], which the interpreter reads.
@@ -100,13 +101,18 @@ pub enum Builtin {
     Insert,
     /// `Pool.duplicate(self) -> Pool[T]`
     Duplicate,
+    /// `Pool.update(inout self, handle: Handle[T], change: fn(take T) -> T) -> Bool`
+    Update,
 }
 
 impl Builtin {
     /// Whether it takes `inout self`, so its receiver is a variable or a part of one that it
     /// changes (STD.md, REFERENCE §5.2).
     pub fn changes_receiver(self) -> bool {
-        matches!(self, Builtin::Push | Builtin::Pop | Builtin::Set | Builtin::Remove | Builtin::Insert)
+        matches!(
+            self,
+            Builtin::Push | Builtin::Pop | Builtin::Set | Builtin::Remove | Builtin::Insert | Builtin::Update
+        )
     }
 }
 
@@ -240,6 +246,23 @@ pub struct Program {
     pub parts_out: SideTable<Pat, Box<[Box<[FieldIdx]>]>>,
     /// The module's examples, in declaration order.
     pub examples: Vec<ExampleInfo>,
+    /// What each closure takes and captures (REFERENCE §6.7).
+    pub closures: SideTable<Expr, ClosureInfo>,
+    /// How `debug` writes each function value it is given: as its type, with the names of
+    /// the type parameters of the function it is in (OPEN_QUESTIONS P5).
+    pub debug_fns: SideTable<Expr, Box<str>>,
+}
+
+/// A closure's parameters and their modes, and the locals of the frame it is made in that it
+/// captures, which it reads there (REFERENCE §6.7).
+pub struct ClosureInfo {
+    pub params: Vec<LocalId>,
+    pub modes: Vec<ParamMode>,
+    /// What it captures, with each one's name.
+    pub captures: Vec<(LocalId, Box<str>)>,
+    /// The resource parameters it owns, its `take` ones, which a failure exit abandons, with
+    /// their spans.
+    pub owned: Vec<(LocalId, Span)>,
 }
 
 /// An `example` declaration (REFERENCE §14).
@@ -314,6 +337,9 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         stmt_start: (0, 0),
         typed: Vec::new(),
         written_keys: Some(Vec::new()),
+        closure_scopes: Vec::new(),
+        builders: Vec::new(),
+        escaped: Vec::new(),
     };
     checker.imports();
     checker.adt_names();
@@ -349,7 +375,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
 fn holds_var(ty: &Ty, seen: &mut HashSet<usize>) -> bool {
     match ty {
         Ty::Var(_) => true,
-        Ty::Adt(_, args) => {
+        _ if let Some(args) = ty.parts() => {
             seen.insert(Arc::as_ptr(args) as *const Ty as usize) && args.iter().any(|arg| holds_var(arg, seen))
         }
         _ => false,
@@ -447,6 +473,18 @@ struct FnState {
     /// For each type parameter that a parameter of interface type stands for, that
     /// parameter's name and the interface, which diagnostics suggest a declaration with.
     anonymous: Vec<Option<(Box<str>, Box<str>)>>,
+    /// The closures of the body, in the order they were checked.
+    closures: Vec<ExprId>,
+    /// The function values `debug` is given, which it writes as their types.
+    debugged: Vec<ExprId>,
+    /// The captures whose type wasn't known when they were captured, each with where, which
+    /// are checked for reach once it is.
+    late_captures: Vec<(LocalId, Span)>,
+    /// How many of the function's locals, counted from the first, a closure, or a local that
+    /// holds one, needs to stay alive: one more than the last local it captures, at any
+    /// depth. A block can't yield a function value that needs one it declares.
+    needs: HashMap<ExprId, u32>,
+    local_needs: HashMap<LocalId, u32>,
 }
 
 impl FnState {
@@ -463,8 +501,25 @@ impl FnState {
             example: false,
             bounds: Vec::new(),
             anonymous: Vec::new(),
+            closures: Vec::new(),
+            debugged: Vec::new(),
+            late_captures: Vec::new(),
+            needs: HashMap::new(),
+            local_needs: HashMap::new(),
         }
     }
+}
+
+/// A closure being checked: the first local it declares, and the locals declared before it
+/// that its body uses, which it captures.
+struct ClosureScope {
+    base: u32,
+    captures: Vec<(LocalId, Box<str>)>,
+    /// Whether its body has a call without the marker it needs, whose failure its error type
+    /// would have taken.
+    unmarked: bool,
+    /// The labels of the loops around it, which its body can't leave.
+    labels: Vec<Symbol>,
 }
 
 /// An enclosing `try`, `attempt`, `else` form or example, and the error types of the
@@ -598,6 +653,13 @@ struct Checker<'a> {
     /// and the bounds of the type parameters there. They are checked once every `derives`
     /// and `impl` is known, and `None` after that, when a written type is checked at once.
     written_keys: Option<Vec<WrittenKey>>,
+    /// The closures being checked, innermost last.
+    closure_scopes: Vec<ClosureScope>,
+    /// The expressions of the body being checked that build a value whose type may hold a
+    /// function value, which is reported once the body settles it (E0509), and where such a
+    /// value was reported, so a value around it isn't reported again.
+    builders: Vec<ExprId>,
+    escaped: Vec<Span>,
 }
 
 /// The key type of a `Map` type a declaration writes, which is checked once every `derives`
@@ -1072,6 +1134,14 @@ impl Checker<'_> {
                         ),
                     )
                 }
+                Origin::Closure { name, span } => (
+                    span,
+                    format!(
+                        "the type of closure parameter `{}` can't be inferred; write it, as in `|{}: Int|`",
+                        self.m.text(name),
+                        self.m.text(name)
+                    ),
+                ),
                 Origin::Defaulted => continue,
             };
             self.error(codes::CANNOT_INFER, message.0, message.1);
@@ -1098,6 +1168,9 @@ impl Checker<'_> {
                 if ty.is_unknown() || self.vars.has_open(&ty) {
                     return;
                 }
+                if self.fn_targ(&ty, span) {
+                    return;
+                }
                 if *callee == *"Map" {
                     self.key_bound(&ty, span);
                     return;
@@ -1105,7 +1178,7 @@ impl Checker<'_> {
                 if self.resource_targ(&ty, &callee, &param, span) {
                     return;
                 }
-                if let Some(&iface) = ifaces.iter().find(|&&iface| !self.implements(&ty, iface)) {
+                if let Some(iface) = self.unmet_bound(&ty, &ifaces) {
                     let message = format!(
                         "`{}` does not implement `{}`, which `{callee}` needs of `{param}`",
                         self.show(&ty),
@@ -1148,6 +1221,33 @@ impl Checker<'_> {
     /// without variables, so the interpreter never sees one.
     fn settle(&mut self) {
         self.solve(0, 0, 0);
+        // A value that holds a function value could outlive what it captures (E0509). It is
+        // reported where a function value goes into it. A part that holds one already was
+        // reported where it was made (§15.1).
+        for e in std::mem::take(&mut self.builders) {
+            let span = self.span(e);
+            if !self.wraps_fn(e) || self.escaped.contains(&span) {
+                continue;
+            }
+            let ty = self.vars.zonk(self.p.ty(e));
+            if !holds_fn(&ty) {
+                continue;
+            }
+            // A closure passed where a type argument was already reported has its result
+            // from it.
+            if matches!(self.m.exprs[e].kind, ExprKind::Closure(_))
+                && self.escaped.iter().any(|outer| outer.contains(span))
+            {
+                continue;
+            }
+            let message = format!(
+                "this value is a `{}`, which holds a function value, and a function value can't be stored or returned, since it lives only as long as what it captures",
+                self.show(&ty)
+            );
+            self.error(codes::FUNCTION_VALUE_ESCAPES, span, message);
+            self.escaped.push(span);
+        }
+        self.escaped.clear();
         for e in std::mem::take(&mut self.typed) {
             if let Some(ty) = self.p.expr_ty.get(e) {
                 let ty = self.vars.zonk(ty);
@@ -1157,7 +1257,27 @@ impl Checker<'_> {
         for local in &mut self.f.locals {
             local.ty = self.vars.zonk(&local.ty);
         }
+        for e in std::mem::take(&mut self.f.debugged) {
+            let shown = self.show(self.p.ty(e)).into();
+            self.p.debug_fns.insert(e, shown);
+        }
+        for (id, span) in std::mem::take(&mut self.f.late_captures) {
+            if self.may_reach(&self.f.locals[id.index()].ty) {
+                self.reaching_capture(span);
+            }
+        }
         self.vars.clear();
+        // A closure owns its `take` parameters of a resource type, which a failure abandons.
+        for e in std::mem::take(&mut self.f.closures) {
+            let ExprKind::Closure(closure) = &self.m.exprs[e].kind else { continue };
+            let Some(info) = self.p.closures.get_mut(e) else { continue };
+            info.owned = (info.params.iter().zip(&info.modes).zip(&closure.params))
+                .filter(|((local, mode), _)| {
+                    **mode == ParamMode::Take && self.p.decls.is_resource(&self.f.locals[local.index()].ty)
+                })
+                .map(|((local, _), param)| (*local, param.name.span))
+                .collect();
+        }
     }
 
     /// Checks the key types of the `Map` types the declarations write, now that every
@@ -1387,7 +1507,7 @@ impl Checker<'_> {
                 for field in decls {
                     let text = m.text(field.name.sym);
                     let cased = self.snake_case(field.name, "field");
-                    let ty = self.resolve_type(field.ty);
+                    let ty = self.part_type(field.ty, "a field");
                     if let Some(&first) = index.get(&field.name.sym) {
                         if cased {
                             let message = format!("field `{text}` is declared twice");
@@ -1558,8 +1678,8 @@ impl Checker<'_> {
                     params.push((name.into(), ty));
                     modes.push(param.mode);
                 }
-                let ret = method.ret.map_or(Ty::Unit, |t| self.resolve_type(t));
-                let fails = method.fails.map(|t| self.resolve_type(t)).filter(|t| *t != Ty::Never);
+                let ret = method.ret.map_or(Ty::Unit, |t| self.part_type(t, "a result"));
+                let fails = method.fails.map(|t| self.part_type(t, "an error type")).filter(|t| *t != Ty::Never);
                 let fails = self.error_type(fails, method.fails);
                 if let Some(at) = method.ret {
                     self.exposes(decl.name, vis, &ret, at);
@@ -1874,9 +1994,9 @@ impl Checker<'_> {
             };
             params.push(ParamInfo { name: param.name.sym, ty, mode: param.mode });
         }
-        let ret = decl.ret.map_or(Ty::Unit, |t| self.resolve_type(t));
+        let ret = decl.ret.map_or(Ty::Unit, |t| self.part_type(t, "a result"));
         // `Never` has no values, so a function that fails with it cannot fail.
-        let fails = decl.fails.map(|t| self.resolve_type(t)).filter(|t| *t != Ty::Never);
+        let fails = decl.fails.map(|t| self.part_type(t, "an error type")).filter(|t| *t != Ty::Never);
         let fails = self.error_type(fails, decl.fails);
         let typed = decl.params.iter().map(|p| p.ty).chain(decl.ret).chain(decl.fails);
         let types = params.iter().map(|p| p.ty.clone()).chain(decl.ret.map(|_| ret.clone()));
@@ -2454,8 +2574,9 @@ impl Checker<'_> {
         let te = &m.types[t];
         match te.kind {
             TypeExprKind::Named(name) => self.type_name(name),
+            TypeExprKind::Fn { ref params, ret, fails } => self.fn_type(params, ret, fails),
             TypeExprKind::Tuple(ref elements) => {
-                let tys = elements.iter().map(|&t| self.resolve_type(t)).collect();
+                let tys = elements.iter().map(|&t| self.part_type(t, "a tuple's element")).collect();
                 self.p.decls.tuple_ty(tys)
             }
             TypeExprKind::SelfType => match &self.self_ty {
@@ -2480,7 +2601,7 @@ impl Checker<'_> {
                 }
                 if let Some(id) = self.generic_adt(name.sym) {
                     let args = args.as_deref().unwrap_or_default();
-                    let tys: Vec<Ty> = args.iter().map(|&arg| self.resolve_type(arg)).collect();
+                    let tys: Vec<Ty> = args.iter().map(|&arg| self.part_type(arg, "a type argument")).collect();
                     let n = self.p.decls.adt(id).params;
                     if tys.len() != n {
                         let verb = if tys.len() == 1 { "was" } else { "were" };
@@ -2519,6 +2640,31 @@ impl Checker<'_> {
                 Ty::Error
             }
         }
+    }
+
+    /// The type written at `t` where a function type can't be: a field, a result, an error, a
+    /// type argument or a tuple's element. A function value there could outlive what it
+    /// captures (REFERENCE §6.7, OPEN_QUESTIONS P5).
+    fn part_type(&mut self, t: TypeId, what: &str) -> Ty {
+        let ty = self.resolve_type(t);
+        if !matches!(ty, Ty::Fn(..)) {
+            return ty;
+        }
+        let message =
+            format!("a function type can't be {what}, since a function value lives only as long as what it captures");
+        self.error(codes::FUNCTION_VALUE_ESCAPES, self.m.types[t].span, message);
+        Ty::Error
+    }
+
+    /// `fn(A, inout B) -> R fails E` (REFERENCE §9.4). A parameter may be a function too.
+    fn fn_type(&mut self, params: &[(ParamMode, TypeId)], ret: Option<TypeId>, fails: Option<TypeId>) -> Ty {
+        let modes = params.iter().map(|&(mode, _)| mode).collect();
+        let tys = params.iter().map(|&(_, t)| self.resolve_type(t)).collect();
+        let ret = ret.map_or(Ty::Unit, |t| self.part_type(t, "a result"));
+        let at = fails;
+        let fails = fails.map(|t| self.part_type(t, "an error type")).filter(|t| *t != Ty::Never);
+        let fails = self.error_type(fails, at).unwrap_or(Ty::Never);
+        Ty::func(modes, tys, ret, fails)
     }
 
     fn type_name(&mut self, name: Ident) -> Ty {
@@ -2762,7 +2908,7 @@ impl Checker<'_> {
                     }
                 };
                 let defined = matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::EQ);
-                if !defined && !ty.is_unknown() {
+                if !defined && !ty.is_unknown() && !holds_fn(&ty) {
                     let message =
                         format!("`==` is not defined for `{}`, so an example can't compare it", self.show(&ty));
                     let at = span.to(self.span(*value));
@@ -2964,6 +3110,14 @@ impl Checker<'_> {
                 self.pattern_borrowed = destructures && self.borrowed_value(*init);
                 self.let_pattern(*pat, &ty, *mutable, false);
                 self.pattern_borrowed = false;
+                // The local holds what its function value captures alive (see `FnState::needs`).
+                let needs = self.value_needs(*init);
+                if needs > 0
+                    && let PatKind::Bind(_) = self.m.pats[*pat].kind
+                    && let Some(&id) = self.p.pat_local.get(*pat)
+                {
+                    self.f.local_needs.insert(id, needs);
+                }
                 self.flow(&init_ty)
             }
             StmtKind::Check { cond, fallback } => {
@@ -3112,6 +3266,17 @@ impl Checker<'_> {
         if !self.f.locals[id.index()].mutable {
             let message = self.immutable(root, id, "assign to it");
             self.error(codes::IMMUTABLE_ASSIGNMENT, span, message);
+        } else if self.changes_capture(id, span) {
+            return self.rejected_value(value);
+        }
+        // A `var` given a function value could outlive what it captures (OPEN_QUESTIONS P5).
+        // A `let` can't be given anything, which is reported already.
+        if let Ty::Fn(..) = self.vars.resolve(&ty)
+            && self.f.locals[id.index()].mutable
+        {
+            let message = "a `var` or an `inout` parameter can't be given a new function value, which could outlive what it captures";
+            self.error(codes::FUNCTION_VALUE_ESCAPES, span, message);
+            return self.rejected_value(value);
         }
         self.copying = true;
         let value_ty = self.check(value, &ty);
@@ -3144,6 +3309,7 @@ impl Checker<'_> {
                     return None;
                 };
                 self.p.res.insert(target, Res::Local(id));
+                self.capture(id, m.text(name.sym), name.span);
                 (name, id, self.f.locals[id.index()].ty.clone())
             }
             ExprKind::Field { base, name } => {
@@ -3201,6 +3367,8 @@ impl Checker<'_> {
                 | ExprKind::Map(_)
                 | ExprKind::Index { .. }
                 | ExprKind::It
+                | ExprKind::Closure(_)
+                | ExprKind::Applied { .. }
         ) || matches!(self.m.exprs[e].kind, ExprKind::Else { value, .. } if self.is_bare_value(value))
     }
 
@@ -3208,6 +3376,13 @@ impl Checker<'_> {
         let span = self.m.stmts[s].span;
         let keyword = if is_break { "break" } else { "continue" };
         let index = match label {
+            None if self.f.loops.is_empty() && !self.closure_scopes.is_empty() => {
+                let message = format!(
+                    "`{keyword}` can't leave a closure; its body ends with its value or a `return` (OPEN_QUESTIONS Q33)"
+                );
+                self.error(codes::MISPLACED_JUMP, span, message);
+                return;
+            }
             None if self.f.loops.is_empty() => {
                 self.error(codes::MISPLACED_JUMP, span, format!("`{keyword}` outside a loop"));
                 return;
@@ -3217,7 +3392,14 @@ impl Checker<'_> {
                 Some(index) => index,
                 None => {
                     let text = self.m.text(label.sym);
-                    self.error(codes::MISPLACED_JUMP, label.span, format!("no enclosing loop is labelled `{text}`"));
+                    let message = if self.closure_scopes.iter().any(|scope| scope.labels.contains(&label.sym)) {
+                        format!(
+                            "`{keyword} {text}` can't leave a closure; its body ends with its value or a `return` (OPEN_QUESTIONS Q33)"
+                        )
+                    } else {
+                        format!("no enclosing loop is labelled `{text}`")
+                    };
+                    self.error(codes::MISPLACED_JUMP, label.span, message);
                     return;
                 }
             },
@@ -3254,9 +3436,11 @@ impl Checker<'_> {
     /// finish.
     fn block_value(&mut self, block: &Block, expected: Option<&Ty>, copying: bool) -> Ty {
         let m = self.m;
+        let base = self.f.locals.len() as u32;
         self.f.scopes.push(Vec::new());
         let mut flow = Flow::Finishes;
         let mut value = None;
+        let mut tail = None;
         let count = block.stmts.len();
         // The last statement of a block that is never closed, or lost one, may not be its end,
         // so the expected type only guides it, and a mismatch isn't reported.
@@ -3285,12 +3469,16 @@ impl Checker<'_> {
                     flow = Flow::Leaves;
                 }
                 value = Some(ty);
+                tail = Some(e);
                 continue;
             }
             let next = self.stmt(s);
             flow = self.then(flow, next);
         }
         self.f.scopes.pop();
+        if let Some(e) = tail {
+            self.local_capture(e, base);
+        }
         let flow = self.now(flow);
         if flow == Flow::Leaves {
             return Ty::Never;
@@ -3391,6 +3579,10 @@ impl Checker<'_> {
         if key.is_unknown() || self.vars.has_open(&key) || self.unknown_interfaces(&key) {
             return true;
         }
+        // A function value can't be a key, which is reported where it goes in (E0509).
+        if matches!(key, Ty::Fn(..)) || holds_fn(&key) {
+            return false;
+        }
         // `set` keeps the key it has and drops the equal one it is given, which can't drop a
         // resource (§10 rule 5).
         if self.p.decls.is_resource(&key) {
@@ -3415,7 +3607,8 @@ impl Checker<'_> {
             self.pending.push(Pending::Bound { ty, ifaces, callee, param, span });
             return;
         }
-        if !ty.is_unknown() && !self.implements(&ty, iface) && !self.unknown_interfaces(&ty) {
+        // One that holds a function value was reported where it was made (E0509).
+        if !ty.is_unknown() && !self.implements(&ty, iface) && !self.unknown_interfaces(&ty) && !holds_fn(&ty) {
             let message = format!(
                 "`{}` does not implement `{}`, which `{what}` needs of `{param}`",
                 self.show(&ty),
@@ -3549,6 +3742,8 @@ impl Checker<'_> {
                     if !self.f.locals[id.index()].mutable {
                         let message = self.immutable(name, id, &format!("call `{method}`, which changes it"));
                         self.error(codes::IMMUTABLE_ASSIGNMENT, self.span(receiver), message);
+                    } else {
+                        self.changes_capture(id, self.span(receiver));
                     }
                     return;
                 }
@@ -3562,7 +3757,11 @@ impl Checker<'_> {
     /// Infers the type of `e`, a part of an expression that was rejected, which was the one
     /// to give the type arguments `e` leaves open, so they are not reported again (§15.1).
     fn rejected_value(&mut self, e: ExprId) -> Ty {
-        let ty = self.infer(e);
+        // A closure has no function type to take its parameters' types from.
+        let ty = match self.m.exprs[e].kind {
+            ExprKind::Closure(_) => self.expr(e, Some(&Ty::Error)),
+            _ => self.infer(e),
+        };
         self.vars.quiet(&ty);
         ty
     }
@@ -3629,6 +3828,17 @@ impl Checker<'_> {
         }
         self.inner_errors = outer + (self.errors - before);
         self.record(e, ty.clone());
+        if matches!(
+            self.m.exprs[e].kind,
+            ExprKind::List(_)
+                | ExprKind::Map(_)
+                | ExprKind::Tuple(_)
+                | ExprKind::Call { .. }
+                | ExprKind::MethodCall { .. }
+                | ExprKind::Closure(_)
+        ) {
+            self.builders.push(e);
+        }
         ty
     }
 
@@ -3758,7 +3968,8 @@ impl Checker<'_> {
                     if let FTextPart::Expr(x) = part {
                         let ty = self.infer(*x);
                         let ty = self.force(&ty);
-                        if !self.implements(&ty, IfaceId::SHOW) && !ty.is_unknown() {
+                        // One that holds a function value was reported where it was made (E0509).
+                        if !self.implements(&ty, IfaceId::SHOW) && !ty.is_unknown() && !holds_fn(&ty) {
                             let span = self.span(*x);
                             self.error(
                                 codes::UNSUPPORTED_OPERATOR,
@@ -3778,7 +3989,27 @@ impl Checker<'_> {
                 self.method_call(e, *receiver, *method, targs.as_deref(), args, span, chain, expected)
             }
             ExprKind::Field { base, name } => {
-                if let Some(id) = self.enum_named(*base) {
+                let enum_id = self.enum_named(*base);
+                if let Some(id) = enum_id
+                    && self.p.decls.adt(id).variant_named(self.m.text(name.sym)).is_some()
+                {
+                    return self.unit_variant(e, id, *name, expected);
+                }
+                if let Some((id, method)) = self.associated_named(*base, name.sym) {
+                    let (ty, text) = (&self.p.decls.adt(id).name, self.m.text(name.sym));
+                    let message = if method {
+                        format!(
+                            "`{text}` is a method of `{ty}`, which is called on a value with its arguments; it isn't a function value, but a closure can wrap a call of it, as in `|x: {ty}| x.{text}()`"
+                        )
+                    } else {
+                        format!(
+                            "`{ty}.{text}` is an associated function, which is called with its arguments; it isn't a function value, but a closure can wrap a call of it, as in `|| {ty}.{text}()`"
+                        )
+                    };
+                    self.error(codes::METHOD_VALUE, name.span, message);
+                    return Ty::Error;
+                }
+                if let Some(id) = enum_id {
                     return self.unit_variant(e, id, *name, expected);
                 }
                 self.in_chain = chain;
@@ -3816,7 +4047,9 @@ impl Checker<'_> {
                     }
                     None => {
                         self.rejected_value(*value);
-                        let message = if self.f.returns {
+                        let message = if !self.closure_scopes.is_empty() {
+                            "`fail` in a closure whose function type has no `fails`; the type it is passed as must have one, as in `fn(Int) -> Int fails E`"
+                        } else if self.f.returns {
                             "`fail` needs a `fails` clause, and this function declares none"
                         } else if self.f.example {
                             "`fail` in an example, which has no function to fail"
@@ -3876,7 +4109,9 @@ impl Checker<'_> {
             ExprKind::Unreachable => Ty::Never,
             ExprKind::Debug(values) => {
                 for value in values {
-                    self.infer(*value);
+                    if let Ty::Fn(..) = self.infer(*value) {
+                        self.f.debugged.push(*value);
+                    }
                 }
                 Ty::Unit
             }
@@ -3888,6 +4123,7 @@ impl Checker<'_> {
             ExprKind::It => match self.its.last() {
                 Some(&id) => {
                     self.p.res.insert(e, Res::Local(id));
+                    self.capture(id, "it", span);
                     self.f.locals[id.index()].ty.clone()
                 }
                 None => {
@@ -3900,6 +4136,8 @@ impl Checker<'_> {
                     Ty::Error
                 }
             },
+            ExprKind::Applied { callee, targs } => self.applied(e, *callee, targs),
+            ExprKind::Closure(closure) => self.closure(e, closure, expected),
             ExprKind::Error => Ty::Error,
         }
     }
@@ -3982,6 +4220,7 @@ impl Checker<'_> {
                 Ty::Error
             }
         };
+        let base = self.f.locals.len() as u32;
         match &it {
             Some(err) => {
                 let id = LocalId(self.f.locals.len() as u32);
@@ -4008,6 +4247,10 @@ impl Checker<'_> {
             }
             Fallback::Block(block) => (self.block_value(block, expected, copying), self.tail(block)),
         };
+        // A closure the fallback gives can't capture `it` (Q34).
+        if let Some(tail) = tail {
+            self.local_capture(tail, base);
+        }
         match &it {
             Some(_) => {
                 self.its.pop();
@@ -4215,7 +4458,8 @@ impl Checker<'_> {
                     BinOp::Eq | BinOp::Ne => matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::EQ),
                     _ => matches!(ty, Ty::Float(_)) || self.implements(&ty, IfaceId::ORD),
                 };
-                if !defined && !ty.is_unknown() {
+                // One that holds a function value was reported where it was made (E0509).
+                if !defined && !ty.is_unknown() && !holds_fn(&ty) {
                     let message = format!("`{symbol}` is not defined for `{}`", self.show(&ty));
                     self.error(codes::UNSUPPORTED_OPERATOR, span, message);
                 }
@@ -4229,6 +4473,7 @@ impl Checker<'_> {
         let text = m.text(name.sym);
         if let Some(id) = self.lookup_local(name.sym) {
             self.p.res.insert(e, Res::Local(id));
+            self.capture(id, self.m.text(name.sym), name.span);
             return self.f.locals[id.index()].ty.clone();
         }
         // A module item that reuses a variant's name has been reported, and so are its uses.
@@ -4238,8 +4483,8 @@ impl Checker<'_> {
             }
             return self.unit_variant(e, id, name, expected);
         }
-        if self.fn_names.contains_key(&name.sym) {
-            self.not_implemented(name.span, "functions used as values", Planned::Phase(2));
+        if let Some(&f) = self.fn_names.get(&name.sym) {
+            return self.fn_value(e, f, None, name.span);
         } else if self.unqualified_variant(name) || self.poisoned.contains(&name.sym) {
         } else if self.imports.contains_key(&name.sym)
             || self.adt_named(name.sym).is_some()
@@ -4316,7 +4561,7 @@ impl Checker<'_> {
         let callee_span = self.span(callee);
         match m.exprs[callee].kind {
             ExprKind::Name(name) if self.lookup_local(name.sym).is_some() => {
-                self.not_implemented(callee_span, "calls of function values", Planned::Phase(2))
+                return self.value_call(e, callee, targs, args, span, chain);
             }
             ExprKind::Name(name) if self.unqualified_variant(name) => {}
             ExprKind::Name(name) if self.poisoned.contains(&name.sym) => {}
@@ -4331,10 +4576,371 @@ impl Checker<'_> {
                 let text = m.text(name.sym);
                 self.error(codes::UNKNOWN_NAME, name.span, format!("unknown function `{text}`"));
             }
-            _ => self.not_implemented(callee_span, "calls of function values", Planned::Phase(2)),
+            _ => return self.value_call(e, callee, targs, args, span, chain),
         }
         self.rejected_args(args);
         Ty::Error
+    }
+
+    /// Module function `f` used as a value, generic with type arguments from `targs` or else
+    /// from the type it meets (REFERENCE §4.8). A method or associated function isn't one.
+    fn fn_value(&mut self, e: ExprId, f: FnId, targs: Option<&[TypeId]>, span: Span) -> Ty {
+        let info = &self.p.fns[f];
+        if info.rejected {
+            return Ty::Error;
+        }
+        let later = info.params.iter().find_map(|p| match p.mode {
+            ParamMode::Keep => Some(("functions with `keep` parameters used as values", Planned::Phase(3))),
+            ParamMode::InoutPartial => {
+                Some(("functions with `inout(partial)` parameters used as values", Planned::Unscheduled))
+            }
+            _ => None,
+        });
+        if let Some((what, planned)) = later {
+            self.not_implemented(span, what, planned);
+            return Ty::Error;
+        }
+        self.p.res.insert(e, Res::Fn(f));
+        let Some(tvars) = self.call_targs(f, targs, span) else { return Ty::Error };
+        self.targ_bounds(f, &tvars, span);
+        let info = &self.p.fns[f];
+        let modes = info.params.iter().map(|p| p.mode).collect();
+        let params = info.params.iter().map(|p| p.ty.subst(&tvars)).collect();
+        let fails = info.fails.as_ref().map_or(Ty::Never, |err| err.subst(&tvars));
+        Ty::func(modes, params, info.ret.subst(&tvars), fails)
+    }
+
+    /// `|x| expr`, `|a: Int| -> Int { … }` or `|| expr` (REFERENCE §6.7). Its parameters take
+    /// their types from their annotations or from the function type it is `expected` to be,
+    /// and their modes from that type. Its result and error types come from that type or its
+    /// body, where `return` returns from the closure and `break` and `continue` can't leave it
+    /// (OPEN_QUESTIONS Q33). It captures the locals declared before it that its body uses,
+    /// by reference, so it can't change them or capture a capability yet (phase 3).
+    fn closure(&mut self, e: ExprId, closure: &Closure, expected: Option<&Ty>) -> Ty {
+        let m = self.m;
+        let span = self.span(e);
+        let expected = expected.map(|ty| self.vars.resolve(ty));
+        let mut rejected = false;
+        // Where the call it is passed to was rejected, or a value of another type is expected,
+        // its parameters' types are unknown and not reported (§15.1).
+        let quiet = match &expected {
+            Some(Ty::Error) => true,
+            Some(ty) if ty.fn_parts().is_none() && !matches!(ty, Ty::Var(_)) => {
+                let message = format!("expected `{}`, found a closure", self.show(ty));
+                self.error(codes::TYPE_MISMATCH, span, message);
+                rejected = true;
+                true
+            }
+            _ => false,
+        };
+        let mut expected = expected
+            .as_ref()
+            .and_then(Ty::fn_parts)
+            .map(|(modes, ret, fails, params)| (modes.to_vec(), ret.clone(), fails.clone(), params.to_vec()));
+        if let Some((_, _, _, params)) = &expected
+            && params.len() != closure.params.len()
+        {
+            let (n, given) = (params.len(), closure.params.len());
+            let noun = if given == 1 { "parameter" } else { "parameters" };
+            let message = format!("this closure takes {given} {noun}, but the function type it is passed as takes {n}");
+            self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
+            self.inner_errors += 1;
+            expected = None;
+            rejected = true;
+        }
+        let mut modes = Vec::new();
+        let mut params = Vec::new();
+        for (i, param) in closure.params.iter().enumerate() {
+            let given = expected.as_ref().map(|(modes, _, _, params)| (modes[i], params[i].clone()));
+            modes.push(given.as_ref().map_or(ParamMode::Borrow, |(mode, _)| *mode));
+            let ty = match (param.ty, given) {
+                (Some(t), given) => {
+                    let ty = self.resolve_type(t);
+                    // The closure takes what the function type passes it (§9.4).
+                    if let Some((_, given)) = given
+                        && !self.vars.subsume(&ty, &given)
+                    {
+                        let message = format!(
+                            "this parameter is `{}`, but the function type the closure is passed as gives it `{}`",
+                            self.show(&ty),
+                            self.show(&given)
+                        );
+                        self.error(codes::TYPE_MISMATCH, m.types[t].span, message);
+                        self.inner_errors += 1;
+                        rejected = true;
+                    }
+                    ty
+                }
+                (None, Some((_, given))) => given,
+                (None, None) if rejected || quiet => self.vars.rejected(),
+                (None, None) => {
+                    self.vars.fresh(Kind::Any, Origin::Closure { name: param.name.sym, span: param.name.span })
+                }
+            };
+            params.push(ty);
+        }
+        let ret = match (closure.ret, &expected) {
+            (Some(t), _) => self.part_type(t, "a result"),
+            (None, Some((_, ret, _, _))) => ret.clone(),
+            (None, None) => self.vars.fresh(Kind::Any, Origin::Defaulted),
+        };
+        // An error type that only `Never` gives is `Never`, so a closure without one can't fail.
+        let fails = match &expected {
+            Some((_, _, fails, _)) => fails.clone(),
+            None => self.vars.open_nevers(&Ty::Never),
+        };
+        // The closure's own state: its result and error, and no loops to leave.
+        let base = self.f.locals.len() as u32;
+        let own_fails = (self.vars.resolve(&fails) != Ty::Never).then(|| fails.clone());
+        let outer = (
+            std::mem::replace(&mut self.f.ret, ret.clone()),
+            std::mem::replace(&mut self.f.fails, own_fails),
+            std::mem::take(&mut self.f.loops),
+            std::mem::replace(&mut self.f.returns, true),
+            std::mem::take(&mut self.markers),
+        );
+        let labels = outer.2.iter().filter_map(|l| l.label).collect();
+        self.closure_scopes.push(ClosureScope { base, captures: Vec::new(), unmarked: false, labels });
+        self.f.scopes.push(Vec::new());
+        let mut locals = Vec::new();
+        for ((param, ty), mode) in closure.params.iter().zip(&params).zip(&modes) {
+            // Without a function type, what the body may change is unknown (§15.1).
+            let mutable = quiet || matches!(mode, ParamMode::Inout | ParamMode::InoutPartial);
+            locals.push(self.declare(param.name, ty.clone(), mutable, "parameter", *mode != ParamMode::Take));
+        }
+        let body = self.block_value(&closure.body, Some(&ret), true);
+        // A body that always leaves gives `Never`, however it leaves (OPEN_QUESTIONS Q33).
+        if diverges_ty(&body) {
+            let _ = self.vars.subsume(&ret, &Ty::Never);
+        } else if body != Ty::Error {
+            let _ = self.vars.subsume(&ret, &body);
+        }
+        // A body that never fails gives the error type `Never`, as a call of a function
+        // without `fails` does, so a type argument nothing else gives settles as `Never`.
+        let _ = self.vars.subsume(&fails, &Ty::Never);
+        self.f.scopes.pop();
+        let scope = self.closure_scopes.pop().expect("pushed above");
+        // Its error type would have come from the call, so it is unknown (§15.1).
+        if scope.unmarked && expected.is_none() {
+            rejected = true;
+        }
+        (self.f.ret, self.f.fails, self.f.loops, self.f.returns, self.markers) = outer;
+        let needs = scope.captures.iter().map(|(id, _)| self.local_needs(*id)).max().unwrap_or(0);
+        self.f.needs.insert(e, needs);
+        self.f.closures.push(e);
+        self.p.closures.insert(
+            e,
+            ClosureInfo { params: locals, modes: modes.clone(), captures: scope.captures, owned: Vec::new() },
+        );
+        if rejected {
+            self.rejected.insert(e);
+            return Ty::Error;
+        }
+        Ty::func(modes, params, ret, fails)
+    }
+
+    /// How many locals a value held in local `id` needs alive (see [`FnState::needs`]): `id`
+    /// itself, and those its function value captures.
+    fn local_needs(&self, id: LocalId) -> u32 {
+        (id.0 + 1).max(self.f.local_needs.get(&id).copied().unwrap_or(0))
+    }
+
+    /// Reports `e`, the value a block, branch or fallback gives, when it is a function value
+    /// that captures a local declared there, from `base` on, which ends with it (E0509).
+    fn local_capture(&mut self, e: ExprId, base: u32) {
+        let span = self.span(e);
+        if self.value_needs(e) <= base || self.escaped.iter().any(|inner| span.contains(*inner)) {
+            return;
+        }
+        let message = "this gives a function value that captures a local declared here, such as a binding of the block or of a pattern, which ends here";
+        self.error(codes::FUNCTION_VALUE_ESCAPES, span, message);
+        self.escaped.push(span);
+    }
+
+    /// How many locals the value of `e` needs alive, if it is a function value (see
+    /// [`FnState::needs`]).
+    fn value_needs(&self, e: ExprId) -> u32 {
+        let m = self.m;
+        let tail = |block: &Block| self.tail(block).map_or(0, |e| self.value_needs(e));
+        match &m.exprs[e].kind {
+            ExprKind::Closure(_) => self.f.needs.get(&e).copied().unwrap_or(0),
+            ExprKind::Name(_) => match self.p.res(e) {
+                Some(Res::Local(id)) => self.f.local_needs.get(&id).copied().unwrap_or(0),
+                _ => 0,
+            },
+            ExprKind::If { then_block, else_branch, .. } => {
+                let other = match else_branch {
+                    Some(ElseBranch::Block(block)) => tail(block),
+                    Some(ElseBranch::If(nested)) => self.value_needs(*nested),
+                    None => 0,
+                };
+                tail(then_block).max(other)
+            }
+            ExprKind::Match { arms, .. } => arms.iter().map(|arm| tail(&arm.body)).max().unwrap_or(0),
+            ExprKind::Else { value, fallback } => {
+                let fallback = match fallback {
+                    Fallback::Value(value) => self.value_needs(*value),
+                    Fallback::Block(block) => tail(block),
+                };
+                self.value_needs(*value).max(fallback)
+            }
+            _ => 0,
+        }
+    }
+
+    /// Notes that the closures being checked capture local `id`, used at `span`, when it is
+    /// declared before them. A capability, or a value that holds one, gives a closure reach,
+    /// which phase 3 brings (REFERENCE §9.4).
+    fn capture(&mut self, id: LocalId, name: &str, span: Span) {
+        let mut first = false;
+        for scope in &mut self.closure_scopes {
+            if id.0 < scope.base && !scope.captures.iter().any(|(captured, _)| *captured == id) {
+                scope.captures.push((id, name.into()));
+                first = true;
+            }
+        }
+        if !first {
+            return;
+        }
+        let ty = self.vars.zonk(&self.f.locals[id.index()].ty);
+        if self.vars.has_open(&ty) {
+            self.f.late_captures.push((id, span));
+        } else if self.may_reach(&ty) {
+            self.reaching_capture(span);
+        }
+    }
+
+    /// Whether a value of type `ty` may hold a capability: it does, or it holds a value of a
+    /// type parameter without `Copy`, whose type argument may (REFERENCE §5.1, Q31).
+    fn may_reach(&self, ty: &Ty) -> bool {
+        fn open_param(ty: &Ty, bounds: &[Vec<IfaceId>]) -> bool {
+            match ty {
+                Ty::Param(i) => bounds.get(*i as usize).is_none_or(|b| !b.contains(&IfaceId::COPY)),
+                // A function value holds none of the values its type names.
+                Ty::Fn(..) => false,
+                _ => ty.parts().is_some_and(|parts| parts.iter().any(|part| open_param(part, bounds))),
+            }
+        }
+        self.p.decls.has_reach(ty) || open_param(ty, &self.f.bounds)
+    }
+
+    fn reaching_capture(&mut self, span: Span) {
+        self.not_implemented(span, "closures that capture a capability or a value that holds one", Planned::Phase(3));
+    }
+
+    /// Whether local `id` is one the innermost closure being checked captures, which it may
+    /// not change before phase 3 (REFERENCE §5.3).
+    fn changes_capture(&mut self, id: LocalId, span: Span) -> bool {
+        if !self.closure_scopes.last().is_some_and(|scope| id.0 < scope.base) {
+            return false;
+        }
+        self.not_implemented(span, "closures that change a variable they capture", Planned::Phase(3));
+        true
+    }
+
+    /// `f::[T]` without a call, which names a generic function as a value. A method is
+    /// called, never a value (E0320), and nothing else takes type arguments.
+    fn applied(&mut self, e: ExprId, callee: ExprId, targs: &[TypeId]) -> Ty {
+        let m = self.m;
+        let span = self.span(e);
+        if let ExprKind::Name(name) = m.exprs[callee].kind
+            && self.lookup_local(name.sym).is_none()
+            && let Some(&f) = self.fn_names.get(&name.sym)
+        {
+            let ty = self.fn_value(callee, f, Some(targs), span);
+            self.record(callee, ty.clone());
+            return ty;
+        }
+        // What the type arguments were meant for is checked as written, and its type is
+        // unknown after them (§15.1).
+        let ty = self.rejected_value(callee);
+        if !ty.is_unknown() {
+            let what = match &m.exprs[callee].kind {
+                ExprKind::Name(name) | ExprKind::Field { name, .. }
+                    if matches!(self.p.res(callee), Some(Res::Ctor(..))) =>
+                {
+                    format!("`{}` is a variant, which", m.text(name.sym))
+                }
+                ExprKind::Name(name) if matches!(ty, Ty::Fn(..)) => {
+                    format!("`{}` is a function value, which", m.text(name.sym))
+                }
+                ExprKind::Name(name) => format!("`{}`", m.text(name.sym)),
+                ExprKind::Field { name, .. } => format!("`{}` is a field, which", m.text(name.sym)),
+                _ => "this value".to_string(),
+            };
+            let span = match (targs.first(), targs.last()) {
+                (Some(&first), Some(&last)) => m.types[first].span.to(m.types[last].span),
+                _ => span,
+            };
+            self.error(codes::TYPE_ARGUMENT_COUNT, span, format!("{what} takes no type arguments"));
+        }
+        Ty::Error
+    }
+
+    /// The record or enum that `base` names, when `name` is one of its associated functions
+    /// or methods, so `base.name` without a call names it as a value (E0320), and whether it
+    /// is a method.
+    fn associated_named(&self, base: ExprId, name: Symbol) -> Option<(AdtId, bool)> {
+        let ExprKind::Name(type_name) = self.m.exprs[base].kind else { return None };
+        if self.lookup_local(type_name.sym).is_some() {
+            return None;
+        }
+        let id = self.adt_named(type_name.sym)?;
+        let entry = self.inherent.get(&id)?.iter().find(|entry| entry.name == name)?;
+        Some((id, self.p.fns[entry.f].receiver.is_some()))
+    }
+
+    /// Whether a value of type `ty` has a method `name`, its own, built in or from an
+    /// interface it implements. Nothing is reported.
+    fn has_method(&self, ty: &Ty, name: Symbol) -> bool {
+        let text = self.m.text(name);
+        if let Ty::Adt(id, _) = ty
+            && self.inherent.get(id).is_some_and(|entries| entries.iter().any(|entry| entry.name == name))
+        {
+            return true;
+        }
+        builtin_method(ty, text).is_some()
+            || self.p.decls.ifaces().any(|(iface, def)| def.method(text).is_some() && self.implements(ty, iface))
+    }
+
+    /// A call of a function value, which takes no labels and no type arguments, and takes
+    /// `&` for each `inout` parameter (REFERENCE §3, §9.4). A call through `fails E` is
+    /// marked like any call that can fail (§7.2).
+    fn value_call(
+        &mut self,
+        e: ExprId,
+        callee: ExprId,
+        targs: Option<&[TypeId]>,
+        args: &[Arg],
+        span: Span,
+        chain: bool,
+    ) -> Ty {
+        let m = self.m;
+        let ty = self.infer(callee);
+        // Only the callee's own type must be known now. Its parts may still be settled by
+        // the arguments or later code.
+        let ty = match self.vars.resolve(&ty) {
+            ty @ Ty::Var(_) => self.force(&ty),
+            ty => ty,
+        };
+        let name = match m.exprs[callee].kind {
+            ExprKind::Name(name) => m.text(name.sym).to_string(),
+            _ => "this function value".to_string(),
+        };
+        let Some((modes, ret, fails, params)) = ty.fn_parts() else {
+            if !ty.is_unknown() {
+                let message = format!("`{name}` is a `{}`, not a function, so it can't be called", self.show(&ty));
+                self.error(codes::TYPE_MISMATCH, self.span(callee), message);
+            }
+            self.rejected_args(args);
+            return Ty::Error;
+        };
+        self.no_targs(targs, &name, span);
+        let (modes, ret, fails) = (modes.to_vec(), ret.clone(), fails.clone());
+        let params: Vec<(&str, Ty)> = params.iter().map(|ty| ("", ty.clone())).collect();
+        self.generic_args(&name, &params, &[], args, span, Modes::Each(&modes));
+        self.fallible_call(e, &name, &fails, span, chain);
+        ret
     }
 
     /// The module function that `callee` names. A variant of the prelude is never one, even
@@ -4396,8 +5002,41 @@ impl Checker<'_> {
         let params: Vec<(&str, Ty)> = info.params.iter().map(|p| (m.text(p.name), p.ty.clone())).collect();
         let modes: Vec<ParamMode> = info.params.iter().map(|p| p.mode).collect();
         let (ret, fails) = (info.ret.clone(), info.fails.clone());
-        let generics: Vec<(Box<str>, Vec<IfaceId>)> =
-            info.generics.iter().map(|g| (g.name.clone(), g.bounds.clone())).collect();
+        let Some(tvars) = self.call_targs(f, targs, span) else {
+            self.rejected_args(args);
+            return Ty::Error;
+        };
+        // The type the call is expected to have gives what it can first, so a mismatch is
+        // reported at the argument (OPEN_QUESTIONS P5). A `Never` in it is known only in part,
+        // and the arguments may widen it.
+        if targs.is_none()
+            && let Some(expected) = expected.filter(|t| !t.is_unknown())
+        {
+            self.vars.subsume(expected, &ret.subst(&tvars));
+        }
+        let counted = self.generic_args(name, &params, &tvars, args, span, Modes::Each(&modes));
+        // An expected type with an error may have given them, and arguments that don't
+        // match their parameters leave them to nothing (§15.1).
+        if expected == Some(&Ty::Error) || !counted {
+            for ty in &tvars {
+                self.vars.poison(ty);
+            }
+        }
+        self.targ_bounds(f, &tvars, span);
+        if let Some(err) = fails {
+            self.fallible_call(e, name, &err.subst(&tvars), span, chain);
+        }
+        ret.subst(&tvars)
+    }
+
+    /// The type arguments of a call or a use as a value of function `f`: from `targs`, or else
+    /// fresh variables that the expected type and the arguments give. A parameter whose
+    /// declaration or constraint is rejected stands for an unknown type. `None` when `targs`
+    /// gives the wrong number, which is reported.
+    fn call_targs(&mut self, f: FnId, targs: Option<&[TypeId]>, span: Span) -> Option<Vec<Ty>> {
+        let m = self.m;
+        let info = &self.p.fns[f];
+        let name = m.text(info.name);
         // A parameter whose declaration or constraint is rejected stands for an unknown type,
         // and any other is a variable until `::[…]`, the expected type or an argument gives it.
         let rejected: Vec<bool> = info.generics.iter().map(|g| g.rejected).collect();
@@ -4408,7 +5047,7 @@ impl Checker<'_> {
         // also right.
         let duplicates = info.generics.iter().filter(|g| g.sym.is_none() && g.param.is_none()).count();
         if let Some(targs) = targs {
-            let tys: Vec<Ty> = targs.iter().map(|&t| self.resolve_type(t)).collect();
+            let tys: Vec<Ty> = targs.iter().map(|&t| self.part_type(t, "a type argument")).collect();
             let fewest = declared - duplicates;
             if tys.len() != declared && (fewest..declared).contains(&tys.len()) {
                 tvars.fill(Some(Ty::Error));
@@ -4426,8 +5065,7 @@ impl Checker<'_> {
                     }
                 };
                 self.error(codes::TYPE_ARGUMENT_COUNT, at, message);
-                self.rejected_args(args);
-                return Ty::Error;
+                return None;
             } else {
                 for (slot, ty) in tvars.iter_mut().zip(tys) {
                     slot.get_or_insert(ty);
@@ -4437,22 +5075,18 @@ impl Checker<'_> {
         let tvars: Vec<Ty> = (tvars.into_iter().enumerate())
             .map(|(param, ty)| ty.unwrap_or_else(|| self.vars.fresh(Kind::Any, Origin::Call { f, param, span })))
             .collect();
-        // The type the call is expected to have gives what it can first, so a mismatch is
-        // reported at the argument (OPEN_QUESTIONS P5). A `Never` in it is known only in part,
-        // and the arguments may widen it.
-        if targs.is_none()
-            && let Some(expected) = expected.filter(|t| !t.is_unknown())
-        {
-            self.vars.subsume(expected, &ret.subst(&tvars));
-        }
-        let counted = self.generic_args(name, &params, &tvars, args, span, Modes::Each(&modes));
-        // An expected type with an error may have given them, and arguments that don't
-        // match their parameters leave them to nothing (§15.1).
-        if expected == Some(&Ty::Error) || !counted {
-            for ty in &tvars {
-                self.vars.poison(ty);
-            }
-        }
+        Some(tvars)
+    }
+
+    /// Checks each type argument of a call or use of function `f` against its parameter's
+    /// constraints, once the statement settles it if it has a variable in it. A function
+    /// value can't be one, since it could outlive what it captures (OPEN_QUESTIONS P5).
+    fn targ_bounds(&mut self, f: FnId, tvars: &[Ty], span: Span) {
+        let info = &self.p.fns[f];
+        let name: Box<str> = self.m.text(info.name).into();
+        let generics: Vec<(Box<str>, Vec<IfaceId>)> =
+            info.generics.iter().map(|g| (g.name.clone(), g.bounds.clone())).collect();
+        let name = &*name;
         for (ty, (param, bounds)) in tvars.iter().zip(&generics) {
             let ty = self.vars.resolve(ty);
             if ty.is_unknown() {
@@ -4465,10 +5099,10 @@ impl Checker<'_> {
                 self.pending.push(Pending::Bound { ty: ty.clone(), ifaces, callee, param, span });
                 continue;
             }
-            if self.resource_targ(&ty, name, param, span) {
+            if self.fn_targ(&ty, span) || self.resource_targ(&ty, name, param, span) {
                 continue;
             }
-            if let Some(&iface) = bounds.iter().find(|&&iface| !self.implements(&ty, iface)) {
+            if let Some(iface) = self.unmet_bound(&ty, bounds) {
                 let message = format!(
                     "`{}` does not implement `{}`, which `{name}` needs of `{param}`",
                     self.show(&ty),
@@ -4477,10 +5111,59 @@ impl Checker<'_> {
                 self.error(codes::MISSING_IMPLEMENTATION, span, message);
             }
         }
-        if let Some(err) = fails {
-            self.fallible_call(e, name, &err.subst(&tvars), span, chain);
+    }
+
+    /// Whether the value `e` builds takes a function value itself, rather than in a part
+    /// that holds one already: as an element or argument, or a closure as its result or
+    /// error.
+    fn wraps_fn(&self, e: ExprId) -> bool {
+        let bare = |e: &ExprId| self.p.expr_ty.get(*e).is_some_and(|ty| matches!(self.vars.resolve(ty), Ty::Fn(..)));
+        match &self.m.exprs[e].kind {
+            ExprKind::Closure(_) => self
+                .vars
+                .zonk(self.p.ty(e))
+                .fn_parts()
+                .is_some_and(|(_, ret, fails, _)| matches!(ret, Ty::Fn(..)) || matches!(fails, Ty::Fn(..))),
+            // Only a variant takes a function value into what it gives. A function value
+            // given to a function's type parameter is a type argument, reported by
+            // [`Checker::fn_targ`], and a closure's result was reported in the closure.
+            ExprKind::Call { callee, args, .. } if matches!(self.p.res(*callee), Some(Res::Ctor(..))) => {
+                args.iter().any(|arg| bare(&arg.value))
+            }
+            // A qualified variant, as in `Option.Some(f)`.
+            ExprKind::MethodCall { args, .. } if matches!(self.p.res(e), Some(Res::Ctor(..))) => {
+                args.iter().any(|arg| bare(&arg.value))
+            }
+            ExprKind::List(elements) | ExprKind::Tuple(elements) => elements.iter().any(bare),
+            ExprKind::Map(entries) => entries.iter().any(|(key, value)| bare(key) || bare(value)),
+            _ => false,
         }
-        ret.subst(&tvars)
+    }
+
+    /// The first of `bounds` that type argument `ty` doesn't implement. One that holds a
+    /// function value was reported where it was made (E0509), so its bounds are not.
+    fn unmet_bound(&self, ty: &Ty, bounds: &[IfaceId]) -> Option<IfaceId> {
+        let iface = bounds.iter().copied().find(|&iface| !self.implements(ty, iface))?;
+        (!holds_fn(&self.vars.zonk(ty))).then_some(iface)
+    }
+
+    /// Reports a function value as a type argument and returns whether it did (E0509). One
+    /// call is reported once. A type that holds one was reported where it was made, and its
+    /// constraints aren't (see [`Checker::unmet_bound`]).
+    fn fn_targ(&mut self, ty: &Ty, span: Span) -> bool {
+        if !matches!(ty, Ty::Fn(..)) {
+            return false;
+        }
+        if self.escaped.contains(&span) {
+            return true;
+        }
+        self.escaped.push(span);
+        let message = format!(
+            "`{}` is a function type, which can't be a type argument, since a function value lives only as long as what it captures",
+            self.show(ty)
+        );
+        self.error(codes::FUNCTION_VALUE_ESCAPES, span, message);
+        true
     }
 
     /// A record's constructor takes its fields as parameters, so a construction follows the
@@ -4590,15 +5273,6 @@ impl Checker<'_> {
         if receiver_ty == Ty::Text && planned {
             let what = format!("`Text` methods of §12.3, such as `{name}`,");
             self.not_implemented(method.span, &what, Planned::Unscheduled);
-            self.rejected_args(args);
-            return Ty::Error;
-        }
-        if let (Ty::Adt(AdtId::POOL, _), "update") = (&receiver_ty, name) {
-            self.not_implemented(
-                method.span,
-                "calls of `Pool.update`, whose `change` is a closure,",
-                Planned::Phase(2),
-            );
             self.rejected_args(args);
             return Ty::Error;
         }
@@ -4995,6 +5669,13 @@ impl Checker<'_> {
                 Ty::Error
             }
             (Ty::Error, _) => Ty::Error,
+            (ty, _) if self.has_method(ty, name.sym) => {
+                let message = format!(
+                    "`{text}` is a method, which is called with its arguments; it isn't a function value, but a closure can wrap a call of it, as in `|| x.{text}()`"
+                );
+                self.error(codes::METHOD_VALUE, name.span, message);
+                Ty::Error
+            }
             (ty, _) => {
                 let message = format!("`{}` has no field `{text}`", self.show(ty));
                 self.error(codes::UNKNOWN_MEMBER, name.span, message);
@@ -5107,13 +5788,23 @@ impl Checker<'_> {
             self.rejected_args(args);
             return false;
         }
-        // One label problem is reported per call, with the labels the call needs.
+        // One label problem is reported per call, with the labels the call needs. A function
+        // value's parameters have no names, so its arguments take no labels (REFERENCE §3).
         let labelled = params.iter().map(|(param, _)| format!("{}: …", param.as_ref())).collect::<Vec<_>>().join(", ");
+        let unnamed = params.iter().any(|(param, _)| param.as_ref().is_empty());
         let mut labels_reported = false;
         for (i, (arg, (param, _))) in args.iter().zip(params).enumerate() {
             let param = param.as_ref();
             match arg.label {
                 _ if labels_reported => {}
+                Some(label) if unnamed => {
+                    let message = format!(
+                        "`{callee}` is a function value, whose parameters have no names, so its arguments take no labels"
+                    );
+                    self.error(codes::WRONG_LABEL, label.span, message);
+                    labels_reported = true;
+                }
+                None if unnamed => {}
                 Some(label) if m.text(label.sym) != param => {
                     let text = m.text(label.sym);
                     self.error(
@@ -5140,37 +5831,98 @@ impl Checker<'_> {
                 _ => {}
             }
         }
-        for (i, (arg, (param, ty))) in args.iter().zip(params).enumerate() {
-            let mode = match modes {
-                Modes::Borrow => ParamMode::Borrow,
-                Modes::Take => ParamMode::Take,
-                Modes::Each(modes) => modes.get(i).copied().unwrap_or(ParamMode::Borrow),
-            };
-            // A type parameter that `targs` doesn't cover is the caller's own, such as the `T`
-            // that `Self` stands for in `x.bigger(y)` where `x: T`, so it is a type like any.
-            let ty = if mentions_targ(ty, targs) { ty.subst(targs) } else { ty.clone() };
-            let inout = matches!(mode, ParamMode::Inout | ParamMode::InoutPartial);
-            if inout && arg.inout {
-                // An `inout` of a resource is never rolled back, so it is partial (§5.4).
-                let partial = mode == ParamMode::InoutPartial || self.p.decls.is_resource(&ty);
-                self.inout_arg(arg.value, &ty, partial);
-                continue;
-            }
-            if inout || arg.inout {
-                let (param, value) = (param.as_ref(), self.span(arg.value));
-                let message = if inout {
-                    format!(
-                        "`{param}` is an `inout` parameter, so its argument is marked with `&`, as in `{param}: &x`"
-                    )
-                } else {
-                    format!("`{param}` isn't an `inout` parameter, so its argument takes no `&`")
-                };
-                self.error_of(arg.value, codes::INOUT_MARKER_MISMATCH, value, message);
-            }
-            self.copying = mode == ParamMode::Take;
-            self.check(arg.value, &ty);
+        // A closure's parameters take their types from the others, so the others go first,
+        // then each closure whose parameter types are written or settled, so the order of the
+        // arguments doesn't change the types (OPEN_QUESTIONS Q33). A closure that an `if`,
+        // `match` or `else` gives waits as one does.
+        let (mut closures, others): (Vec<usize>, Vec<usize>) =
+            (0..args.len()).partition(|&i| self.gives_closure(args[i].value));
+        for i in others {
+            self.generic_arg(callee, i, &args[i], (params[i].0.as_ref(), &params[i].1), targs, modes);
+        }
+        while !closures.is_empty() {
+            let ready =
+                closures.iter().position(|&i| self.closure_ready(args[i].value, &params[i].1, targs)).unwrap_or(0);
+            let i = closures.remove(ready);
+            self.generic_arg(callee, i, &args[i], (params[i].0.as_ref(), &params[i].1), targs, modes);
         }
         true
+    }
+
+    /// Checks argument `i` of a call against parameter `param` of type `ty`.
+    fn generic_arg(&mut self, callee: &str, i: usize, arg: &Arg, (param, ty): (&str, &Ty), targs: &[Ty], modes: Modes) {
+        let mode = match modes {
+            Modes::Borrow => ParamMode::Borrow,
+            Modes::Take => ParamMode::Take,
+            Modes::Each(modes) => modes.get(i).copied().unwrap_or(ParamMode::Borrow),
+        };
+        // A type parameter that `targs` doesn't cover is the caller's own, such as the `T`
+        // that `Self` stands for in `x.bigger(y)` where `x: T`, so it is a type like any.
+        let ty = if mentions_targ(ty, targs) { ty.subst(targs) } else { ty.clone() };
+        let inout = matches!(mode, ParamMode::Inout | ParamMode::InoutPartial);
+        if inout && arg.inout {
+            // An `inout` of a resource is never rolled back, so it is partial (§5.4).
+            let partial = mode == ParamMode::InoutPartial || self.p.decls.is_resource(&ty);
+            self.inout_arg(arg.value, &ty, partial);
+            return;
+        }
+        if inout || arg.inout {
+            let value = self.span(arg.value);
+            let n = i + 1;
+            let message = if param.is_empty() && inout {
+                format!(
+                    "argument {n} of `{callee}` is an `inout` parameter, so it is marked with `&`, as in `{callee}(&x)`"
+                )
+            } else if param.is_empty() {
+                format!("argument {n} of `{callee}` isn't an `inout` parameter, so it takes no `&`")
+            } else if inout {
+                format!("`{param}` is an `inout` parameter, so its argument is marked with `&`, as in `{param}: &x`")
+            } else {
+                format!("`{param}` isn't an `inout` parameter, so its argument takes no `&`")
+            };
+            self.error_of(arg.value, codes::INOUT_MARKER_MISMATCH, value, message);
+        }
+        self.copying = mode == ParamMode::Take;
+        self.check(arg.value, &ty);
+    }
+
+    /// Whether the closure `arg`, passed as a parameter of type `ty`, would find its
+    /// parameters' types known, from its annotations or from `ty`.
+    fn closure_ready(&mut self, arg: ExprId, ty: &Ty, targs: &[Ty]) -> bool {
+        let ty = if mentions_targ(ty, targs) { ty.subst(targs) } else { ty.clone() };
+        let ty = self.vars.resolve(&ty);
+        let written = |j: usize| match &self.m.exprs[arg].kind {
+            ExprKind::Closure(closure) => closure.params.get(j).is_some_and(|param| param.ty.is_some()),
+            _ => false,
+        };
+        ty.fn_parts().is_some_and(|(_, _, _, params)| {
+            params.iter().enumerate().all(|(j, param)| written(j) || !self.vars.has_open(param))
+        })
+    }
+
+    /// Whether `e` is a closure, or an `if`, `match` or `else` that may give one.
+    fn gives_closure(&self, e: ExprId) -> bool {
+        let tail = |block: &Block| self.tail(block).is_some_and(|e| self.gives_closure(e));
+        match &self.m.exprs[e].kind {
+            ExprKind::Closure(_) => true,
+            ExprKind::If { then_block, else_branch, .. } => {
+                tail(then_block)
+                    || match else_branch {
+                        Some(ElseBranch::Block(block)) => tail(block),
+                        Some(ElseBranch::If(nested)) => self.gives_closure(*nested),
+                        None => false,
+                    }
+            }
+            ExprKind::Match { arms, .. } => arms.iter().any(|arm| tail(&arm.body)),
+            ExprKind::Else { value, fallback } => {
+                self.gives_closure(*value)
+                    || match fallback {
+                        Fallback::Value(value) => self.gives_closure(*value),
+                        Fallback::Block(block) => tail(block),
+                    }
+            }
+            _ => false,
+        }
     }
 
     /// Checks an `&` argument, which a failure may leave half changed when it is `partial`.
@@ -5223,6 +5975,8 @@ impl Checker<'_> {
         if !self.f.locals[id.index()].mutable {
             let message = self.immutable(root, id, "pass it with `&`");
             self.error(codes::IMMUTABLE_ASSIGNMENT, span, message);
+        } else if self.changes_capture(id, span) {
+            return;
         }
         if actual.is_unknown() || ty.is_unknown() {
             return;
@@ -5263,6 +6017,9 @@ impl Checker<'_> {
                 if self.vars.has_var(err) {
                     self.pending.push(Pending::Unmarked { ty: err.clone(), callee: callee.into(), span });
                 } else {
+                    if let Some(scope) = self.closure_scopes.last_mut() {
+                        scope.unmarked = true;
+                    }
                     self.unmarked(callee, err, span);
                 }
             }
@@ -5354,7 +6111,10 @@ impl Checker<'_> {
             return;
         }
         for err in errs.iter().filter(|err| **err != Ty::Never) {
-            let message = if self.f.returns {
+            let message = if !self.closure_scopes.is_empty() {
+                let err = self.show(err);
+                format!("`try` propagates `{err}`, but the function type of this closure has no `fails {err}`")
+            } else if self.f.returns {
                 let err = self.show(err);
                 format!("`try` propagates `{err}`, but this function does not declare `fails {err}`")
             } else {
@@ -5439,6 +6199,7 @@ impl Checker<'_> {
         };
         let copying = std::mem::take(&mut self.tail_copying);
         // The bindings of an `is` in the condition scope over the then-block (REFERENCE §6.4).
+        let base = self.f.locals.len() as u32;
         self.f.scopes.push(Vec::new());
         self.condition(*cond);
         let then_ty = match (mode, else_branch) {
@@ -5452,6 +6213,10 @@ impl Checker<'_> {
             (Mode::Value(_), None) => self.block_value(then_block, None, copying),
             (Mode::Value(expected), Some(_)) => self.block_value(then_block, expected, copying),
         };
+        // So does a closure the then-block gives, which can't capture them (Q34).
+        if let (Mode::Value(_), Some(tail)) = (mode, self.tail(then_block)) {
+            self.local_capture(tail, base);
+        }
         self.f.scopes.pop();
         let ty = match (mode, else_branch) {
             (Mode::Stmt | Mode::Tail(_), _) => {
@@ -5629,9 +6394,14 @@ impl Checker<'_> {
             self.error(codes::UNKNOWN_MEMBER, name.span, message);
             return Ty::Error;
         };
+        // A variant with fields isn't a function value, so it takes its arguments, and a
+        // closure can wrap it (OPEN_QUESTIONS P5).
         if !variant.fields.is_empty() && !variant.rejected {
-            let what = format!("variants with fields used as values, such as `{}`,", def.ctor_name(v));
-            self.not_implemented(name.span, &what, Planned::Phase(2));
+            let ctor = def.ctor_name(v);
+            let message = format!(
+                "`{ctor}` has fields, so it is written with its arguments, as in `{ctor}(…)`; it isn't a function value"
+            );
+            self.error(codes::WRONG_ARGUMENT_COUNT, name.span, message);
             return Ty::Error;
         }
         self.p.res.insert(e, Res::Ctor(id, v));
@@ -5716,6 +6486,7 @@ impl Checker<'_> {
         let mut tys = Vec::new();
         for arm in arms {
             // An arm's bindings scope over its guard and body.
+            let base = self.f.locals.len() as u32;
             self.f.scopes.push(Vec::new());
             self.pattern_borrowed = borrowed;
             let space = self.pattern(arm.pat, &scrutinee_ty);
@@ -5736,6 +6507,10 @@ impl Checker<'_> {
                     let ty = self.block_value(&arm.body, expected.as_ref(), copying);
                     if !ty.is_unknown() {
                         expected = Some(ty.clone());
+                    }
+                    // A closure the arm gives can't capture its bindings (Q34).
+                    if let Some(tail) = self.tail(&arm.body) {
+                        self.local_capture(tail, base);
                     }
                     ty
                 }
@@ -6215,9 +6990,30 @@ fn without_bad_keys(decls: &Decls, ty: &Ty, bounds: &[Vec<IfaceId>], unknown: &[
 fn mentions_targ(ty: &Ty, targs: &[Ty]) -> bool {
     match ty {
         Ty::Param(i) => (*i as usize) < targs.len(),
-        Ty::Adt(_, args) => args.iter().any(|arg| mentions_targ(arg, targs)),
-        _ => false,
+        ty => ty.parts().is_some_and(|parts| parts.iter().any(|part| mentions_targ(part, targs))),
     }
+}
+
+/// Whether `ty` holds a function value where one can't be: in a record, enum, tuple or
+/// collection, or in a function type's result or error (OPEN_QUESTIONS P5). A function
+/// type's parameter may be a function. Each shared part is walked once.
+fn holds_fn(ty: &Ty) -> bool {
+    fn walk(ty: &Ty, inside: bool, seen: &mut HashSet<(usize, bool)>) -> bool {
+        match ty {
+            Ty::Fn(_, parts) => {
+                inside
+                    || (seen.insert((Arc::as_ptr(parts) as *const Ty as usize, false))
+                        && (parts[..2].iter().any(|part| walk(part, true, seen))
+                            || parts[2..].iter().any(|part| walk(part, false, seen))))
+            }
+            Ty::Adt(_, args) => {
+                seen.insert((Arc::as_ptr(args) as *const Ty as usize, true))
+                    && args.iter().any(|arg| walk(arg, true, seen))
+            }
+            _ => false,
+        }
+    }
+    walk(ty, false, &mut HashSet::new())
 }
 
 /// Whether a value of this type may never be produced. An error counts, because the code it
@@ -6324,6 +7120,10 @@ fn builtin_method(ty: &Ty, name: &str) -> Option<BuiltinSig> {
                     needs: Some((t.clone(), IfaceId::COPY, "T")),
                     ..sig(Builtin::Duplicate, vec![], Ty::applied(AdtId::POOL, vec![t]))
                 },
+                "update" => {
+                    let change = Ty::func(vec![ParamMode::Take], vec![t.clone()], t, Ty::Never);
+                    sig(Builtin::Update, vec![("handle", handle), ("change", change)], Ty::Bool)
+                }
                 _ => return None,
             }
         }

@@ -9,7 +9,6 @@
 // expect-error: E0307
 // expect-error: E0309
 // expect-error: E0312
-// expect-error: E0901
 // `Option` takes one type argument and `Result` two (STD.md). A variant's type arguments
 // come from the expected type, which for `==` is the other operand's, or else from its fields,
 // and a variant that neither determines is rejected (OPEN_QUESTIONS P5). A literal inside
@@ -88,7 +87,7 @@ fn values(o: Option[Int], f: Option[Float]) {
     let k = Some()                                  // <- E0208
     let l = Some(1, 2)                              // <- E0208
     let m: Option[Int] = None(1)                    // <- E0208
-    let n = Some                                    // <- E0901
+    let n = Some                                    // <- E0208
     let p = Option.Maybe(1)                         // <- E0303
     let q = Result.None                             // <- E0303
     let r = o == Some(1.5)                          // <- E0301

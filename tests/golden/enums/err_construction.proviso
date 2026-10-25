@@ -6,10 +6,10 @@
 // expect-error: E0301
 // expect-error: E0303
 // expect-error: E0306
-// expect-error: E0901
 // Variants are built qualified, with the labels of a call (REFERENCE §4.5, §3); only `Some`,
 // `None`, `Ok` and `Err` may be used unqualified. A variant without fields takes no
-// parentheses. An enum has no fields and no `with`, and it has `==` and `show` only when it
+// parentheses, and one with fields isn't a function value, so it takes its arguments
+// (OPEN_QUESTIONS P5). An enum has no fields and no `with`, and it has `==` and `show` only when it
 // derives them. Each mistake is reported once.
 enum Shape {
     Circle(radius: Int)
@@ -26,7 +26,7 @@ fn build() -> Shape {
     let f = Shape.Empty()                           // <- E0208
     let g = Shape.Circle(radius: "big")             // <- E0301
     let h = Shape(radius: 1)                        // <- E0201
-    let i = Shape.Circle                            // <- E0901
+    let i = Shape.Circle                            // <- E0208
     let m = Shape.Unknown                           // <- E0303
     let j = Shape.Empty
     let r = j.radius                                // <- E0303

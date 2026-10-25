@@ -1,0 +1,194 @@
+// phase: 2.9
+// expect-error: E0509
+// A closure lives only until the call it is passed to returns, or as long as the local it
+// is bound to (REFERENCE §6.7, OPEN_QUESTIONS Q34). So a function value may be a parameter,
+// a local, an argument or the value of a branch, but nothing that can outlive what it
+// captures. It can't be a field, a result, an error, an element, a type argument or a part
+// of a tuple, whether the type is written or inferred. A function type's own result can't
+// be a function either, and a `var` can't be given a new function value. A block, a
+// branch or an arm can't yield a closure that captures a local declared inside it, or a
+// binding of its `is` test or pattern. Each mistake is reported once, where the function
+// value goes in, and not again at a value that holds it or a call that takes that value
+// (REFERENCE §15.1). `keep fn` will lift parts of this (OPEN_QUESTIONS P5).
+use std.pool { Pool }
+
+record Holder {
+    f: fn(Int) -> Int                               // <- E0509
+}
+
+enum Stop {
+    Halt
+}
+
+fn make() -> fn(Int) -> Int {                       // <- E0509
+    unreachable
+}
+
+fn fails_with() fails fn() {                        // <- E0509
+    unreachable
+}
+
+fn listed(xs: List[fn()]) {}                        // <- E0509
+
+fn optional(o: Option[fn()]) {}                     // <- E0509
+
+fn tupled(t: (fn(), Int)) {}                        // <- E0509
+
+fn curried(f: fn() -> fn()) {}                      // <- E0509
+
+fn higher(f: fn(fn(Int) -> Int) -> Int) -> Int {
+    return f(|x| x)
+}
+
+fn generic[T](x: take T) -> T {
+    return x
+}
+
+fn inferred(f: fn(Int) -> Int) {
+    let xs = [f]                                    // <- E0509
+    let o = Some(f)                                 // <- E0509
+    let t = (f, 1)                                  // <- E0509
+    let g = generic(x: f)                           // <- E0509
+    let m = ["k": f]                                // <- E0509
+    let p: Pool[fn()] = Pool.new()                  // <- E0509
+    let k = || f                                    // <- E0509
+    var h = f
+    h = f                                           // <- E0509
+    let ok = f
+}
+
+fn escape_block(flag: Bool) -> Int {
+    let base = 1
+    let f = if flag {
+        let local = 2
+        |x: Int| x + local                          // <- E0509
+    } else {
+        |x: Int| x + base
+    }
+    let g = if flag {
+        let inner = 3
+        let add = |x: Int| x + inner
+        add                                         // <- E0509
+    } else {
+        |x: Int| x
+    }
+    let h = if flag {
+        let deep = 4
+        match flag {                                // <- E0509
+            true => |x: Int| x + deep
+            false => |x: Int| x
+        }
+    } else {
+        |x: Int| x
+    }
+    return f(1) + g(2) + h(3)
+}
+
+fn escape_pattern(o: Option[Int]) -> Int {
+    let base = 1
+    let f = if o is Some(n) {
+        |x: Int| x + n                              // <- E0509
+    } else {
+        |x: Int| x + base
+    }
+    let g = match o {
+        Some(n) => |x: Int| x + n                   // <- E0509
+        None => |x: Int| x
+    }
+    let h = match o {
+        Some(n) => {
+            let m = n + 1
+            |x: Int| x + m                          // <- E0509
+        }
+        None => |x: Int| x + base
+    }
+    let k = match o {
+        Some(n) => |x: Int| x + base
+        None => |x: Int| x
+    }
+    return f(1) + g(1) + h(1) + k(1)
+}
+
+fn some[T: Copy](x: T) -> Option[T] {
+    return Some(x)
+}
+
+fn apply_to[T, R](x: T, f: fn(T) -> R) -> R {
+    return f(x)
+}
+
+fn once(f: fn(Int) -> Int) {
+    let a = some(x: f)                              // <- E0509
+    let b = some(x: some(x: f))                     // <- E0509
+    let c = Some(Some(f))                           // <- E0509
+    let d = apply_to(x: f, f: |h| h)                // <- E0509
+    let e = some::[fn(Int) -> Int](x: f)            // <- E0509
+    let m = [f: 1]                                  // <- E0509
+    var xs = [f]                                    // <- E0509
+    let y = xs.pop()
+    let n = xs.len()
+    let t = (xs, 1)
+    let k = || {                                    // <- E0509
+        let o = Some(f)                             // <- E0509
+        f
+    }
+}
+
+fn same_eq[T: Eq](x: T) -> Bool {
+    return x == x
+}
+
+fn bound_after(f: fn(Int) -> Int) -> Bool {
+    return same_eq(x: Some(f))                      // <- E0509
+}
+
+fn compared(f: fn(Int) -> Int) -> Bool {
+    let a = None == Some(f)                         // <- E0509
+    let b = Some(f) < None                          // <- E0509
+    let t = f"{Some(f)}"                            // <- E0509
+    let xs = [Some(f)]                              // <- E0509
+    return xs.contains(None)
+}
+
+fn run[R](f: fn() -> R) -> R {
+    return f()
+}
+
+record Box {
+    n: Int
+}
+
+impl Box {
+    fn call[R](self, f: fn() -> R) -> R {
+        return f()
+    }
+
+    fn hold[T](self, x: T) -> Option[T] {
+        return None
+    }
+}
+
+fn once_in_results(f: fn(Int) -> Int, flag: Bool, b: Box) {
+    let c = run(f: || Some(f))                      // <- E0509
+    let g = run(f: || [f])                          // <- E0509
+    let k = || Some(f)                              // <- E0509
+    let d = run(f: k)
+    let e = run(f: if flag { || Some(f) } else { || None })     // <- E0509
+    let m = b.call(f: || Some(f))                   // <- E0509
+    let o = Some(|| 1)                              // <- E0509
+    let h = b.hold(x: f)                            // <- E0509
+    let t = run(f: || (f, 1))                       // <- E0509
+}
+
+fn qualified(f: fn(Int) -> Int, flag: Bool) -> Bool {
+    let a = Option.Some(f)                          // <- E0509
+    let d = Option.Some(|x: Int| x)                 // <- E0509
+    let e = Option.Some(f) == None                  // <- E0509
+    let g = if flag {
+        let deep = 4
+        Option.Some(|x: Int| x + deep)              // <- E0509
+    } else {
+        None
+    }
+    return e
+}

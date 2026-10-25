@@ -1,0 +1,268 @@
+// phase: 2.9
+// expect-error: E0501
+// expect-error: E0502
+// expect-error: E0504
+// expect-error: E0505
+// A closure borrows what it captures, whether a local or a parameter of any mode (REFERENCE
+// §6.7). So it can't move a captured unique value or consume a captured resource (§5.1,
+// §10 rule 6), in any body form. It can't capture a value that has moved, and a value it
+// captures can't move while the closure may still be called, since a call of the closure
+// uses what it captures. A closure argument reads every local it captures, so it overlaps
+// an `&` argument or an `inout self` receiver on the same local in the same call (§5.3,
+// OPEN_QUESTIONS P5).
+use std.pool { Pool, Handle }
+
+unique record Token {
+    id: Int
+}
+
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+fn run(f: fn()) {
+    f()
+}
+
+fn read(f: fn() -> Int) -> Int {
+    return f()
+}
+
+fn give(f: fn() -> Probe) {
+    let p = f()
+    p.close()
+}
+
+fn change(n: inout Int, f: fn() -> Int) {
+    n = f()
+}
+
+fn change_after(f: fn() -> Int, n: inout Int) {
+    n = f()
+}
+
+fn take_token(t: take Token) {}
+
+fn moved_local() {
+    let token = Token(id: 1)
+    run(f: || take_token(t: token))                 // <- E0504
+}
+
+fn moved_param(token: take Token, lent: Token, held: inout Token) {
+    run(f: || take_token(t: token))                 // <- E0504
+    run(f: || take_token(t: lent))                  // <- E0504
+    run(f: || {
+        let t = held                                // <- E0504
+    })
+    let n = read(f: || {
+        if token.id > 0 {
+            return token.id
+        }
+        let t = token                               // <- E0504
+        0
+    })
+}
+
+fn consumed_local() {
+    let probe = Probe(name: "p")
+    run(f: || probe.close())                        // <- E0502
+    give(f: || probe)                               // <- E0502
+    run(f: || {
+        let q = probe                               // <- E0502
+    })
+    probe.close()
+}
+
+fn consumed_param(probe: Probe, held: inout Probe) {
+    run(f: || probe.close())                        // <- E0502
+    run(f: || held.close())                         // <- E0502
+}
+
+fn moved_before() {
+    let token = Token(id: 1)
+    take_token(t: token)
+    let n = read(f: || token.id)                    // <- E0501
+}
+
+fn moved_while_held() {
+    let token = Token(id: 1)
+    let f = || token.id
+    take_token(t: token)
+    let n = f()                                     // <- E0501
+}
+
+fn moved_while_held_twice() {
+    let token = Token(id: 1)
+    let f = || token.id
+    let g = || f() + 1
+    take_token(t: token)
+    let n = read(f: g)                              // <- E0501
+}
+
+fn moved_after_last_use() {
+    let token = Token(id: 1)
+    let f = || token.id
+    let n = f()
+    take_token(t: token)
+}
+
+fn overlap() {
+    var n = 1
+    change(n: &n, f: || n)                          // <- E0505
+    change_after(f: || n + 1, n: &n)                // <- E0505
+    var m = 2
+    change(n: &m, f: || n)
+}
+
+fn overlap_bound() {
+    var n = 1
+    let f = || n
+    change(n: &n, f: f)                             // <- E0505
+}
+
+fn pool_overlap(pool: inout Pool[Int], h: Handle[Int]) -> Bool {
+    return pool.update(handle: h, change: |x| x + pool.len())  // <- E0505
+}
+
+fn read_then_take(f: fn() -> Int, t: take Token) {}
+
+fn take_then_read(t: take Token, f: fn() -> Int) {}
+
+fn moved_in_call() {
+    let a = Token(id: 1)
+    read_then_take(f: || a.id, t: a)                // <- E0505
+    let b = Token(id: 2)
+    take_then_read(t: b, f: || b.id)                // <- E0501
+}
+
+fn bump_to(n: inout Int) -> Int {
+    n = 5
+    return 0
+}
+
+fn outer(f: fn() -> Int, a: Int) -> Int {
+    return f()
+}
+
+fn apply_int(f: fn(Int) -> Int, x: Int) -> Int {
+    return f(x)
+}
+
+fn changed_by_later_argument() -> Int {
+    var n = 1
+    let f = || n
+    let a = outer(f: || n, a: bump_to(n: &n))      // <- E0505
+    let b = outer(f: f, a: bump_to(n: &n))          // <- E0505
+    let g: fn(Int) -> Int = |k| k + n
+    let c = g(bump_to(n: &n))                       // <- E0505
+    let d = apply_int(f: |y| y + n, x: if true {
+        n = 5                                       // <- E0505
+        0
+    } else {
+        0
+    })
+    let e = g(if true {
+        n = 5                                       // <- E0505
+        0
+    } else {
+        0
+    })
+    return a
+}
+
+fn take_id(t: take Token) -> Int {
+    return t.id
+}
+
+fn moved_by_callee_argument() -> Int {
+    let token = Token(id: 1)
+    let h: fn(Int) -> Int = |a| a + token.id
+    return h(take_id(t: token))                     // <- E0505
+}
+
+fn give_then(f: fn() -> Text, p: take Probe) {
+    p.close()
+}
+
+fn look_then_take(a: Probe, b: take Probe) {
+    b.close()
+}
+
+fn consumed_only() {
+    let probe = Probe(name: "p")
+    run(f: || probe.close())                        // <- E0502
+}
+
+fn consumed_param_only(probe: take Probe) {
+    run(f: || probe.close())                        // <- E0502
+}
+
+fn captured_then_taken() {
+    let p = Probe(name: "p")
+    give_then(f: || p.name, p: p)                   // <- E0505
+}
+
+fn lent_then_taken() {
+    let p = Probe(name: "p")
+    look_then_take(a: p, b: p)                      // <- E0505
+}
+
+fn read_both(f: fn() -> Int, g: inout fn() -> Int) -> Int {
+    return f()
+}
+
+fn held_var_lent() -> Int {
+    var n = 1
+    var g = || n
+    return read_both(f: || g(), g: &g)              // <- E0505
+}
+
+fn change_held(n: inout Int, f: inout fn() -> Int) -> Int {
+    n = n + 1
+    return f()
+}
+
+fn held_change(f: inout fn() -> Int, n: inout Int) -> Int {
+    n = n + 1
+    return f()
+}
+
+fn held_take(f: inout fn() -> Int, t: take Token) -> Int {
+    return f()
+}
+
+record Pair {
+    a: Int
+    b: Int
+}
+
+fn change_pair(n: inout Int, f: inout fn() -> Int) -> Int {
+    return f()
+}
+
+fn lent_through_inout(other: inout fn() -> Int) -> Int {
+    var n = 1
+    var f = || n
+    let a = change_held(n: &n, f: &f)               // <- E0505
+    let b = held_change(f: &f, n: &n)               // <- E0505
+    var g = || f()
+    let c = change_held(n: &n, f: &g)               // <- E0505
+    let token = Token(id: 1)
+    var h = || token.id
+    let d = held_take(f: &h, t: token)              // <- E0505
+    var p = Pair(a: 1, b: 2)
+    var k = || p.b
+    let e = change_pair(n: &p.a, f: &k)             // <- E0505
+    var m = 3
+    let ok = change_held(n: &m, f: &f)
+    let param = change_held(n: &n, f: &other)
+    return a + b + c + d + e + ok + param
+}

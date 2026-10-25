@@ -5,8 +5,7 @@
 // does an `Abandon` constraint (OPEN_QUESTIONS §G). A refinement that reads a resource
 // field may run again after the field moved, so moving it out waits too. A map keeps the key
 // it has when `set` meets an equal one, which would drop a resource, so a resource as a map
-// key waits too. Interface methods
-// that take `inout self` come later, and so do function types (slice 2.9).
+// key waits too. Interface methods that take `inout self` come later.
 resource record Probe {
     name: Text
 }
@@ -46,9 +45,6 @@ fn moved_out(g: take Guarded) {
 
 interface Grow {
     fn grow(inout self)                             // <- E0901
-}
-
-fn body(f: fn(inout Probe)) {                       // <- E0901
 }
 
 resource record Tag derives(Eq, Hash) {

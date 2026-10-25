@@ -15,7 +15,7 @@ use proviso_syntax::source::{SourceFile, Span};
 
 /// How far this toolchain implements the v1 plan (OPEN_QUESTIONS P3): phase 1, and the first
 /// eight slices of phase 2.
-pub const IMPLEMENTED_PHASE: Phase = Phase::slice(2, 8);
+pub const IMPLEMENTED_PHASE: Phase = Phase::slice(2, 9);
 
 /// A point in the v1 plan: a whole phase, or a slice of one. A phase delivered over several
 /// pull requests numbers its slices `2.1`, `2.2` and so on, and each pull request turns its
@@ -158,8 +158,9 @@ impl Compiled {
             let ty = match &m.types[decl.target].kind {
                 TypeExprKind::Named(name) | TypeExprKind::Applied { name, .. } => m.text(name.sym),
                 TypeExprKind::SelfType => "Self",
-                // The parser rejects implementations for tuples.
+                // The parser rejects implementations for tuples and function types.
                 TypeExprKind::Tuple(_) => "(…)",
+                TypeExprKind::Fn { .. } => "fn",
             };
             let owner = match &decl.iface {
                 Some(iface) => format!("{}.{ty}.{}", m.name, m.text(iface.sym)),

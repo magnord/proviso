@@ -118,7 +118,7 @@ pub mod codes {
         MIXED_AND_OR = "E0104", "mixed_and_or",
             "`and` and `or` cannot be mixed without parentheses (REFERENCE §6.1, H2).";
         MISPLACED_JUMP = "E0105", "misplaced_jump",
-            "`break` or `continue` outside a loop, or naming a label no enclosing loop has.";
+            "`break` or `continue` outside a loop, or naming a label no enclosing loop has. A closure's body is outside the loops around it (OPEN_QUESTIONS Q33).";
         INVALID_ASSIGNMENT_TARGET = "E0106", "invalid_assignment_target",
             "An assignment to something that isn't a variable or one of its fields or elements, or a method that changes its receiver, such as `push`, or an `&` argument, on something that isn't one (REFERENCE §5.2).";
         TODO_REQUIRES_INCOMPLETE = "E0107", "todo_requires_incomplete",
@@ -139,9 +139,9 @@ pub mod codes {
         MISSING_LABEL = "E0206", "missing_label",
             "Calls to functions with two or more parameters label every argument, and so does every `with` and every part of a pattern for several fields, except a bare field name (REFERENCE §3, §6.4, H3).";
         WRONG_LABEL = "E0207", "wrong_label",
-            "An argument label that does not match the parameter in that position, or pattern fields out of declaration order.";
+            "An argument label that does not match the parameter in that position, any label in a call of a function value, or pattern fields out of declaration order (REFERENCE §3).";
         WRONG_ARGUMENT_COUNT = "E0208", "wrong_argument_count",
-            "A call passes more or fewer arguments than the function has parameters, a `with` replaces no field, or a pattern matches the wrong number of fields.";
+            "A call passes more or fewer arguments than the function has parameters, a closure has more or fewer parameters than the function type it is passed as, a `with` replaces no field, a pattern matches the wrong number of fields, or a variant with fields is written without its arguments (REFERENCE §4.5, §6.4).";
         NEEDLESS_ALIAS = "E0209", "needless_alias",
             "`as` renames an import only to resolve a name collision (REFERENCE §3, Q24).";
         DUPLICATE_NAME = "E0210", "duplicate_name",
@@ -174,7 +174,7 @@ pub mod codes {
         NON_EXHAUSTIVE_MATCH = "E0311", "non_exhaustive_match",
             "A `match` does not cover every value of its type; add the missing arms or `_` (REFERENCE §6.3).";
         CANNOT_INFER = "E0312", "cannot_infer",
-            "A value or call whose type arguments neither its expected type nor its fields or arguments give, such as `let x = None` or `var xs = []` (OPEN_QUESTIONS P5).";
+            "A value or call whose type arguments neither its expected type nor its fields or arguments give, such as `let x = None` or `var xs = []`, or a closure parameter whose type neither its annotation, the expected type nor its body gives (OPEN_QUESTIONS P5).";
         DUPLICATE_IMPLEMENTATION = "E0313", "duplicate_implementation",
             "A type implements an interface twice, by two `impl` blocks or by an `impl` and `derives` (REFERENCE §4.9).";
         IMPL_MISMATCH = "E0314", "impl_mismatch",
@@ -189,6 +189,8 @@ pub mod codes {
             "A `let` or `for` pattern that may not match its value, such as `let Some(x) = o` or one with a literal; use `match`, `is` or an `else` form (REFERENCE §6.4, §6.6).";
         ABANDON_NOT_RESOURCE = "E0319", "abandon_not_resource",
             "An `impl Abandon` for a type that isn't a resource, which has nothing to abandon (REFERENCE §10).";
+        METHOD_VALUE = "E0320", "method_value",
+            "A method or associated function named without a call, as in `x.len` or `Counter.fresh`. Neither is a function value, so it is called with its arguments, and a closure can wrap it, as in `|| x.len()` (OPEN_QUESTIONS P5).";
 
         // E0412, E0414, E0601 and E0602 are reserved for later phases: the §F
         // goldens already expect them.
@@ -201,7 +203,7 @@ pub mod codes {
         CHECK_FALLS_THROUGH = "E0415", "check_falls_through",
             "The `else` of a `check` must not finish, so it has type `Never`, as `fail` and a block that returns, breaks or continues do (REFERENCE §8.4).";
         USE_AFTER_MOVE = "E0501", "use_after_move",
-            "A unique or resource value, or an owned value of a type parameter without `Copy`, is used after it moved, also on a path where it may have moved, as after a branch or in a loop (REFERENCE §4.8, §5.1).";
+            "A unique or resource value, or an owned value of a type parameter without `Copy`, is used after it moved, also by a closure that captures it or a call of such a closure, and also on a path where it may have moved, as after a branch or in a loop (REFERENCE §4.8, §5.1).";
         LENT_RESOURCE_CONSUMED = "E0502", "lent_resource_consumed",
             "A borrowed or `inout` resource, or a part of one, cannot be consumed: passed to `take`, used by a `take self` method, bound to a new name, returned, stored or consumed by a loop (REFERENCE §10).";
         NOT_COPYABLE = "E0503", "not_copyable",
@@ -209,13 +211,15 @@ pub mod codes {
         LENT_VALUE_MOVED = "E0504", "lent_value_moved",
             "A borrowed or `inout` value of a unique type, or a part of one, is moved: bound to a new name, assigned, returned, stored in a value, passed to `take`, consumed by `for … in take`, or by a `take self` method or `with` (REFERENCE §5.1, §5.2). An arm's scrutinee and what its pattern binds are lent to the arm's guard, and a record's fields to its refinements, so moving them there is the same mistake (OPEN_QUESTIONS P5).";
         OVERLAPPING_ACCESS = "E0505", "overlapping_access",
-            "Two accesses to one variable overlap in a call while one of them is `inout`, such as `swap(a: &x, b: &x)`, or a unique value is moved or changed while a call, its own index or a guard has it lent (REFERENCE §5.3).";
+            "Two accesses to one variable overlap in a call while one of them is `inout`, such as `swap(a: &x, b: &x)` or a closure argument that captures `x` beside `&x`, or a value is moved or changed while a call, its own index or a guard has it lent, as a unique argument or a local that a closure argument or the called function value captures (REFERENCE §5.3; OPEN_QUESTIONS P5).";
         INOUT_MARKER_MISMATCH = "E0506", "inout_marker_mismatch",
             "An argument for an `inout` parameter without `&`, or `&` on an argument whose parameter isn't `inout` (REFERENCE §5.2, H5).";
         RESOURCE_NOT_CONSUMED = "E0507", "resource_not_consumed",
             "A resource the scope owns is neither consumed nor transferred on a path to a normal exit: the end of its block, `return`, `break` or `continue` (REFERENCE §10).";
         RESOURCE_DISCARDED = "E0508", "resource_discarded",
             "A resource is overwritten or discarded: assigned over, or produced by an expression that nothing consumes (REFERENCE §10).";
+        FUNCTION_VALUE_ESCAPES = "E0509", "function_value_escapes",
+            "A function value is put where it could outlive what it captures, such as a field, a result, an error, an element, a type argument, an assignment to a `var`, or the value of a block, branch or arm that declares a local it captures (REFERENCE §6.7; OPEN_QUESTIONS P5).";
         EFFECTS_CALL_IN_OBSERVES = "E0601", "effects_call_in_observes",
             "An operation that needs only `observes` permissions calls an `effects` operation (REFERENCE §9.2).";
         REACH_NOT_ADMITTED = "E0602", "reach_not_admitted",

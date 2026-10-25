@@ -3,8 +3,7 @@
 // Generic records and `impl` blocks, implementations for generic types such as
 // `Option[Int]`, a hand-written `Ord` or `Hash`, `cmp`, interface functions
 // without `self`, generic interface methods, generic interfaces such as `Index[Int]`, tag
-// parameters, `Self` in expressions and patterns, and functions used as values, such as
-// `id::[Int]` without a call, come later. So do implementations for `Never` and for
+// parameters, and `Self` in expressions and patterns come later. So do implementations for `Never` and for
 // capability types such as `Out`,
 // capability interfaces in an `impl`, a constraint or a call, and calls of the methods of
 // `Index` and the operator interfaces. Uses of what they declare aren't reported
@@ -140,8 +139,6 @@ fn calls(c: Counter, o: Option[Int], p: Pair) -> Int {
     let e = c.close() + o.size() + p.swap() + Counter.fresh().n + c.size()
     let f = c < c
     let g = c.n.cmp(2)                              // <- E0901
-    let h = id::[Int]                               // <- E0901
-    let k = c.size::[Int]                           // <- E0901
     let i = c.get(i: 0) + first(x: c) + scaled(x: 1) + id(x: 2)
     let j = c.empty() or c.zeroed()
     return e

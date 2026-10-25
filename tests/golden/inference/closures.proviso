@@ -1,0 +1,149 @@
+// phase: 2.9
+// A closure's parameter types may come from a generic call's other arguments, and its
+// result and error types become type arguments of the call. The order of the arguments
+// doesn't change the result. The arguments that aren't closures go first, then each
+// closure whose parameter types are written or known, until none is left (OPEN_QUESTIONS
+// P5). A closure that an `if` or `match` gives waits as one does, and calling a function
+// value leaves the parts of its type open. A body that always leaves gives `Never`, however
+// it leaves (Q33). Each group is one call and its rewrites with the parameters in another
+// order. `small` is an
+// `Int8`, so a closure that gave its own type, or a literal's default, would show as an
+// overflow or a mismatch.
+use std.io { IoError }
+
+enum Stop derives(Show) {
+    Halt
+}
+
+fn apply_to[T, R](x: T, f: fn(T) -> R) -> R {
+    return f(x)
+}
+
+fn apply_from[T, R](f: fn(T) -> R, x: T) -> R {
+    return f(x)
+}
+
+fn chain[A, B, C](f: fn(A) -> B, g: fn(B) -> C, x: A) -> C {
+    return g(f(x))
+}
+
+fn chain_back[A, B, C](g: fn(B) -> C, f: fn(A) -> B, x: A) -> C {
+    return g(f(x))
+}
+
+fn chain_first[A, B, C](x: A, g: fn(B) -> C, f: fn(A) -> B) -> C {
+    return g(f(x))
+}
+
+fn both[T: Show](show: fn(T) -> Text, make: fn() -> T) -> Text {
+    return show(make())
+}
+
+fn both_back[T: Show](make: fn() -> T, show: fn(T) -> Text) -> Text {
+    return show(make())
+}
+
+fn run_or[T: Copy, E](f: fn() -> T fails E, fallback: T) -> T {
+    return f() else fallback
+}
+
+fn run_or_back[T: Copy, E](fallback: T, f: fn() -> T fails E) -> T {
+    return f() else fallback
+}
+
+fn first_of[T, R](f: fn(T) -> R, g: fn(T) -> R) -> Text {
+    return "first"
+}
+
+fn on_identity[T: Copy](f: fn(fn(T) -> T) -> T) -> T {
+    return f(|t| t)
+}
+
+fn stop() -> Never {
+    loop {}
+}
+
+fn half(x: Int8) -> Int8 fails Stop {
+    if x % 2 == 1 {
+        fail Stop.Halt
+    }
+    return x / 2
+}
+
+fn small() -> Int8 {
+    return 100
+}
+
+fn applied() -> Text {
+    let a = apply_to(x: small(), f: |n| n + 20)
+    let b = apply_from(f: |n| n + 20, x: small())
+    let c = apply_to(x: small(), f: |n| f"{n}")
+    let d = apply_from(f: |n| f"{n}", x: small())
+    return f"{a} {b} {c} {d}"
+}
+
+fn chained() -> Text {
+    let a = chain(f: |n| n + 1, g: |m| m + 20, x: small())
+    let b = chain_back(g: |m| m + 20, f: |n| n + 1, x: small())
+    let c = chain_first(x: small(), g: |m| m + 20, f: |n| n + 1)
+    let d = chain(f: |n| f"{n}", g: |t| f"<{t}>", x: small())
+    let e = chain_back(g: |t| f"<{t}>", f: |n| f"{n}", x: small())
+    return f"{a} {b} {c} {d} {e}"
+}
+
+fn made() -> Text {
+    let a = both(show: |t| f"{t + 20}", make: || small())
+    let b = both_back(make: || small(), show: |t| f"{t + 20}")
+    return f"{a} {b}"
+}
+
+fn failing() -> Text {
+    let a = run_or(f: || try half(small()), fallback: 0)
+    let b = run_or_back(fallback: 0, f: || try half(small()))
+    let c = run_or(f: || try half(small() + 1), fallback: 1)
+    let d = run_or_back(fallback: 1, f: || try half(small() + 1))
+    let e = run_or(f: || small(), fallback: 0)
+    return f"{a} {b} {c} {d} {e}"
+}
+
+fn wrapped(flag: Bool) -> Text {
+    let a = apply_to(x: small(), f: if flag { |n| n + 20 } else { |n| n })
+    let b = apply_from(f: if flag { |n| n + 20 } else { |n| n }, x: small())
+    let c = apply_from(f: match flag {
+        true => |n| n + 20,
+        false => |n| n,
+    }, x: small())
+    let d = first_of(f: |n| n.byte_len(), g: |t: Text| 1)
+    let e = first_of(f: |t: Text| 1, g: |n| n.byte_len())
+    let g = on_identity(f: |h| h(small()) + 20)
+    let h = apply_from(f: if flag { |t| t.byte_len() } else { |t| 0 }, x: "four")
+    let i = apply_from(f: match flag {
+        true => |t| t.byte_len(),
+        false => |t| 0,
+    }, x: "four")
+    return f"{a} {b} {c} {d} {e} {g} {h} {i}"
+}
+
+fn never_called(flag: Bool) -> Int {
+    if flag {
+        return apply_from(f: |n: Int8| unreachable, x: small())
+    }
+    return apply_to(x: small(), f: |n| {
+        loop {}
+    })
+}
+
+fn expected() -> Text {
+    let f: fn(Int8) -> Int8 = |n| n + 20
+    let g: fn(Int8) -> Text = |n| f"{n + 20}"
+    return f"{f(small())} {g(small())}"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(applied())
+    try sys.stdout.write_line(chained())
+    try sys.stdout.write_line(made())
+    try sys.stdout.write_line(failing())
+    try sys.stdout.write_line(wrapped(flag: true))
+    try sys.stdout.write_line(expected())
+}

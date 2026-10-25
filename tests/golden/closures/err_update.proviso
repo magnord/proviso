@@ -1,0 +1,38 @@
+// phase: 2.9
+// expect-error: E0206
+// expect-error: E0301
+// expect-error: E0305
+// expect-error: E0507
+// `update` labels both its arguments, changes its receiver, and takes a closure of type
+// `fn(take T) -> T` (STD.md). The closure owns the element it takes, so a resource element
+// must be consumed or returned on every path (REFERENCE §10 rule 2).
+use std.pool { Pool, Handle }
+
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+fn wrong(pool: inout Pool[Int], h: Handle[Int], lent: Pool[Int]) {
+    let a = pool.update(handle: h, change: 1)       // <- E0301
+    let b = pool.update(handle: h, change: |x: Text| 1)  // <- E0301
+    let c = pool.update(handle: h, change: |x| "t") // <- E0301
+    let d = pool.update(h, |x| x)                   // <- E0206
+    let e = lent.update(handle: h, change: |x| x)   // <- E0305
+}
+
+fn resources(probes: inout Pool[Probe], h: Handle[Probe]) {
+    let a = probes.update(handle: h, change: |p| p)
+    let b = probes.update(handle: h, change: |p| Probe(name: p.name))  // <- E0507
+    let c = probes.update(handle: h, change: |p| {
+        p.close()
+        Probe(name: "new")
+    })
+}

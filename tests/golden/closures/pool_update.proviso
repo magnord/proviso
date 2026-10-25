@@ -1,0 +1,101 @@
+// phase: 2.9
+// `pool.update(handle: h, change: f)` takes the element out, passes it to `change`, and
+// puts the result back under the same handle, so `h` and other handles stay valid. It
+// returns `false` without calling `change` when the handle is stale or from another pool
+// (STD.md). `change` takes the element, so a unique or resource element moves through it,
+// and it may capture locals, the pool's handles among them (REFERENCE §5.5, §6.7).
+use std.io { IoError }
+use std.pool { Pool, Handle }
+
+record Person derives(Show) {
+    name: Text
+    age: Int
+}
+
+unique record Counter {
+    n: Int
+}
+
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+fn renamed(p: take Probe, name: Text) -> Probe {
+    p.close()
+    return Probe(name: name)
+}
+
+fn copied() -> Text {
+    var people: Pool[Person] = Pool.new()
+    let h = people.insert(Person(name: "ada", age: 36))
+    let changed = people.update(handle: h, change: |x| x.with(age: x.age + 1))
+    let gone = people.insert(Person(name: "bob", age: 1))
+    let removed = people.remove(gone) else Person(name: "", age: 0)
+    let stale = people.update(handle: gone, change: |x| unreachable)
+    var other: Pool[Person] = Pool.new()
+    let foreign = other.update(handle: h, change: |x| unreachable)
+    return f"{changed} {people[h].show()} {stale} {foreign} {people.len()}"
+}
+
+fn uniques() -> Text {
+    var counters: Pool[Counter] = Pool.new()
+    let h = counters.insert(Counter(n: 1))
+    let k = counters.insert(Counter(n: 2))
+    let step = 5
+    let a = counters.update(handle: h, change: |c| Counter(n: c.n + step))
+    let b = counters.update(handle: k, change: |c| {
+        if c.n > 1 {
+            return c.with(n: c.n * 10)
+        }
+        c
+    })
+    let same = h == h
+    return f"{a} {b} {counters[h].n} {counters[k].n} {same}"
+}
+
+enum Done {
+    Named(name: Text)
+}
+
+// Nothing consumes an owned pool of resources yet (OPEN_QUESTIONS §G), so this one ends
+// by failing, which abandons it.
+fn resources() fails Done {
+    var probes: Pool[Probe] = Pool.new()
+    let h = probes.insert(Probe(name: "a"))
+    let ok = probes.update(handle: h, change: |p| renamed(p: p, name: "b"))
+    fail Done.Named(name: f"{ok} {probes[h].name}")
+}
+
+fn resource_names() -> Text {
+    match attempt resources() {
+        Ok(_) => return "none"
+        Err(Done.Named(name: name)) => return name
+    }
+}
+
+fn through(pool: inout Pool[Int], h: Handle[Int]) -> Bool {
+    return pool.update(handle: h, change: |x| x + 1)
+}
+
+fn generic() -> Text {
+    var pool: Pool[Int] = Pool.new()
+    let h = pool.insert(1)
+    let a = through(pool: &pool, h: h)
+    let b = through(pool: &pool, h: h)
+    return f"{a} {b} {pool[h]}"
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try sys.stdout.write_line(copied())
+    try sys.stdout.write_line(uniques())
+    try sys.stdout.write_line(resource_names())
+    try sys.stdout.write_line(generic())
+}

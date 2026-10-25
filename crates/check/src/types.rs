@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use proviso_syntax::ast::ParamMode;
+
 use crate::decls::{AdtId, IfaceId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -103,6 +105,9 @@ pub enum Ty {
     IoError,
     /// A capability interface type such as `Out`. Copies of its values share state (REFERENCE §9.6).
     Cap(Arc<CapTy>),
+    /// A function type: the modes of its parameters, and its parts, `[result, error,
+    /// parameters…]`, where the error of one that can't fail is `Never` (REFERENCE §9.4).
+    Fn(Arc<[ParamMode]>, Arc<[Ty]>),
     /// The type parameter at this index of the generic declaration whose fields mention it,
     /// such as `T` in the prelude's `Option[T]`.
     Param(u32),
@@ -132,6 +137,37 @@ impl Ty {
         if args.contains(&Ty::Error) { Ty::Error } else { Ty::Adt(id, args.into()) }
     }
 
+    /// The function type with these parameters, result and error. A part that has an error
+    /// makes the whole type one, as [`Ty::applied`] does.
+    pub fn func(modes: Vec<ParamMode>, params: Vec<Ty>, ret: Ty, fails: Ty) -> Ty {
+        let mut parts = vec![ret, fails];
+        parts.extend(params);
+        Ty::func_parts(modes.into(), parts)
+    }
+
+    fn func_parts(modes: Arc<[ParamMode]>, parts: Vec<Ty>) -> Ty {
+        if parts.contains(&Ty::Error) { Ty::Error } else { Ty::Fn(modes, parts.into()) }
+    }
+
+    /// The types a compound type is built from: a record's or enum's type arguments, or a
+    /// function type's parts. `None` for a type without any.
+    pub fn parts(&self) -> Option<&Arc<[Ty]>> {
+        match self {
+            Ty::Adt(_, args) if !args.is_empty() => Some(args),
+            Ty::Fn(_, parts) => Some(parts),
+            _ => None,
+        }
+    }
+
+    /// The type built as this one is, from `parts` in place of its own [`Ty::parts`].
+    pub fn with_parts(&self, parts: Vec<Ty>) -> Ty {
+        match self {
+            Ty::Adt(id, _) => Ty::applied(*id, parts),
+            Ty::Fn(modes, _) => Ty::func_parts(modes.clone(), parts),
+            ty => ty.clone(),
+        }
+    }
+
     pub fn option(value: Ty) -> Ty {
         Ty::applied(AdtId::OPTION, vec![value])
     }
@@ -144,7 +180,7 @@ impl Ty {
     pub fn subst(&self, args: &[Ty]) -> Ty {
         match self {
             Ty::Param(i) => args[*i as usize].clone(),
-            Ty::Adt(id, inner) if !inner.is_empty() => Ty::applied(*id, inner.iter().map(|t| t.subst(args)).collect()),
+            ty if let Some(parts) = ty.parts() => ty.with_parts(parts.iter().map(|t| t.subst(args)).collect()),
             ty => ty.clone(),
         }
     }
@@ -163,6 +199,14 @@ impl Ty {
 
     pub fn out() -> Ty {
         Ty::Cap(Arc::new(CapTy { iface: IfaceId::OUT }))
+    }
+
+    /// A function type's result, error and parameters.
+    pub fn fn_parts(&self) -> Option<(&[ParamMode], &Ty, &Ty, &[Ty])> {
+        match self {
+            Ty::Fn(modes, parts) => Some((modes, &parts[0], &parts[1], &parts[2..])),
+            _ => None,
+        }
     }
 
     pub fn is_numeric(&self) -> bool {
