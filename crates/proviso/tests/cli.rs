@@ -431,8 +431,8 @@ fn deep_types_are_too_deep_once() {
         (
             format!(
                 "{deep}fn f() -> Int {{\n    let s = {}1{}\n    return 1\n}}\n",
-                "deep(x: ".repeat(150),
-                ")".repeat(150)
+                "deep(x: ".repeat(300),
+                ")".repeat(300)
             ),
             65,
             6,

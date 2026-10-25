@@ -5289,12 +5289,8 @@ impl Checker<'_> {
         // The type the call is expected to have gives what it can first, so a mismatch is
         // reported at the argument (OPEN_QUESTIONS P5). A `Never` in it is known only in part,
         // and the arguments may widen it.
-        // An open variable has nothing to give, and its argument binds it after the call. A
-        // generic call nested in another's argument would chain their types first, which
-        // the depth check could see only through every variable (issue #17).
         if targs.is_none()
             && let Some(expected) = expected.filter(|t| !t.is_unknown())
-            && !matches!(self.vars.resolve(expected), Ty::Var(v) if self.vars.open(v).is_some_and(|o| o.kind == Kind::Any))
         {
             self.vars.subsume(expected, &ret.subst(&tvars));
         }
