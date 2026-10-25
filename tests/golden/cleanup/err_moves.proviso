@@ -1,6 +1,7 @@
 // phase: 2
 // expect-error: E0201
 // expect-error: E0301
+// expect-error: E0303
 // expect-error: E0320
 // expect-error: E0507
 // expect-error: E0508
@@ -9,10 +10,11 @@
 // may get one later (issue #46). A call of a function gives a value of its result type
 // whatever its arguments are, so an error in an argument doesn't hide the resource it
 // gives, whether it is bound, discarded, matched, tested or assigned over a place that
-// holds one (issue #46). An error at the callee or in a construction does. A method used
-// as a value, as in `p.close`, was meant to be called, so its receiver isn't reported as
-// left over, inside a closure or outside one, and nor is a field it is read from (issue
-// #50).
+// holds one (issue #46). An error at the callee or in a construction does, and so does a
+// value given where it doesn't fit. A method used as a value, as in `p.close`, was meant to
+// be called, so its receiver isn't reported as left over, inside a closure or outside one,
+// and nor is a field it is read from or a value it is made on (issue #50). A misspelled
+// field is read, not called, so the leak of its base is still reported.
 
 resource record Probe {
     name: Text
@@ -79,6 +81,19 @@ fn mistyped_assigned() {
     q.close()
 }
 
+fn takes_int(n: Int) {}
+
+impl Probe {
+    fn add(self, n: Int) -> Int {
+        return n
+    }
+}
+
+fn mismatched_argument(p: Probe) {
+    takes_int(n: open(name: "a"))                   // <- E0301
+    let n = p.add(n: open(name: "b"))               // <- E0301
+}
+
 fn unknown_callee() {
     let p = nosuch(name: 5)                         // <- E0201
     let s = Spare(probe: Some(nosuch))              // <- E0201
@@ -100,4 +115,13 @@ fn method_value_closure() {
 fn method_value_field(pair: take Pair) {
     let c = pair.left.close                         // <- E0320
     pair.right.close()
+}
+
+fn method_value_temp() {
+    let c = open(name: "a").close                   // <- E0320
+}
+
+fn misspelled_field() {
+    let p = open(name: "a")                         // <- E0507
+    let n = p.nme                                   // <- E0303
 }

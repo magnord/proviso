@@ -350,6 +350,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         consumed: HashSet::new(),
         rejected: HashSet::new(),
         mismatched: HashSet::new(),
+        method_values: HashSet::new(),
         errors: 0,
         inner_errors: 0,
         tail_copying: false,
@@ -699,6 +700,9 @@ struct Checker<'a> {
     /// The branches whose type didn't match the others', and the `if`, `match` and `else`
     /// forms they are in, which give no type (REFERENCE §15.1).
     mismatched: HashSet<ExprId>,
+    /// The fields rejected as methods named as values, as in `p.close`, which the move pass
+    /// treats as rejected calls of them (REFERENCE §15.1).
+    method_values: HashSet<ExprId>,
     /// How many errors were reported, and how many of them inside the parts of the
     /// expression being checked.
     errors: usize,
@@ -2393,6 +2397,7 @@ impl Checker<'_> {
         moves::Found {
             consumed: std::mem::take(&mut self.consumed),
             rejected: std::mem::take(&mut self.rejected),
+            method_values: std::mem::take(&mut self.method_values),
             errors,
         }
     }
@@ -6768,6 +6773,7 @@ impl Checker<'_> {
                     "`{text}` is a method, which is called with its arguments; it isn't a function value, but a closure can wrap a call of it, as in `|| x.{text}()`"
                 );
                 self.error(codes::METHOD_VALUE, name.span, message);
+                self.method_values.insert(e);
                 Ty::Error
             }
             (ty, _) => {

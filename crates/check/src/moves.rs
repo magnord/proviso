@@ -49,6 +49,8 @@ pub(crate) struct Found {
     pub consumed: HashSet<ExprId>,
     /// The expressions an error was reported at, not at one of their parts.
     pub rejected: HashSet<ExprId>,
+    /// The fields rejected as methods named as values.
+    pub method_values: HashSet<ExprId>,
     /// Where the checker reported errors in the body, which the resources reported here must
     /// not depend on (REFERENCE §15.1).
     pub errors: Vec<Span>,
@@ -98,6 +100,7 @@ pub(crate) fn check(
         bounds,
         consumed: &found.consumed,
         rejected: &found.rejected,
+        method_values: &found.method_values,
         checked: &found.errors,
         state: Some(State::default()),
         loops: Vec::new(),
@@ -427,6 +430,8 @@ struct Walk<'a> {
     /// The expressions the checker rejected, which move nothing and lend nothing, so that
     /// nothing is reported that depends on them (REFERENCE §15.1).
     rejected: &'a HashSet<ExprId>,
+    /// See [`Found::method_values`].
+    method_values: &'a HashSet<ExprId>,
     /// See [`Found::errors`].
     checked: &'a [Span],
     /// What may have moved here, or `None` where the code is unreachable.
@@ -517,11 +522,13 @@ impl Walk<'_> {
 
     /// Whether what `e` gives is unknown, since the checker rejected it or reported an error
     /// inside it. A call of a function gives a value of its result type whatever its
-    /// arguments are, so only an error at the call makes that unknown (issue #46).
+    /// arguments are, so only an error at the call makes that unknown (issue #46), such as
+    /// its value not fitting where it is given.
     fn gives_unknown(&self, e: ExprId) -> bool {
         match self.m.exprs[e].kind {
             ExprKind::Call { callee, .. } if matches!(self.p.res(callee), Some(Res::Fn(_))) => {
-                self.rejected.contains(&e)
+                let span = self.span(e);
+                self.rejected.contains(&e) || self.checked.contains(&span)
             }
             _ => self.tainted(e),
         }
@@ -1723,13 +1730,12 @@ impl Walk<'_> {
             }
             ExprKind::Field { base, .. } => {
                 self.expr(*base);
-                if !matches!(self.p.res(e), Some(Res::Ctor(..))) {
-                    self.borrowed_temp(*base);
-                }
-                // A rejected method value, as in `p.close`, was meant to be called, which may
-                // have consumed its receiver, as a rejected call may (REFERENCE §15.1).
-                if self.rejected.contains(&e) {
+                // A method value, as in `p.close`, was meant to be called, which may have
+                // consumed its receiver, as a rejected call may (REFERENCE §15.1).
+                if self.method_values.contains(&e) {
                     self.rejected_receiver(*base);
+                } else if !matches!(self.p.res(e), Some(Res::Ctor(..))) {
+                    self.borrowed_temp(*base);
                 }
             }
             ExprKind::Index { base, index } => {
