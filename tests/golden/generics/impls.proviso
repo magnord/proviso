@@ -53,7 +53,7 @@ impl[T] Tree[T] {
     fn size(self) -> Int {
         return match self {
             Leaf => 0
-            Node(left, _, right) => left.size() + 1 + right.size()
+            Node(left, value: _, right) => left.size() + 1 + right.size()
         }
     }
 }

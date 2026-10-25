@@ -45,15 +45,15 @@ fn arms(t: Tree[Int], e: Either[Int, Text], v: Either[Int, Void], w: Either[Box[
         _ => 1
     }
     let g = match t {                               // <- E0311
-        Node(_, Node(_, 1, _), _) => 1
-        Node(_, Leaf, _) => 2
+        Node(left: Node(value: 1, ..), ..) => 1
+        Node(left: Leaf, ..) => 2
         Leaf => 3
     }
     let h = match Box(item: e) {
         Box(item: Left(n)) => n
-        Box(item: Right(s)) => s.len()
+        Box(item: Right(s)) => s.byte_len()
     }
-    let i = match Box(item: Box(item: 2.5)) {
+    let i = match Box(item: Box(item: 2)) {
         Box(item: Box(item: "x")) => 1              // <- E0301
         _ => 2
     }

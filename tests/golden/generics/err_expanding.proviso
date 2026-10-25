@@ -59,7 +59,7 @@ fn calls(n: Nested[Int], g: Grow[Int], p: Ping[Text], s: Swap[Int, Text], u: Use
         Stop => 2
     }
     let c = match s {
-        S(S(End(a, b))) => a + b.len()
+        S(S(End(a: x, b: y))) => x + y.byte_len()
         _ => 0
     }
     return a + b + c + u.w.wrapped.first.first.wrapped.first.second

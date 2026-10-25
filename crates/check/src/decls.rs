@@ -112,8 +112,9 @@ pub struct IfaceMethod {
     pub fails: Option<Ty>,
 }
 
-/// The type an `impl` is for, told apart as its values tell it at run time. Phase 2
-/// implements interfaces only for types without type arguments, so this names one.
+/// The type an `impl` is for, told apart as its values tell it at run time: by its name,
+/// whatever its type arguments are. A type has at most one `impl` of an interface, so the
+/// name is enough (OPEN_QUESTIONS §G, P5).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ImplKey {
     Int(IntTy),
@@ -136,7 +137,7 @@ impl ImplKey {
             Ty::Text => ImplKey::Text,
             Ty::Unit => ImplKey::Unit,
             Ty::IoError => ImplKey::IoError,
-            Ty::Adt(id, args) if args.is_empty() => ImplKey::Adt(*id),
+            Ty::Adt(id, _) => ImplKey::Adt(*id),
             _ => return None,
         })
     }
@@ -146,6 +147,19 @@ impl ImplKey {
 /// one the block lacks or declares differently.
 pub struct ImplDef {
     pub methods: Vec<Option<usize>>,
+    /// The types it applies to: its target, where the block's type parameter `i` is
+    /// `Ty::Param(i)`, as in `Box[Param(0)]` for `impl[T: Show] Show for Box[T]`.
+    pub target: Ty,
+    /// The constraints of each of the block's type parameters, which the type arguments
+    /// that match them must meet.
+    pub bounds: Vec<Vec<IfaceId>>,
+}
+
+impl ImplDef {
+    /// The `impl` of a type without type parameters of its own.
+    pub fn plain(methods: Vec<Option<usize>>, target: Ty) -> ImplDef {
+        ImplDef { methods, target, bounds: Vec::new() }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -192,6 +206,13 @@ pub struct AdtDef {
     pub kind: AdtKind,
     /// The number of type parameters. Fields refer to them as [`Ty::Param`].
     pub params: usize,
+    /// Whether a value holds values of each type parameter, at any depth of its fields. A
+    /// handle doesn't hold its element, so `Handle[T]` holds no `T`, and nor does a record
+    /// whose only `T` is in a handle. Only held type arguments decide a type's kind and the
+    /// interfaces it derives (REFERENCE §5.1; OPEN_QUESTIONS P5).
+    pub held: Vec<bool>,
+    /// A value has reach whatever the type arguments are, as `System` does (REFERENCE §9.4).
+    pub reach: bool,
     /// Its variants are written without the enum's name, and their one field without a label:
     /// `Some(3)` and `Err(e)` (REFERENCE §3, STD.md).
     pub bare_variants: bool,
@@ -243,6 +264,8 @@ impl AdtDef {
             name: name.into(),
             kind,
             params: 0,
+            held: Vec::new(),
+            reach: false,
             bare_variants: false,
             variants: Vec::new(),
             derives: Vec::new(),
@@ -262,6 +285,7 @@ impl AdtDef {
         let fields = (0..n).map(|i| FieldDef { name: i.to_string().into(), ty: Ty::Param(i as u32) }).collect();
         let mut def = AdtDef::record(&name, fields);
         def.params = n;
+        def.held = vec![true; n];
         def.tuple = true;
         def.derives = vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW, IfaceId::HASH];
         def
@@ -271,6 +295,7 @@ impl AdtDef {
     fn native(name: &str, params: usize, derives: Vec<IfaceId>) -> AdtDef {
         let mut def = AdtDef::new(name, AdtKind::Native);
         def.params = params;
+        def.held = vec![true; params];
         def.derives = derives;
         def
     }
@@ -366,6 +391,76 @@ pub struct Pred {
 /// An argument list [`Decls::is_resource`] has answered for, kept alive with the answer.
 type Known = (Arc<[Ty]>, bool);
 
+/// The answers of a walk for the type argument lists it has seen: by the type's id, the
+/// interface asked about and the list's address.
+type Memo = HashMap<(u32, u32, usize), bool>;
+
+/// What a value of a type is (REFERENCE §5.1, §9.4).
+#[derive(Clone, Copy, Default)]
+struct Kinds {
+    unique: bool,
+    resource: bool,
+    reach: bool,
+}
+
+impl Kinds {
+    fn or(self, other: Kinds) -> Kinds {
+        Kinds {
+            unique: self.unique || other.unique,
+            resource: self.resource || other.resource,
+            reach: self.reach || other.reach,
+        }
+    }
+}
+
+/// Whether `ty` is a type that `pattern` describes, where `Ty::Param(i)` stands for any type,
+/// the same one at each place, which `binds[i]` records (REFERENCE §4.8). `Never`, which is a
+/// subtype of every type, matches anything, and so do an open variable and an unknown type,
+/// which could be anything.
+pub fn matches_target(pattern: &Ty, ty: &Ty, binds: &mut [Option<Ty>]) -> bool {
+    match (pattern, ty) {
+        (_, Ty::Never | Ty::Var(_) | Ty::Error) => true,
+        (Ty::Param(i), ty) => match &binds[*i as usize] {
+            Some(bound) => {
+                let agree = compatible(bound, ty, &mut HashSet::new());
+                if agree && *bound == Ty::Never {
+                    binds[*i as usize] = Some(ty.clone());
+                }
+                agree
+            }
+            None => {
+                binds[*i as usize] = Some(ty.clone());
+                true
+            }
+        },
+        (Ty::Adt(a, pargs), Ty::Adt(b, targs)) => {
+            a == b && pargs.len() == targs.len() && pargs.iter().zip(targs.iter()).all(|(p, t)| matches_target(p, t, binds))
+        }
+        (pattern, ty) => pattern == ty,
+    }
+}
+
+/// Whether `a` and `b` are the same type, where `Never`, an open variable or an unknown type
+/// on either side agrees with anything. `seen` holds the pairs of argument lists already
+/// found to agree, by address, so types that share parts cost each pair once.
+fn compatible(a: &Ty, b: &Ty, seen: &mut HashSet<(usize, usize)>) -> bool {
+    match (a, b) {
+        (Ty::Never | Ty::Var(_) | Ty::Error, _) | (_, Ty::Never | Ty::Var(_) | Ty::Error) => true,
+        (Ty::Adt(x, xs), Ty::Adt(y, ys)) => {
+            let key = (Arc::as_ptr(xs) as *const Ty as usize, Arc::as_ptr(ys) as *const Ty as usize);
+            x == y
+                && xs.len() == ys.len()
+                && (key.0 == key.1
+                    || seen.contains(&key)
+                    || (xs.iter().zip(ys.iter()).all(|(x, y)| compatible(x, y, seen)) && seen.insert(key)))
+        }
+        (Ty::Fn(xm, xs), Ty::Fn(ym, ys)) => {
+            xm == ym && xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| compatible(x, y, seen))
+        }
+        (a, b) => a == b,
+    }
+}
+
 pub struct Decls {
     adts: Vec<AdtDef>,
     ifaces: Vec<IfaceDef>,
@@ -383,17 +478,19 @@ pub struct Decls {
     /// The argument lists [`Decls::is_resource`] has answered for, by address, so a deep type
     /// such as a list of lists costs each level once over the whole program. Each entry keeps
     /// its list alive, so the address isn't reused.
-    resource_args: Mutex<HashMap<usize, Known>>,
+    resource_args: Mutex<HashMap<(u32, usize), Known>>,
 }
 
 impl Default for Decls {
     /// The prelude, with each declaration at the id its constant names.
     fn default() -> Decls {
-        let system = AdtDef::record("System", vec![FieldDef { name: "stdout".into(), ty: Ty::out() }]);
+        let mut system = AdtDef::record("System", vec![FieldDef { name: "stdout".into(), ty: Ty::out() }]);
+        system.reach = true;
         // As STD.md declares them, so `Some` comes before `None`.
         let generic = |name: &str, params: usize, variants: [(&str, Option<(&str, u32)>); 2]| {
             let mut def = AdtDef::enumeration(name);
             def.params = params;
+            def.held = vec![true; params];
             def.bare_variants = true;
             def.derives = vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW, IfaceId::HASH];
             for (variant, field) in variants {
@@ -441,7 +538,8 @@ impl Default for Decls {
         // whatever its element type (STD.md, REFERENCE §5.5).
         let mut pool = AdtDef::native("Pool", 1, Vec::new());
         pool.unique = true;
-        let handle = AdtDef::native("Handle", 1, vec![IfaceId::EQ, IfaceId::HASH]);
+        let mut handle = AdtDef::native("Handle", 1, vec![IfaceId::EQ, IfaceId::HASH]);
+        handle.held = vec![false];
         let adts = vec![system, option, result, parse_error, AdtDef::tuple(2), list, map, pool, handle];
         debug_assert_eq!(adts.len(), AdtId::BUILT_IN);
         let tuples = HashMap::from([(2, AdtId::PAIR)]);
@@ -609,20 +707,23 @@ impl Decls {
     /// Which records and enums have values: those with a variant whose fields all have types
     /// with values. An enum without variants has none, and so does a type that can only be
     /// built from itself. A type with a rejected variant is taken to have some, so that
-    /// nothing about it is reported (REFERENCE §15.1).
+    /// nothing about it is reported (REFERENCE §15.1). Whether a generic type has values
+    /// depends only on whether its type arguments do, so each generic type is asked once per
+    /// combination of those answers that a use needs (OPEN_QUESTIONS P5).
     pub fn inhabited(&self) -> Inhabited {
         let mut graph = Graph::default();
+        let mut instances = Instances::default();
         // Node `i` is record or enum `i`, which has values if one of its variants does.
         for _ in &self.adts {
             graph.node(false);
         }
         for (a, def) in self.adts.iter().enumerate() {
-            // A generic type's values depend on its arguments, so `has_values` asks per use.
+            // A generic type's node is one per combination of its type arguments' answers.
             if def.params > 0 {
                 continue;
             }
             for variant in &def.variants {
-                let fields = variant.fields.iter().map(|f| graph.requirement(self, &f.ty)).collect();
+                let fields = variant.fields.iter().map(|f| graph.requirement(self, &f.ty, &[], &mut instances)).collect();
                 let variant = graph.all(fields);
                 graph.implies(variant, a);
             }
@@ -630,25 +731,36 @@ impl Decls {
                 graph.fire(a);
             }
         }
+        graph.expand(self, &mut instances);
         graph.run();
-        let adts = graph.nodes[..self.adts.len()].iter().map(|n| n.fired).collect();
-        Inhabited { adts, applied: RefCell::default() }
+        Inhabited { graph: RefCell::new((graph, instances)), applied: RefCell::default() }
+    }
+
+    /// The type arguments of a value of `id` that it holds (see [`AdtDef::held`]).
+    fn held_args<'t>(&'t self, id: AdtId, args: &'t [Ty]) -> impl Iterator<Item = &'t Ty> + 't {
+        let held = &self.adt(id).held;
+        args.iter().enumerate().filter(move |(i, _)| held.get(*i).copied().unwrap_or(true)).map(|(_, arg)| arg)
     }
 
     /// Whether `ty` implements `iface`: built in, derived (STD.md) or by an `impl`. Type
     /// parameter `i` implements the interfaces `params[i]` lists. An unknown type implements
     /// nothing, so callers decide whether it is worth reporting.
     pub fn implements(&self, ty: &Ty, iface: IfaceId, params: &[Vec<IfaceId>]) -> bool {
+        self.implements_in(ty, iface, params, &mut HashMap::new())
+    }
+
+    /// [`Decls::implements`], where `memo` holds the answers for the type argument lists
+    /// already asked about, by address, so a type that shares its parts, as `(t, t)` does,
+    /// costs each part once.
+    fn implements_in(&self, ty: &Ty, iface: IfaceId, params: &[Vec<IfaceId>], memo: &mut Memo) -> bool {
         if iface == IfaceId::COPY {
-            return self.copyable(ty, params, &mut Vec::new());
+            return self.copyable(ty, params, memo);
         }
         // Every resource type implements `Abandon`: a base resource by its `impl`, which
         // E0309 asks for, and an aggregate by abandoning what it holds (REFERENCE §10).
         if iface == IfaceId::ABANDON && self.is_resource(ty) {
             return true;
         }
-        let by_impl =
-            || ImplKey::of(ty).is_some_and(|key| self.impls.contains_key(&(iface, key)) || self.unknown.contains(&key));
         match ty {
             Ty::Param(i) => params.get(*i as usize).is_some_and(|bounds| bounds.contains(&iface)),
             // A rejected `impl` block may have given it this interface for any type arguments.
@@ -658,32 +770,68 @@ impl Decls {
             // A map's keys implement `Eq` and `Hash` wherever its type is checked (REFERENCE
             // §4.2), so only its values decide, and a rejected key type isn't reported again.
             Ty::Adt(AdtId::MAP, args) if matches!(iface, IfaceId::EQ | IfaceId::HASH) => {
-                args[1] == Ty::Never || self.implements(&args[1], iface, params)
+                args[1] == Ty::Never || self.implements_in(&args[1], iface, params, memo)
             }
-            // `Option` and `Result` implement what their type arguments do (STD.md). `Never` has
-            // no values, so it implements everything as an argument.
-            Ty::Adt(id, args) if self.adt(*id).derives.contains(&iface) => {
-                args.iter().all(|arg| *arg == Ty::Never || self.implements(arg, iface, params))
+            Ty::Adt(id, args) => {
+                let key = (id.0, iface.0, Arc::as_ptr(args) as *const Ty as usize);
+                if let Some(&known) = memo.get(&key) {
+                    return known;
+                }
+                // A derived interface holds when the type arguments the type holds implement
+                // it (STD.md; OPEN_QUESTIONS P5). `Never` has no values, so it implements
+                // everything as an argument.
+                let known = if self.adt(*id).derives.contains(&iface) {
+                    self.held_args(*id, args).all(|arg| *arg == Ty::Never || self.implements_in(arg, iface, params, memo))
+                } else {
+                    self.by_impl(ty, iface, params, memo)
+                };
+                memo.insert(key, known);
+                known
             }
-            Ty::Adt(id, _) => self.adt(*id).unknown_interfaces || by_impl(),
             // Text is ordered by code point (REFERENCE §12.3).
             Ty::Int(_) | Ty::Char | Ty::Text => {
-                matches!(iface, IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW | IfaceId::HASH) || by_impl()
+                matches!(iface, IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW | IfaceId::HASH)
+                    || self.by_impl(ty, iface, params, memo)
             }
             // `Float` has IEEE `==` built in, but no `Eq` (REFERENCE §12.2, Q22).
-            Ty::Float(_) => iface == IfaceId::SHOW || by_impl(),
-            Ty::Bool => matches!(iface, IfaceId::EQ | IfaceId::SHOW | IfaceId::HASH) || by_impl(),
-            Ty::Unit => matches!(iface, IfaceId::EQ | IfaceId::HASH) || by_impl(),
-            Ty::IoError => iface == IfaceId::SHOW || by_impl(),
+            Ty::Float(_) => iface == IfaceId::SHOW || self.by_impl(ty, iface, params, memo),
+            Ty::Bool => {
+                matches!(iface, IfaceId::EQ | IfaceId::SHOW | IfaceId::HASH) || self.by_impl(ty, iface, params, memo)
+            }
+            Ty::Unit => matches!(iface, IfaceId::EQ | IfaceId::HASH) || self.by_impl(ty, iface, params, memo),
+            Ty::IoError => iface == IfaceId::SHOW || self.by_impl(ty, iface, params, memo),
             // A function value implements nothing, so it isn't compared or shown (OPEN_QUESTIONS P5).
             Ty::Cap(_) | Ty::Fn(..) | Ty::Never | Ty::Error | Ty::Var(_) => false,
         }
     }
 
-    /// Whether values of `ty` move instead of being copied (REFERENCE §5.1): it is unique, or
-    /// holds a unique value, or is a type parameter that `params` doesn't give `Copy`, which
-    /// may stand for a unique type (§4.8). An aggregate takes the strongest kind of its
-    /// parts, so a generic one moves when one of its type arguments does.
+    /// Whether an `impl` of `iface` applies to `ty`: one for its name whose target matches
+    /// it, with type arguments that meet the block's constraints (REFERENCE §4.9). A
+    /// rejected `impl` block for it may have been one.
+    fn by_impl(&self, ty: &Ty, iface: IfaceId, params: &[Vec<IfaceId>], memo: &mut Memo) -> bool {
+        let Some(key) = ImplKey::of(ty) else { return false };
+        if self.unknown.contains(&key) {
+            return true;
+        }
+        let Some(def) = self.impls.get(&(iface, key)) else { return false };
+        let mut binds = vec![None; def.bounds.len()];
+        if !matches_target(&def.target, ty, &mut binds) {
+            return false;
+        }
+        binds.iter().zip(&def.bounds).all(|(bind, bounds)| match bind {
+            Some(arg) if *arg != Ty::Never => bounds.iter().all(|&b| self.implements_in(arg, b, params, memo)),
+            _ => true,
+        })
+    }
+
+    /// The `impl` of `iface` for `ty`'s name, whose target `ty` matches, with the type
+    /// arguments it gives the block's parameters, whatever they implement.
+    pub fn impl_for(&self, iface: IfaceId, ty: &Ty) -> Option<(&ImplDef, Vec<Option<Ty>>)> {
+        let def = self.impls.get(&(iface, ImplKey::of(ty)?))?;
+        let mut binds = vec![None; def.bounds.len()];
+        matches_target(&def.target, ty, &mut binds).then_some((def, binds))
+    }
+
     /// Whether `ty` moves only because a type parameter in it may lack `Copy`, so it would
     /// be copyable if each were `Copy` (REFERENCE §4.8).
     pub fn moves_by_param(&self, ty: &Ty, params: &[Vec<IfaceId>]) -> bool {
@@ -692,20 +840,19 @@ impl Decls {
         self.moves(ty, params) && !self.moves(ty, &copy)
     }
 
-    /// [`Decls::moves`], where `memo` holds what each argument list already walked gave, by
-    /// its address, so a walk over many types that share parts costs each part once. The
-    /// types must outlive `memo`.
-    pub fn moves_memo(&self, ty: &Ty, params: &[Vec<IfaceId>], memo: &mut HashMap<usize, bool>) -> bool {
+    /// [`Decls::moves`], where `memo` holds what each type argument list already walked gave,
+    /// by its type's id and its address, so a walk over many types that share parts costs
+    /// each part once. The types must outlive `memo`.
+    pub fn moves_memo(&self, ty: &Ty, params: &[Vec<IfaceId>], memo: &mut HashMap<(u32, usize), bool>) -> bool {
         match ty {
             Ty::Param(i) => !params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)),
             Ty::Adt(id, _) if self.adt(*id).unique => true,
-            Ty::Adt(AdtId::HANDLE, _) => false,
-            Ty::Adt(_, args) => {
-                let key = Arc::as_ptr(args) as *const Ty as usize;
+            Ty::Adt(id, args) if !args.is_empty() => {
+                let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
                 if let Some(&moves) = memo.get(&key) {
                     return moves;
                 }
-                let moves = args.iter().any(|arg| self.moves_memo(arg, params, memo));
+                let moves = self.held_args(*id, args).any(|arg| self.moves_memo(arg, params, memo));
                 memo.insert(key, moves);
                 moves
             }
@@ -713,42 +860,30 @@ impl Decls {
         }
     }
 
+    /// Whether values of `ty` move instead of being copied (REFERENCE §5.1): it is unique, or
+    /// holds a unique value, or is a type parameter that `params` doesn't give `Copy`, which
+    /// may stand for a unique type (§4.8). A generic type moves when it is declared unique,
+    /// holds a unique value whatever its type arguments are, or when a type argument it holds
+    /// moves.
     pub fn moves(&self, ty: &Ty, params: &[Vec<IfaceId>]) -> bool {
-        self.moves_in(ty, params, &mut HashSet::new())
-    }
-
-    /// [`Decls::moves`], where `seen` holds the addresses of the argument lists already found
-    /// not to move, so a type that shares a part, as `(t, t)` does, costs each part once.
-    fn moves_in(&self, ty: &Ty, params: &[Vec<IfaceId>], seen: &mut HashSet<usize>) -> bool {
-        match ty {
-            Ty::Param(i) => !params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)),
-            Ty::Adt(id, _) if self.adt(*id).unique => true,
-            Ty::Adt(AdtId::HANDLE, _) => false,
-            // A module's record or enum takes no type arguments, so `unique` says it all, and
-            // a generic prelude type mentions each of its type parameters in a field.
-            Ty::Adt(_, args) => {
-                seen.insert(Arc::as_ptr(args) as *const Ty as usize)
-                    && args.iter().any(|arg| self.moves_in(arg, params, seen))
-            }
-            _ => false,
-        }
+        self.moves_memo(ty, params, &mut HashMap::new())
     }
 
     /// Whether `ty` is a resource (REFERENCE §5.1): a base resource, or an aggregate that holds
-    /// one, such as `Option[File]` or `List[File]`. A type parameter isn't, since a resource
-    /// can't be a type argument of a generic function yet (OPEN_QUESTIONS P5).
+    /// one, such as `Option[File]`, `List[File]` or a generic record of one. A type parameter
+    /// isn't, since a resource can't be a type argument of a generic function yet
+    /// (OPEN_QUESTIONS P5).
     pub fn is_resource(&self, ty: &Ty) -> bool {
         match ty {
             _ if !self.any_resource => false,
             Ty::Adt(id, _) if self.adt(*id).resource => true,
-            Ty::Adt(AdtId::HANDLE, _) => false,
-            Ty::Adt(_, args) => {
-                let key = Arc::as_ptr(args) as *const Ty as usize;
+            Ty::Adt(id, args) if !args.is_empty() => {
+                let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
                 let cache = || self.resource_args.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some((_, known)) = cache().get(&key) {
                     return *known;
                 }
-                let known = args.iter().any(|arg| self.is_resource(arg));
+                let known = self.held_args(*id, args).any(|arg| self.is_resource(arg));
                 cache().insert(key, (args.clone(), known));
                 known
             }
@@ -760,95 +895,121 @@ impl Decls {
     /// as `System` and a record with an `Out` field do. A handle refers to its pool's element
     /// without holding it.
     pub fn has_reach(&self, ty: &Ty) -> bool {
-        self.reach_in(ty, &mut HashSet::new())
+        self.reach_in(ty, &mut HashMap::new())
     }
 
-    fn reach_in(&self, ty: &Ty, seen: &mut HashSet<(AdtId, usize)>) -> bool {
+    fn reach_in(&self, ty: &Ty, memo: &mut HashMap<(u32, usize), bool>) -> bool {
         match ty {
             Ty::Cap(_) => true,
-            Ty::Adt(AdtId::HANDLE, _) => false,
-            Ty::Adt(id, args) => {
-                seen.insert((*id, Arc::as_ptr(args) as *const Ty as usize))
-                    && (args.iter().any(|arg| self.reach_in(arg, seen))
-                        || (self.adt(*id).variants.iter()).any(|v| v.fields.iter().any(|f| self.reach_in(&f.ty, seen))))
+            Ty::Adt(id, _) if self.adt(*id).reach => true,
+            Ty::Adt(id, args) if !args.is_empty() => {
+                let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
+                if let Some(&reach) = memo.get(&key) {
+                    return reach;
+                }
+                let reach = self.held_args(*id, args).any(|arg| self.reach_in(arg, memo));
+                memo.insert(key, reach);
+                reach
             }
             _ => false,
         }
     }
 
-    /// Marks each record and enum that holds a unique value as unique itself (REFERENCE
-    /// §5.1), once every field's type is known. The module's types take no type arguments,
-    /// so a field's kind doesn't depend on a use.
+    /// Settles which type parameters each record and enum holds, and which are unique,
+    /// resources or have reach whatever their type arguments are (REFERENCE §5.1), once every
+    /// field's type is known. A field's type may hold a type declared later, so each type is
+    /// settled again whenever one it mentions changes, until nothing does.
     pub fn settle_kinds(&mut self) {
-        // Which records and enums hold each one, and those that are unique or resources
-        // already: those declared so, and those with a field that moves without them, such as
-        // a pool.
+        let module = AdtId::BUILT_IN..self.adts.len();
+        // Which records and enums mention each one in a field.
         let mut held_by: HashMap<usize, Vec<usize>> = HashMap::new();
-        let (mut unique, mut resources) = (Vec::new(), Vec::new());
-        for a in AdtId::BUILT_IN..self.adts.len() {
-            let fields = self.adts[a].variants.iter().flat_map(|v| &v.fields);
+        for a in module.clone() {
             let mut parts = Vec::new();
-            for field in fields.clone() {
+            for field in self.adts[a].variants.iter().flat_map(|v| &v.fields) {
                 mentioned(&field.ty, &mut parts);
             }
+            parts.sort_unstable();
+            parts.dedup();
             for part in parts {
                 held_by.entry(part).or_default().push(a);
             }
+            let def = &mut self.adts[a];
+            if def.held.len() != def.params {
+                def.held = vec![false; def.params];
+            }
+            def.resource |= def.resource_base;
+        }
+        self.any_resource = module.clone().any(|a| self.adts[a].resource_base);
+        let mut queue: Vec<usize> = module.clone().rev().collect();
+        let mut queued = vec![false; self.adts.len()];
+        for &a in &queue {
+            queued[a] = true;
+        }
+        while let Some(a) = queue.pop() {
+            queued[a] = false;
             let def = &self.adts[a];
-            if def.unique || fields.clone().any(|f| self.moves(&f.ty, &[])) {
-                unique.push(a);
+            let mut held = def.held.clone();
+            let mut kind = Kinds { unique: def.unique, resource: def.resource, reach: def.reach };
+            for field in def.variants.iter().flat_map(|v| &v.fields) {
+                kind = kind.or(self.base_kind(&field.ty, &mut held));
             }
-            if def.resource_base {
-                resources.push(a);
+            let def = &mut self.adts[a];
+            if held == def.held && kind.unique == def.unique && kind.resource == def.resource && kind.reach == def.reach {
+                continue;
             }
-        }
-        self.any_resource = !resources.is_empty();
-        for a in &resources {
-            self.adts[*a].resource = true;
-        }
-        while let Some(a) = resources.pop() {
+            def.held = held;
+            (def.unique, def.resource, def.reach) = (kind.unique || kind.resource, kind.resource, kind.reach);
             for &holder in held_by.get(&a).map_or(&[][..], Vec::as_slice) {
-                if !self.adts[holder].resource {
-                    self.adts[holder].resource = true;
-                    resources.push(holder);
-                    unique.push(holder);
+                if !queued[holder] {
+                    queued[holder] = true;
+                    queue.push(holder);
                 }
             }
         }
-        while let Some(a) = unique.pop() {
-            self.adts[a].unique = true;
-            for &holder in held_by.get(&a).map_or(&[][..], Vec::as_slice) {
-                if !self.adts[holder].unique {
-                    self.adts[holder].unique = true;
-                    unique.push(holder);
+        self.resource_args.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    /// What a value of `ty`, written in a field, is whatever the type parameters are, from
+    /// what is settled so far. Marks each type parameter it holds in `held`.
+    fn base_kind(&self, ty: &Ty, held: &mut [bool]) -> Kinds {
+        match ty {
+            Ty::Param(i) => {
+                if let Some(slot) = held.get_mut(*i as usize) {
+                    *slot = true;
                 }
+                Kinds::default()
             }
+            Ty::Cap(_) => Kinds { reach: true, ..Kinds::default() },
+            Ty::Adt(id, args) => {
+                let def = self.adt(*id);
+                let mut kind = Kinds { unique: def.unique, resource: def.resource, reach: def.reach };
+                for (i, arg) in args.iter().enumerate() {
+                    if def.held.get(i).copied().unwrap_or(false) {
+                        kind = kind.or(self.base_kind(arg, held));
+                    }
+                }
+                kind
+            }
+            _ => Kinds::default(),
         }
     }
 
     /// Whether `ty` is `Copy`: copyable with no reach, which a capability has (REFERENCE
-    /// §5.1). A unique type isn't copyable. A record or enum is when its fields are; one
-    /// already being asked about in `seen` is taken to be, since only its other fields can
-    /// decide.
-    fn copyable(&self, ty: &Ty, params: &[Vec<IfaceId>], seen: &mut Vec<AdtId>) -> bool {
+    /// §5.1). A unique type isn't copyable, and a generic one is when the type arguments it
+    /// holds are.
+    fn copyable(&self, ty: &Ty, params: &[Vec<IfaceId>], memo: &mut Memo) -> bool {
         match ty {
             Ty::Cap(_) => false,
             Ty::Param(i) => params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)),
-            Ty::Adt(id, _) if self.adt(*id).unique => false,
-            // A handle holds no element (STD.md).
-            Ty::Adt(AdtId::HANDLE, _) => true,
-            // A collection holds values of its type arguments (REFERENCE §5.1).
-            Ty::Adt(id, args) if self.adt(*id).is_native() => args.iter().all(|arg| self.copyable(arg, params, seen)),
-            Ty::Adt(id, args) => {
-                if args.is_empty() && seen.contains(id) {
-                    return true;
+            Ty::Adt(id, _) if self.adt(*id).unique || self.adt(*id).reach => false,
+            Ty::Adt(id, args) if !args.is_empty() => {
+                let key = (id.0, IfaceId::COPY.0, Arc::as_ptr(args) as *const Ty as usize);
+                if let Some(&known) = memo.get(&key) {
+                    return known;
                 }
-                seen.push(*id);
-                let def = self.adt(*id);
-                let copyable = (0..def.variants.len())
-                    .all(|v| def.field_types(VariantIdx::new(v), args).iter().all(|f| self.copyable(f, params, seen)));
-                seen.pop();
-                copyable
+                let known = self.held_args(*id, args).all(|arg| self.copyable(arg, params, memo));
+                memo.insert(key, known);
+                known
             }
             _ => true,
         }
@@ -970,7 +1131,10 @@ fn mentioned(ty: &Ty, found: &mut Vec<usize>) {
 
 /// Which types have values (see [`Decls::inhabited`]).
 pub struct Inhabited {
-    adts: Vec<bool>,
+    /// The conditions, settled so far, with the generic types asked about. A use may ask
+    /// about a generic type with type arguments nothing asked about before, which extends
+    /// them. Those it adds depend on nothing settled before, so the answers settled stay.
+    graph: RefCell<(Graph, Instances)>,
     /// Whether each record or enum with type arguments asked about so far has values, by its
     /// id and the address of its argument list. A type never changes, so the answer stays,
     /// and the entry holds the list so its address isn't reused. A type that shares a part,
@@ -991,17 +1155,28 @@ impl Inhabited {
                 if let Some((_, answer)) = self.applied.borrow().get(&key) {
                     return *answer;
                 }
-                let def = decls.adt(*id);
-                let answer = (0..def.variants.len()).any(|v| {
-                    def.field_types(VariantIdx::new(v), args).iter().all(|field| self.has_values(decls, field))
-                });
+                let bits: Box<[bool]> = args.iter().map(|arg| self.has_values(decls, arg)).collect();
+                let mut graph = self.graph.borrow_mut();
+                let (graph, instances) = &mut *graph;
+                let node = graph.instance(*id, bits, instances);
+                graph.expand(decls, instances);
+                graph.run();
+                let answer = graph.nodes[node].fired;
                 self.applied.borrow_mut().insert(key, (args.clone(), answer));
                 answer
             }
-            Ty::Adt(id, _) => self.adts[id.index()],
+            Ty::Adt(id, _) => self.graph.borrow().0.nodes[id.index()].fired,
             _ => true,
         }
     }
+}
+
+/// The generic types the [`Graph`] has a node for: each by its id and whether each of its
+/// type arguments has values, with those whose variants aren't in the graph yet.
+#[derive(Default)]
+struct Instances {
+    nodes: HashMap<(AdtId, Box<[bool]>), usize>,
+    pending: Vec<(AdtId, Box<[bool]>, usize)>,
 }
 
 /// Whether a type has values, as a condition on records and enums whose answer isn't known
@@ -1044,10 +1219,21 @@ impl Graph {
         }
     }
 
+    /// `part` as it is now: a node that has fired is met.
+    fn settled(&self, part: Requirement) -> Requirement {
+        match part {
+            Requirement::Node(node) if self.nodes[node].fired => Requirement::Met,
+            part => part,
+        }
+    }
+
     /// Makes `parent` fire when `part` is met.
     fn implies(&mut self, part: Requirement, parent: usize) {
-        match part {
-            Requirement::Met => self.fire(parent),
+        match self.settled(part) {
+            Requirement::Met => match &mut self.nodes[parent].missing {
+                Some(_) => {}
+                None => self.fire(parent),
+            },
             Requirement::Unmet => {}
             Requirement::Node(node) => {
                 self.nodes[node].parents.push(parent);
@@ -1063,12 +1249,14 @@ impl Graph {
             if all { (Requirement::Unmet, Requirement::Met) } else { (Requirement::Met, Requirement::Unmet) };
         let mut nodes = Vec::new();
         for part in parts {
-            match part {
+            match self.settled(part) {
                 Requirement::Node(node) => nodes.push(node),
                 part if part == decisive => return decisive,
                 _ => {}
             }
         }
+        nodes.sort_unstable();
+        nodes.dedup();
         match nodes.as_slice() {
             [] => neutral,
             [node] => Requirement::Node(*node),
@@ -1087,25 +1275,81 @@ impl Graph {
         self.combine(true, parts)
     }
 
-    /// When `ty` has values. A generic type has values when one of its variants does, for
-    /// its arguments, so `Option[Never]` has `None` and `Result[Never, Never]` has none.
-    fn requirement(&mut self, decls: &Decls, ty: &Ty) -> Requirement {
+    /// When `ty`, written where type parameter `i` has values when `params[i]` says so, has
+    /// values. A generic type has values when one of its variants does for its arguments, so
+    /// `Option[Never]` has `None` and `Result[Never, Never]` has none. That depends only on
+    /// which of its type arguments have values, so a type argument whose answer isn't known
+    /// yet, such as a record of the module, splits the condition by its answer.
+    fn requirement(&mut self, decls: &Decls, ty: &Ty, params: &[bool], instances: &mut Instances) -> Requirement {
         match ty {
             Ty::Never => Requirement::Unmet,
-            Ty::Adt(id, _) if decls.adt(*id).is_native() => Requirement::Met,
+            Ty::Param(i) => match params.get(*i as usize) {
+                Some(false) => Requirement::Unmet,
+                _ => Requirement::Met,
+            },
+            Ty::Adt(id, _) if decls.adt(*id).is_native() || decls.adt(*id).unknown_variants => Requirement::Met,
             Ty::Adt(id, args) if !args.is_empty() => {
-                let def = decls.adt(*id);
-                let variants = (0..def.variants.len())
-                    .map(|v| {
-                        let fields = def.field_types(VariantIdx::new(v), args);
-                        let parts = fields.iter().map(|field| self.requirement(decls, field)).collect();
-                        self.all(parts)
+                let parts: Vec<Requirement> =
+                    args.iter().map(|arg| self.requirement(decls, arg, params, instances)).collect();
+                let mut open: Vec<usize> = (parts.iter())
+                    .filter_map(|part| match part {
+                        Requirement::Node(node) => Some(*node),
+                        _ => None,
                     })
                     .collect();
-                self.combine(false, variants)
+                open.sort_unstable();
+                open.dedup();
+                // Each answer of the open arguments is a case. Many open arguments would be
+                // too many cases, so the type is taken to have values, which asks for an arm
+                // rather than leaving one out.
+                if open.len() > 8 {
+                    return Requirement::Met;
+                }
+                let cases = (0..1usize << open.len())
+                    .map(|case| {
+                        let holds = |node: usize| case & (1 << open.iter().position(|&n| n == node).unwrap_or(0)) != 0;
+                        let bits = (parts.iter())
+                            .map(|part| match part {
+                                Requirement::Met => true,
+                                Requirement::Unmet => false,
+                                Requirement::Node(node) => holds(*node),
+                            })
+                            .collect();
+                        let mut conditions: Vec<Requirement> =
+                            open.iter().filter(|&&node| holds(node)).map(|&node| Requirement::Node(node)).collect();
+                        conditions.push(Requirement::Node(self.instance(*id, bits, instances)));
+                        self.all(conditions)
+                    })
+                    .collect();
+                self.combine(false, cases)
             }
             Ty::Adt(id, _) => Requirement::Node(id.index()),
             _ => Requirement::Met,
+        }
+    }
+
+    /// The node of generic type `id` whose type arguments have values as `bits` says.
+    fn instance(&mut self, id: AdtId, bits: Box<[bool]>, instances: &mut Instances) -> usize {
+        if let Some(&node) = instances.nodes.get(&(id, bits.clone())) {
+            return node;
+        }
+        let node = self.node(false);
+        instances.nodes.insert((id, bits.clone()), node);
+        instances.pending.push((id, bits, node));
+        node
+    }
+
+    /// Adds the variants of each generic type's node that lacks them, and of those they
+    /// need in turn.
+    fn expand(&mut self, decls: &Decls, instances: &mut Instances) {
+        while let Some((id, bits, node)) = instances.pending.pop() {
+            let def = decls.adt(id);
+            for variant in &def.variants {
+                let fields =
+                    variant.fields.iter().map(|f| self.requirement(decls, &f.ty, &bits, instances)).collect();
+                let variant = self.all(fields);
+                self.implies(variant, node);
+            }
         }
     }
 

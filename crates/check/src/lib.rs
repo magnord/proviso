@@ -345,7 +345,9 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     checker.adt_names();
     checker.iface_names();
     checker.unknown_impl_targets();
+    checker.adt_generics();
     checker.adt_fields();
+    checker.expanding_types();
     checker.p.decls.settle_kinds();
     checker.inhabited = Some(checker.p.decls.inhabited());
     checker.iface_methods();
@@ -394,6 +396,8 @@ struct AdtSrc<'a> {
     id: AdtId,
     name: Ident,
     vis: Visibility,
+    /// Its type parameters, as declared (REFERENCE §4.8).
+    generics: &'a [GenericParam],
     derives: &'a [Ident],
     /// The variants the declaration keeps, in order: a record's one, named like it, or the
     /// first of each name in an enum.
@@ -1109,7 +1113,7 @@ impl Checker<'_> {
                         span,
                         format!(
                             "the {noun} of this `{name}` can't be inferred; give the binding a type, such as `{}`",
-                            example_type(&name)
+                            self.example_of(adt)
                         ),
                     )
                 }
@@ -1431,9 +1435,11 @@ impl Checker<'_> {
     fn adt_names(&mut self) {
         let m = self.m;
         for item in &m.items {
-            let (name, derives, refinement, kind) = match &item.kind {
-                ItemKind::Record(decl) => (decl.name, &decl.derives[..], decl.refinement, AdtKind::Record),
-                ItemKind::Enum(decl) => (decl.name, &decl.derives[..], None, AdtKind::Enum),
+            let (name, generics, derives, refinement, kind) = match &item.kind {
+                ItemKind::Record(decl) => {
+                    (decl.name, &decl.generics[..], &decl.derives[..], decl.refinement, AdtKind::Record)
+                }
+                ItemKind::Enum(decl) => (decl.name, &decl.generics[..], &decl.derives[..], None, AdtKind::Enum),
                 _ => continue,
             };
             let text = m.text(name.sym);
@@ -1471,8 +1477,9 @@ impl Checker<'_> {
             // A resource moves as a unique value does, and must also be consumed (§5.1, §10).
             def.resource_base = matches!(&item.kind, ItemKind::Record(decl) if decl.resource);
             def.unique = def.resource_base || matches!(&item.kind, ItemKind::Record(decl) if decl.unique);
+            def.params = generics.len();
             let id = self.p.decls.push(def);
-            self.adts.push(AdtSrc { id, name, vis: item.vis, derives, variants, refinement });
+            self.adts.push(AdtSrc { id, name, vis: item.vis, generics, derives, variants, refinement });
             // A rejected name is reported once. Its uses, and what it collides with, are not.
             let cased = self.pascal_case(name, "type");
             if !cased || prelude_type(text) {
@@ -1494,12 +1501,47 @@ impl Checker<'_> {
         }
     }
 
+    /// Checks the type parameters of each generic record and enum, once every type has a
+    /// name: PascalCase, distinct, and unlike any type's name (REFERENCE §2, §3, H4). A type
+    /// whose parameters are rejected may have meant any of them, so its uses aren't checked
+    /// (§15.1).
+    fn adt_generics(&mut self) {
+        let m = self.m;
+        for k in 0..self.adts.len() {
+            let (name, generics) = (self.adts[k].name, self.adts[k].generics);
+            let mut seen: Vec<Symbol> = Vec::new();
+            let mut rejected = false;
+            for param in generics {
+                let text = m.text(param.name.sym);
+                let cased = self.pascal_case(param.name, "type parameter");
+                if seen.contains(&param.name.sym) {
+                    if cased {
+                        self.error(codes::DUPLICATE_NAME, param.name.span, format!("type parameter `{text}` is declared twice"));
+                    }
+                    rejected = true;
+                } else if cased && self.names_type(param.name.sym) {
+                    let message = format!("type parameter `{text}` would shadow the type `{text}` (H4)");
+                    self.error(codes::SHADOWING, param.name.span, message);
+                    rejected = true;
+                }
+                seen.push(param.name.sym);
+            }
+            if rejected {
+                self.poisoned.insert(name.sym);
+            }
+        }
+    }
+
     /// Resolves the fields of every variant once every record and enum has a name, so a
-    /// field's type may be declared later in the file (OPEN_QUESTIONS P5).
+    /// field's type may be declared later in the file (OPEN_QUESTIONS P5). A generic type's
+    /// fields name its type parameters, which they write as `Ty::Param(i)`.
     fn adt_fields(&mut self) {
         let m = self.m;
         for k in 0..self.adts.len() {
             let (id, name, vis) = (self.adts[k].id, self.adts[k].name, self.adts[k].vis);
+            let generics = self.adts[k].generics;
+            self.generic_scope = generics.iter().enumerate().map(|(i, g)| (g.name.sym, Some(i as u32))).collect();
+            self.param_names = generics.iter().map(|g| m.text(g.name.sym).into()).collect();
             for v in 0..self.adts[k].variants.len() {
                 let decls = self.adts[k].variants[v].1;
                 let mut fields: Vec<FieldDef> = Vec::new();
@@ -1525,6 +1567,96 @@ impl Checker<'_> {
                 let variant = &mut self.p.decls.adt_mut(id).variants[v];
                 variant.locals = fields.len();
                 variant.fields = fields;
+            }
+        }
+        self.generic_scope.clear();
+        self.param_names.clear();
+    }
+
+    /// Reports each generic type that holds itself, directly or through other generic types,
+    /// with a type argument that grows, such as `Nested[List[T]]` in `enum Nested[T]`
+    /// (E0904). Each of its instances would need a bigger one, so they would never end
+    /// (REFERENCE §4.8). This is the expanding-cycle rule of ECMA-335 II.9.2. A node is a
+    /// type parameter of one of the module's generic types. A field's type argument gives an
+    /// edge from each type parameter in it to the parameter it fills, which grows unless the
+    /// argument is that type parameter itself. A cycle with a growing edge is the error,
+    /// reported once at the first field whose type argument grows. Its types are taken to
+    /// have every variant's values, so nothing that depends on them is reported (§15.1).
+    fn expanding_types(&mut self) {
+        let m = self.m;
+        let mut first = vec![usize::MAX; self.adts.len()];
+        let mut index: HashMap<AdtId, usize> = HashMap::new();
+        let mut count = 0;
+        for (k, adt) in self.adts.iter().enumerate() {
+            let params = self.p.decls.adt(adt.id).params;
+            if params > 0 {
+                first[k] = count;
+                index.insert(adt.id, k);
+                count += params;
+            }
+        }
+        if count == 0 {
+            return;
+        }
+        // Each edge's target, whether it grows, and where the field's type is written.
+        let mut edges: Vec<Vec<(usize, bool, Span)>> = vec![Vec::new(); count];
+        for (k, adt) in self.adts.iter().enumerate() {
+            if first[k] == usize::MAX {
+                continue;
+            }
+            let def = self.p.decls.adt(adt.id);
+            for (variant, (_, decls)) in def.variants.iter().zip(&adt.variants) {
+                for (field, decl) in variant.fields.iter().zip(kept_fields(decls)) {
+                    let span = m.types[decl.ty].span;
+                    let mut stack = vec![&field.ty];
+                    while let Some(ty) = stack.pop() {
+                        let Ty::Adt(id, args) = ty else { continue };
+                        if let Some(&j) = index.get(id) {
+                            for (p, arg) in args.iter().enumerate() {
+                                let mut params = Vec::new();
+                                params_in(arg, &mut params);
+                                for i in params {
+                                    let grows = *arg != Ty::Param(i);
+                                    edges[first[k] + i as usize].push((first[j] + p, grows, span));
+                                }
+                            }
+                        }
+                        stack.extend(args.iter());
+                    }
+                }
+            }
+        }
+        let components = strongly_connected(&edges);
+        let owner = |node: usize| {
+            (0..self.adts.len()).rfind(|&k| first[k] != usize::MAX && first[k] <= node).expect("every node has a type")
+        };
+        let mut reports: Vec<(Span, Vec<usize>)> = Vec::new();
+        for component in components {
+            let growing = (component.iter())
+                .flat_map(|&node| edges[node].iter())
+                .filter(|(to, grows, _)| *grows && component.contains(to))
+                .map(|&(_, _, span)| span)
+                .min_by_key(|span| span.lo);
+            if let Some(span) = growing {
+                let mut types: Vec<usize> = component.iter().map(|&node| owner(node)).collect();
+                types.sort_unstable();
+                types.dedup();
+                reports.push((span, types));
+            }
+        }
+        reports.sort_by_key(|(span, _)| span.lo);
+        for (span, types) in reports {
+            let names: Vec<String> = types.iter().map(|&k| format!("`{}`", m.text(self.adts[k].name.sym))).collect();
+            let holds = match names.as_slice() {
+                [one] => format!("each time {one} holds itself"),
+                _ => format!("on each turn of the cycle of {}", names.join(" and ")),
+            };
+            let message = format!(
+                "this type argument grows {holds}, so its instances would never end; a generic type may hold itself only with its own type parameters (§4.8)"
+            );
+            self.error(codes::EXPANDING_TYPE, span, message);
+            for k in types {
+                self.p.decls.adt_mut(self.adts[k].id).unknown_variants = true;
             }
         }
     }
@@ -1769,10 +1901,14 @@ impl Checker<'_> {
             let adt = &self.adts[k];
             let def = self.p.decls.adt(adt.id);
             let mut missing = Vec::new();
+            self.param_names = adt.generics.iter().map(|g| m.text(g.name.sym).into()).collect();
             for &iface in &def.derives {
+                // A generic type derives it for the type arguments that implement it, so each
+                // type parameter is taken to (OPEN_QUESTIONS P5).
+                let params = vec![vec![iface]; def.params];
                 for (variant, (_, decls)) in def.variants.iter().zip(&adt.variants) {
                     for (field, field_decl) in variant.fields.iter().zip(kept_fields(decls)) {
-                        if !field.ty.is_unknown() && !self.p.decls.implements(&field.ty, iface, &[]) {
+                        if !field.ty.is_unknown() && !self.p.decls.implements(&field.ty, iface, &params) {
                             let message = format!(
                                 "field `{}` has type `{}`, which does not implement `{}`, so `{}` cannot derive it",
                                 field.name,
@@ -1789,17 +1925,24 @@ impl Checker<'_> {
                 self.error(codes::MISSING_IMPLEMENTATION, span, message);
             }
         }
+        self.param_names.clear();
     }
 
     /// Checks each refinement as a `Bool` in a scope of the fields it sees: its own field for
     /// a field's `where`, every field for a record's (OPEN_QUESTIONS P5).
     fn adt_predicates(&mut self) {
+        let m = self.m;
         for k in 0..self.adts.len() {
             let id = self.adts[k].id;
+            // A generic type's refinements see its type parameters, which implement nothing.
+            let generics = self.adts[k].generics;
+            self.generic_scope = generics.iter().enumerate().map(|(i, g)| (g.name.sym, Some(i as u32))).collect();
+            self.param_names = generics.iter().map(|g| m.text(g.name.sym).into()).collect();
             for v in 0..self.adts[k].variants.len() {
                 let kept = kept_fields(self.adts[k].variants[v].1);
                 let fields = &self.p.decls.adt(id).variants[v].fields;
                 let mut state = FnState::new(Ty::Unit, None);
+                state.bounds = vec![Vec::new(); generics.len()];
                 state.returns = false;
                 state.refinement = true;
                 state.params = fields.len();
@@ -1834,6 +1977,8 @@ impl Checker<'_> {
                 variant.read_fields = (0..variant.fields.len()).map(|i| read.contains(&LocalId(i as u32))).collect();
             }
         }
+        self.generic_scope.clear();
+        self.param_names.clear();
     }
 
     /// What the move pass needs to know of the body just checked, whose diagnostics begin at
@@ -2325,7 +2470,7 @@ impl Checker<'_> {
             );
             self.error(codes::IMPL_MISMATCH, header, message);
         }
-        self.p.decls.add_impl(iface, key, ImplDef { methods: fns });
+        self.p.decls.add_impl(iface, key, ImplDef::plain(fns, target.clone()));
     }
 
     /// Records an `impl` block for `target` that names an interface it can't implement.
@@ -2679,14 +2824,13 @@ impl Checker<'_> {
         if let Some(ty) = builtin_type(text) {
             return ty;
         }
-        if let Some(&id) = self.adt_names.get(&name.sym) {
-            return Ty::adt(id);
-        }
         if let Some(id) = self.generic_adt(name.sym) {
-            let def = self.p.decls.adt(id);
-            let message = format!("`{text}` takes {}, as in `{}`", type_args(def.params), example_type(&def.name));
+            let message = format!("`{text}` takes {}, as in `{}`", type_args(self.p.decls.adt(id).params), self.example_of(id));
             self.error(codes::UNKNOWN_TYPE, name.span, message);
             return Ty::Error;
+        }
+        if let Some(&id) = self.adt_names.get(&name.sym) {
+            return Ty::adt(id);
         }
         match self.imports.get(&name.sym) {
             Some(Import::Type(ty)) => return ty.clone(),
@@ -2710,12 +2854,23 @@ impl Checker<'_> {
         Ty::Error
     }
 
-    /// The generic type `sym` names, which a use gives type arguments: the prelude's, or one
-    /// imported from the standard library, such as `Pool`.
+    /// How a message writes generic type `id` with its type parameters, as in `Pair[A, B]`.
+    fn example_of(&self, id: AdtId) -> String {
+        match self.adts.iter().find(|adt| adt.id == id) {
+            Some(adt) => {
+                let params: Vec<&str> = adt.generics.iter().map(|g| self.m.text(g.name.sym)).collect();
+                format!("{}[{}]", self.m.text(adt.name.sym), params.join(", "))
+            }
+            None => example_type(&self.p.decls.adt(id).name).to_string(),
+        }
+    }
+
+    /// The generic type `sym` names, which a use gives type arguments: the module's, the
+    /// prelude's, or one imported from the standard library, such as `Pool`.
     fn generic_adt(&self, sym: Symbol) -> Option<AdtId> {
         let text = self.m.text(sym);
-        if self.adt_names.contains_key(&sym) {
-            return None;
+        if let Some(&id) = self.adt_names.get(&sym) {
+            return (self.p.decls.adt(id).params > 0).then_some(id);
         }
         match self.imports.get(&sym) {
             Some(Import::Type(Ty::Adt(id, args))) if args.is_empty() && self.p.decls.adt(*id).params > 0 => Some(*id),
@@ -4521,9 +4676,9 @@ impl Checker<'_> {
         if let ExprKind::Name(name) = m.exprs[callee].kind
             && !self.poisoned.contains(&name.sym)
             && self.lookup_local(name.sym).is_none()
-            && (bare_variant(m.text(name.sym)).is_some() || self.adt_named(name.sym).is_some())
+            && let Some(id) = bare_variant(m.text(name.sym)).or_else(|| self.adt_named(name.sym))
         {
-            self.no_targs(targs, m.text(name.sym), span);
+            self.ctor_targs(targs, id, m.text(name.sym), span);
         }
         if let ExprKind::Name(name) = m.exprs[callee].kind
             && self.lookup_local(name.sym).is_none()
@@ -4556,7 +4711,7 @@ impl Checker<'_> {
                 self.rejected_args(args);
                 return Ty::Error;
             }
-            return self.construct(callee, id, args, span);
+            return self.construct(callee, id, args, span, expected);
         }
         let callee_span = self.span(callee);
         match m.exprs[callee].kind {
@@ -4964,6 +5119,24 @@ impl Checker<'_> {
         self.error(codes::TYPE_ARGUMENT_COUNT, span, format!("`{what}` takes no type arguments"));
     }
 
+    /// Reports type arguments given to a constructor of `id`. A generic one takes them from
+    /// its fields and the expected type (OPEN_QUESTIONS P5).
+    fn ctor_targs(&mut self, targs: Option<&[TypeId]>, id: AdtId, what: &str, span: Span) {
+        if self.p.decls.adt(id).params == 0 {
+            return self.no_targs(targs, what, span);
+        }
+        let Some(targs) = targs else { return };
+        let m = self.m;
+        let span = match (targs.first(), targs.last()) {
+            (Some(&first), Some(&last)) => m.types[first].span.to(m.types[last].span),
+            _ => span,
+        };
+        let message = format!(
+            "`{what}` takes its type arguments from its fields and the type it is expected to have, not from `::[…]`; give the binding a type instead"
+        );
+        self.error(codes::TYPE_ARGUMENT_COUNT, span, message);
+    }
+
     /// A call of function `f`, a module's or a method. Its type arguments come from
     /// `targs`, or else from the type the call is expected to have and then from the
     /// arguments, and each must implement its parameter's constraints (REFERENCE §4.8;
@@ -5168,13 +5341,16 @@ impl Checker<'_> {
 
     /// A record's constructor takes its fields as parameters, so a construction follows the
     /// rules of a call (REFERENCE §4.4). It stores its arguments, so it copies them.
-    fn construct(&mut self, callee: ExprId, id: AdtId, args: &[Arg], span: Span) -> Ty {
+    /// A generic record takes its type arguments from its fields and the expected type
+    /// together, as a variant does (OPEN_QUESTIONS P5).
+    fn construct(&mut self, callee: ExprId, id: AdtId, args: &[Arg], span: Span, expected: Option<&Ty>) -> Ty {
         self.p.res.insert(callee, Res::Ctor(id, VariantIdx::RECORD));
         let def = self.p.decls.adt(id);
         let name = def.name.clone();
         let params: Vec<(Box<str>, Ty)> = def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-        self.generic_args(&name, &params, &[], args, span, Modes::Take);
-        Ty::adt(id)
+        let targs = self.variant_args(id, expected, span);
+        let counted = self.generic_args(&name, &params, &targs, args, span, Modes::Take);
+        self.variant_type(id, targs, expected, span, !counted)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5194,8 +5370,9 @@ impl Checker<'_> {
         if let Some(id) = self.enum_named(receiver)
             && (self.p.decls.adt(id).variant_named(name).is_some() || is_pascal(name))
         {
-            if self.p.decls.adt(id).variant_named(name).is_some() {
-                self.no_targs(targs, name, span);
+            if let Some((v, _)) = self.p.decls.adt(id).variant_named(name) {
+                let ctor = self.p.decls.ctor_name(id, v);
+                self.ctor_targs(targs, id, &ctor, span);
             }
             return self.construct_variant(e, id, method, args, span, expected);
         }
@@ -5265,7 +5442,7 @@ impl Checker<'_> {
                 self.consumed.insert(receiver);
                 self.element_taken(receiver, &receiver_ty);
             }
-            self.with_args(e, *id, args, span);
+            self.with_args(e, &receiver_ty, args, span);
             return receiver_ty;
         }
         // The `Text` methods of §12.3 that STD.md doesn't declare yet.
@@ -5652,10 +5829,10 @@ impl Checker<'_> {
 
     fn field(&mut self, e: ExprId, base_ty: &Ty, name: Ident) -> Ty {
         let text = self.m.text(name.sym);
-        if let Ty::Adt(id, _) = base_ty
+        if let Ty::Adt(id, args) = base_ty
             && let Some((i, field)) = self.p.decls.adt(*id).field(text)
         {
-            let ty = field.ty.clone();
+            let ty = field.ty.subst(args);
             self.p.res.insert(e, Res::Field(i));
             return ty;
         }
@@ -5687,11 +5864,15 @@ impl Checker<'_> {
     /// Checks the arguments of `with`. They label the fields they replace, at least one, once
     /// each and in declaration order, even on a one-field record (OPEN_QUESTIONS P5). One
     /// label problem is reported per call.
-    fn with_args(&mut self, e: ExprId, id: AdtId, args: &[Arg], span: Span) {
+    /// A generic record keeps its type arguments, so a field it replaces keeps its type.
+    fn with_args(&mut self, e: ExprId, record_ty: &Ty, args: &[Arg], span: Span) {
         let m = self.m;
+        let Ty::Adt(id, targs) = record_ty else { return };
+        let id = *id;
         let def = self.p.decls.adt(id);
         let record = def.name.clone();
-        let fields: Vec<(Box<str>, Ty)> = def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+        let fields: Vec<(Box<str>, Ty)> =
+            def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.subst(targs))).collect();
         if args.is_empty() {
             let message = format!("`with` names at least one field of `{record}` to replace");
             self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
@@ -7263,4 +7444,69 @@ fn is_snake(name: &str) -> bool {
 
 fn is_pascal(name: &str) -> bool {
     name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && name.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Pushes the index of each type parameter `ty` mentions to `found`, once each.
+fn params_in(ty: &Ty, found: &mut Vec<u32>) {
+    match ty {
+        Ty::Param(i) if !found.contains(i) => found.push(*i),
+        ty => {
+            for part in ty.parts().into_iter().flat_map(|parts| parts.iter()) {
+                params_in(part, found);
+            }
+        }
+    }
+}
+
+/// The strongly connected components of the graph whose node `i` has an edge to each
+/// target in `edges[i]`, by Tarjan's algorithm with an explicit stack, so a long chain of
+/// types can't overflow the native one.
+fn strongly_connected<E>(edges: &[Vec<(usize, bool, E)>]) -> Vec<Vec<usize>> {
+    let n = edges.len();
+    let (mut index, mut low, mut on_stack) = (vec![usize::MAX; n], vec![0; n], vec![false; n]);
+    let (mut next, mut stack, mut components) = (0, Vec::new(), Vec::new());
+    for root in 0..n {
+        if index[root] != usize::MAX {
+            continue;
+        }
+        // Each frame is a node and how many of its edges it has followed.
+        let mut frames = vec![(root, 0)];
+        index[root] = next;
+        low[root] = next;
+        next += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(&mut (node, ref mut edge)) = frames.last_mut() {
+            if let Some(&(to, ..)) = edges[node].get(*edge) {
+                *edge += 1;
+                if index[to] == usize::MAX {
+                    index[to] = next;
+                    low[to] = next;
+                    next += 1;
+                    stack.push(to);
+                    on_stack[to] = true;
+                    frames.push((to, 0));
+                } else if on_stack[to] {
+                    low[node] = low[node].min(index[to]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == index[node] {
+                let mut component = Vec::new();
+                while let Some(top) = stack.pop() {
+                    on_stack[top] = false;
+                    component.push(top);
+                    if top == node {
+                        break;
+                    }
+                }
+                components.push(component);
+            }
+        }
+    }
+    components
 }

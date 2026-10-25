@@ -24,7 +24,7 @@ fn single[T](value: take T) -> Tree[T] {
 fn size[T](t: Tree[T]) -> Int {
     return match t {
         Leaf => 0
-        Node(left, _, right) => size(t: left) + 1 + size(t: right)
+        Node(left, value: _, right) => size(t: left) + 1 + size(t: right)
     }
 }
 
@@ -72,7 +72,7 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(describe(e: Either.Right(Either.Right(true))))
     let deep: Tree[Tree[Either[Int, Bool]]] = single(value: single(value: Either.Left(1)))
     let n = match deep {
-        Node(_, Node(_, Left(v), _), _) => v + 0
+        Node(value: Node(value: Left(v), ..), ..) => v + 0
         _ => 0
     }
     try sys.stdout.write_line(f"{n} {deep is Node(value: Leaf, ..)}")

@@ -58,9 +58,9 @@ fn variants(small: Int8) -> Text {
     let t2 = Tree.Node(left: Tree.Node(left: Tree.Leaf, value: small, right: Tree.Leaf), value: 1, right: Tree.Leaf)
     let t3 = Tree.Node(left: Tree.Leaf, value: small, right: Tree.Leaf)
     let t4 = Tree.Node(left: Tree.Node(left: Tree.Leaf, value: 2, right: Tree.Leaf), value: small, right: Tree.Leaf)
-    let p1 = Pair(first: Tree.Leaf, second: t3)
-    let p2 = Pair(first: t3, second: Tree.Leaf)
-    return f"{tree8(t1)} {tree8(t2)} {tree8(p1.first)} {tree8(p2.second)} {t4 == t2}"
+    let p1 = Duo(a: Tree.Leaf, b: t3)
+    let p2 = Duo(a: t3, b: Tree.Leaf)
+    return f"{tree8(t1)} {tree8(t2)} {tree8(p1.a)} {tree8(p2.b)} {t4 == t2}"
 }
 
 fn meeting(c: Bool, small: Int8) -> Text {

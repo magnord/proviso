@@ -436,7 +436,7 @@ struct Walk<'a> {
     /// `attempt` that handles it, by that handler.
     handled: HashMap<ExprId, Option<State>>,
     /// What [`Walk::moves`] found for each argument list, by its address.
-    memo: RefCell<HashMap<usize, bool>>,
+    memo: RefCell<HashMap<(u32, usize), bool>>,
     /// What each loop reached when it was last walked.
     loop_cache: HashMap<ExprId, LoopWalk>,
     /// The locals each loop being walked has touched, innermost last.

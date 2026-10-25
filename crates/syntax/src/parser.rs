@@ -631,23 +631,27 @@ impl Parser<'_> {
             }
             self.bump();
         }
-        let decl = self.record_decl()?;
+        let decl = self.record_decl(kind == T::Keyword(Kw::Resource))?;
         Ok(RecordDecl { unique: kind == T::Keyword(Kw::Unique), resource: kind == T::Keyword(Kw::Resource), ..decl })
     }
 
-    fn record_decl(&mut self) -> PResult<RecordDecl> {
+    fn record_decl(&mut self, resource: bool) -> PResult<RecordDecl> {
         self.bump();
         let name = self.ident("a record name")?;
-        let decl = self.record_rest(name);
+        let decl = self.record_rest(name, resource);
         if decl.is_err() {
             self.m.poisoned.insert(name.sym);
         }
         decl
     }
 
-    fn record_rest(&mut self, name: Ident) -> PResult<RecordDecl> {
-        if self.at(T::LBracket) {
-            return self.not_implemented("generic records", Planned::Phase(2));
+    fn record_rest(&mut self, name: Ident, resource: bool) -> PResult<RecordDecl> {
+        let generics = self.type_generics()?;
+        // A generic resource's `impl Abandon` would be generic code that may drop a value of
+        // a type parameter, which waits for the answer generic functions do (OPEN_QUESTIONS §G).
+        if resource && !generics.is_empty() {
+            self.diags.not_implemented(name.span, "generic resource records", Planned::Unscheduled);
+            return Err(());
         }
         if self.at(T::Keyword(Kw::Uses)) {
             return self.not_implemented("the `uses` of a record", Planned::Phase(3));
@@ -679,7 +683,7 @@ impl Parser<'_> {
             }
         }
         let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
-        Ok(RecordDecl { name, unique: false, resource: false, derives, fields, refinement })
+        Ok(RecordDecl { name, generics, unique: false, resource: false, derives, fields, refinement })
     }
 
     /// `derives(Eq, Show)`, or nothing.
@@ -709,9 +713,7 @@ impl Parser<'_> {
     }
 
     fn enum_rest(&mut self, name: Ident) -> PResult<EnumDecl> {
-        if self.at(T::LBracket) {
-            return self.not_implemented("generic enums", Planned::Phase(2));
-        }
+        let generics = self.type_generics()?;
         let derives = self.derives()?;
         let open = self.expect(T::LBrace, "`{` and the enum's variants")?;
         let mut variants = Vec::new();
@@ -736,7 +738,7 @@ impl Parser<'_> {
                 break;
             }
         }
-        Ok(EnumDecl { name, derives, variants })
+        Ok(EnumDecl { name, generics, derives, variants })
     }
 
     /// `Circle(radius: Float)` or `Empty`.
@@ -801,14 +803,12 @@ impl Parser<'_> {
 
     fn impl_rest(&mut self) -> PResult<ImplDecl> {
         self.bump();
-        if self.at(T::LBracket) {
-            return self.not_implemented("generic `impl` blocks", Planned::Phase(2));
-        }
+        let generics = if self.at(T::LBracket) { self.generics()? } else { Vec::new() };
         let first = self.type_expr()?;
         let (iface, target) = if self.eat(T::Keyword(Kw::For)) {
             if let TypeExprKind::Applied { args: Some(_), .. } = self.m.types[first].kind {
                 let span = self.m.types[first].span;
-                self.diags.not_implemented(span, "generic interfaces", Planned::Phase(2));
+                self.diags.not_implemented(span, "generic interfaces", Planned::Unscheduled);
                 return Err(());
             }
             let TypeExprKind::Named(iface) = self.m.types[first].kind else {
@@ -820,28 +820,23 @@ impl Parser<'_> {
         } else {
             (None, first)
         };
-        if let TypeExprKind::Tuple(_) = self.m.types[target].kind {
-            let span = self.m.types[target].span;
-            self.diags.not_implemented(span, "implementations for tuple types", Planned::Phase(2));
-            return Err(());
-        }
         if let TypeExprKind::Fn { .. } = self.m.types[target].kind {
             let span = self.m.types[target].span;
             self.diags.not_implemented(span, "implementations for function types", Planned::Unscheduled);
             return Err(());
         }
-        if let TypeExprKind::Applied { args: Some(_), .. } = self.m.types[target].kind {
+        // An `impl` for every type, as `impl[T] Show for T`, would apply to types of other
+        // modules too (REFERENCE §4.9).
+        if let TypeExprKind::Named(name) = self.m.types[target].kind
+            && generics.iter().any(|g| g.name.sym == name.sym)
+        {
             let span = self.m.types[target].span;
-            self.diags.not_implemented(
-                span,
-                "implementations for generic types, such as `Option[Int]`,",
-                Planned::Phase(2),
-            );
+            self.diags.not_implemented(span, "implementations for every type, such as `impl[T] I for T`,", Planned::Unscheduled);
             return Err(());
         }
         let open = self.expect(T::LBrace, "`{` and the block's methods")?;
         let (methods, recovered) = self.members(&open, Self::method)?;
-        Ok(ImplDecl { iface, target, methods, recovered })
+        Ok(ImplDecl { generics, iface, target, methods, recovered })
     }
 
     /// The members of an `impl` block or interface after its `{`, and whether a syntax error
@@ -976,7 +971,7 @@ impl Parser<'_> {
 
     fn interface_rest(&mut self, name: Ident) -> PResult<InterfaceDecl> {
         if self.at(T::LBracket) {
-            return self.not_implemented("generic interfaces", Planned::Phase(2));
+            return self.not_implemented("generic interfaces", Planned::Unscheduled);
         }
         let open = self.expect(T::LBrace, "`{` and the interface's methods")?;
         let (methods, recovered) = self.members(&open, |p| {
@@ -988,6 +983,22 @@ impl Parser<'_> {
             p.fn_rest(name, FnKind::Signature)
         })?;
         Ok(InterfaceDecl { name, methods, recovered })
+    }
+
+    /// The type parameters of a record or enum, as in `record Pair[A, B]`, or none. A
+    /// constraint on one isn't scheduled, so constraints go on the `impl` blocks and functions
+    /// that need them (OPEN_QUESTIONS P5).
+    fn type_generics(&mut self) -> PResult<Vec<GenericParam>> {
+        if !self.at(T::LBracket) {
+            return Ok(Vec::new());
+        }
+        let generics = self.generics()?;
+        if let Some(param) = generics.iter().find(|g| !g.bounds.is_empty()) {
+            let span = param.name.span.to(param.bounds.last().map_or(param.name.span, |b| b.span));
+            self.diags.not_implemented(span, "constraints on a type's own type parameters", Planned::Unscheduled);
+            return Err(());
+        }
+        Ok(generics)
     }
 
     /// `[T: Ord + Copy, U]` after a function's name (REFERENCE §4.8).
@@ -1007,7 +1018,7 @@ impl Parser<'_> {
                     }
                     bounds.push(self.ident("an interface")?);
                     if self.at(T::LBracket) {
-                        return self.not_implemented("generic interfaces", Planned::Phase(2));
+                        return self.not_implemented("generic interfaces", Planned::Unscheduled);
                     }
                     if !self.eat(T::Plus) {
                         break;

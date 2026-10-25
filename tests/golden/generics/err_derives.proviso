@@ -28,7 +28,7 @@ fn largest[T: Ord + Copy](a: T, b: T) -> T {
     return a
 }
 
-fn uses(p: Pair[Plain, Int], s: Slot[Float], q: Pair[Int, Slot[Plain]]) -> Bool {
+fn derived(p: Pair[Plain, Int], s: Slot[Float], q: Pair[Int, Slot[Plain]]) -> Bool {
     let a = p == p                                  // <- E0306
     let b = f"{s}"
     let c = s == s                                  // <- E0306
