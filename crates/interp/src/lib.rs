@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use proviso_check::decls::{AdtId, Decls, FieldIdx, IfaceId, ImplKey, VariantIdx};
 use proviso_check::types::{FloatTy, IntTy, Ty};
-use proviso_check::{Builtin, ExampleInfo, FnId, LocalId, Program, Res};
+use proviso_check::{Builtin, ExampleInfo, FnId, LocalId, Num, Program, Res};
 use proviso_syntax::ast::*;
 use proviso_syntax::source::{SourceFile, Span};
 
@@ -1454,7 +1454,9 @@ impl Interp<'_> {
                 Some(Res::Fn(f)) => Value::Fn(FnValue::Named(f)),
                 other => unreachable!("names evaluate to locals, not {other:?}"),
             },
-            ExprKind::Call { callee, args, .. } if !matches!(self.p.res(*callee), Some(Res::Fn(_) | Res::Ctor(..))) => {
+            ExprKind::Call { callee, args, .. }
+                if !matches!(self.p.res(*callee), Some(Res::Fn(_) | Res::Ctor(..) | Res::Method(_))) =>
+            {
                 let Value::Fn(f) = self.expr(*callee, frame)? else {
                     unreachable!("the checker found a function type")
                 };
@@ -1483,6 +1485,11 @@ impl Interp<'_> {
                         let result = self.call_back(Callee::Fn(f), values, &places, frame, span);
                         return self.attempted(e, result);
                     }
+                    // `T(x)` converts its one value (STD.md).
+                    Some(Res::Method(builtin)) => {
+                        self.owned.truncate(mark);
+                        self.builtin(builtin, values, span)?
+                    }
                     // Labels follow the declaration order, so argument `i` is field `i`.
                     Some(Res::Ctor(def, variant)) => {
                         let value = Value::Adt(Adt { def, variant, fields: values.into() });
@@ -1507,7 +1514,13 @@ impl Interp<'_> {
                 let named = match res {
                     Res::Ctor(..)
                     | Res::Dispatch { qualified: true, .. }
-                    | Res::Method(Builtin::Parse(_) | Builtin::PoolNew) => true,
+                    | Res::Method(
+                        Builtin::Parse(_)
+                        | Builtin::PoolNew
+                        | Builtin::TryFrom(_)
+                        | Builtin::WrappingFrom(_)
+                        | Builtin::Convert(_),
+                    ) => true,
                     Res::Fn(f) => self.p.fns[f].receiver.is_none(),
                     _ => false,
                 };
@@ -1553,7 +1566,7 @@ impl Interp<'_> {
                     }
                     Res::Dispatch { iface, method, .. } => {
                         let result = match iface {
-                            IfaceId::SHOW | IfaceId::EQ => self.dispatch(iface, method, values, span),
+                            IfaceId::SHOW | IfaceId::EQ | IfaceId::ORD => self.dispatch(iface, method, values, span),
                             IfaceId::ABANDON if !matches!(&values[0], Value::Adt(adt) if self.p.decls.adt(adt.def).resource_base) => {
                                 self.dispatch(iface, method, values, span)
                             }
@@ -1632,7 +1645,7 @@ impl Interp<'_> {
                     _ if op.is_arithmetic() => return self.arithmetic(*op, a, b, span),
                     BinOp::Eq => Value::Bool(self.equal(&a, &b, span)?),
                     BinOp::Ne => Value::Bool(!self.equal(&a, &b, span)?),
-                    _ => Value::Bool(compare(*op, &a, &b)),
+                    _ => Value::Bool(holds(*op, self.ordering(&a, &b, span)?)),
                 }
             }
             ExprKind::Range { .. } => unreachable!("ranges appear only in `for` loops"),
@@ -2163,6 +2176,40 @@ impl Interp<'_> {
                     return Err(Unwind::Fail(Value::Adt(error)));
                 }
             },
+            // A conversion that keeps every value, or an integer to the nearest float, ties
+            // to even, as Rust's `as` rounds it (STD.md).
+            (Builtin::Convert(Num::Int(it)), [Value::Int(x, _)]) => Value::Int(*x, it),
+            (Builtin::Convert(Num::Float(FloatTy::F64)), [Value::Int(x, _)]) => Value::F64(*x as f64),
+            (Builtin::Convert(Num::Float(FloatTy::F64)), [Value::F32(x)]) => Value::F64(f64::from(*x)),
+            (Builtin::Convert(Num::Float(FloatTy::F32)), [Value::Int(x, _)]) => Value::F32(*x as f32),
+            (Builtin::Convert(Num::Float(_)), [value @ (Value::F64(_) | Value::F32(_))]) => value.clone(),
+            (Builtin::TryFrom(it), [Value::Int(x, _)]) if it.contains(*x) => Value::Int(*x, it),
+            (Builtin::TryFrom(_), [Value::Int(..)]) => return Err(conversion_error(CONVERSION_OUT_OF_RANGE)),
+            (Builtin::WrappingFrom(it), [Value::Int(x, _)]) => Value::Int(wrap(*x, it), it),
+            (Builtin::ToInt, [x, Value::Adt(rounding)]) => {
+                let x = match x {
+                    Value::F64(x) => *x,
+                    Value::F32(x) => f64::from(*x),
+                    other => unreachable!("`to_int` rounds a float, not {other:?}"),
+                };
+                if x.is_nan() {
+                    return Err(conversion_error(CONVERSION_NOT_A_NUMBER));
+                }
+                // As `Rounding` declares its variants (STD.md).
+                let rounded = match rounding.variant.index() {
+                    0 => x.trunc(),
+                    1 => x.floor(),
+                    2 => x.ceil(),
+                    3 => x.round_ties_even(),
+                    _ => x.round(),
+                };
+                // `Int` holds -2^63 up to 2^63 - 1, and both bounds are exact as floats.
+                let bound = 2f64.powi(63);
+                if !(-bound..bound).contains(&rounded) {
+                    return Err(conversion_error(CONVERSION_OUT_OF_RANGE));
+                }
+                Value::Int(rounded as i128, IntTy::I64)
+            }
             (builtin, values) => unreachable!("{builtin:?} does not apply to {values:?}"),
         })
     }
@@ -2251,6 +2298,10 @@ impl Interp<'_> {
         match (iface, values.as_slice()) {
             (IfaceId::SHOW, [value]) => Ok(Value::Text(self.show(value, site)?.into())),
             (IfaceId::EQ, [a, b]) => Ok(Value::Bool(self.equal(a, b, site)?)),
+            // Only a type that implements `Ord` has `cmp`, and a float doesn't (Q22).
+            (IfaceId::ORD, [a, b]) => {
+                Ok(ordering_value(self.ordering(a, b, site)?.expect("values of an `Ord` type are ordered")))
+            }
             // Every resource implements `Abandon`, and an aggregate abandons what it holds
             // (REFERENCE §10 rule 4).
             (IfaceId::ABANDON, [value]) if !matches!(value, Value::Adt(adt) if self.p.decls.adt(adt.def).resource_base) =>
@@ -2279,6 +2330,24 @@ impl Interp<'_> {
             match self.call(f, vec![value.clone()], site)? {
                 Value::Text(text) => Ok(Some(text)),
                 other => unreachable!("`show` returns Text, not {other:?}"),
+            }
+        })
+    }
+
+    /// How `a` and `b` are ordered, as `<` and `cmp` order them. A record or enum whose type
+    /// implements `Ord` by hand is ordered by its `cmp`, also inside a value whose `Ord` is
+    /// derived (OPEN_QUESTIONS P5). A defect in it is traced to `site`.
+    fn ordering(&mut self, a: &Value, b: &Value, site: Span) -> Flow<Option<Ordering>> {
+        let p = self.p;
+        order_with(a, b, &mut |a, b| {
+            let Some(f) = hand_written(a, IfaceId::ORD, &p.decls) else { return Ok(None) };
+            match self.call(f, vec![a.clone(), b.clone()], site)? {
+                Value::Adt(adt) if adt.def == AdtId::ORDERING => Ok(Some(match adt.variant.index() {
+                    0 => Ordering::Less,
+                    1 => Ordering::Equal,
+                    _ => Ordering::Greater,
+                })),
+                other => unreachable!("`cmp` returns an Ordering, not {other:?}"),
             }
         })
     }
@@ -2338,6 +2407,21 @@ const PARSE_OUT_OF_RANGE: VariantIdx = VariantIdx::new(2);
 /// `parse` on integer type `it`: an optional `+` or `-`, then one or more ASCII digits
 /// (STD.md). Text of that form whose value doesn't fit is out of range; any other text is
 /// invalid, so the form is checked first (OPEN_QUESTIONS P5).
+/// `std.num`'s `ConversionError.OutOfRange` and `NotANumber`, as STD.md declares them.
+const CONVERSION_OUT_OF_RANGE: VariantIdx = VariantIdx::new(0);
+const CONVERSION_NOT_A_NUMBER: VariantIdx = VariantIdx::new(1);
+
+/// A failure with `std.num`'s `ConversionError` variant `variant`.
+fn conversion_error(variant: VariantIdx) -> Unwind {
+    Unwind::Fail(Value::Adt(Adt { def: AdtId::CONVERSION_ERROR, variant, fields: Arc::from([]) }))
+}
+
+/// The value of `it` with the low bits of `x`, as two's complement keeps them.
+fn wrap(x: i128, it: IntTy) -> i128 {
+    let span = it.max() - it.min() + 1;
+    (x - it.min()).rem_euclid(span) + it.min()
+}
+
 fn parse_int(text: &str, it: IntTy) -> Result<i128, VariantIdx> {
     if text.is_empty() {
         return Err(PARSE_EMPTY);
@@ -2512,7 +2596,11 @@ fn int_arithmetic(op: BinOp, x: i128, y: i128, it: IntTy) -> Result<i128, (Defec
 /// Ordering of two values of the same type, as `Ord` gives it. Floats follow IEEE, so NaN is
 /// unordered with everything; text compares by code point, which UTF-8 byte order preserves.
 fn compare(op: BinOp, a: &Value, b: &Value) -> bool {
-    let ordering = order(a, b);
+    holds(op, order(a, b))
+}
+
+/// Whether comparison `op` holds of two values in `ordering`, where `None` is unordered.
+fn holds(op: BinOp, ordering: Option<Ordering>) -> bool {
     match op {
         BinOp::Lt => ordering == Some(Ordering::Less),
         BinOp::Le => matches!(ordering, Some(Ordering::Less | Ordering::Equal)),
@@ -2522,12 +2610,25 @@ fn compare(op: BinOp, a: &Value, b: &Value) -> bool {
     }
 }
 
-/// The derived `Ord` orders a record or enum by variant in declaration order, then field by
-/// field in declaration order (STD.md). Lists and tuples are ordered element by element from
-/// the left, so a prefix comes first, and maps by their entries sorted by key (OPEN_QUESTIONS
-/// P5). No `Ord` is written by hand yet, so this is every ordering. Like [`equal`], it keeps
-/// what is still to compare in a list of its own, so no value is too deep for the native stack.
+/// [`order_with`] for values with no `Ord` written by hand.
 fn order(a: &Value, b: &Value) -> Option<Ordering> {
+    match order_with(a, b, &mut |_, _| Ok::<_, Infallible>(None)) {
+        Ok(ordering) => ordering,
+        Err(never) => match never {},
+    }
+}
+
+/// Decides the order of a pair of records or enums whose `cmp` is written by hand, and `None`
+/// for any other pair.
+type HandWrittenOrd<'a, E> = dyn FnMut(&Value, &Value) -> Result<Option<Ordering>, E> + 'a;
+
+/// The derived `Ord` orders a record or enum by variant in declaration order, then field by
+/// field in declaration order (STD.md), where `hand_written` decides a pair of records or
+/// enums it returns `Some` for. Lists and tuples are ordered element by element from the
+/// left, so a prefix comes first, and maps by their entries sorted by key (OPEN_QUESTIONS
+/// P5). Like [`equal`], it keeps what is still to compare in a list of its own, so no value
+/// is too deep for the native stack.
+fn order_with<E>(a: &Value, b: &Value, hand_written: &mut HandWrittenOrd<'_, E>) -> Result<Option<Ordering>, E> {
     /// What is left to compare, last first.
     enum Work<'v> {
         Pair(&'v Value, &'v Value),
@@ -2547,11 +2648,15 @@ fn order(a: &Value, b: &Value) -> Option<Ordering> {
                 (Value::Char(x), Value::Char(y)) => x.partial_cmp(y),
                 (Value::Text(x), Value::Text(y)) => x.partial_cmp(y),
                 (Value::Unit, Value::Unit) => Some(Ordering::Equal),
-                (Value::Adt(x), Value::Adt(y)) => {
-                    // Pushed in reverse, so the first field is compared first, with all it holds.
-                    work.extend(x.fields.iter().zip(y.fields.iter()).rev().map(|(a, b)| Work::Pair(a, b)));
-                    x.variant.index().partial_cmp(&y.variant.index())
-                }
+                (a @ Value::Adt(x), b @ Value::Adt(y)) => match hand_written(a, b)? {
+                    Some(ordering) => Some(ordering),
+                    None => {
+                        // Pushed in reverse, so the first field is compared first, with all it
+                        // holds.
+                        work.extend(x.fields.iter().zip(y.fields.iter()).rev().map(|(a, b)| Work::Pair(a, b)));
+                        x.variant.index().partial_cmp(&y.variant.index())
+                    }
+                },
                 (Value::List(x), Value::List(y)) => {
                     work.push(Work::Lengths(x.items.len(), y.items.len()));
                     work.extend(x.items.iter().zip(y.items.iter()).rev().map(|(a, b)| Work::Pair(a, b)));
@@ -2574,10 +2679,20 @@ fn order(a: &Value, b: &Value) -> Option<Ordering> {
             Work::Entries(xs, ys, _) => xs.len().partial_cmp(&ys.len()),
         };
         if ordering != Some(Ordering::Equal) {
-            return ordering;
+            return Ok(ordering);
         }
     }
-    Some(Ordering::Equal)
+    Ok(Some(Ordering::Equal))
+}
+
+/// The prelude's `Ordering` value for `ordering` (STD.md).
+fn ordering_value(ordering: Ordering) -> Value {
+    let variant = match ordering {
+        Ordering::Less => 0,
+        Ordering::Equal => 1,
+        Ordering::Greater => 2,
+    };
+    Value::Adt(Adt { def: AdtId::ORDERING, variant: VariantIdx::new(variant), fields: Arc::from([]) })
 }
 
 /// A map's entries sorted by key. Its keys implement `Ord` when the map does, and none is a

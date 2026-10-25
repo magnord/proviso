@@ -31,9 +31,15 @@ impl AdtId {
     pub const POOL: AdtId = AdtId(7);
     /// `std.pool`'s `Handle[T]` (STD.md).
     pub const HANDLE: AdtId = AdtId(8);
+    /// The prelude's `Ordering`, which `cmp` returns (STD.md).
+    pub const ORDERING: AdtId = AdtId(9);
+    /// The prelude's `Rounding`, which `to_int` takes (STD.md).
+    pub const ROUNDING: AdtId = AdtId(10);
+    /// `std.num`'s `ConversionError` (STD.md).
+    pub const CONVERSION_ERROR: AdtId = AdtId(11);
 
     /// How many records and enums are declared before the module's own.
-    const BUILT_IN: usize = 9;
+    const BUILT_IN: usize = 12;
 
     pub fn index(self) -> usize {
         self.0 as usize
@@ -550,12 +556,27 @@ impl Default for Decls {
         };
         let option = generic("Option", 1, [("Some", Some(("value", 0))), ("None", None)]);
         let result = generic("Result", 2, [("Ok", Some(("value", 0))), ("Err", Some(("error", 1)))]);
-        let mut parse_error = AdtDef::enumeration("ParseError");
-        parse_error.derives = vec![IfaceId::EQ, IfaceId::SHOW];
-        for variant in ["Empty", "Invalid", "OutOfRange"] {
-            parse_error.variants.push(VariantDef::new(variant, Vec::new()));
-        }
-        // `Ord`'s `cmp` returns an `Ordering`, which comes later, so its calls are rejected.
+        // An enum whose variants have no fields, which derives `derives`.
+        let plain = |name: &str, variants: &[&str], derives: Vec<IfaceId>| {
+            let mut def = AdtDef::enumeration(name);
+            def.derives = derives;
+            def.variants.extend(variants.iter().map(|variant| VariantDef::new(variant, Vec::new())));
+            def
+        };
+        let parse_error = plain("ParseError", &["Empty", "Invalid", "OutOfRange"], vec![IfaceId::EQ, IfaceId::SHOW]);
+        // Ordered as declared, so `Less < Equal < Greater` (STD.md).
+        let ordering = plain(
+            "Ordering",
+            &["Less", "Equal", "Greater"],
+            vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW, IfaceId::HASH],
+        );
+        let rounding = plain(
+            "Rounding",
+            &["TowardZero", "TowardNegative", "TowardPositive", "NearestEven", "NearestAway"],
+            vec![IfaceId::EQ, IfaceId::SHOW, IfaceId::HASH],
+        );
+        let conversion_error =
+            plain("ConversionError", &["OutOfRange", "NotANumber"], vec![IfaceId::EQ, IfaceId::SHOW]);
         let method = |name: &str, params: Vec<(&str, Ty)>, ret: Ty| IfaceMethod {
             name: name.into(),
             self_mode: ParamMode::Borrow,
@@ -569,7 +590,7 @@ impl Default for Decls {
             .map(|&name| {
                 let methods = match name {
                     "Eq" => vec![method("eq", vec![("other", Ty::Param(0))], Ty::Bool)],
-                    "Ord" => vec![method("cmp", vec![("other", Ty::Param(0))], Ty::Error)],
+                    "Ord" => vec![method("cmp", vec![("other", Ty::Param(0))], Ty::adt(AdtId::ORDERING))],
                     "Show" => vec![method("show", vec![], Ty::Text)],
                     // `abandon` takes `take self` and can't fail (STD.md).
                     "Abandon" => {
@@ -589,7 +610,20 @@ impl Default for Decls {
         pool.unique = true;
         let mut handle = AdtDef::native("Handle", 1, vec![IfaceId::EQ, IfaceId::HASH]);
         handle.held = vec![false];
-        let adts = vec![system, option, result, parse_error, AdtDef::tuple(2), list, map, pool, handle];
+        let adts = vec![
+            system,
+            option,
+            result,
+            parse_error,
+            AdtDef::tuple(2),
+            list,
+            map,
+            pool,
+            handle,
+            ordering,
+            rounding,
+            conversion_error,
+        ];
         debug_assert_eq!(adts.len(), AdtId::BUILT_IN);
         let tuples = HashMap::from([(2, AdtId::PAIR)]);
         Decls {
@@ -1219,6 +1253,7 @@ impl Decls {
             Ty::Unit => "Unit",
             Ty::Never => "Never",
             Ty::Adt(AdtId::PARSE_ERROR, _) => std("ParseError", "std.text.ParseError"),
+            Ty::Adt(AdtId::CONVERSION_ERROR, _) => std("ConversionError", "std.num.ConversionError"),
             Ty::Adt(id, _) => &self.adt(*id).name,
             Ty::IoError => std("IoError", "std.io.IoError"),
             Ty::Cap(cap) if cap.iface == IfaceId::OUT => std("Out", "std.io.Out"),

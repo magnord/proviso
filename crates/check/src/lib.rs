@@ -103,6 +103,24 @@ pub enum Builtin {
     Duplicate,
     /// `Pool.update(inout self, handle: Handle[T], change: fn(take T) -> T) -> Bool`
     Update,
+    /// `T(x)`, a conversion that keeps every value, and `Float.from(x)` and `Float32.from(x)`
+    /// from any integer type, which round to the nearest value, ties to even (STD.md).
+    Convert(Num),
+    /// `T.try_from(x) -> T fails ConversionError` from any integer type, for each integer
+    /// type `T`. It is called on the type, so it has no receiver.
+    TryFrom(IntTy),
+    /// `T.wrapping_from(x) -> T` from any integer type, which keeps the low bits of `x`.
+    WrappingFrom(IntTy),
+    /// `Float.to_int(self, rounding: Rounding) -> Int fails ConversionError`, and the same for
+    /// `Float32`.
+    ToInt,
+}
+
+/// A numeric type, which a conversion makes a value of.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Num {
+    Int(IntTy),
+    Float(FloatTy),
 }
 
 impl Builtin {
@@ -1421,6 +1439,8 @@ impl Checker<'_> {
             ["std", "text"] => Some(vec![("ParseError", Ty::adt(AdtId::PARSE_ERROR))]),
             // A generic import names its type without type arguments, which each use gives.
             ["std", "pool"] => Some(vec![("Pool", Ty::adt(AdtId::POOL)), ("Handle", Ty::adt(AdtId::HANDLE))]),
+            // `ConversionError` is the only item `std.num` declares (STD.md).
+            ["std", "num"] => Some(vec![("ConversionError", Ty::adt(AdtId::CONVERSION_ERROR))]),
             ["std", module] => {
                 let planned = match *module {
                     "fs" | "test" => Planned::Phase(3),
@@ -1434,7 +1454,7 @@ impl Checker<'_> {
                 self.error(
                     codes::UNKNOWN_IMPORT,
                     span,
-                    format!("unknown module `{joined}`; phase 1 checks one file at a time, and the standard library provides only `std.io`, `std.pool` and `std.text`"),
+                    format!("unknown module `{joined}`; phase 1 checks one file at a time, and the standard library provides only `std.io`, `std.num`, `std.pool` and `std.text`"),
                 );
                 None
             }
@@ -2829,17 +2849,13 @@ impl Checker<'_> {
         }
         let later = Rejected { unknown: true, bodies: false };
         match iface {
-            IfaceId::EQ | IfaceId::SHOW | IfaceId::ABANDON => Ok(()),
+            // A hand-written `Ord` defines `<` and the rest by its `cmp` (OPEN_QUESTIONS P5).
+            IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW | IfaceId::ABANDON => Ok(()),
             IfaceId::COPY => {
                 let message =
                     "`Copy` holds by itself for copyable types with no reach, so it can't be implemented (§5.1)";
                 self.error(codes::NOT_IMPLEMENTABLE, name.span, message);
                 Err(Rejected { unknown: false, bodies: true })
-            }
-            IfaceId::ORD => {
-                let what = "hand-written `Ord` implementations, whose `cmp` returns an `Ordering`,";
-                self.not_implemented(name.span, what, Planned::Phase(2));
-                Err(later)
             }
             IfaceId::HASH => {
                 self.not_implemented(name.span, "hand-written `Hash` implementations", Planned::Unscheduled);
@@ -3081,6 +3097,9 @@ impl Checker<'_> {
                         self.not_implemented(te.span, "units of measure", Planned::PastV1)
                     }
                     Some(_) => self.error(codes::UNKNOWN_TYPE, te.span, format!("`{text}` takes no type arguments")),
+                    None if prelude_enum(text).is_some() => {
+                        self.error(codes::UNKNOWN_TYPE, te.span, format!("`{text}` takes no type arguments"))
+                    }
                     None => match later_type(text) {
                         Some(planned) => self.not_implemented(name.span, &format!("`{text}` types"), planned),
                         None => self.error(codes::UNKNOWN_TYPE, name.span, format!("unknown type `{text}`")),
@@ -3127,6 +3146,9 @@ impl Checker<'_> {
         }
         if let Some(ty) = builtin_type(text) {
             return ty;
+        }
+        if let Some(id) = prelude_enum(text) {
+            return Ty::adt(id);
         }
         if self.aliases.contains_key(&name.sym) {
             return self.alias_type(name.sym);
@@ -5144,8 +5166,8 @@ impl Checker<'_> {
             ExprKind::Name(name) if m.text(name.sym) == "System" => {
                 self.not_implemented(callee_span, "constructions of `System`", Planned::Phase(3))
             }
-            ExprKind::Name(name) if builtin_type(m.text(name.sym)).is_some() => {
-                self.not_implemented(callee_span, "conversions such as `Int64(x)`", Planned::Phase(2))
+            ExprKind::Name(name) if let Some(target) = builtin_type(m.text(name.sym)) => {
+                return self.conversion(callee, name, target, targs, args, span);
             }
             ExprKind::Name(name) => {
                 let text = m.text(name.sym);
@@ -5983,6 +6005,26 @@ impl Checker<'_> {
                 self.fallible_call(e, &callee, &Ty::adt(AdtId::PARSE_ERROR), span, chain);
                 return ty.clone();
             }
+            (Ty::Int(it), "try_from" | "wrapping_from") => {
+                let callee = format!("{type_text}.{name}");
+                self.no_targs(targs, &callee, span);
+                let builtin = if name == "try_from" { Builtin::TryFrom(*it) } else { Builtin::WrappingFrom(*it) };
+                self.p.res.insert(e, Res::Method(builtin));
+                self.int_arg(&callee, args, span);
+                if name == "try_from" {
+                    self.fallible_call(e, &callee, &Ty::adt(AdtId::CONVERSION_ERROR), span, chain);
+                }
+                return ty.clone();
+            }
+            (Ty::Float(ft), "from") => {
+                let callee = format!("{type_text}.from");
+                self.no_targs(targs, &callee, span);
+                self.p.res.insert(e, Res::Method(Builtin::Convert(Num::Float(*ft))));
+                self.int_arg(&callee, args, span);
+                return ty.clone();
+            }
+            // `Int.from` would be the lossless `Int(x)`, and the rest have no agreed meaning
+            // yet (OPEN_QUESTIONS §G).
             (Ty::Int(_) | Ty::Float(_), "from" | "try_from" | "wrapping_from" | "saturating_from") => {
                 let what = format!("numeric conversions such as `{type_text}.{name}`");
                 self.not_implemented(span, &what, Planned::Unscheduled);
@@ -5997,6 +6039,106 @@ impl Checker<'_> {
         }
         self.rejected_args(args);
         Ty::Error
+    }
+
+    /// `T(x)`, where `T` is the built-in type `target`: a conversion that keeps every value,
+    /// from an integer type to one that holds all of its values, or from `Float32` to `Float`.
+    /// A conversion that may lose a value is spelled as what it does, by `T.try_from`,
+    /// `T.wrapping_from`, `T.from` or `to_int` (STD.md). A literal argument has type `T`.
+    fn conversion(
+        &mut self,
+        callee: ExprId,
+        name: Ident,
+        target: Ty,
+        targs: Option<&[TypeId]>,
+        args: &[Arg],
+        span: Span,
+    ) -> Ty {
+        let text = self.m.text(name.sym);
+        let num = match target {
+            Ty::Int(it) => Num::Int(it),
+            Ty::Float(ft) => Num::Float(ft),
+            _ => {
+                let message = format!("`{text}` has no constructor, and only a numeric type converts with `T(x)`");
+                self.error(codes::UNKNOWN_NAME, name.span, message);
+                self.rejected_args(args);
+                return Ty::Error;
+            }
+        };
+        self.no_targs(targs, text, span);
+        let [arg] = args else {
+            let message = format!("`{text}(…)` converts 1 value, but {} were given", args.len());
+            self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
+            self.rejected_args(args);
+            return Ty::Error;
+        };
+        if let Some(label) = arg.label {
+            let message = format!("the value `{text}(…)` converts takes no label");
+            self.error(codes::WRONG_LABEL, label.span, message);
+            self.rejected_value(arg.value);
+            return Ty::Error;
+        }
+        if arg.inout {
+            let message = format!("`{text}(…)` reads its value, so its argument takes no `&`");
+            self.error(codes::INOUT_MARKER_MISMATCH, self.span(arg.value), message);
+        }
+        let ty = self.expr(arg.value, Some(&target));
+        let ty = self.force(&ty);
+        let lossless = match (&ty, &target) {
+            _ if ty.is_unknown() || ty == target => true,
+            (Ty::Int(from), Ty::Int(to)) => to.min() <= from.min() && from.max() <= to.max(),
+            (Ty::Float(FloatTy::F32), Ty::Float(FloatTy::F64)) => true,
+            _ => false,
+        };
+        if !lossless {
+            let shown = self.show(&ty);
+            let instead = match (&ty, &target) {
+                (Ty::Int(_), Ty::Int(_)) => format!(
+                    "`{text}.try_from(x)` fails when it doesn't fit, and `{text}.wrapping_from(x)` keeps its low bits"
+                ),
+                (Ty::Int(_), Ty::Float(_)) => format!("`{text}.from(x)` rounds it to the nearest `{text}`"),
+                (Ty::Float(_), Ty::Int(_)) => {
+                    "`x.to_int(rounding: Rounding.TowardZero)` rounds it as it says and gives an `Int`".to_string()
+                }
+                (Ty::Float(_), Ty::Float(_)) => "no conversion narrows a float yet".to_string(),
+                _ => String::new(),
+            };
+            let message = match &ty {
+                Ty::Int(_) | Ty::Float(_) => {
+                    format!("`{text}(…)` can't convert `{shown}` without losing values; {instead}")
+                }
+                Ty::Adt(id, _) if self.p.decls.adt(*id).distinct => format!(
+                    "`{text}(…)` converts a number, not `{shown}`; a distinct type's number is `x.value` (§4.6)"
+                ),
+                _ => format!("`{text}(…)` converts a number, not `{shown}`"),
+            };
+            self.error(codes::TYPE_MISMATCH, self.span(arg.value), message);
+            return target;
+        }
+        self.p.res.insert(callee, Res::Method(Builtin::Convert(num)));
+        target
+    }
+
+    /// Checks the one argument of `callee`, which converts a value of any integer type.
+    fn int_arg(&mut self, callee: &str, args: &[Arg], span: Span) {
+        let [arg] = args else {
+            let message = format!("`{callee}` takes 1 argument, but {} were given", args.len());
+            self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
+            self.rejected_args(args);
+            return;
+        };
+        if let Some(label) = arg.label {
+            let message = format!("the value `{callee}` converts takes no label");
+            self.error(codes::WRONG_LABEL, label.span, message);
+            self.rejected_value(arg.value);
+            return;
+        }
+        let ty = self.infer(arg.value);
+        let ty = self.force(&ty);
+        if !matches!(ty, Ty::Int(_)) && !ty.is_unknown() {
+            let message = format!("`{callee}` converts an integer, not `{}`", self.show(&ty));
+            self.error(codes::TYPE_MISMATCH, self.span(arg.value), message);
+        }
     }
 
     /// The method `x.name(…)` calls on a value of type `ty`: one of the type's own, or one of
@@ -6087,10 +6229,6 @@ impl Checker<'_> {
                     self.show(shown)
                 );
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);
-                None
-            }
-            [Callee::Iface(IfaceId::ORD, _)] => {
-                self.not_implemented(method.span, "`cmp` and the `Ordering` it returns", Planned::Phase(2));
                 None
             }
             [callee] => Some(*callee),
@@ -6252,10 +6390,6 @@ impl Checker<'_> {
             None => {
                 let message = format!("`{iface_text}` has no method `{name}`");
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);
-                true
-            }
-            Some(_) if iface == IfaceId::ORD => {
-                self.not_implemented(method.span, "`cmp` and the `Ordering` it returns", Planned::Phase(2));
                 true
             }
             Some(_) => false,
@@ -7038,7 +7172,8 @@ impl Checker<'_> {
             Some(Import::Type(Ty::Adt(id, args))) if args.is_empty() => Some(*id),
             _ => None,
         };
-        self.adt_names.get(&sym).copied().or_else(|| prelude_adt(self.m.text(sym))).or_else(imported)
+        let text = self.m.text(sym);
+        self.adt_names.get(&sym).copied().or_else(|| prelude_adt(text)).or_else(|| prelude_enum(text)).or_else(imported)
     }
 
     /// The enum that `e` names, when it is a name that is not a local.
@@ -7790,6 +7925,10 @@ fn builtin_method(ty: &Ty, name: &str) -> Option<BuiltinSig> {
         (Ty::Text, "starts_with") => sig(Builtin::StartsWith, vec![("prefix", Ty::Text)], Ty::Bool),
         (Ty::Text, "strip_prefix") => sig(Builtin::StripPrefix, vec![("prefix", Ty::Text)], Ty::option(Ty::Text)),
         (Ty::Text, "lines") => sig(Builtin::Lines, vec![], Ty::list(Ty::Text)),
+        (Ty::Float(_), "to_int") => BuiltinSig {
+            fails: Some(Ty::adt(AdtId::CONVERSION_ERROR)),
+            ..sig(Builtin::ToInt, vec![("rounding", Ty::adt(AdtId::ROUNDING))], Ty::INT)
+        },
         (Ty::Adt(AdtId::LIST, args), _) => {
             let t = args[0].clone();
             match name {
@@ -7924,6 +8063,15 @@ fn prelude_adt(name: &str) -> Option<AdtId> {
     }
 }
 
+/// `Ordering` and `Rounding`, the prelude's enums without type parameters (STD.md).
+fn prelude_enum(name: &str) -> Option<AdtId> {
+    match name {
+        "Ordering" => Some(AdtId::ORDERING),
+        "Rounding" => Some(AdtId::ROUNDING),
+        _ => None,
+    }
+}
+
 /// The enum of `Some`, `None`, `Ok` and `Err`, the variants that may be used unqualified in
 /// expressions (REFERENCE §3).
 fn bare_variant(name: &str) -> Option<AdtId> {
@@ -7967,6 +8115,7 @@ fn type_args(n: usize) -> String {
 fn prelude_type(name: &str) -> bool {
     builtin_type(name).is_some()
         || prelude_adt(name).is_some()
+        || prelude_enum(name).is_some()
         || collection_adt(name).is_some()
         || bare_variant(name).is_some()
         || later_type(name).is_some()
@@ -7976,7 +8125,10 @@ fn prelude_type(name: &str) -> bool {
 /// Prelude types that later phases implement.
 fn later_type(name: &str) -> Option<Planned> {
     match name {
-        "Array" | "Bytes" | "Ordering" | "Rounding" | "Invalid" => Some(Planned::Phase(2)),
+        // Nothing builds an `Array` or `Bytes` yet, and the validators that report `Invalid`
+        // come with the verifier (OPEN_QUESTIONS P3).
+        "Array" | "Bytes" => Some(Planned::Unscheduled),
+        "Invalid" => Some(Planned::Phase(5)),
         // Nothing builds a `Set` yet (OPEN_QUESTIONS Q37).
         "Set" => Some(Planned::Unscheduled),
         "Outcome" | "Defect" => Some(Planned::Phase(6)),
