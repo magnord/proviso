@@ -232,6 +232,7 @@ record Crate[T] {
 impl[T: Nope] Crate[T] {                            // <- E0307
     fn k(self) -> Int {
         let c = self
+        let d = self.with(item: 5)
         let a = self.item
         let b = self.item
         return self.item.len() + self.item
@@ -247,6 +248,16 @@ impl[T: Nope, U] Crate[T] {                         // <- E0307, E0312
 impl[T: Nope] Count for Crate[T] {                  // <- E0307
     fn count(self) -> Int {
         return self.item.count()
+    }
+}
+
+record Tote[T] {
+    item: T
+}
+
+impl[T: Nope + Show] Count for Tote[T] {            // <- E0307
+    fn count(self) -> Int {
+        return 1
     }
 }
 
@@ -409,7 +420,7 @@ fn taken_heads() -> Int {
 // A block whose type parameter has a rejected constraint is still for `Crate[T]`, so its
 // methods and interface are known, and others aren't.
 fn rejected_bounds(c: Crate[Int]) -> Text {
-    let n = c.k() + counted(x: c)
+    let n = c.k() + counted(x: c) + counted(x: Tote(item: Point(x: 1)))
     let m = c.h()                                   // <- E0303
     return f"{c}"                                   // <- E0306
 }
