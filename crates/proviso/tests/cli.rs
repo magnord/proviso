@@ -620,15 +620,18 @@ fn alias_and_expect_messages_read_right() {
 }
 
 /// Two types that share their parts within each but not with each other, as two doubling
-/// chains built apart do, are compared, joined and listed in time linear in their sources
+/// chains built apart do, are compared, joined, listed and passed for one type parameter in
+/// time linear in their sources
 /// (issue #53).
 #[test]
 fn types_built_apart_join_in_linear_time() {
-    let mut text = String::from("fn f() {\n    let a0 = 1\n    let b0 = 2\n");
+    let mut text = String::from(
+        "fn same[T: Copy](x: T, y: T) -> Bool {\n    return true\n}\n\nfn f() {\n    let a0 = 1\n    let b0 = 2\n",
+    );
     for i in 1..=40 {
         text += &format!("    let a{i} = (a{0}, a{0})\n    let b{i} = (b{0}, b{0})\n", i - 1);
     }
-    text += "    let c = a40 == b40\n    let d = if c { a40 } else { b40 }\n    let e = [a40, b40]\n}\n";
+    text += "    let c = a40 == b40\n    let d = if c { a40 } else { b40 }\n    let e = [a40, b40]\n    let s = same(x: a40, y: b40)\n}\n";
     let file = source("built_apart.proviso", &text);
     let output = check_within(&file, 20);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
