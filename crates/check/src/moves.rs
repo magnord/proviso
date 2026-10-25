@@ -527,6 +527,31 @@ impl Walk<'_> {
         }
     }
 
+    /// [`Walk::holds_resource`] for a value bound to a `var` or assigned to one, which may get
+    /// a resource in place later, through a field, an element or an `&` argument. Only an
+    /// enum's variant can't, so only a variant that holds no resource holds none here.
+    fn may_hold_later(&self, e: ExprId) -> bool {
+        if !self.is_resource(self.p.ty(e)) {
+            return false;
+        }
+        let variant = |adt: AdtId| self.p.decls.adt(adt).is_enum();
+        match (&self.m.exprs[e].kind, self.p.res(e)) {
+            (ExprKind::Name(_) | ExprKind::Field { .. }, Some(Res::Ctor(adt, _))) if variant(adt) => false,
+            (ExprKind::Call { args, .. } | ExprKind::MethodCall { args, .. }, Some(Res::Ctor(adt, _)))
+                if variant(adt) =>
+            {
+                args.iter().any(|arg| self.holds_resource(arg.value))
+            }
+            (ExprKind::Call { callee, args, .. }, _)
+                if let Some(Res::Ctor(adt, _)) = self.p.res(*callee)
+                    && variant(adt) =>
+            {
+                args.iter().any(|arg| self.holds_resource(arg.value))
+            }
+            _ => true,
+        }
+    }
+
     /// Whether `local`'s `path`, of type `ty`, holds no resource on every path here: it is
     /// released, or it is a record or tuple whose parts all are. A base resource holds itself,
     /// apart from the `self` of its own `take self` method (OPEN_QUESTIONS Q35).
@@ -1115,12 +1140,16 @@ impl Walk<'_> {
                     self.report(codes::RESOURCE_DISCARDED, m.pats[*pat].span, message.to_string());
                 }
                 self.matched(*init, *pat);
-                // A value that holds no resource, such as `None`, has nothing to consume.
-                if !self.holds_resource(*init) || self.refused.contains(init) || self.tainted(*init) {
-                    let mut locals = Vec::new();
-                    self.pattern_locals(*pat, &mut locals);
-                    if let Some(state) = &mut self.state {
-                        for local in locals {
+                // A value that holds no resource, such as `None`, has nothing to consume. One a
+                // `var` may fill in place later counts only when it is a variant.
+                let excused = self.refused.contains(init) || self.tainted(*init);
+                let (empty, empty_for_var) = (!self.holds_resource(*init), !self.may_hold_later(*init));
+                let mut locals = Vec::new();
+                self.pattern_locals(*pat, &mut locals);
+                let mutable: Vec<bool> = locals.iter().map(|l| self.locals[l.index()].mutable).collect();
+                if let Some(state) = &mut self.state {
+                    for (local, mutable) in locals.into_iter().zip(mutable) {
+                        if excused || if mutable { empty_for_var } else { empty } {
                             state.release(local, Vec::new());
                         }
                     }
@@ -1149,7 +1178,7 @@ impl Walk<'_> {
                 match self.place(*target) {
                     Some((local, path)) if *op == AssignOp::Set => {
                         self.assign_place(*target, local, &path);
-                        if !self.holds_resource(*value)
+                        if !self.may_hold_later(*value)
                             && let Some(state) = &mut self.state
                         {
                             state.release(local, path);

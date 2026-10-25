@@ -10,8 +10,8 @@
 // reported once, at its binding. A failure exit abandons instead, so a scope may fail
 // holding resources, and a borrowed parameter is lent, so its caller consumes it. Nothing
 // takes all of a pool's elements out, so an owned pool of resources is left over even when
-// empty (OPEN_QUESTIONS §G). A value bound while it holds no resource owns what is later put
-// in it in place, by a field, `push`, `set` or an `&` argument.
+// empty (OPEN_QUESTIONS §G). A `var` may get a resource in place later, by a field, `push`,
+// `set` or an `&` argument, so one bound to an empty record or literal still owns it.
 use std.pool { Pool }
 
 resource record Probe {
@@ -210,9 +210,21 @@ fn put(probes: inout List[Probe]) {
     probes.push(open(name: "put"))
 }
 
+record Row {
+    items: List[Probe]
+}
+
+record Rows {
+    rows: List[Row]
+}
+
+fn filled_deep() {
+    var w = Rows(rows: [Row(items: [])])            // <- E0507
+    w.rows[0].items.push(open(name: "deep"))
+}
+
 fn filled_later() {
     var spare = Spare(probe: None)                  // <- E0507
-    spare.probe = Some(open(name: "field"))
     var pushed: List[Probe] = []                    // <- E0507
     pushed.push(open(name: "pushed"))
     var given: List[Probe] = []                     // <- E0507
