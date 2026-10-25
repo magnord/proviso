@@ -3242,9 +3242,13 @@ impl Checker<'_> {
             TypeExprKind::Applied { name, ref args } => {
                 let text = m.text(name.sym);
                 // A rejected declaration's type arguments mean the same whichever one it was.
+                // A later phase's item, such as a capability, may take arguments that aren't
+                // types, as in `Logger[write]`.
                 if self.poisoned.contains(&name.sym) {
-                    for &arg in args.as_deref().unwrap_or_default() {
-                        self.resolve_type(arg);
+                    if !m.planned_names.contains(&name.sym) {
+                        for &arg in args.as_deref().unwrap_or_default() {
+                            self.resolve_type(arg);
+                        }
                     }
                     return Ty::Error;
                 }

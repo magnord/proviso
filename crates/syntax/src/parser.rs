@@ -51,6 +51,7 @@ pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> M
         poisoned: HashSet::new(),
         impls: HashSet::new(),
         lost_fns: HashSet::new(),
+        planned_names: HashSet::new(),
         tuple_impls: false,
         everywhere: HashSet::new(),
     };
@@ -597,6 +598,7 @@ impl Parser<'_> {
         if let Some(token) = self.tokens.get(i).filter(|t| t.kind == T::Ident) {
             let name = self.intern(token.span);
             self.m.poisoned.insert(name.sym);
+            self.m.planned_names.insert(name.sym);
         }
     }
 

@@ -8,12 +8,12 @@
 // An item the parser rejects is reported once, and what it declares stays declared, so
 // its uses aren't reported (REFERENCE §15.1). A second item on the line of another is
 // parsed after the error, with or without `pub`, but a keyword with nothing after it
-// isn't (issue #21). A later phase's item, such as a top-level constant or an `extern`
-// function, leaves its name unknown rather than undefined (issue #39). A `derives`
-// written after a record's or enum's body, before its `where` or after it, or after a
-// distinct type's `where`, is reported and still derives (issue #55). An `impl` block
-// whose header doesn't parse leaves its type with methods nothing records, one for a
-// function type leaves tuples alone, and one for every type, as in `impl[T] I for T`,
+// isn't (issue #21). A later phase's item, such as a top-level constant, an `extern`
+// function or a capability, leaves its name unknown rather than undefined (issue #39). A
+// `derives` written after a record's or enum's body, before its `where` or after it, or
+// after a distinct type's `where`, is reported and still derives (issue #55). An `impl`
+// block whose header doesn't parse leaves its type with methods nothing records, one for
+// a function type leaves tuples alone, and one for every type, as in `impl[T] I for T`,
 // leaves every type implementing `I` (issue #53). An error inside the item, or beside it,
 // is still reported.
 use std.io { IoError }
@@ -39,7 +39,11 @@ let limit = 4                                       // <- E0901
 extern "C" fn crc(n: Int) -> Int                    // <- E0901
     trusted pure
 
-fn constants() -> Int {
+cap interface Flag effects(write) {                 // <- E0901
+    fn raise(self)
+}
+
+fn constants(f: Flag[write], g: Nope[write]) -> Int {   // <- E0307
     return top + limit + crc(n: 1) + nosuch       // <- E0201
 }
 
