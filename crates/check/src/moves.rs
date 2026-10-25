@@ -1045,6 +1045,10 @@ impl Walk<'_> {
     /// Reports a use of `local`'s `path` that may have moved, or a part of which may have.
     fn use_place(&mut self, e: ExprId, local: LocalId, path: &[u32]) {
         self.touch(local);
+        // A rejected capture may have been meant to be consumed (REFERENCE §15.1).
+        if self.captured.contains(&local) && self.tainted(e) {
+            self.excused.insert(local);
+        }
         if let Some(reads) = self.fn_reads.get(&local).cloned() {
             let name = self.describe(e);
             self.reads(e, &reads, |captured| {
@@ -1312,10 +1316,6 @@ impl Walk<'_> {
         self.reads(e, &reads, |captured| {
             format!("`{captured}` may have moved already, so this closure can't capture it (§5.1)")
         });
-        // A rejected closure may have meant to consume what it captures (REFERENCE §15.1).
-        if self.tainted(e) {
-            self.excused.extend(captures.iter().map(|(local, _)| *local));
-        }
         let params: Vec<(LocalId, Span, String)> = (info.owned.iter())
             .map(|(local, span)| {
                 let i = info.params.iter().position(|p| p == local).expect("an owned parameter is a parameter");
@@ -2102,9 +2102,12 @@ impl Walk<'_> {
             // so no resource it reads is reported as left over (REFERENCE §15.1).
             for value in receiver.map(|(r, _)| r).into_iter().chain(args.iter().map(|arg| arg.value)) {
                 self.read(value);
-                if let Some((local, path)) = self.place(value)
-                    && let Some(state) = &mut self.state
-                {
+                let Some((local, path)) = self.place(value) else { continue };
+                // A closure's state ends with it, so what it captures is excused instead.
+                if self.captured.contains(&local) {
+                    self.excused.insert(local);
+                }
+                if let Some(state) = &mut self.state {
                     state.release(local, path);
                 }
             }

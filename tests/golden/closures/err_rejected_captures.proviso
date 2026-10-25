@@ -1,0 +1,47 @@
+// phase: 2.9
+// expect-error: E0201
+// expect-error: E0208
+// expect-error: E0303
+// expect-error: E0507
+// A rejected call in a closure may have meant to consume what it is given, so a captured
+// resource it reads isn't reported as left over, as outside a closure (REFERENCE §15.1).
+// An error elsewhere in the closure leaves its captures as they are, so a resource nothing
+// consumes is still reported, since a closure can't consume what it captures (§10 rule 6).
+resource record Probe {
+    name: Text
+}
+
+impl Probe {
+    fn close(take self) {}
+}
+
+impl Abandon for Probe {
+    fn abandon(take self) {}
+}
+
+fn run(f: fn() -> Int) -> Int {
+    return f()
+}
+
+fn misspelled() {
+    let p = Probe(name: "p")
+    let n = run(f: || {
+        p.clse()                                    // <- E0303
+        1
+    })
+}
+
+fn wrong_arguments() {
+    let p = Probe(name: "p")
+    let n = run(f: || {
+        p.close(1)                                  // <- E0208
+        1
+    })
+}
+
+fn other_error() {
+    let p = Probe(name: "p")                        // <- E0507
+    let n = run(f: || p.name.byte_len() + nope)     // <- E0201
+}
+
+pub fn main(sys: keep System) {}
