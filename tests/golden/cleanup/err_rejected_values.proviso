@@ -137,7 +137,12 @@ fn branches(c: Bool, n: Int) -> Int {
         "text"                                      // <- E0301
     }
     let f = if c { 1 } else if n > 0 { "two" } else { 3 } // <- E0301
-    return a + b + d + e + f + 3
+    let a1 = a + 1
+    let b1 = b + 1
+    let d1: Text = d
+    let e1: Text = e
+    let f1: Text = f
+    return 0
 }
 
 fn rejected_branches(c: Bool, n: Int) -> Int {
