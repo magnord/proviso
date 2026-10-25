@@ -231,7 +231,15 @@ record Crate[T] {
 
 impl[T: Nope] Crate[T] {                            // <- E0307
     fn k(self) -> Int {
+        let a = self.item
+        let b = self.item
         return self.item.len() + self.item
+    }
+}
+
+impl[T: Nope, U] Crate[T] {                         // <- E0307, E0312
+    fn u(self) -> Int {
+        return 1
     }
 }
 
@@ -321,6 +329,12 @@ impl[T] Marker for Duo[T, T] {
 }
 
 impl Marker for Duo[Int, Text] {                    // <- E0321
+}
+
+impl[T] Marker for Crate[T] {
+}
+
+impl[T: Nope] Marker for Crate[T] {                 // <- E0313, E0307
 }
 
 interface Anything {

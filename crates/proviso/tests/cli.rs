@@ -458,3 +458,20 @@ fn deep_types_are_too_deep_once() {
         }
     }
 }
+
+/// A type parameter of an `impl` block whose constraint is rejected keeps its name in the
+/// block's target, so messages about the block and its `self` name it as written
+/// (OPEN_QUESTIONS P5, Generic impls).
+#[test]
+fn rejected_impl_constraints_keep_their_parameter_names() {
+    let text = "interface Count {\n    fn count(self) -> Int\n}\n\nrecord Crate[T] {\n    item: T\n}\n\n\
+        impl[T] Count for Crate[T] {\n    fn count(self) -> Int {\n        return 1\n    }\n}\n\n\
+        impl[T: Nope] Count for Crate[T] {\n    fn count(self) -> Int {\n        return self.nothing()\n    }\n}\n";
+    let file = source("rejected_constraint.proviso", text);
+    let output = proviso().arg("check").arg(&file).output().unwrap();
+    let errors = stderr(&output);
+    assert_eq!(output.status.code(), Some(65), "{errors}");
+    assert!(errors.contains("error[E0313]: `Crate[T]` already implements `Count`"), "{errors}");
+    assert!(errors.contains("error[E0303]: `Crate[T]` has no method `nothing`"), "{errors}");
+    assert_eq!(errors.matches("error[").count(), 3, "{errors}");
+}

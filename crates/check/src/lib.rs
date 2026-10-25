@@ -483,6 +483,9 @@ struct FnState {
     example: bool,
     /// The interfaces each of the function's type parameters implements.
     bounds: Vec<Vec<IfaceId>>,
+    /// Whether each of the function's type parameters has a rejected declaration or
+    /// constraint, so a field of its type is unknown (§15.1).
+    rejected: Vec<bool>,
     /// For each type parameter that a parameter of interface type stands for, that
     /// parameter's name and the interface, which diagnostics suggest a declaration with.
     anonymous: Vec<Option<(Box<str>, Box<str>)>>,
@@ -514,6 +517,7 @@ impl FnState {
             example: false,
             bounds: Vec::new(),
             anonymous: Vec::new(),
+            rejected: Vec::new(),
             closures: Vec::new(),
             debugged: Vec::new(),
             late_captures: Vec::new(),
@@ -2019,7 +2023,8 @@ impl Checker<'_> {
         let m = self.m;
         let found = self.found(0);
         let body = moves::Body::Predicate(expr);
-        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags)
+        let bounds = self.move_bounds();
+        moves::check(m, &mut self.p, &self.f.locals, &bounds, &found, body, self.diags)
     }
 
     fn signatures(&mut self) {
@@ -2339,9 +2344,10 @@ impl Checker<'_> {
         let m = self.m;
         let target_span = m.types[decl.target].span;
         let header = span.to(target_span);
-        // A parameter with a rejected constraint still has its place in the target, as an
-        // unknown type, so the block is for `Box[_]`, any box, and not for an unknown type
-        // (§15.1). One that names a type may have meant it, so it leaves the target unknown.
+        // A parameter with a rejected constraint still has its place in the target, so the
+        // block is for `Box[T]`, any box, and not for an unknown type (§15.1). Matching takes
+        // it to meet any constraint, and a field of its type is unknown in the block's bodies.
+        // One that names a type may have meant the type, so it leaves the target unknown.
         let unscoped: Vec<(Symbol, u32)> = (self.impl_generics.iter().enumerate())
             .filter(|(_, g)| g.rejected)
             .filter_map(|(i, g)| Some((g.sym?, i as u32)))
@@ -2354,7 +2360,6 @@ impl Checker<'_> {
         }
         let target = self.resolve_type(decl.target);
         self.impl_scope();
-        let target = unknown_params(&target, &unscoped);
         // Only the target gives the block's type parameters, so one it doesn't name could
         // be any type at each call (OPEN_QUESTIONS P5). It stands for an unknown type.
         if !mentions_error(&target) {
@@ -2579,7 +2584,8 @@ impl Checker<'_> {
             );
             self.error(codes::IMPL_MISMATCH, header, message);
         }
-        let bounds = self.impl_generics.iter().map(|g| g.bounds.clone()).collect();
+        let bounds =
+            (self.impl_generics.iter()).map(|g| if g.rejected { Vec::new() } else { g.bounds.clone() }).collect();
         let names = self.impl_generics.iter().map(|g| g.name.clone()).collect();
         self.p.decls.add_impl(iface, key, ImplDef { methods: fns, target: target.clone(), bounds, names });
     }
@@ -3032,6 +3038,7 @@ impl Checker<'_> {
         }
         let mut state = FnState::new(info.ret.clone(), info.fails.clone());
         state.bounds = info.generics.iter().map(|g| g.bounds.clone()).collect();
+        state.rejected = info.generics.iter().map(|g| g.rejected).collect();
         state.anonymous = (info.generics.iter())
             .map(|g| Some((m.text(g.param?).into(), self.iface_name(*g.bounds.first()?).into())))
             .collect();
@@ -3103,7 +3110,8 @@ impl Checker<'_> {
             .collect();
         self.p.fns[id].owned = owned;
         let body = moves::Body::Fn(moves::FnBody { block: body, params, consumes_self });
-        moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags);
+        let bounds = self.move_bounds();
+        moves::check(m, &mut self.p, &self.f.locals, &bounds, &found, body, self.diags);
         self.p.fns[id].locals = self.f.locals.len();
         self.generic_scope.clear();
         self.param_names.clear();
@@ -6058,12 +6066,34 @@ impl Checker<'_> {
         ret
     }
 
+    /// The type arguments `args` of a value's type, with each type parameter of the function
+    /// whose declaration or constraint is rejected unknown, as in the bodies of `impl[T: Nope]
+    /// Box[T]`, so the parts of that type aren't reported (§15.1).
+    fn known_args(&self, args: &[Ty]) -> Vec<Ty> {
+        if !self.f.rejected.contains(&true) {
+            return args.to_vec();
+        }
+        let unknown: Vec<Ty> = (self.f.rejected.iter().enumerate())
+            .map(|(i, &rejected)| if rejected { Ty::Error } else { Ty::Param(i as u32) })
+            .collect();
+        args.iter().map(|arg| arg.subst(&unknown)).collect()
+    }
+
+    /// The constraints the move checker takes each type parameter to have. One with a
+    /// rejected declaration or constraint may have been `Copy` (§15.1).
+    fn move_bounds(&self) -> Vec<Vec<IfaceId>> {
+        let rejected = |i: usize| self.f.rejected.get(i).copied().unwrap_or(false);
+        (self.f.bounds.iter().enumerate())
+            .map(|(i, bounds)| if rejected(i) { vec![IfaceId::COPY] } else { bounds.clone() })
+            .collect()
+    }
+
     fn field(&mut self, e: ExprId, base_ty: &Ty, name: Ident) -> Ty {
         let text = self.m.text(name.sym);
         if let Ty::Adt(id, args) = base_ty
             && let Some((i, field)) = self.p.decls.adt(*id).field(text)
         {
-            let ty = field.ty.subst(args);
+            let ty = field.ty.subst(&self.known_args(args));
             self.p.res.insert(e, Res::Field(i));
             return ty;
         }
@@ -6100,10 +6130,11 @@ impl Checker<'_> {
         let m = self.m;
         let Ty::Adt(id, targs) = record_ty else { return };
         let id = *id;
+        let targs = self.known_args(targs);
         let def = self.p.decls.adt(id);
         let record = def.name.clone();
         let fields: Vec<(Box<str>, Ty)> =
-            def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.subst(targs))).collect();
+            def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.subst(&targs))).collect();
         if args.is_empty() {
             let message = format!("`with` names at least one field of `{record}` to replace");
             self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
@@ -7175,8 +7206,9 @@ impl Checker<'_> {
             return self.unknown_parts(fields);
         }
         let ctor = def.ctor_name(v);
+        let targs = self.known_args(targs);
         let declared: Vec<(Box<str>, Ty)> =
-            variant.fields.iter().map(|f| (f.name.clone(), f.ty.subst(targs))).collect();
+            variant.fields.iter().map(|f| (f.name.clone(), f.ty.subst(&targs))).collect();
         let Some(fields) = fields else {
             if declared.is_empty() {
                 self.p.pat_ctor.insert(pat, CtorPat { adt: id, variant: v, fields: Box::new([]) });
@@ -7751,18 +7783,6 @@ fn strongly_connected<E>(edges: &[Vec<(usize, bool, E)>]) -> Vec<Vec<usize>> {
         }
     }
     components
-}
-
-/// `ty` with each type parameter in `params` replaced by an unknown type, part by part, so
-/// `Box[T]` becomes `Box[_]` rather than an unknown type as a whole.
-fn unknown_params(ty: &Ty, params: &[(Symbol, u32)]) -> Ty {
-    match ty {
-        Ty::Param(i) if params.iter().any(|&(_, p)| p == *i) => Ty::Error,
-        Ty::Adt(id, args) if !params.is_empty() => {
-            Ty::Adt(*id, args.iter().map(|arg| unknown_params(arg, params)).collect())
-        }
-        ty => ty.clone(),
-    }
 }
 
 /// Whether two `impl` targets are the same up to the names of their blocks' type parameters,
