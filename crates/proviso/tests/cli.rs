@@ -51,14 +51,15 @@ fn run_needs_a_main() {
 }
 
 /// A `main` whose declaration doesn't parse is reported once, not also as missing (§15.1;
-/// issue #55). A type named `main`, rejected for its name or because it doesn't parse, is no
-/// function, so `main` is missing.
+/// issue #55). A type named `main`, rejected for its name or because it doesn't parse, or a
+/// constant, is no function, so `main` is missing.
 #[test]
 fn a_main_that_fails_to_parse_is_not_missing() {
     for (text, code) in [
         ("record main {\n    n: Int\n}\n", "E0204"),
         ("type main = Int\n", "E0204"),
         ("record main {\n    n:\n}\n", "E0101"),
+        ("let main: Int = 3\n", "E0901"),
     ] {
         let file = source("type_main.proviso", text);
         let errors = stderr(&run(&["run"], &file));
