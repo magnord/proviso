@@ -5973,7 +5973,6 @@ impl Checker<'_> {
         self.p.decls.reach(ty, &self.f.bounds)
     }
 
-
     /// Whether local `id` is one the innermost closure being checked captures, which it may
     /// not change before phase 3 (REFERENCE §5.3).
     fn changes_capture(&mut self, id: LocalId, span: Span) -> bool {
