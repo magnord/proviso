@@ -1,8 +1,11 @@
 // phase: 3.2
 // expect-error: E0602
+// expect-error: E0603
 // The joins of reach/joins, in both orders, pinned from the other side: a join of values
 // uses what any of them uses, and a function-typed parameter of a join of closures admits
-// only what all of them admit (OPEN_QUESTIONS P5, Reach inference).
+// only what all of them admit (OPEN_QUESTIONS P5, Reach inference). Every branch counts,
+// also a middle `else if`, a `match` inside an `else`, and each branch under a written
+// function type, which is then checked against their join.
 cap interface Dir observes(read) effects(write) {
     fn read_text(self, path: Text) -> Text                      needs read
     fn write_text(self, path: Text, text: Text)                 needs write
@@ -60,4 +63,40 @@ fn params(flag: Bool) -> Int {
     let c = take_reaching(f: a)                                 // <- E0602
     let d = take_reaching(f: b)                                 // <- E0602
     return c + d
+}
+
+fn pure(f: fn() -> Text) -> Text {
+    return f()
+}
+
+fn all_branches(dir: Dir[read], x: Int) -> Text {
+    let r = || dir.read_text(path: "w")
+    let a: fn() -> Text = if x == 0 { r } else { || "a" }       // <- E0602
+    let b: fn() -> Text = match x {                             // <- E0602
+        0 => r
+        _ => || "b"
+    }
+    let c = pure(f: if x == 0 { r } else { || "c" })           // <- E0602
+    let d = if x == 0 { || "d" } else if x == 1 { r } else { || "e" }
+    let e = if x == 0 { || "f" } else { match x {
+        1 => r
+        _ => || "g"
+    } }
+    let f = pure(f: d)                                         // <- E0602
+    let g = pure(f: e)                                         // <- E0602
+    return f"{a()}{b()}{c}{f}{g}"
+}
+
+fn give_all(d: Dir) -> Dir {
+    return d
+}
+
+fn give_read(d: Dir) -> Dir[read] {
+    return d.only::[read]()
+}
+
+fn middle(dir: Dir, x: Int) {
+    let f = if x == 0 { give_all } else if x == 1 { give_read } else { give_all }
+    let g: fn(Dir) -> Dir = if x == 0 { give_read } else { give_all }  // <- E0603
+    f(dir).write_text(path: "m", text: "x")                     // <- E0603
 }

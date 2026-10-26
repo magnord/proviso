@@ -113,3 +113,14 @@ fn held_resource(h: take Held) -> Text {
     h.abandon()
     return t
 }
+
+fn late_nested(dir: Dir[read]) {
+    let f = |p| {
+        let t = g(|| g(|| {
+            debug(p)                                            // <- E0602
+            "p"
+        }))
+        takes_dir(d: p)
+    }
+    f(dir)
+}

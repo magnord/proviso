@@ -1,11 +1,42 @@
 // phase: 3.2
 // expect-error: E0301
+// expect-error: E0701
 // A written function type is what each branch's closure must be, so a mistake in either is
-// reported in its body, not at the whole `if` or `match` (issue #61).
+// reported in its body, not at the whole `if` or `match` (issue #61). A branch nested in
+// another's `else` joins with the rest, so its result and error type count.
 fn annotated(flag: Bool) {
     let f: fn() -> Never = if flag { || 5 } else { || 6 }            // <- E0301, E0301
     let g: fn() -> Never = match flag {
         true => || 7                                                 // <- E0301
         false => || 8                                                // <- E0301
     }
+}
+
+fn stop() -> Never {
+    unreachable
+}
+
+fn five() -> Int {
+    return 5
+}
+
+enum Oops {
+    Bad
+}
+
+fn risky(n: Int) -> Int fails Oops {
+    if n < 0 {
+        fail Oops.Bad
+    }
+    return n
+}
+
+fn nested(flag: Bool, x: Int) {
+    let f = if flag { stop } else { match x {
+        1 => five
+        _ => five
+    } }
+    let t: Text = f()                                                // <- E0301
+    let d = if x == 0 { || 1 } else if x == 1 { || try risky(n: -1) } else { || 2 }
+    let n = d()                                                      // <- E0701
 }

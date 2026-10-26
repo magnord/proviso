@@ -1392,11 +1392,13 @@ impl Checker<'_> {
             let shown = self.show(self.p.ty(e)).into();
             self.p.debug_fns.insert(e, shown);
         }
+        // Each closure around a capture captures it, and the innermost one is reported.
+        let mut reported = HashSet::new();
         for (e, id, span) in std::mem::take(&mut self.f.late_captures) {
             let ty = &self.f.locals[id.index()].ty;
             let reach = self.reach(ty);
             let Some(Ty::Reach(uses)) = self.p.ty(e).fn_uses() else { continue };
-            if !ty.is_unknown() && !reach.covered_by(uses) {
+            if !ty.is_unknown() && !reach.covered_by(uses) && reported.insert((span.lo, span.hi)) {
                 let message = format!(
                     "this closure captures a value of type `{}`, which was inferred after the closure's type `{}`, so the closure's `uses` doesn't cover what it reaches; give the value a type where it is declared (§9.4)",
                     self.show(ty),
@@ -7875,8 +7877,10 @@ impl Checker<'_> {
                 // The branches' types are joined, so either may give the other its type
                 // arguments and literal types (OPEN_QUESTIONS P5; issue #10). The then-branch's
                 // type, joined with the expected one, is what the else-branch meets.
-                // A written function type is what each branch's closure must be (issue #61).
-                let from_then = !then_ty.is_unknown() && !self.requires_fn(expected);
+                // A written function type is what each branch's closure must be (issue #61), and
+                // the `if`'s type is still the join of both.
+                let required = !inherited && self.requires_fn(expected);
+                let from_then = !then_ty.is_unknown() && !required;
                 let known = if from_then { Some(then_ty.clone()) } else { expected.cloned() };
                 let expected = known.as_ref();
                 if inherited || from_then {
@@ -7907,6 +7911,7 @@ impl Checker<'_> {
                         self.mismatched.insert(e);
                         Ty::Error
                     }
+                    _ if required => self.join_branches(then_ty, else_ty, else_tail),
                     // The else-branch's type is the join, unless it has none of its own.
                     Some(known) if else_ty.is_unknown() => known.clone(),
                     _ => else_ty,
@@ -7915,6 +7920,31 @@ impl Checker<'_> {
         };
         self.record(e, ty.clone());
         ty
+    }
+
+    /// The join of `known`, what earlier branches gave, and `ty`, what the branch `tail`
+    /// gives, where both were checked against a written function type. A mismatch is reported
+    /// at `tail`.
+    fn join_branches(&mut self, known: Ty, ty: Ty, tail: Option<ExprId>) -> Ty {
+        if ty.is_unknown() || diverges_ty(&ty) {
+            return known;
+        }
+        if known.is_unknown() || diverges_ty(&known) {
+            return ty;
+        }
+        self.vars.join(&known, &ty).unwrap_or_else(|| {
+            let message = format!("expected `{}`, found `{}`", self.show(&known), self.show(&ty));
+            let code = self.mismatch_code(&known, &ty);
+            match tail {
+                Some(tail) => {
+                    self.mismatch(tail, code, self.span(tail), message);
+                    self.mismatched.insert(tail);
+                }
+                None => self.vars.quiet(&known),
+            }
+            self.vars.poison(&ty);
+            Ty::Error
+        })
     }
 
     /// Checks `e`, a branch's value or a tuple's element, where the others give `known`,
@@ -8151,7 +8181,9 @@ impl Checker<'_> {
         let mut leaves = Ty::Never;
         let mut tys = Vec::new();
         let mut sibling = self.siblings.remove(&e);
-        let required = self.requires_fn(expected.as_ref());
+        // A written function type is what each arm's closure must be, and the arms still join.
+        let required = !sibling && self.requires_fn(expected.as_ref());
+        let mut joined = Ty::Never;
         for arm in arms {
             // An arm's bindings scope over its guard and body.
             let base = self.f.locals.len() as u32;
@@ -8176,7 +8208,9 @@ impl Checker<'_> {
                         self.mark_sibling(self.tail(&arm.body));
                     }
                     let ty = self.block_value(&arm.body, expected.as_ref(), copying);
-                    if !ty.is_unknown() && !required {
+                    if required {
+                        joined = self.join_branches(joined, ty.clone(), self.tail(&arm.body));
+                    } else if !ty.is_unknown() {
                         expected = Some(ty.clone());
                         sibling = true;
                     }
@@ -8227,6 +8261,7 @@ impl Checker<'_> {
                 self.mismatched.insert(e);
                 Ty::Error
             }
+            Mode::Value(_) if required && joined != Ty::Never => joined,
             Mode::Value(_) => expected.unwrap_or(Ty::Error),
         };
         self.record(e, ty.clone());
