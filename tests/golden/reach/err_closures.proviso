@@ -1,4 +1,5 @@
 // phase: 3.2
+// expect-error: E0208
 // expect-error: E0602
 // A function type without `uses` admits only closures that capture no capability, and one
 // with `uses` only those whose reach it covers, permissions included (REFERENCE §9.4,
@@ -144,4 +145,15 @@ fn late_written(log: Log) {
         takes_log(l: p)
     }
     f(log)
+}
+
+fn no_params(f: fn()) {}
+
+// A rejected closure's late captures aren't checked (REFERENCE §15.1).
+fn late_rejected(dir: Dir[read]) {
+    let f = |p| {
+        no_params(f: |x| debug(p))                              // <- E0208
+        takes_dir(d: p)
+    }
+    f(dir)
 }

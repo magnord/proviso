@@ -1399,6 +1399,10 @@ impl Checker<'_> {
         for (e, id, span, written) in std::mem::take(&mut self.f.late_captures) {
             let ty = &self.f.locals[id.index()].ty;
             let reach = self.reach(ty);
+            // A rejected closure's captures aren't checked (§15.1).
+            if self.p.ty(e).is_unknown() {
+                continue;
+            }
             let Some(Ty::Reach(uses)) = written.as_ref().or(Some(self.p.ty(e))).and_then(Ty::fn_uses) else { continue };
             if ty.is_unknown() || reach.covered_by(uses) || !reported.insert((span.lo, span.hi)) {
                 continue;
