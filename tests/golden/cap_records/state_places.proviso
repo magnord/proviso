@@ -1,0 +1,71 @@
+// phase: 3.3
+// A `state` field is a place, as a variable is. An assignment, a method that changes its
+// receiver, and an `&` argument may change it or a part of it, through any copy of the object
+// (REFERENCE §9.6). An `&` argument from `state` is copied in, so a callee that fails leaves
+// it as it was unless its parameter keeps partial changes (§5.4). A plain field holding a
+// handle reaches the other object's `state` through its operations.
+use std.io { IoError }
+
+record Point {
+    x: Int
+    y: Int
+}
+
+enum StepError {
+    TooFar(by: Int)
+}
+
+cap interface Board observes(look) effects(move) {
+    fn look(self) -> Text                                       needs look
+    fn move_by(self, dx: Int, dy: Int) fails StepError          needs move
+    fn mark(self, i: Int, text: Text)                           needs move
+}
+
+cap record Grid {
+    limit: Int
+    state at: Point
+    state marks: List[Text]
+    state moves: Int
+}
+
+fn step(p: inout Point, dx: Int, dy: Int, limit: Int) fails StepError {
+    p.x += dx
+    p.y += dy
+    check p.x <= limit else fail StepError.TooFar(by: p.x - limit)
+}
+
+fn count(n: inout Int) {
+    n += 1
+}
+
+impl Board for Grid {
+    fn look(self) -> Text {
+        return f"({self.at.x}, {self.at.y}) after {self.moves} moves, marks {self.marks}"
+    }
+
+    fn move_by(self, dx: Int, dy: Int) fails StepError {
+        count(&self.moves)
+        try step(p: &self.at, dx: dx, dy: dy, limit: self.limit)
+    }
+
+    fn mark(self, i: Int, text: Text) {
+        self.marks[i] = text
+        self.marks.push(f"#{i}")
+    }
+}
+
+record Player {
+    name: Text
+    board: Board
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let grid = Grid(limit: 5, at: Point(x: 0, y: 0), marks: ["a", "b"], moves: 0)
+    let player = Player(name: "ada", board: Board.of(grid))
+    player.board.move_by(dx: 2, dy: 1) else {}
+    try sys.stdout.write_line(grid.look())
+    player.board.move_by(dx: 9, dy: 9) else {}
+    try sys.stdout.write_line(grid.look())
+    grid.mark(i: 1, text: "B")
+    try sys.stdout.write_line(player.board.look())
+}
