@@ -4,9 +4,10 @@
 // expect-error: E0309
 // expect-error: E0606
 // expect-error: E0901
-// Only a `cap record` implements a capability interface (REFERENCE §9.6), and `X.of(r)` takes
-// one that implements `X`. A `cap record` is a handle that copies share, so its fields can't be
-// unique or resources. Type parameters, `derives` and refinements on one aren't scheduled. In a
+// Only a `cap record` implements a capability interface (OPEN_QUESTIONS Q30, P5), and `X.of(r)`
+// takes one that implements `X` (REFERENCE §9.6). A `cap record` is a handle that copies share,
+// and unique or resource fields on one aren't scheduled, nor are type parameters, `derives`
+// and refinements. In a
 // `cap interface`, `Self` may be an operation's result but not a parameter's type, since a
 // handle's argument may come from another implementation, and `Self` with `uses` isn't
 // scheduled either, nor are patterns that match a `cap record` (OPEN_QUESTIONS P5; issue
@@ -122,9 +123,25 @@ cap record Holder {
     state token: Token                                          // <- E0901
 }
 
+resource record Lock {
+    id: Int
+}
+
+impl Abandon for Lock {
+    fn abandon(take self) {}
+}
+
+cap record Locker {
+    lock: Lock                                                  // <- E0901
+}
+
 fn matched(d: Dial) -> Int {
     let Dial(n) = d                                             // <- E0901
-    return n
+    let is_dial = d is Dial(_)                                  // <- E0901
+    let m = match d {
+        Dial(n: k) => k,                                        // <- E0901
+    }
+    return n + m
 }
 
 fn gauges() -> Int {

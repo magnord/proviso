@@ -1,0 +1,33 @@
+// phase: 3.3
+// A chain of a million capability objects, each holding the next in a `state` field or in a
+// plain one, goes away without recursion, as a long enum does (OPEN_QUESTIONS P5).
+use std.io { IoError }
+
+cap record Node {
+    next: Option[Node]
+    state later: Option[Node]
+    state depth: Int
+}
+
+impl Node {
+    fn depth(self) -> Int {
+        return self.depth
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var plain: Option[Node] = None
+    var held: Option[Node] = None
+    for i in 0..1000000 {
+        plain = Some(Node(next: plain, later: None, depth: i))
+        held = Some(Node(next: None, later: held, depth: i))
+    }
+    let depth = match plain {
+        Some(node) => node.depth(),
+        None => 0,
+    }
+    try sys.stdout.write_line(f"built {depth}")
+    plain = None
+    held = None
+    try sys.stdout.write_line("dropped")
+}

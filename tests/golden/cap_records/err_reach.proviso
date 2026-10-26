@@ -4,8 +4,8 @@
 // A `cap record` reaches what its fields reach and every capability interface it implements,
 // with every permission, since a direct call may run any of its operations (OPEN_QUESTIONS
 // P5). So it isn't `Copy`, and a closure that captures one reaches those interfaces.
-// `X.of(r)` has every permission of `X`, and `uses` what `r` reaches besides `X` (REFERENCE
-// §9.6), so the capabilities in `r`'s fields and the other interfaces `r` implements.
+// `X.of(r)` has every permission of `X`, and `uses` what `r` reaches besides `X` (OPEN_QUESTIONS
+// P5, §G), so the capabilities in `r`'s fields and the other interfaces `r` implements.
 use std.io { Out }
 
 cap interface Log effects(append) {

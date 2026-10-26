@@ -1,0 +1,51 @@
+// phase: 3.3
+// A `cap record` derives nothing, but may implement `Eq`, `Ord` and `Show` by hand (OPEN_QUESTIONS
+// P5). `==`, `<`, `cmp`, interpolation and `show` use its methods, also inside a list and inside
+// a record whose `Eq` is derived. Its methods may read its `state`, which every copy shares.
+use std.io { IoError }
+
+cap record Tally {
+    name: Text
+    state total: Int
+}
+
+impl Tally {
+    fn add(self, n: Int) {
+        self.total += n
+    }
+}
+
+impl Eq for Tally {
+    fn eq(self, other: Tally) -> Bool {
+        return self.name == other.name
+    }
+}
+
+impl Ord for Tally {
+    fn cmp(self, other: Tally) -> Ordering {
+        return self.total.cmp(other.total)
+    }
+}
+
+impl Show for Tally {
+    fn show(self) -> Text {
+        return f"{self.name} at {self.total}"
+    }
+}
+
+record Pair derives(Eq) {
+    left: Tally
+    right: Tally
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let a = Tally(name: "a", total: 1)
+    let b = Tally(name: "b", total: 5)
+    let a2 = a
+    a2.add(n: 9)
+    try sys.stdout.write_line(f"{a} {a2} {b}")
+    try sys.stdout.write_line(f"{a == a2} {a == b} {a < b} {b < a} {[a, b]}")
+    try sys.stdout.write_line(a.show())
+    try sys.stdout.write_line(f"{Pair(left: a, right: b) == Pair(left: a2, right: b)}")
+    try sys.stdout.write_line(f"{Pair(left: a, right: b) == Pair(left: b, right: a)}")
+}

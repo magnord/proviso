@@ -1,9 +1,9 @@
 // phase: 3.3
 // A `state` field is a place, as a variable is. An assignment, a method that changes its
-// receiver, and an `&` argument may change it or a part of it, through any copy of the object
-// (REFERENCE §9.6). An `&` argument from `state` is copied in, so a callee that fails leaves
-// it as it was unless its parameter keeps partial changes (§5.4). A plain field holding a
-// handle reaches the other object's `state` through its operations.
+// receiver, and an `&` argument may change it or a part of it through `self` (REFERENCE
+// §9.6; OPEN_QUESTIONS P5). An `&` argument from `state` is lent to the call, and a callee
+// that fails leaves it as it was unless its parameter keeps partial changes (§5.4). A plain
+// field holding a handle reaches the other object's `state` through its operations.
 use std.io { IoError }
 
 record Point {

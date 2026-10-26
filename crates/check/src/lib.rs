@@ -259,6 +259,10 @@ pub struct Program {
     /// again before they are assigned (REFERENCE §5.1), so the interpreter may take the
     /// value out.
     pub moves_out: SideTable<Expr, ()>,
+    /// The calls of a `cap record`'s methods on a value of it from outside its own `impl`
+    /// blocks, which may not re-enter its object, as a call through a handle may not
+    /// (REFERENCE §9.6; OPEN_QUESTIONS Q30).
+    pub outside_calls: SideTable<Expr, ()>,
     /// The `match` arms whose patterns move the whole local or field their scrutinee names,
     /// which leaves its place when the arm is chosen.
     pub arms_out: SideTable<Pat, ()>,
@@ -4607,6 +4611,28 @@ impl Checker<'_> {
         }
     }
 
+    /// Notes method call `e` if it calls a method of a `cap record` on a value of it from
+    /// outside the record's own `impl` blocks. Only those blocks' direct calls to the
+    /// record's methods are ordinary calls (OPEN_QUESTIONS Q30).
+    fn outside_call(&mut self, e: ExprId) {
+        let ExprKind::MethodCall { receiver, ref args, .. } = self.m.exprs[e].kind else { return };
+        let value = match self.p.res(e) {
+            Some(Res::Dispatch { qualified: true, .. }) => match args.first() {
+                Some(first) => first.value,
+                None => return,
+            },
+            Some(Res::Dispatch { .. }) => receiver,
+            Some(Res::Fn(f)) if self.p.fns[f].receiver.is_some() => receiver,
+            _ => return,
+        };
+        if let Ty::Adt(id, _) = self.p.ty(value)
+            && self.p.decls.adt(*id).cap
+            && !matches!(&self.self_ty, Some(Ty::Adt(owner, _)) if owner == id)
+        {
+            self.p.outside_calls.insert(e, ());
+        }
+    }
+
     /// Whether `e` is the receiver of the method being checked.
     fn is_self(&self, e: ExprId) -> bool {
         self.f.has_self
@@ -5339,6 +5365,9 @@ impl Checker<'_> {
         let ty = self.vars.resolve(&ty);
         let ty = self.shallow(e, ty, before);
         let ty = if self.f.view.is_some() { self.view_expr(e, ty) } else { ty };
+        if let ExprKind::MethodCall { .. } = self.m.exprs[e].kind {
+            self.outside_call(e);
+        }
         if copying {
             self.copied(e, &ty);
             self.consumed.insert(e);

@@ -57,6 +57,9 @@ pub enum Value {
     Handle(HandleValue),
     IoError(Arc<str>),
     Cap(Cap),
+    /// A value of a `cap record`, which is a handle to its object (REFERENCE §9.6). The `Arc`
+    /// keeps a `Value` as small as it is without one.
+    Object(Arc<CapObject>),
     Fn(FnValue),
 }
 
@@ -340,6 +343,11 @@ fn drop_parts(owned: &mut Vec<Value>) {
                     owned.extend(std::mem::take(&mut pool.slots).into_iter().flatten().map(|(_, value)| value));
                 }
             }
+            Value::Object(object) => {
+                if let Some(object) = Arc::get_mut(object) {
+                    object.take_parts(owned);
+                }
+            }
             _ => {}
         }
         // `value` now holds no other record, enum or collection, so dropping it doesn't recurse.
@@ -349,14 +357,14 @@ fn drop_parts(owned: &mut Vec<Value>) {
 /// Moves the records, enums and collections out of `fields` into `owned`.
 fn take_parts(fields: &mut [Value], owned: &mut Vec<Value>) {
     for field in fields {
-        if let Value::Adt(_) | Value::List(_) | Value::Map(_) | Value::Pool(_) = field {
+        if let Value::Adt(_) | Value::List(_) | Value::Map(_) | Value::Pool(_) | Value::Object(_) = field {
             owned.push(std::mem::replace(field, Value::Unit));
         }
     }
 }
 
-/// A capability. Copies share the underlying state, the one exception to value semantics
-/// (REFERENCE §9.6).
+/// A capability the runtime provides. Copies share the underlying state, the one exception to
+/// value semantics (REFERENCE §9.6), as copies of a [`Value::Object`] do.
 #[derive(Clone, Debug)]
 pub enum Cap {
     Stdin,
@@ -365,8 +373,6 @@ pub enum Cap {
     /// One of `System`'s capabilities that has no operations yet, such as its `Clock`
     /// (OPEN_QUESTIONS Q6).
     Inert(IfaceId),
-    /// A value of a `cap record`, which is a handle to its object.
-    Object(CapObject),
 }
 
 /// A value of a `cap record`. Its plain fields are its own, as a record's are, and `with`
@@ -377,6 +383,29 @@ pub struct CapObject {
     /// The plain fields, with `Unit` at each `state` field.
     pub fields: Arc<[Value]>,
     pub state: Arc<CapState>,
+}
+
+impl CapObject {
+    /// Moves the records, enums, collections and objects that this handle alone holds, in its
+    /// plain fields or, as the last handle to its object, in its `state`, into `owned`.
+    fn take_parts(&mut self, owned: &mut Vec<Value>) {
+        if let Some(fields) = Arc::get_mut(&mut self.fields) {
+            take_parts(fields, owned);
+        }
+        if let Some(state) = Arc::get_mut(&mut self.state) {
+            take_parts(&mut state.0.get_mut().unwrap_or_else(PoisonError::into_inner).values, owned);
+        }
+    }
+}
+
+impl Drop for CapObject {
+    /// Drops what the handle holds without recursion, as [`Adt`] does, so a chain of objects
+    /// as long as memory allows doesn't overflow the native stack.
+    fn drop(&mut self) {
+        let mut owned = Vec::new();
+        self.take_parts(&mut owned);
+        drop_parts(&mut owned);
+    }
 }
 
 /// The `state` of a capability object, and the calls of its methods in progress.
@@ -850,9 +879,7 @@ impl Interp<'_> {
         // A method of a `cap record` runs on its object, whose `state` it leaves as it was if
         // it fails (REFERENCE §9.6).
         let object = match (callee, args.first()) {
-            (Callee::Fn(f), Some(Value::Cap(Cap::Object(object)))) if p.fns[f].receiver.is_some() => {
-                Some((object.clone(), f))
-            }
+            (Callee::Fn(f), Some(Value::Object(object))) if p.fns[f].receiver.is_some() => Some((object.clone(), f)),
             _ => None,
         };
         let (body, mut frame, owned, params) = match callee {
@@ -917,6 +944,8 @@ impl Interp<'_> {
         if let (Some((object, _)), Some(snapshot)) = (&object, snapshot) {
             let mut state = object.state.lock();
             state.running -= 1;
+            // A field lent out to a change that began before this call is `Unit` in both, and
+            // goes back when that change ends.
             if result.is_err() {
                 state.values = snapshot;
             }
@@ -1068,7 +1097,15 @@ impl Interp<'_> {
             if inout_self {
                 let (root, path) = self.place(receiver, frame)?;
                 let span = self.m.exprs[receiver].span;
-                places.push(Inout { index: 0, root, path, span, partial: partial(self.p, None) });
+                places.push(Inout {
+                    index: 0,
+                    root,
+                    path,
+                    span,
+                    partial: partial(self.p, None),
+                    lent: None,
+                    shares: None,
+                });
                 values.push(Value::Unit);
             } else {
                 values.push(self.held(receiver, frame)?);
@@ -1078,20 +1115,40 @@ impl Interp<'_> {
             if arg.inout {
                 let (root, path) = self.place(arg.value, frame)?;
                 let span = self.m.exprs[arg.value].span;
-                places.push(Inout { index: values.len(), root, path, span, partial: partial(self.p, Some(i)) });
+                let partial = partial(self.p, Some(i));
+                places.push(Inout { index: values.len(), root, path, span, partial, lent: None, shares: None });
                 values.push(Value::Unit);
             } else {
                 values.push(self.held(arg.value, frame)?);
             }
         }
-        for place in &places {
-            // A `state` field is copied in, since the object stays readable meanwhile.
-            values[place.index] = match &place.root {
-                Root::Local(id) if !can_fail || place.partial => {
-                    std::mem::replace(slot(&mut frame[id.index()], &place.path)?, Value::Unit)
+        for k in 0..places.len() {
+            let take = !can_fail || places[k].partial;
+            values[places[k].index] = match &places[k].root {
+                Root::Local(id) if take => {
+                    std::mem::replace(slot(&mut frame[id.index()], &places[k].path)?, Value::Unit)
                 }
-                root => self.read_place(frame, root, &place.path, place.span)?,
+                Root::Local(_) => self.read_place(frame, &places[k].root, &places[k].path, places[k].span)?,
+                // A `state` field is lent out of its object for the call, once however many
+                // places it holds, so nothing reads or changes it meanwhile (REFERENCE §9.6).
+                // A call that may roll it back gets a copy, as for a local.
+                Root::State(..) => {
+                    let key = places[k].root.key();
+                    let owner =
+                        match places[..k].iter().position(|place| place.lent.is_some() && place.root.key() == key) {
+                            Some(owner) => owner,
+                            None => {
+                                places[k].lent = self.lend(&places[k].root, places[k].span)?;
+                                k
+                            }
+                        };
+                    places[k].shares = (owner != k).then_some(owner);
+                    let path = places[k].path.clone();
+                    let lent = &mut places[owner].lent.as_mut().expect("a `state` root is lent").value;
+                    if take { std::mem::replace(slot(lent, &path)?, Value::Unit) } else { at(lent, &path)?.clone() }
+                }
             };
+            let place = &places[k];
             // A closure this call made reads what it captures as it is now (REFERENCE §6.7).
             if let Value::Fn(FnValue::Closure(c)) = &values[place.index]
                 && c.frame == self.frame
@@ -1208,7 +1265,7 @@ impl Interp<'_> {
         &mut self,
         callee: Callee,
         values: Vec<Value>,
-        places: &[Inout],
+        mut places: Vec<Inout>,
         frame: &mut Frame,
         site: Span,
     ) -> Flow<Value> {
@@ -1218,22 +1275,31 @@ impl Interp<'_> {
             return result;
         }
         if result.is_err() {
-            for (place, value) in places.iter().zip(finals).filter(|(place, _)| place.partial) {
-                if let Ok(mut lent) = self.lend(&place.root, place.span)
-                    && let Ok(slot) = slot(base(frame, &place.root, &mut lent), &place.path)
-                {
+            for (k, value) in finals.into_iter().enumerate() {
+                if !places[k].partial {
+                    continue;
+                }
+                let path = places[k].path.clone();
+                let owner = places[k].shares.unwrap_or(k);
+                if let Ok(slot) = slot(lent_base(frame, &mut places[owner]), &path) {
                     *slot = value;
                 }
             }
+            // Each lent `state` field goes back as it was, but for the partial changes.
             return result;
         }
         let value = result?;
-        for (place, value) in places.iter().zip(finals) {
-            let mut lent = self.lend(&place.root, place.span)?;
-            *slot(base(frame, &place.root, &mut lent), &place.path)? = value;
+        for (k, value) in finals.into_iter().enumerate() {
+            let path = places[k].path.clone();
+            let owner = places[k].shares.unwrap_or(k);
+            *slot(lent_base(frame, &mut places[owner]), &path)? = value;
+        }
+        // The lent `state` fields go back before anything reads them.
+        for place in &mut places {
+            place.lent = None;
         }
         let mut checked: Vec<PlaceKey> = Vec::new();
-        for place in places {
+        for place in &places {
             for depth in (0..place.path.len()).rev() {
                 let key = (place.root.key(), place.path[..depth].iter().map(Step::key).collect());
                 if checked.contains(&key) {
@@ -1487,7 +1553,7 @@ impl Interp<'_> {
     /// is a capability object and `i` one of its `state` fields.
     fn state_root(&self, frame: &Frame, root: &Root, path: &[Step], i: FieldIdx, span: Span) -> Flow<Option<Root>> {
         let object = |value: &Value| match value {
-            Value::Cap(Cap::Object(object)) if self.p.decls.adt(object.def).variant().fields[i.index()].state => {
+            Value::Object(object) if self.p.decls.adt(object.def).variant().fields[i.index()].state => {
                 Some(Root::State(object.state.clone(), object.def, i))
             }
             _ => None,
@@ -1539,32 +1605,24 @@ impl Interp<'_> {
         let def = self.p.decls.adt(def);
         let field = &def.variant().fields[i.index()].name;
         let message = format!(
-            "this reads `state` field `{field}` of a `{}` while a change to it is in progress; calls on one capability object run one at a time (§9.6)",
+            "this uses `state` field `{field}` of a `{}` while a change to it is in progress; calls on one capability object run one at a time (§9.6)",
             def.name
         );
         defect(DefectKind::ReentrantCall, message, span)
     }
 
     /// Begins a call of method `f` of a `cap record` on `object`, and returns the object's
-    /// `state` as it was, which a failure restores. A call through a capability handle while
-    /// one of the object's methods runs re-enters it, and so does any call while one of its
-    /// `state` fields is lent out, which are defects (REFERENCE §9.6; OPEN_QUESTIONS Q30).
+    /// `state` as it was, which a failure restores. A call through a capability handle, or
+    /// from outside the record's own `impl` blocks, while one of the object's methods runs
+    /// re-enters it, which is a defect (REFERENCE §9.6; OPEN_QUESTIONS Q30).
     fn enter(&self, object: &CapObject, f: FnId, handle: bool, site: Span) -> Flow<Vec<Value>> {
         let mut state = object.state.lock();
         let def = self.p.decls.adt(object.def);
         let name = self.m.text(self.p.fns[f].name);
         if handle && state.running > 0 {
             let message = format!(
-                "this calls `{name}` through a capability handle on a `{}` whose operation is still running; calls on one capability object run one at a time (§9.6)",
+                "this calls `{name}` on a `{}` whose operation is still running, through a capability handle or from outside the record's own `impl` blocks; calls on one capability object run one at a time (§9.6)",
                 def.name
-            );
-            return Err(defect(DefectKind::ReentrantCall, message, site));
-        }
-        if let Some(i) = state.lent.iter().position(|&lent| lent) {
-            let message = format!(
-                "this calls `{name}` on a `{}` while a change to its `state` field `{}` is in progress; calls on one capability object run one at a time (§9.6)",
-                def.name,
-                def.variant().fields[i].name
             );
             return Err(defect(DefectKind::ReentrantCall, message, site));
         }
@@ -1585,7 +1643,7 @@ impl Interp<'_> {
                 state[i] = std::mem::replace(&mut fields[i], Value::Unit);
             }
         }
-        Value::Cap(Cap::Object(CapObject { def, fields: fields.into(), state: Arc::new(CapState::new(state)) }))
+        Value::Object(Arc::new(CapObject { def, fields: fields.into(), state: Arc::new(CapState::new(state)) }))
     }
 
     /// Whether `e` is a local or a field of one.
@@ -1698,7 +1756,7 @@ impl Interp<'_> {
                     FnValue::Named(f) => Callee::Fn(*f),
                     FnValue::Closure(c) => Callee::Closure(c),
                 };
-                let result = self.call_back(callee, values, &places, frame, span);
+                let result = self.call_back(callee, values, places, frame, span);
                 return self.attempted(e, result);
             }
             ExprKind::Call { callee, args, .. } => {
@@ -1711,7 +1769,7 @@ impl Interp<'_> {
                 match self.p.res(*callee) {
                     Some(Res::Fn(f)) => {
                         self.owned.truncate(mark);
-                        let result = self.call_back(Callee::Fn(f), values, &places, frame, span);
+                        let result = self.call_back(Callee::Fn(f), values, places, frame, span);
                         return self.attempted(e, result);
                     }
                     // `T(x)` converts its one value (STD.md).
@@ -1791,17 +1849,14 @@ impl Interp<'_> {
                         return self.attempted(e, result);
                     }
                     Res::Fn(f) => {
-                        let result = self.call_back(Callee::Fn(f), values, &places, frame, span);
+                        self.handle_call = self.p.outside_calls.get(e).is_some();
+                        let result = self.call_back(Callee::Fn(f), values, places, frame, span);
                         return self.attempted(e, result);
                     }
                     Res::Dispatch { iface, method, .. } => {
                         let self_value = receiver.unwrap_or_else(|| args[0].value);
                         let result = match iface {
-                            _ if let Value::Cap(cap) = &values[0]
-                                && !matches!(cap, Cap::Object(_)) =>
-                            {
-                                self.operation(cap, iface, method, &values[1..])
-                            }
+                            _ if let Value::Cap(cap) = &values[0] => self.operation(cap, iface, method, &values[1..]),
                             IfaceId::SHOW | IfaceId::EQ | IfaceId::ORD => self.dispatch(iface, method, values, span),
                             IfaceId::ABANDON if !matches!(&values[0], Value::Adt(adt) if self.p.decls.adt(adt.def).resource_base) => {
                                 self.dispatch(iface, method, values, span)
@@ -1810,10 +1865,12 @@ impl Interp<'_> {
                                 let key = impl_key(&values[0]);
                                 let f = self.p.decls.impl_method(iface, key, method);
                                 let f = f.expect("the checker found an implementation");
-                                // A call through a capability handle, rather than on a value of
-                                // the `cap record`, may not re-enter its object (OPEN_QUESTIONS Q30).
-                                self.handle_call = matches!(self.p.ty(self_value), Ty::Cap(_));
-                                self.call_back(Callee::Fn(f), values, &places, frame, span)
+                                // A call through a capability handle, or from outside the `cap
+                                // record`'s own blocks, may not re-enter its object (OPEN_QUESTIONS
+                                // Q30).
+                                self.handle_call = matches!(self.p.ty(self_value), Ty::Cap(_))
+                                    || self.p.outside_calls.get(e).is_some();
+                                self.call_back(Callee::Fn(f), values, places, frame, span)
                             }
                         };
                         return self.attempted(e, result);
@@ -1833,7 +1890,7 @@ impl Interp<'_> {
                         let mut value = values.next().expect("`with` has a receiver");
                         let fields = match &mut value {
                             Value::Adt(adt) => Arc::make_mut(&mut adt.fields),
-                            Value::Cap(Cap::Object(object)) => Arc::make_mut(&mut object.fields),
+                            Value::Object(object) => Arc::make_mut(&mut Arc::make_mut(object).fields),
                             _ => unreachable!("`with` copies a record"),
                         };
                         for (i, value) in replaced.iter().zip(values) {
@@ -1863,7 +1920,7 @@ impl Interp<'_> {
                 let Some(Res::Field(i)) = self.p.res(e) else { unreachable!("fields are resolved") };
                 match self.expr(*base, frame)? {
                     Value::Adt(adt) => adt.fields[i.index()].clone(),
-                    Value::Cap(Cap::Object(object)) => self.object_field(&object, i, span)?,
+                    Value::Object(object) => self.object_field(&object, i, span)?,
                     other => unreachable!("fields are read from records, not {other:?}"),
                 }
             }
@@ -2432,7 +2489,7 @@ impl Interp<'_> {
                 Value::List(Arc::new(ListValue { items }))
             }
             // A narrowed capability is the same object, with the same state (REFERENCE §9.2).
-            (Builtin::Only | Builtin::Of, [cap @ Value::Cap(_)]) => cap.clone(),
+            (Builtin::Only | Builtin::Of, [cap @ (Value::Cap(_) | Value::Object(_))]) => cap.clone(),
             (Builtin::ByteLen, [Value::Text(text)]) => Value::Int(text.len() as i128, IntTy::I64),
             (Builtin::IsEmpty, [Value::Text(text)]) => Value::Bool(text.is_empty()),
             // Rust's `char::is_whitespace` is Unicode's `White_Space` (STD.md).
@@ -2734,7 +2791,7 @@ fn impl_key(value: &Value) -> ImplKey {
         Value::Unit => ImplKey::Unit,
         Value::IoError(_) => ImplKey::IoError,
         Value::Adt(adt) => ImplKey::Adt(adt.def),
-        Value::Cap(Cap::Object(object)) => ImplKey::Adt(object.def),
+        Value::Object(object) => ImplKey::Adt(object.def),
         // A module may implement its interface for a standard type, as `List[Int]` (§4.9).
         Value::List(_) => ImplKey::Adt(AdtId::LIST),
         Value::Map(_) => ImplKey::Adt(AdtId::MAP),
@@ -2749,13 +2806,14 @@ fn impl_key(value: &Value) -> ImplKey {
 fn hand_written(value: &Value, iface: IfaceId, decls: &Decls) -> Option<FnId> {
     let def = match value {
         Value::Adt(adt) => adt.def,
-        Value::Cap(Cap::Object(object)) => object.def,
+        Value::Object(object) => object.def,
         _ => return None,
     };
     decls.impl_method(iface, ImplKey::Adt(def), 0)
 }
 
 /// A step of a place: a record's field, or a list's element and where it is indexed.
+#[derive(Clone)]
 enum Step {
     Field(FieldIdx),
     Index(i128, Span),
@@ -2794,6 +2852,11 @@ struct Inout {
     span: Span,
     /// It keeps the callee's changes whether or not the call succeeds (REFERENCE §5.4).
     partial: bool,
+    /// The `state` field it is in, lent out of its object for the call, which dropping puts
+    /// back.
+    lent: Option<Lent>,
+    /// The index of the place before it in the call that holds its lent `state` field.
+    shares: Option<usize>,
 }
 
 /// Where a place is rooted: a local of the running call, or a `state` field of a `cap
@@ -2842,12 +2905,22 @@ fn base<'v>(frame: &'v mut Frame, root: &Root, lent: &'v mut Option<Lent>) -> &'
     }
 }
 
+/// The value an `inout` argument's place starts from: its local's, or its lent `state`
+/// field's.
+fn lent_base<'v>(frame: &'v mut Frame, place: &'v mut Inout) -> &'v mut Value {
+    match (&place.root, &mut place.lent) {
+        (Root::Local(id), _) => &mut frame[id.index()],
+        (Root::State(..), Some(lent)) => &mut lent.value,
+        (Root::State(..), None) => unreachable!("a `state` root is lent for the call"),
+    }
+}
+
 /// The value at `path` inside `value`. An index outside its list is a defect.
 fn at<'v>(mut value: &'v Value, path: &[Step]) -> Flow<&'v Value> {
     for step in path {
         value = match (step, value) {
             (Step::Field(i), Value::Adt(adt)) => &adt.fields[i.index()],
-            (Step::Field(i), Value::Cap(Cap::Object(object))) => &object.fields[i.index()],
+            (Step::Field(i), Value::Object(object)) => &object.fields[i.index()],
             (Step::Index(i, span), Value::List(list)) => &list.items[element_at(*i, list.items.len(), *span)?],
             _ => unreachable!("paths go through records and lists"),
         };
@@ -2862,7 +2935,7 @@ fn slot<'v>(mut value: &'v mut Value, path: &[Step]) -> Flow<&'v mut Value> {
     for step in path {
         value = match (step, value) {
             (Step::Field(i), Value::Adt(adt)) => &mut Arc::make_mut(&mut adt.fields)[i.index()],
-            (Step::Field(i), Value::Cap(Cap::Object(object))) => &mut Arc::make_mut(&mut object.fields)[i.index()],
+            (Step::Field(i), Value::Object(object)) => &mut Arc::make_mut(&mut Arc::make_mut(object).fields)[i.index()],
             (Step::Index(i, span), Value::List(list)) => {
                 let at = element_at(*i, list.items.len(), *span)?;
                 &mut Arc::make_mut(list).items[at]
@@ -2989,6 +3062,11 @@ fn order_with<E>(a: &Value, b: &Value, hand_written: &mut HandWrittenOrd<'_, E>)
                         x.variant.index().partial_cmp(&y.variant.index())
                     }
                 },
+                // A `cap record` derives nothing, so it is ordered by its own `cmp`.
+                (a @ Value::Object(_), b @ Value::Object(_)) => match hand_written(a, b)? {
+                    Some(ordering) => Some(ordering),
+                    None => unreachable!("the checker found `Ord` for {a:?}"),
+                },
                 (Value::List(x), Value::List(y)) => {
                     work.push(Work::Lengths(x.items.len(), y.items.len()));
                     work.extend(x.items.iter().zip(y.items.iter()).rev().map(|(a, b)| Work::Pair(a, b)));
@@ -3098,6 +3176,11 @@ fn equal_with<E>(a: &Value, b: &Value, hand_written: &mut HandWrittenEq<'_, E>) 
                     x.variant == y.variant
                 }
             },
+            // A `cap record` derives nothing, so it is compared by its own `eq`.
+            (a @ Value::Object(_), b @ Value::Object(_)) => match hand_written(a, b)? {
+                Some(same) => same,
+                None => unreachable!("the checker found `Eq` for {a:?}"),
+            },
             (Value::List(x), Value::List(y)) => {
                 pairs.extend(x.items.iter().zip(y.items.iter()).rev());
                 x.items.len() == y.items.len()
@@ -3150,6 +3233,8 @@ fn hash_value(value: &Value, decls: &Decls) -> u64 {
             Value::Char(x) => x.hash(&mut hasher),
             Value::Text(x) => x.hash(&mut hasher),
             Value::Unit | Value::IoError(_) | Value::Cap(_) => {}
+            // A `cap record` has a hand-written `eq` if any, so it hashes as its type alone.
+            Value::Object(object) => object.def.index().hash(&mut hasher),
             Value::Handle(handle) => handle.hash(&mut hasher),
             Value::Pool(_) => unreachable!("a pool implements no `Hash`"),
             Value::Fn(_) => unreachable!("a function value implements no `Hash`"),
@@ -3318,11 +3403,15 @@ fn write_value<E>(
                 out.push_str(&format!("Handle(slot: {}, generation: {})", handle.slot, handle.generation));
             }
             Value::IoError(message) => out.push_str(message),
+            // Only a `cap record` that implements `Show` is shown, and `debug` writes its name.
+            Value::Object(object) => match hand_written(value)? {
+                Some(text) => out.push_str(&text),
+                None => out.push_str(&decls.adt(object.def).name),
+            },
             Value::Cap(cap) => out.push_str(match cap {
                 Cap::Stdin => "In",
                 Cap::Stdout | Cap::Stderr => "Out",
                 Cap::Inert(iface) => &decls.iface(*iface).name,
-                Cap::Object(object) => &decls.adt(object.def).name,
             }),
             // `debug` writes a function value's type, which only the checker knows.
             Value::Fn(_) => out.push_str("fn"),

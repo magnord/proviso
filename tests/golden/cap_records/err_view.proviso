@@ -89,6 +89,16 @@ fn takes_sinks(s: Sinks) -> Int {
     return 0
 }
 
+fn bump(n: inout Int) {
+    n += 1
+}
+
+impl Audited {
+    fn helper(self) -> Int {
+        return self.reads
+    }
+}
+
 impl Store for Audited {
     // What the view allows.
     fn read_text(self, key: Text) -> Text fails StoreError {
@@ -112,6 +122,7 @@ impl Store for Audited {
         self.reader.append("never")                             // <- E0603
         let out = self.sinks.out
         out.write_line("x") else {}                             // <- E0601
+        let later = || self.write_text(key: "k", text: "v")     // <- E0601
         return self.files.len()
     }
 
@@ -119,6 +130,7 @@ impl Store for Audited {
     fn again(self) -> Self {
         self.reads += 1                                         // <- E0305
         self.files.set(key: "k", value: "v")                    // <- E0305
+        bump(n: &self.reads)                                    // <- E0305
         return self                                             // <- E0605
     }
 
@@ -130,6 +142,7 @@ impl Store for Audited {
         let a = takes_store(s: self)                            // <- E0605
         let b = takes_sinks(s: self.sinks)                      // <- E0605
         let c = Store.of(self)                                  // <- E0605
+        let d = self.helper()                                   // <- E0605
         let f = || self.files.len()
         let g = || self.sinks.label
         let logs = self.sinks.logs                              // <- E0605

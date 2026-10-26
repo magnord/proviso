@@ -144,7 +144,7 @@ Slice 3.3 adds this kind:
 
 | Kind | Cause |
 |---|---|
-| `reentrant_call` | a call through a capability handle into an object whose operation is still running, or a read of a `state` field while a change to it is in progress; calls on one capability object run one at a time (§9.6; OPEN_QUESTIONS Q30, P5) |
+| `reentrant_call` | a call into an object whose operation is still running, through a capability handle or from outside its record's own `impl` blocks, or a use of a `state` field while a change to it, such as an `&` argument, is in progress; calls on one capability object run one at a time (§9.6; OPEN_QUESTIONS Q30, P5) |
 
 Every report is printed on stderr as `<kind>[<detail>]: <message>`, followed by its location and call sites (OPEN_QUESTIONS P5, T10). A leak comes right after the defect in `abandon` that caused it, and its location is the binding that owned the resource. Output of `debug(…)` also goes to stderr, one line per call, as `[debug <path>:<line>:<col>] <values>`.
 
