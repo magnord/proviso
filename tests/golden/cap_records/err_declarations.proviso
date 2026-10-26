@@ -2,7 +2,7 @@
 // expect-error: E0101
 // expect-error: E0301
 // expect-error: E0309
-// expect-error: E0316
+// expect-error: E0606
 // expect-error: E0901
 // Only a `cap record` implements a capability interface (REFERENCE §9.6), and `X.of(r)` takes
 // one that implements `X`. A `cap record` is a handle that copies share, so its fields can't be
@@ -33,7 +33,7 @@ record Fixed {
     n: Int
 }
 
-impl Gauge for Fixed {                                          // <- E0316
+impl Gauge for Fixed {                                          // <- E0606
     fn read(self) -> Int {
         return self.n
     }

@@ -1,5 +1,5 @@
 // phase: 2.4
-// expect-error: E0316
+// expect-error: E0606
 // expect-error: E0901
 // A hand-written `Hash`, interface functions without `self`, generic
 // interface methods, generic interfaces such as `Index[Int]`, tag parameters, and `Self` in
@@ -79,7 +79,7 @@ impl Greet for Out {                                // <- E0901
     }
 }
 
-impl Out for Counter {                              // <- E0316
+impl Out for Counter {                              // <- E0606
     fn write_line(self, text: Text) fails IoError {
     }
 }

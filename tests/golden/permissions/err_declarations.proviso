@@ -5,7 +5,7 @@
 // expect-error: E0301
 // expect-error: E0303
 // expect-error: E0307
-// expect-error: E0316
+// expect-error: E0606
 // expect-error: E0901
 // Only a `cap interface` declares permissions, and only its operations have `needs`
 // clauses, which name permissions it declares, once each (REFERENCE §9.2). A capability type
@@ -186,7 +186,7 @@ impl Show for Log {                                                     // <- E0
     }
 }
 
-impl Log for Data {                                                     // <- E0316
+impl Log for Data {                                                     // <- E0606
     fn read(self) -> Text {
         return ""
     }

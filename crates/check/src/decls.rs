@@ -1203,6 +1203,11 @@ impl Decls {
             if let Some(uses) = &def.uses {
                 kind.reach = uses.clone();
             }
+            // A `cap record` is copyable whatever its fields are, since its values are handles
+            // to one object (REFERENCE §9.6).
+            if def.cap {
+                (kind.unique, kind.resource) = (false, false);
+            }
             let def = &mut self.adts[a];
             if held == def.held && kind.unique == def.unique && kind.resource == def.resource && kind.reach == def.reach
             {

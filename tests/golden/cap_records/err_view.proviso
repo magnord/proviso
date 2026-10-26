@@ -1,15 +1,18 @@
 // phase: 3.3
+// expect-error: E0305
 // expect-error: E0601
 // expect-error: E0603
+// expect-error: E0605
 // An operation that needs no `effects` permission sees `self` through an observes-only view
 // (REFERENCE §9.2; OPEN_QUESTIONS Q39). A path from `self` may be read through, and a
 // capability at its end is narrowed to its `observes` permissions, as is what it uses. Its
-// `state` is read-only. `self`, and another `cap record` at the end of a path, may be only
-// the root of a path or the receiver of an operation of its own that needs no `effects`
-// permission. Any other value with `effects` reach can't be bound, passed or returned. A
-// closure may capture `self`, since its body is checked with the same view. Each way out of
-// the view is E0601, also through a local bound to a narrowed capability. A permission the
-// static type never had is E0603, as anywhere else.
+// `state` is read-only, so a write to it is E0305. Calling an `effects` operation through the
+// view, or passing a narrowed capability where its full type is expected, is E0601. `self`,
+// and another `cap record` at the end of a path, may be only the root of a path or the
+// receiver of an operation of its own that needs no `effects` permission. Any other value
+// with `effects` reach can't be bound, passed or returned. Each of those ways out of the view
+// is E0605. A closure may capture `self`, since its body is checked with the same view. A
+// permission the static type never had is E0603, as anywhere else.
 use std.io { Out }
 
 enum StoreError {
@@ -114,23 +117,23 @@ impl Store for Audited {
 
     // `state` is read-only through the view.
     fn again(self) -> Self {
-        self.reads += 1                                         // <- E0601
-        self.files.set(key: "k", value: "v")                    // <- E0601
-        return self                                             // <- E0601
+        self.reads += 1                                         // <- E0305
+        self.files.set(key: "k", value: "v")                    // <- E0305
+        return self                                             // <- E0605
     }
 
     // `self`, and values with `effects` reach, stay on their paths.
     fn name(self) -> Text {
-        let me = self                                           // <- E0601
-        let sinks = self.sinks                                  // <- E0601
-        let inner = self.inner                                  // <- E0601
-        let a = takes_store(s: self)                            // <- E0601
-        let b = takes_sinks(s: self.sinks)                      // <- E0601
-        let c = Store.of(self)                                  // <- E0601
+        let me = self                                           // <- E0605
+        let sinks = self.sinks                                  // <- E0605
+        let inner = self.inner                                  // <- E0605
+        let a = takes_store(s: self)                            // <- E0605
+        let b = takes_sinks(s: self.sinks)                      // <- E0605
+        let c = Store.of(self)                                  // <- E0605
         let f = || self.files.len()
         let g = || self.sinks.label
-        let logs = self.sinks.logs                              // <- E0601
-        for log in self.sinks.logs {                            // <- E0601
+        let logs = self.sinks.logs                              // <- E0605
+        for log in self.sinks.logs {                            // <- E0605
         }
         return self.inner.name()
     }

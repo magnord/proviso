@@ -3,10 +3,12 @@
 // expect-error: E0303
 // expect-error: E0305
 // `state` fields are allowed only in a `cap record` (REFERENCE §9.6), and are visible only
-// in the record's own `impl` blocks, where any value of the record may change them, even a
-// `let` or a borrowed parameter (§5.2). Elsewhere a construction sets them, and nothing
-// else names them. `with` replaces plain fields only, also inside the record's own blocks
-// (OPEN_QUESTIONS Q40). Plain fields are ordinary values, which a `let` can't change.
+// in the record's own `impl` blocks. There a state field changes only through a plain `self`,
+// even when `self` is borrowed (§5.2), so the change commits with the method that made it
+// (OPEN_QUESTIONS P5). Changing another value's state is E0305. Elsewhere a construction sets
+// them, and nothing else names them. `with` replaces plain fields only, also inside the
+// record's own blocks (OPEN_QUESTIONS Q40). Plain fields are ordinary values, which a `let`
+// can't change.
 record Point {
     x: Int
     state y: Int                                                // <- E0101
@@ -34,7 +36,7 @@ impl Meter for Clock {
     fn tick(self) {
         self.ticks += 1
         let other = Clock(label: "other", ticks: 0)
-        other.ticks = 5
+        other.ticks = 5                                         // <- E0305
         self.label = "x"                                        // <- E0305
         let copy = self.with(ticks: 2)                          // <- E0303
         let renamed = self.with(label: "y")
@@ -43,7 +45,7 @@ impl Meter for Clock {
 
 impl Clock {
     fn bump_other(self, other: Clock) {
-        other.ticks += self.ticks
+        other.ticks += self.ticks                               // <- E0305
     }
 }
 
