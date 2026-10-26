@@ -19,6 +19,10 @@ cap interface Clockwork {
     fn tick(self)
 }
 
+cap interface Backwards effects(write) observes(peek) {
+    fn peek(self) -> Text                       needs peek
+}
+
 cap interface Sink effects(write) {
     fn put(self, line: Text) -> Self            needs write
 }
@@ -53,7 +57,7 @@ fn full(log: Log, sink: Sink[write]) -> Text {
     return f"{reads(log: r)} {reads(log: h.log)} {counts(log: rc)}"
 }
 
-fn narrowed(log: Log) -> Log[read] {
+fn narrowed(log: keep Log) -> Log[read] {
     let only_read = log.only::[read]()
     let none = log.only::[]()
     let n = none.name()
@@ -65,8 +69,12 @@ fn narrowed_again(log: Log[read, append]) -> Text {
     return r.read()
 }
 
-fn sinks(s: Sink) -> Sink {
+fn sinks(s: keep Sink) -> Sink {
     return s.put(line: "x").put(line: "y")
+}
+
+fn backwards(b: Backwards[peek]) -> Text {
+    return b.peek()
 }
 
 fn ticks(c: Clockwork) {
@@ -74,7 +82,7 @@ fn ticks(c: Clockwork) {
     Clockwork.tick(c)
 }
 
-fn outs(o: Out, w: Out[write]) -> Out[write] {
+fn outs(o: Out, w: keep Out[write]) -> Out[write] {
     let o2 = o.only::[write]()
     return w
 }

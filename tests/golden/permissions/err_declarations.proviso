@@ -8,7 +8,8 @@
 // Only a `cap interface` declares permissions, and only its operations have `needs`
 // clauses, which name permissions it declares, once each (REFERENCE §9.2). A capability type
 // names its interface's permissions, once each. A capability interface is a type, so it
-// can't be a constraint (OPEN_QUESTIONS Q31). `cap record`, `uses` and `with` come in later
+// can't be a constraint (OPEN_QUESTIONS Q31). An `interface` that declares permissions is read
+// as the `cap interface` it was meant to be. `cap record`, `uses` and `with` come in later
 // slices, and implementations for a capability type are not yet scheduled. A rejected
 // declaration's uses aren't reported again (REFERENCE §15.1).
 use std.io { Out }
@@ -30,7 +31,22 @@ cap interface Cased observes(Read) {                                    // <- E0
 }
 
 interface Plain observes(read) {                                        // <- E0101
-    fn read(self) -> Text
+    fn read(self) -> Text                       needs read
+}
+
+fn plain(p: Plain[read]) -> Text {
+    return p.read()
+}
+
+cap interface Again observes(read) observes(count) {                    // <- E0101
+    fn read(self) -> Text                       needs read
+}
+
+cap fn capped() {                                                       // <- E0101
+}
+
+record Reaching {
+    log: Log[read] uses Out                                             // <- E0901
 }
 
 interface Needy {
@@ -96,5 +112,5 @@ impl Log for Data {                                                     // <- E0
 }
 
 fn shown(log: Log, c: Counter, p: Data) -> Text {
-    return f"{log.show()} {c.read()} {p.read()}"
+    return f"{log.show()} {c.read()} {p.read()} {Log.read(p)}"
 }

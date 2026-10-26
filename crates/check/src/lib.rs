@@ -2867,8 +2867,8 @@ impl Checker<'_> {
         // A capability type gets its operations from its interface. Whether it may have methods
         // or implement interfaces of its own isn't decided (OPEN_QUESTIONS P5).
         if let Ty::Cap(_) = target {
-            let what = "implementations for capability types such as `Out`";
-            self.not_implemented(target_span, what, Planned::Unscheduled);
+            let what = format!("implementations for capability types such as `{}`", self.show(&target));
+            self.not_implemented(target_span, &what, Planned::Unscheduled);
             self.declare_rejected(item, decl, &target);
             self.unknown_ty(&target);
             return;
@@ -3096,8 +3096,8 @@ impl Checker<'_> {
         }
         // `cap record`s implement capability interfaces, in slice 3.3.
         if self.names_cap(name.sym) {
-            let what = "implementations of capability interfaces such as `Out`";
-            self.not_implemented(name.span, what, Planned::Phase(3));
+            let what = format!("implementations of capability interfaces such as `{text}`");
+            self.not_implemented(name.span, &what, Planned::Phase(3));
             return Err(Rejected { unknown: true, bodies: false });
         }
         if let Some(&id) = self.iface_names.get(&name.sym) {
@@ -3389,7 +3389,7 @@ impl Checker<'_> {
                     None if prelude_enum(text).is_some() => {
                         self.error(codes::UNKNOWN_TYPE, te.span, format!("`{text}` takes no type arguments"))
                     }
-                    None => match later_type(text) {
+                    None => match later_type(text).or_else(|| unexported_type(text)) {
                         Some(planned) => self.not_implemented(name.span, &format!("`{text}` types"), planned),
                         None => self.error(codes::UNKNOWN_TYPE, name.span, format!("unknown type `{text}`")),
                     },
@@ -3498,7 +3498,7 @@ impl Checker<'_> {
             self.error(codes::UNKNOWN_TYPE, name.span, message);
             return Ty::Error;
         }
-        match later_type(text) {
+        match later_type(text).or_else(|| unexported_type(text)) {
             Some(planned) => self.not_implemented(name.span, &format!("`{text}` types"), planned),
             None => self.error(codes::UNKNOWN_TYPE, name.span, format!("unknown type `{text}`")),
         }
@@ -6399,7 +6399,7 @@ impl Checker<'_> {
         let def = self.p.decls.iface(iface);
         let Some(j) = def.method(name) else {
             if matches!(iface, IfaceId::NET | IfaceId::PROCESS | IfaceId::CLOCK | IfaceId::RANDOM | IfaceId::ENV) {
-                let what = format!("the operations of `{}`, such as `{name}`,", def.name);
+                let what = format!("the operations of `{}`", def.name);
                 self.not_implemented(method.span, &what, Planned::Unscheduled);
             } else if !def.incomplete
                 // A rejected `impl` for the capability type may have declared the method (§15.1).
@@ -6899,7 +6899,7 @@ impl Checker<'_> {
         let name = self.m.text(method.sym);
         let iface_text = self.iface_name(iface).to_string();
         let def = self.p.decls.iface(iface);
-        let found = def.method(name);
+        let (found, cap) = (def.method(name), def.cap.is_some());
         let rejected = match found {
             None if iface.methods_later() => {
                 self.not_implemented(method.span, &format!("calls of `{iface_text}`'s methods"), Planned::Unscheduled);
@@ -6935,9 +6935,15 @@ impl Checker<'_> {
             return Ty::Error;
         }
         if !receiver_ty.is_unknown() && !self.implements(&receiver_ty, iface) {
-            let message = format!("`{}` does not implement `{iface_text}`", self.show(&receiver_ty));
             let at = self.span(first.value);
-            self.error(codes::MISSING_IMPLEMENTATION, at, message);
+            // A capability interface is a type, so its receiver is a value of that type (Q31).
+            if cap {
+                let message = format!("expected `{iface_text}`, found `{}`", self.show(&receiver_ty));
+                self.error(codes::TYPE_MISMATCH, at, message);
+            } else {
+                let message = format!("`{}` does not implement `{iface_text}`", self.show(&receiver_ty));
+                self.error(codes::MISSING_IMPLEMENTATION, at, message);
+            }
             self.rejected_args(rest);
             return Ty::Error;
         }
@@ -8780,6 +8786,12 @@ fn prelude_type(name: &str) -> bool {
         || bare_variant(name).is_some()
         || later_type(name).is_some()
         || IfaceId::prelude(name).is_some()
+}
+
+/// The types of `System`'s fields that no module exports yet, so a program can't name them,
+/// though a module may declare its own (REFERENCE §9.1; OPEN_QUESTIONS P5).
+fn unexported_type(name: &str) -> Option<Planned> {
+    matches!(name, "Net" | "Clock" | "Random" | "Env" | "Process").then_some(Planned::Unscheduled)
 }
 
 /// Prelude types that later phases implement.

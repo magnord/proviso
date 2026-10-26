@@ -14,15 +14,15 @@ fn pick[T](a: take T, b: take T) -> T {
     return a
 }
 
-fn narrow(log: inout Log[read], other: Log[read]) {
+fn narrow(log: inout Log[read], other: keep Log[read]) {
     log = other
 }
 
-fn narrow_all(logs: inout List[Log[read]], other: Log[read]) {
+fn narrow_all(logs: inout List[Log[read]], other: keep Log[read]) {
     logs.push(other)
 }
 
-fn values(full: Log, reader: Log[read], flag: Bool) {
+fn values(full: keep Log, reader: keep Log[read], flag: Bool) {
     pick(a: full, b: reader).append("x")                    // <- E0603
     pick(a: reader, b: full).append("x")                    // <- E0603
     let c = if flag { full } else { reader }
@@ -38,7 +38,7 @@ fn closures(reader: Log[read], flag: Bool) {
     let y = d(reader)                                       // <- E0603
 }
 
-fn inouts(full: Log, reader: Log[read]) {
+fn inouts(full: keep Log, reader: keep Log[read]) {
     var log = full
     narrow(log: &log, other: reader)                        // <- E0603
     var logs = [full]

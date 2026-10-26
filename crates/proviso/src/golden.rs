@@ -286,7 +286,8 @@ fn run_file(path: &Path, name: &str, phase: Phase, bless: bool) -> Result<Verdic
             return Err("examples and tests read no input, so `run: test` has no `.in` file".to_string());
         }
         Ok(input) => input,
-        Err(_) => Vec::new(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => return Err(format!("cannot read {}: {err}", in_path.display())),
     };
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();

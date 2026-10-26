@@ -10,7 +10,7 @@ record Streams {
     errors: Out
 }
 
-fn streams(sys: System) -> Streams {
+fn streams(sys: keep System) -> Streams {
     return Streams(input: sys.stdin, output: sys.stdout, errors: sys.stderr)
 }
 

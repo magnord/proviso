@@ -2142,8 +2142,6 @@ impl Interp<'_> {
         })
     }
 
-    /// Runs a built-in method. `values` holds the receiver, then the arguments. A defect in a
-    /// hand-written `eq` it runs is traced to `site`.
     /// Runs operation `method` of `iface` on native capability `cap`, which the runtime
     /// implements (REFERENCE §9.1). Its static type permitted the call (§9.2).
     fn operation(&mut self, cap: &Cap, iface: IfaceId, method: usize, args: &[Value]) -> Flow<Value> {
@@ -2179,6 +2177,8 @@ impl Interp<'_> {
         }
     }
 
+    /// Runs a built-in method. `values` holds the receiver, then the arguments. A defect in a
+    /// hand-written `eq` it runs is traced to `site`.
     fn builtin(&mut self, builtin: Builtin, values: Vec<Value>, site: Span) -> Flow<Value> {
         Ok(match (builtin, values.as_slice()) {
             (Builtin::Len, [Value::List(list)]) => Value::Int(list.items.len() as i128, IntTy::I64),

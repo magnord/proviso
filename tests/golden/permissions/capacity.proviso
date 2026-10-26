@@ -9,7 +9,7 @@ record Pair[A, B] {
     second: B
 }
 
-fn doubling(out: Out) -> Out[write] {
+fn doubling(out: keep Out) -> Out[write] {
     let p0 = Pair(first: out, second: out.only::[write]())
     let p1 = Pair(first: p0, second: p0)
     let p2 = Pair(first: p1, second: p1)

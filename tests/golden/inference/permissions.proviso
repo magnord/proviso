@@ -18,7 +18,7 @@ fn reads(log: Log[read]) -> Text {
     return log.read()
 }
 
-fn values(full: Log, reader: Log[read], flag: Bool) -> Text {
+fn values(full: keep Log, reader: keep Log[read], flag: Bool) -> Text {
     let a = pick(a: full, b: reader)
     let b = pick(a: reader, b: full)
     let c = if flag { full } else { reader }

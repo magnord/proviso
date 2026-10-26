@@ -8,6 +8,10 @@
 // `Clock`, `Random` and `Env` aren't scheduled yet (OPEN_QUESTIONS Q6).
 use std.io { IoError }
 
+fn netted(n: Net[connect]) -> Int {                         // <- E0901
+    return 0
+}
+
 fn system(sys: System) -> Int {
     let a = System(stdout: sys.stdout)                      // <- E0604
     let b = sys.with(stdout: sys.stderr)                    // <- E0604
