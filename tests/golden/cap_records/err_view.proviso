@@ -92,10 +92,10 @@ impl Store for Audited {
         let log = self.log
         let seen = f"{self.log.peek()} {log.peek()} {peeks(log: self.log)} {self.reader.peek()}"
         let label = self.sinks.label
-        let first = self.sinks.logs[0]
+        let first = self.sinks.logs[0].peek()
         let count = self.files.len() + self.size() + self.inner.size() + Store.size(self) + self.reads
         let text = self.files.get(key) else fail StoreError.NotFound(key: key)
-        return f"{seen} {label} {first.peek()} {count} {text}"
+        return f"{seen} {label} {first} {count} {text}"
     }
 
     // Calls the view forbids.

@@ -11,7 +11,7 @@ use std.io { Out }
 cap interface Counter observes(read) effects(bump) {
     fn count(self) -> Int                                       needs read
     fn bump(self) -> Int                                        needs bump
-    fn bump_and_ask(self, other: Counter[read]) -> Int          needs bump
+    fn bump_and_ask(self, other: Counter[read] uses Out) -> Int needs bump
     fn recount(self) -> Int                                     needs bump
 }
 
@@ -30,7 +30,7 @@ impl Counter for Tally {
         return self.count()
     }
 
-    fn bump_and_ask(self, other: Counter[read]) -> Int {
+    fn bump_and_ask(self, other: Counter[read] uses Out) -> Int {
         self.total += 1
         let _ = attempt self.out.write_line(f"bumped to {self.count()}, asking")
         return other.count()

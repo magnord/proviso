@@ -3149,7 +3149,7 @@ mod tests {
     }
 
     fn field(name: &str, ty: Ty) -> FieldDef {
-        FieldDef { name: name.into(), ty }
+        FieldDef { name: name.into(), ty, state: false }
     }
 
     fn record(def: AdtId, fields: Vec<Value>) -> Value {

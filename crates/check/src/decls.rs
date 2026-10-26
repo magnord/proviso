@@ -309,6 +309,9 @@ pub struct AdtDef {
     /// Declared `type Name = distinct T`: a record whose one field, `value`, holds a `T`,
     /// written `Name(v)` (REFERENCE §4.6). It may derive the operators of `T`.
     pub distinct: bool,
+    /// Declared `cap record`: a capability implemented in Proviso. Its values are handles to
+    /// one object, whose `state` fields every copy shares (REFERENCE §9.6).
+    pub cap: bool,
 }
 
 impl AdtDef {
@@ -342,13 +345,15 @@ impl AdtDef {
             resource_base: false,
             resource: false,
             distinct: false,
+            cap: false,
         }
     }
 
     /// The tuple of `n` elements, a record whose type parameters are its elements' types.
     fn tuple(n: usize) -> AdtDef {
         let name = format!("({})", vec!["_"; n].join(", "));
-        let fields = (0..n).map(|i| FieldDef { name: i.to_string().into(), ty: Ty::Param(i as u32) }).collect();
+        let fields =
+            (0..n).map(|i| FieldDef { name: i.to_string().into(), ty: Ty::Param(i as u32), state: false }).collect();
         let mut def = AdtDef::record(&name, fields);
         def.params = n;
         def.held = vec![true; n];
@@ -444,6 +449,9 @@ impl VariantDef {
 pub struct FieldDef {
     pub name: Box<str>,
     pub ty: Ty,
+    /// A `state` field of a `cap record`, which every copy of the capability shares and only
+    /// the record's own `impl` blocks name (REFERENCE §9.6; OPEN_QUESTIONS Q40).
+    pub state: bool,
 }
 
 /// A refinement, which the v1 profile checks at run time (OPEN_QUESTIONS P3).
@@ -593,6 +601,7 @@ impl Default for Decls {
         let field = |name: &str, iface: IfaceId, perms: usize| FieldDef {
             name: name.into(),
             ty: Ty::cap(iface, Perms::all(perms)),
+            state: false,
         };
         let mut system = AdtDef::record(
             "System",
@@ -619,7 +628,8 @@ impl Default for Decls {
             def.bare_variants = true;
             def.derives = vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW, IfaceId::HASH];
             for (variant, field) in variants {
-                let fields = field.map(|(name, param)| FieldDef { name: name.into(), ty: Ty::Param(param) });
+                let fields =
+                    field.map(|(name, param)| FieldDef { name: name.into(), ty: Ty::Param(param), state: false });
                 def.variants.push(VariantDef::new(variant, fields.into_iter().collect()));
             }
             def

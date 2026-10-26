@@ -254,6 +254,9 @@ pub struct RecordDecl {
     pub opaque: bool,
     /// The capability types after `uses`, which only an opaque record may have.
     pub uses: Option<Vec<TypeId>>,
+    /// Declared `cap record`: a capability implemented in Proviso, whose values are handles
+    /// that share its `state` fields (REFERENCE §9.6).
+    pub cap: bool,
 }
 
 /// `enum Shape derives(Show) { Circle(radius: Float), Empty }` (REFERENCE §4.5).
@@ -277,6 +280,9 @@ pub struct FieldDecl {
     pub ty: TypeId,
     /// The field's `where` predicate, which sees only this field.
     pub refinement: Option<ExprId>,
+    /// Declared `state`, which only a `cap record` has: shared by every copy of the
+    /// capability (REFERENCE §9.6).
+    pub state: bool,
 }
 
 /// `use a.b { X, y as z }`, or `use a.b` with no names.
