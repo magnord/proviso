@@ -2,6 +2,7 @@
 // expect-error: E0101
 // expect-error: E0204
 // expect-error: E0210
+// expect-error: E0301
 // expect-error: E0303
 // expect-error: E0307
 // expect-error: E0901
@@ -83,6 +84,19 @@ interface Split observes(read) {
 
 fn split(s: Split[read]) -> Text {
     return s.read()
+}
+
+cap                                                                     // <- E0101
+fn after_cap() -> Int {
+    return "kept"                                                       // <- E0301
+}
+
+cap interface Broken observes(read {                                    // <- E0101
+    fn read(self) -> Text                       needs read
+}
+
+fn broken(b: Broken[read]) -> Text {
+    return b.read()
 }
 
 record Reaching {

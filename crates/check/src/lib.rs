@@ -673,7 +673,8 @@ struct Checker<'a> {
     /// The module's interfaces.
     iface_names: HashMap<Symbol, IfaceId>,
     ifaces: Vec<IfaceSrc<'a>>,
-    /// The names the module declares capability interfaces with, rejected ones included.
+    /// The names the module declares capability interfaces with, including those that are
+    /// rejected after they parse, such as a wrongly cased one.
     cap_decls: HashSet<Symbol>,
     /// The methods and associated functions of each record and enum, in declaration order.
     inherent: HashMap<AdtId, Vec<Inherent>>,
@@ -6244,8 +6245,9 @@ impl Checker<'_> {
                 return self.iface_call(e, iface, method, targs, args, span, chain);
             }
             // `Set` and `Array` come later, also as the receivers of their functions (Q37).
-            if let Some(planned) =
-                later_type(m.text(receiver_name.sym)).or_else(|| unexported_type(m.text(receiver_name.sym)))
+            let generic = self.generic_scope.iter().any(|(sym, _)| *sym == receiver_name.sym);
+            if let Some(planned) = later_type(m.text(receiver_name.sym))
+                .or_else(|| unexported_type(m.text(receiver_name.sym)).filter(|_| !generic))
                 && !self.poisoned.contains(&receiver_name.sym)
             {
                 let what = format!("`{}` types", m.text(receiver_name.sym));

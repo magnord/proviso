@@ -485,19 +485,23 @@ impl Parser<'_> {
                 ItemKind::Interface(self.interface_decl(true)?)
             }
             T::Keyword(Kw::Cap) if self.nth(1) != T::Keyword(Kw::Record) => {
+                // Only a name on `cap`'s own line is poisoned. An item on the next is kept.
+                self.poison_declared_name();
                 let span = self.bump().span;
                 let message = "`cap` goes right before `interface` or `record`, on the same line, as in `cap interface Log { … }` (§9.2)";
                 self.error(codes::UNEXPECTED_TOKEN, span, message);
                 // A `cap interface` split over two lines is still the capability interface.
+                let mut n = 0;
+                while self.nth(n) == T::Newline {
+                    n += 1;
+                }
+                if self.nth(n) != T::Keyword(Kw::Interface) {
+                    return Err(());
+                }
                 while self.at(T::Newline) {
                     self.bump();
                 }
-                if self.at_kw(Kw::Interface) {
-                    ItemKind::Interface(self.interface_decl(true)?)
-                } else {
-                    self.poison_declared_name();
-                    return Err(());
-                }
+                ItemKind::Interface(self.interface_decl(true)?)
             }
             T::Keyword(Kw::Example) => {
                 // The example is kept, so it is still checked.
@@ -1128,6 +1132,10 @@ impl Parser<'_> {
         self.cap_ops = false;
         if decl.is_err() {
             self.m.poisoned.insert(name.sym);
+            // A capability interface's arguments are permissions, not types.
+            if cap {
+                self.m.planned_names.insert(name.sym);
+            }
         }
         decl
     }

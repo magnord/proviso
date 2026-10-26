@@ -25,8 +25,8 @@ pub struct Module {
     pub poisoned: HashSet<Symbol>,
     /// Names of functions whose declarations failed to parse, among the `poisoned` ones.
     pub lost_fns: HashSet<Symbol>,
-    /// Names declared by a later phase's item, such as a `cap interface`, whose arguments
-    /// may not be types, among the `poisoned` ones.
+    /// Names declared by a later phase's item, such as a `cap record`, or by a `cap interface`
+    /// that failed to parse, whose arguments may not be types, among the `poisoned` ones.
     pub planned_names: HashSet<Symbol>,
     /// Types named by a rejected `impl` block, such as `Point` in `impl Show for Point`. The
     /// block may have given them methods and interfaces, so uses of those aren't reported.

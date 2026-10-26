@@ -1053,6 +1053,8 @@ impl Vars {
         let (a, b) = (self.resolve(a), self.resolve(b));
         match (&a, &b) {
             (Ty::Error, _) | (_, Ty::Error) => Some(Ty::Error),
+            // `Never` is a subtype of every type, so it serves as either (REFERENCE §9.2).
+            (Ty::Never, _) | (_, Ty::Never) => Some(Ty::Never),
             (Ty::Var(x), Ty::Var(y)) => self.union(*x, *y).then(|| self.resolve(&a)),
             // What either needs flows out to the variable, which then needs it too.
             (Ty::Var(x), ty) | (ty, Ty::Var(x)) => {

@@ -74,3 +74,21 @@ fn higher(flag: Bool) -> Int {
     let b = if flag { appends_with } else { reads_with }
     return a(reads_only) + b(reads_only)
 }
+
+fn stop() -> Never {
+    unreachable
+}
+
+fn takes_never(h: fn() -> Never) -> Int {
+    return 0
+}
+
+fn takes_int(h: fn() -> Int) -> Int {
+    return 1
+}
+
+fn never(flag: Bool) -> Int {
+    let a = if flag { takes_never } else { takes_int }
+    let b = if flag { takes_int } else { takes_never }
+    return a(stop) + b(stop)
+}
