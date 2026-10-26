@@ -4669,7 +4669,7 @@ impl Checker<'_> {
         }
         let what = match escape {
             Escape::SelfValue => "`self`".to_string(),
-            Escape::Record | Escape::Reaches => format!("this `{}`", self.show(&self.p.ty(receiver))),
+            Escape::Record | Escape::Reaches => format!("this `{}`", self.show(self.p.ty(receiver))),
         };
         let message = self.view_message(&format!(
             "a call on {what} may change what `self` reaches; only operations of a `cap interface` that need no `effects` permission are called on it"
@@ -4689,11 +4689,11 @@ impl Checker<'_> {
                 }
                 Escape::Record => format!(
                     "this `{}` may only be read through, or be the receiver of an operation that needs no `effects` permission",
-                    self.show(&self.p.ty(e))
+                    self.show(self.p.ty(e))
                 ),
                 Escape::Reaches => format!(
                     "this `{}` reaches `effects` permissions, so it may only be read through",
-                    self.show(&self.p.ty(e))
+                    self.show(self.p.ty(e))
                 ),
             };
             let message = self.view_message(&what);
@@ -5180,7 +5180,7 @@ impl Checker<'_> {
         loop {
             match m.exprs[e].kind {
                 ExprKind::Field { base, .. } if matches!(self.p.res(e), Some(Res::Field(_))) => {
-                    state |= self.is_state(&self.p.ty(base), e);
+                    state |= self.is_state(self.p.ty(base), e);
                     e = base;
                 }
                 ExprKind::Index { base, .. } if matches!(self.p.ty(base), Ty::Adt(AdtId::POOL, _)) => {
@@ -8835,6 +8835,13 @@ impl Checker<'_> {
         let span = m.pats[pat].span;
         if let Ty::Adt(AdtId::SYSTEM, _) = ty {
             self.system_constructed(span, "matched by a pattern");
+            return self.unknown_parts(fields);
+        }
+        // A pattern would read the `state` of an object that may change while the match runs.
+        if let Ty::Adt(id, _) = ty
+            && self.p.decls.adt(*id).cap
+        {
+            self.not_implemented(span, "patterns that match a `cap record`", Planned::Unscheduled);
             return self.unknown_parts(fields);
         }
         // A collection has no constructor to match, as a scalar has none (REFERENCE §6.4).

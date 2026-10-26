@@ -1232,7 +1232,7 @@ impl Interp<'_> {
             let mut lent = self.lend(&place.root, place.span)?;
             *slot(base(frame, &place.root, &mut lent), &place.path)? = value;
         }
-        let mut checked: Vec<((usize, usize), Vec<(bool, i128)>)> = Vec::new();
+        let mut checked: Vec<PlaceKey> = Vec::new();
         for place in places {
             for depth in (0..place.path.len()).rev() {
                 let key = (place.root.key(), place.path[..depth].iter().map(Step::key).collect());
@@ -2803,6 +2803,9 @@ enum Root {
     Local(LocalId),
     State(Arc<CapState>, AdtId, FieldIdx),
 }
+
+/// What tells two places apart: their roots, and the keys of their steps.
+type PlaceKey = ((usize, usize), Vec<(bool, i128)>);
 
 impl Root {
     /// What tells two roots apart.

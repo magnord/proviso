@@ -8,7 +8,8 @@
 // unique or resources. Type parameters, `derives` and refinements on one aren't scheduled. In a
 // `cap interface`, `Self` may be an operation's result but not a parameter's type, since a
 // handle's argument may come from another implementation, and `Self` with `uses` isn't
-// scheduled either (OPEN_QUESTIONS P5; issue #64).
+// scheduled either, nor are patterns that match a `cap record` (OPEN_QUESTIONS P5; issue
+// #64).
 use std.io { Out }
 
 cap interface Gauge observes(read) {
@@ -77,6 +78,11 @@ unique record Token {
 
 cap record Holder {
     state token: Token                                          // <- E0901
+}
+
+fn matched(d: Dial) -> Int {
+    let Dial(n) = d                                             // <- E0901
+    return n
 }
 
 fn gauges() -> Int {
