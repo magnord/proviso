@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use proviso_syntax::ast::{ExprId, ParamMode};
 
-use crate::types::{FloatTy, IntTy, Perms, Ty};
+use crate::types::{FloatTy, IntTy, Perms, Reach, Ty};
 
 /// A record or enum declared in Proviso. The prelude's come first, at fixed ids.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -48,7 +48,7 @@ impl AdtId {
 
 /// An interface: one of the prelude's, a capability interface of the standard library, or
 /// one the module declares. The built-in ones come first, at fixed ids.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct IfaceId(u32);
 
 impl IfaceId {
@@ -267,8 +267,13 @@ pub struct AdtDef {
     /// whose only `T` is in a handle. Only held type arguments decide a type's kind and the
     /// interfaces it derives (REFERENCE §5.1; OPEN_QUESTIONS P5).
     pub held: Vec<bool>,
-    /// A value has reach whatever the type arguments are, as `System` does (REFERENCE §9.4).
-    pub reach: bool,
+    /// What a value reaches whatever the type arguments are: what its fields reach, as
+    /// `System` reaches its capabilities, or what an opaque record declares (REFERENCE §9.2,
+    /// §9.4). A type argument adds its own reach (see [`Decls::reach`]).
+    pub reach: Reach,
+    /// What an opaque record declares it `uses`, nothing if it declares nothing, which its
+    /// fields' reach must be covered by. `None` for any other type.
+    pub uses: Option<Reach>,
     /// Its variants are written without the enum's name, and their one field without a label:
     /// `Some(3)` and `Err(e)` (REFERENCE §3, STD.md).
     pub bare_variants: bool,
@@ -324,7 +329,8 @@ impl AdtDef {
             kind,
             params: 0,
             held: Vec::new(),
-            reach: false,
+            reach: Reach::default(),
+            uses: None,
             bare_variants: false,
             variants: Vec::new(),
             derives: Vec::new(),
@@ -456,20 +462,19 @@ type Known = (Arc<[Ty]>, bool);
 type Memo = HashMap<(u32, u32, usize), bool>;
 
 /// What a value of a type is (REFERENCE §5.1, §9.4).
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct Kinds {
     unique: bool,
     resource: bool,
-    reach: bool,
+    reach: Reach,
 }
 
 impl Kinds {
-    fn or(self, other: Kinds) -> Kinds {
-        Kinds {
-            unique: self.unique || other.unique,
-            resource: self.resource || other.resource,
-            reach: self.reach || other.reach,
-        }
+    fn or(mut self, other: &Kinds) -> Kinds {
+        self.unique |= other.unique;
+        self.resource |= other.resource;
+        self.reach.extend(&other.reach);
+        self
     }
 }
 
@@ -602,7 +607,10 @@ impl Default for Decls {
                 field("process", IfaceId::PROCESS, 1),
             ],
         );
-        system.reach = true;
+        for field in &system.variants[0].fields {
+            let Ty::Cap(cap) = &field.ty else { unreachable!("`System`'s fields are capabilities") };
+            system.reach.extend(&Reach::of_cap(cap));
+        }
         // As STD.md declares them, so `Some` comes before `None`.
         let generic = |name: &str, params: usize, variants: [(&str, Option<(&str, u32)>); 2]| {
             let mut def = AdtDef::enumeration(name);
@@ -1000,7 +1008,7 @@ impl Decls {
             // (REFERENCE §9.2).
             Ty::Cap(cap) => cap.iface == iface,
             // A function value implements nothing, so it isn't compared or shown (OPEN_QUESTIONS P5).
-            Ty::Fn(..) | Ty::Never | Ty::Error | Ty::Var(_) => false,
+            Ty::Fn(..) | Ty::Never | Ty::Error | Ty::Var(_) | Ty::Reach(_) => false,
         }
     }
 
@@ -1100,49 +1108,45 @@ impl Decls {
         }
     }
 
-    /// Whether a value of `ty` has reach (REFERENCE §9.4): it is a capability, or holds one,
-    /// as `System` and a record with an `Out` field do. A handle refers to its pool's element
-    /// without holding it.
-    pub fn has_reach(&self, ty: &Ty) -> bool {
-        self.reach_in(ty, &mut HashMap::new())
+    /// What a value of `ty` may reach (REFERENCE §9.2, §9.4): a capability reaches itself and
+    /// what it uses, a function value what its type `uses`, and a record or enum what its
+    /// declaration says and what its type arguments reach, held or not (REFERENCE §5.1). A
+    /// value of a type parameter may reach what its type argument does, unless `params` makes
+    /// it `Copy` (OPEN_QUESTIONS Q31). A handle refers to its pool's element without holding
+    /// it.
+    pub fn reach(&self, ty: &Ty, params: &[Vec<IfaceId>]) -> Reach {
+        self.reach_in(ty, params, &mut HashMap::new())
     }
 
-    /// Whether a value of `ty` may have reach, where type parameter `i` has none when
-    /// `params[i]` makes it `Copy`.
-    fn may_reach(&self, ty: &Ty, params: &[Vec<IfaceId>], memo: &mut HashMap<(u32, usize), bool>) -> bool {
+    /// [`Decls::reach`], where `memo` holds what each type argument list gave, by its type's
+    /// id and its address, so a type that shares its parts costs each part once.
+    fn reach_in(&self, ty: &Ty, params: &[Vec<IfaceId>], memo: &mut HashMap<(u32, usize), Reach>) -> Reach {
         match ty {
-            Ty::Param(i) => !params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)),
-            Ty::Adt(AdtId::HANDLE, _) => false,
-            Ty::Adt(id, args) if !args.is_empty() && !self.adt(*id).reach => {
-                let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
-                if let Some(&reach) = memo.get(&key) {
-                    return reach;
-                }
-                let reach = args.iter().any(|arg| self.may_reach(arg, params, memo));
-                memo.insert(key, reach);
-                reach
+            Ty::Cap(cap) => Reach::of_cap(cap),
+            Ty::Fn(..) => match ty.fn_uses() {
+                Some(Ty::Reach(uses)) => (**uses).clone(),
+                _ => Reach::default(),
+            },
+            Ty::Param(i) if params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)) => {
+                Reach::default()
             }
-            ty => self.reach_in(ty, memo),
-        }
-    }
-
-    fn reach_in(&self, ty: &Ty, memo: &mut HashMap<(u32, usize), bool>) -> bool {
-        match ty {
-            Ty::Cap(_) => true,
-            Ty::Adt(id, _) if self.adt(*id).reach => true,
+            Ty::Param(i) => Reach::param(*i),
             // A handle is `Copy` whatever its element is (STD.md).
-            Ty::Adt(AdtId::HANDLE, _) => false,
-            Ty::Adt(id, args) if !args.is_empty() => {
+            Ty::Adt(AdtId::HANDLE, _) => Reach::default(),
+            Ty::Adt(id, args) if args.is_empty() => self.adt(*id).reach.clone(),
+            Ty::Adt(id, args) => {
                 let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
-                if let Some(&reach) = memo.get(&key) {
-                    return reach;
+                if let Some(reach) = memo.get(&key) {
+                    return reach.clone();
                 }
-                // Reach comes through every type argument, held or not (REFERENCE §5.1).
-                let reach = args.iter().any(|arg| self.reach_in(arg, memo));
-                memo.insert(key, reach);
+                let mut reach = self.adt(*id).reach.clone();
+                for arg in args.iter() {
+                    reach.extend(&self.reach_in(arg, params, memo));
+                }
+                memo.insert(key, reach.clone());
                 reach
             }
-            _ => false,
+            _ => Reach::default(),
         }
     }
 
@@ -1180,9 +1184,14 @@ impl Decls {
             queued[a] = false;
             let def = &self.adts[a];
             let mut held = def.held.clone();
-            let mut kind = Kinds { unique: def.unique, resource: def.resource, reach: def.reach };
+            let mut kind = Kinds { unique: def.unique, resource: def.resource, reach: def.reach.clone() };
             for field in def.variants.iter().flat_map(|v| &v.fields) {
-                kind = kind.or(self.base_kind(&field.ty, &mut held));
+                kind = kind.or(&self.base_kind(&field.ty, &mut held));
+            }
+            // An opaque record reaches what it declares, which its fields' reach is checked
+            // against (REFERENCE §9.2).
+            if let Some(uses) = &def.uses {
+                kind.reach = uses.clone();
             }
             let def = &mut self.adts[a];
             if held == def.held && kind.unique == def.unique && kind.resource == def.resource && kind.reach == def.reach
@@ -1218,43 +1227,45 @@ impl Decls {
     fn base_kind_in(&self, ty: &Ty, memo: &mut KindMemo) -> (Kinds, Vec<u32>) {
         match ty {
             Ty::Param(i) => (Kinds::default(), vec![*i]),
-            Ty::Cap(_) => (Kinds { reach: true, ..Kinds::default() }, Vec::new()),
+            Ty::Cap(cap) => (Kinds { reach: Reach::of_cap(cap), ..Kinds::default() }, Vec::new()),
+            Ty::Fn(..) => (Kinds { reach: self.reach(ty, &[]), ..Kinds::default() }, Vec::new()),
             Ty::Adt(id, args) => {
                 let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
                 if let Some((known, _)) = memo.get(&key) {
                     return known.clone();
                 }
                 let def = self.adt(*id);
-                let mut kind = Kinds { unique: def.unique, resource: def.resource, reach: def.reach };
+                let mut kind = Kinds { unique: def.unique, resource: def.resource, reach: def.reach.clone() };
                 let mut params = Vec::new();
                 for (i, arg) in args.iter().enumerate() {
                     let (part, held) = self.base_kind_in(arg, memo);
                     if def.held.get(i).copied().unwrap_or(false) {
-                        kind = kind.or(part);
+                        kind = kind.or(&part);
                         params.extend(held);
                     } else if *id != AdtId::HANDLE {
                         // A type argument it doesn't hold still gives it reach (REFERENCE §5.1),
                         // but a handle's never does (STD.md).
-                        kind.reach |= part.reach;
+                        kind.reach.extend(&part.reach);
                     }
                 }
                 params.sort_unstable();
                 params.dedup();
-                memo.insert(key, ((kind, params.clone()), args.clone()));
+                memo.insert(key, ((kind.clone(), params.clone()), args.clone()));
                 (kind, params)
             }
             _ => (Kinds::default(), Vec::new()),
         }
     }
 
-    /// Whether `ty` is `Copy`: copyable with no reach, which a capability has (REFERENCE
-    /// §5.1). A unique type isn't copyable, and a generic one is when the type arguments it
-    /// holds are.
+    /// Whether `ty` is `Copy`: copyable with no reach, which a capability and a function type
+    /// with `uses` have (REFERENCE §5.1). A unique type isn't copyable, and a generic one is
+    /// when the type arguments it holds are.
     fn copyable(&self, ty: &Ty, params: &[Vec<IfaceId>], memo: &mut Memo) -> bool {
         match ty {
             Ty::Cap(_) => false,
+            Ty::Fn(..) => self.reach(ty, params).is_empty(),
             Ty::Param(i) => params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)),
-            Ty::Adt(id, _) if self.adt(*id).unique || self.adt(*id).reach => false,
+            Ty::Adt(id, _) if self.adt(*id).unique || !self.adt(*id).reach.is_empty() => false,
             Ty::Adt(id, args) if !args.is_empty() => {
                 let key = (id.0, IfaceId::COPY.0, Arc::as_ptr(args) as *const Ty as usize);
                 if let Some(&known) = memo.get(&key) {
@@ -1265,7 +1276,7 @@ impl Decls {
                 let held = &self.adt(*id).held;
                 let known = args.iter().enumerate().all(|(i, arg)| match held.get(i).copied().unwrap_or(true) {
                     true => self.copyable(arg, params, memo),
-                    false => *id == AdtId::HANDLE || !self.may_reach(arg, params, &mut HashMap::new()),
+                    false => *id == AdtId::HANDLE || self.reach(arg, params).is_empty(),
                 });
                 memo.insert(key, known);
                 known
@@ -1370,7 +1381,10 @@ impl Decls {
                 f.write_str(" fails ")?;
                 self.write_ty(f, fails, names, budget)?;
             }
-            return Ok(());
+            return match ty.fn_uses() {
+                Some(Ty::Reach(reach)) => self.write_uses(f, reach, names),
+                _ => Ok(()),
+            };
         }
         if let Ty::Param(i) = ty
             && let Some(name) = names.get(*i as usize)
@@ -1394,7 +1408,10 @@ impl Decls {
             if cap.perms != def.all_perms() {
                 write!(f, "[{}]", self.perm_names(cap.iface, cap.perms))?;
             }
-            return Ok(());
+            return self.write_uses(f, &cap.uses, names);
+        }
+        if let Ty::Reach(reach) = ty {
+            return self.write_reach(f, reach, names);
         }
         f.write_str(match ty {
             Ty::Int(it) => it.name(),
@@ -1411,8 +1428,47 @@ impl Decls {
             Ty::Cap(_) => unreachable!("written above"),
             Ty::Param(_) | Ty::Var(_) => "_",
             Ty::Error => "{unknown}",
-            Ty::Fn(..) => unreachable!("written above"),
+            Ty::Fn(..) | Ty::Reach(_) => unreachable!("written above"),
         })
+    }
+
+    /// Writes ` uses C` after a type whose `uses` is `reach`, or nothing when it uses nothing.
+    fn write_uses(&self, f: &mut fmt::Formatter, reach: &Reach, names: &[Box<str>]) -> fmt::Result {
+        if reach.is_empty() {
+            return Ok(());
+        }
+        f.write_str(" uses ")?;
+        self.write_reach(f, reach, names)
+    }
+
+    /// Writes `reach` as `uses` lists it: one capability type, or several in parentheses
+    /// (OPEN_QUESTIONS Q41). A capability with every permission is written bare, and a type
+    /// parameter by its name.
+    fn write_reach(&self, f: &mut fmt::Formatter, reach: &Reach, names: &[Box<str>]) -> fmt::Result {
+        let several = reach.caps().len() + reach.params().len() > 1;
+        if several {
+            f.write_str("(")?;
+        }
+        let budget = Cell::new(DISPLAY_BUDGET);
+        let mut first = true;
+        for &(iface, perms) in reach.caps() {
+            if !first {
+                f.write_str(", ")?;
+            }
+            first = false;
+            self.write_ty(f, &Ty::cap(iface, perms), names, &budget)?;
+        }
+        for &i in reach.params() {
+            if !first {
+                f.write_str(", ")?;
+            }
+            first = false;
+            self.write_ty(f, &Ty::Param(i), names, &budget)?;
+        }
+        if several {
+            f.write_str(")")?;
+        }
+        Ok(())
     }
 }
 

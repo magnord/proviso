@@ -1,0 +1,54 @@
+// phase: 3.2
+// expect-error: E0101
+// expect-error: E0211
+// expect-error: E0307
+// expect-error: E0901
+// `uses` follows a capability type, a function type or an opaque record's name, and takes
+// one capability type or several in parentheses (OPEN_QUESTIONS Q41). A function or
+// operation declares no `uses`, since its parameters carry its authority (§9.2), so `uses`
+// right after a declaration's result type is the declaration's, and the result is left
+// unknown (§15.1, OPEN_QUESTIONS P5). A type that isn't a capability, such as `Int`, a tuple
+// or a type parameter, can't be listed and has no `uses`. A `pub` item can't name a private
+// capability in `uses` (§3). A `cap interface`'s `Self` waits for `cap record`.
+use std.io { Out }
+
+cap interface Log effects(append) {
+    fn append(self, line: Text)                                 needs append
+    fn later(self) -> Text                      needs append uses Out   // <- E0101
+}
+
+fn declared() uses Out {}                                       // <- E0101
+
+fn not_capability(f: fn() uses Int) {}                          // <- E0307
+
+fn parameter[T](f: fn() uses T) {}                              // <- E0307
+
+fn empty(f: fn() uses ()) {}                                    // <- E0101
+
+fn nested(d: Log uses (Out, Int)) {}                            // <- E0307
+
+fn not_capability_base(n: Int uses Out, p: (Log, Log) uses Out) {}  // <- E0307, E0307
+
+fn result(log: keep Log uses Out) -> Log uses Out {            // <- E0101
+    return log
+}
+
+type LoggingLog = Log uses Out
+
+fn aliased(log: keep Log uses Out) -> LoggingLog {
+    return log
+}
+
+cap interface Private effects(go) {
+    fn go(self)                                                 needs go
+}
+
+pub fn exposed(f: fn() uses Private) {}                         // <- E0211
+
+pub opaque record Hidden uses Private {                         // <- E0211
+    n: Int
+}
+
+cap interface Selfish effects(go) {
+    fn go(self, other: Self uses Out)                           needs go  // <- E0901
+}

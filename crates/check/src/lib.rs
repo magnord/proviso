@@ -31,7 +31,7 @@ use crate::decls::{
 };
 use crate::exhaust::{Ctor, Space};
 use crate::infer::{Kind, Origin, Vars};
-use crate::types::{FloatTy, IntTy, Perms, Ty};
+use crate::types::{FN_PARAMS, FloatTy, IntTy, Perms, Reach, Ty};
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Options {
@@ -345,9 +345,11 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         f: FnState::new(Ty::Unit, None),
         in_chain: false,
         sibling_closure: false,
+        siblings: HashSet::new(),
         markers: Vec::new(),
         inhabited: None,
         self_ty: None,
+        cap_self: false,
         generic_scope: Vec::new(),
         param_names: Vec::new(),
         impl_generics: Vec::new(),
@@ -384,6 +386,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     checker.adt_fields();
     checker.expanding_types();
     checker.p.decls.settle_kinds();
+    checker.opaque_reach();
     checker.inhabited = Some(checker.p.decls.inhabited());
     checker.iface_methods();
     checker.adt_derives();
@@ -452,6 +455,9 @@ struct AdtSrc<'a> {
     variants: Vec<(Ident, &'a [FieldDecl])>,
     /// A record's record-level `where`.
     refinement: Option<ExprId>,
+    /// What an opaque record declares it `uses`, none if it declares nothing (REFERENCE §9.2).
+    /// `None` for any other type.
+    uses: Option<&'a [TypeId]>,
 }
 
 struct Local {
@@ -552,9 +558,11 @@ struct FnState {
     closures: Vec<ExprId>,
     /// The function values `debug` is given, which it writes as their types.
     debugged: Vec<ExprId>,
-    /// The captures whose type wasn't known when they were captured, each with where, which
-    /// are checked for reach once it is.
-    late_captures: Vec<(LocalId, Span)>,
+    /// The captures whose type wasn't known when their closure's type was given, each with
+    /// the closure, where it is used, and the written function type the closure was checked
+    /// as, if any. Once the capture's type is known, that type's `uses`, or else the
+    /// closure's own, must cover its reach (REFERENCE §9.4).
+    late_captures: Vec<(ExprId, LocalId, Span, Option<Ty>)>,
     /// How many of the function's locals, counted from the first, a closure, or a local that
     /// holds one, needs to stay alive: one more than the last local it captures, at any
     /// depth. A block can't yield a function value that needs one it declares.
@@ -592,6 +600,8 @@ impl FnState {
 struct ClosureScope {
     base: u32,
     captures: Vec<(LocalId, Box<str>)>,
+    /// Where each capture is first used, by the capture's index.
+    spans: Vec<Span>,
     /// Whether its body has a call without the marker it needs, whose failure its error type
     /// would have taken.
     unmarked: bool,
@@ -672,6 +682,10 @@ struct Checker<'a> {
     /// Set while checking a closure whose expected type is another branch's, which it joins
     /// rather than meets.
     sibling_closure: bool,
+    /// The values whose expected type is what another branch, arm or element gave, rather
+    /// than one written or required (see [`Checker::joined`]). A branch that is an `if` or
+    /// `match` passes this on to its own branches.
+    siblings: HashSet<ExprId>,
     /// The enclosing `try` and `attempt` markers, innermost last.
     markers: Vec<Marker>,
     /// Which types have values (see [`Decls::inhabited`]), once every declaration is known.
@@ -698,6 +712,8 @@ struct Checker<'a> {
     operators: Vec<(AdtId, IfaceId, Ident)>,
     /// What `Self` means here: the type of an `impl` block, or `Param(0)` in an interface.
     self_ty: Option<Ty>,
+    /// `Self` is the type that implements a `cap interface`, which comes with `cap record`.
+    cap_self: bool,
     /// The type parameters in scope, by name, with their indices; `None` for one whose
     /// constraint is rejected, which stands for an unknown type.
     generic_scope: Vec<(Symbol, Option<u32>)>,
@@ -1194,7 +1210,7 @@ impl Checker<'_> {
                 Kind::Float => Ty::Float(FloatTy::F64),
                 Kind::Any if open.quiet => Ty::Error,
                 // A capability whose permissions the values and places it met leave open.
-                Kind::Any if let Some(cap) = open.cap => Ty::cap(cap.iface, cap.solution()),
+                Kind::Any if let Some(bounds) = &open.bounds => bounds.solution(),
                 Kind::Any if open.never || open.hole => Ty::Never,
                 Kind::Any if open.unmarked && !open.owed => Ty::Error,
                 Kind::Any => {
@@ -1284,11 +1300,12 @@ impl Checker<'_> {
                 if ty.is_unknown() || self.vars.has_open(&ty) {
                     return;
                 }
-                if self.fn_targ(&ty, span) {
-                    return;
-                }
+                // A map literal's function key is reported where it goes in (E0509).
                 if *callee == *"Map" {
                     self.key_bound(&ty, span);
+                    return;
+                }
+                if self.fn_targ(&ty, span) {
                     return;
                 }
                 if self.resource_targ(&ty, &callee, &param, span) {
@@ -1377,10 +1394,32 @@ impl Checker<'_> {
             let shown = self.show(self.p.ty(e)).into();
             self.p.debug_fns.insert(e, shown);
         }
-        for (id, span) in std::mem::take(&mut self.f.late_captures) {
-            if self.may_reach(&self.f.locals[id.index()].ty) {
-                self.reaching_capture(span);
+        // Each closure around a capture captures it, and the innermost one is reported.
+        let mut reported = HashSet::new();
+        for (e, id, span, written) in std::mem::take(&mut self.f.late_captures) {
+            let ty = &self.f.locals[id.index()].ty;
+            let reach = self.reach(ty);
+            // A rejected closure's captures aren't checked (§15.1).
+            if self.p.ty(e).is_unknown() {
+                continue;
             }
+            let Some(Ty::Reach(uses)) = written.as_ref().or(Some(self.p.ty(e))).and_then(Ty::fn_uses) else { continue };
+            if ty.is_unknown() || reach.covered_by(uses) || !reported.insert((span.lo, span.hi)) {
+                continue;
+            }
+            let message = match &written {
+                Some(written) => format!(
+                    "this closure captures a value of type `{}`, which reaches more than `{}` admits (§9.4)",
+                    self.show(ty),
+                    self.show(written)
+                ),
+                None => format!(
+                    "this closure captures a value of type `{}`, which was inferred after the closure's type `{}`, so the closure's `uses` doesn't cover what it reaches; give the value a type where it is declared (§9.4)",
+                    self.show(ty),
+                    self.show(self.p.ty(e))
+                ),
+            };
+            self.error(codes::REACH_NOT_ADMITTED, span, message);
         }
         self.vars.clear();
         // A closure owns its `take` parameters of a resource type, which a failure abandons.
@@ -1601,7 +1640,11 @@ impl Checker<'_> {
             def.distinct = matches!(&item.kind, ItemKind::Record(decl) if decl.distinct);
             def.params = generics.len();
             let id = self.p.decls.push(def);
-            self.adts.push(AdtSrc { id, name, vis: item.vis, generics, derives, variants, refinement });
+            let uses = match &item.kind {
+                ItemKind::Record(decl) if decl.opaque => Some(decl.uses.as_deref().unwrap_or_default()),
+                _ => None,
+            };
+            self.adts.push(AdtSrc { id, name, vis: item.vis, generics, derives, variants, refinement, uses });
             self.adt_vis.insert(id, item.vis);
             // A rejected name is reported once. Its uses, and what it collides with, are not.
             let cased = self.pascal_case(name, "type");
@@ -1787,7 +1830,7 @@ impl Checker<'_> {
         while let Some(t) = work.pop() {
             match &self.m.types[t].kind {
                 TypeExprKind::Named(name) if self.aliases.contains_key(&name.sym) => found.push(name.sym),
-                TypeExprKind::Named(_) | TypeExprKind::SelfType => {}
+                TypeExprKind::Named(_) | TypeExprKind::SelfType | TypeExprKind::Rejected => {}
                 TypeExprKind::Applied { name, args } => {
                     if self.aliases.contains_key(&name.sym) {
                         found.push(name.sym);
@@ -1795,9 +1838,11 @@ impl Checker<'_> {
                     work.extend(args.iter().flatten().rev());
                 }
                 TypeExprKind::Tuple(parts) => work.extend(parts.iter().rev()),
-                TypeExprKind::Fn { params, ret, fails } => {
-                    work.extend(fails.iter().chain(ret.iter()).chain(params.iter().map(|(_, t)| t)).rev());
+                TypeExprKind::Fn { params, ret, fails, uses } => {
+                    let parts = fails.iter().chain(ret.iter()).chain(params.iter().map(|(_, t)| t)).chain(uses);
+                    work.extend(parts.rev());
                 }
+                TypeExprKind::Uses { base, uses } => work.extend(std::iter::once(base).chain(uses).rev()),
             }
         }
         found
@@ -1897,9 +1942,61 @@ impl Checker<'_> {
                 variant.locals = fields.len();
                 variant.fields = fields;
             }
+            // A declared reach that has a mistake in it is unknown, so the record reaches what
+            // its fields do, and nothing more is reported (§15.1).
+            if let Some(uses) = self.adts[k].uses {
+                let declared = self.exposed_uses(uses, Some((name, vis)));
+                if declared.is_none() {
+                    self.adts[k].uses = None;
+                }
+                self.p.decls.adt_mut(id).uses = declared;
+            }
         }
         self.generic_scope.clear();
         self.param_names.clear();
+    }
+
+    /// Reports each field of an opaque record whose reach the record's `uses` doesn't cover
+    /// (REFERENCE §9.2). A type parameter's reach is its type argument's, which the record's
+    /// type adds wherever it is used, so only capabilities are compared.
+    fn opaque_reach(&mut self) {
+        let m = self.m;
+        for k in 0..self.adts.len() {
+            let (id, name) = (self.adts[k].id, self.adts[k].name);
+            let Some(declared) = self.p.decls.adt(id).uses.clone() else { continue };
+            let Some((_, decls)) = self.adts[k].variants.first().copied() else { continue };
+            let fields: Vec<(Box<str>, Ty)> =
+                self.p.decls.adt(id).variant().fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+            // The variant keeps the first of fields declared twice, so a field is found by name.
+            let mut seen = HashSet::new();
+            for decl in decls {
+                if !seen.insert(decl.name.sym) {
+                    continue;
+                }
+                let text = m.text(decl.name.sym);
+                let Some((field, ty)) = fields.iter().find(|(field, _)| **field == *text) else { continue };
+                let reach = self.p.decls.reach(ty, &[]).without_params();
+                if *ty == Ty::Error || reach.covered_by(&declared) {
+                    continue;
+                }
+                let message = format!(
+                    "`{}` declares that it uses {}, but its field `{}` has type `{}`, which reaches more; an opaque record's `uses` covers what its fields reach (§9.2)",
+                    m.text(name.sym),
+                    self.show_reach(&declared),
+                    field,
+                    self.show(ty)
+                );
+                self.error(codes::REACH_NOT_ADMITTED, m.types[decl.ty].span, message);
+            }
+        }
+    }
+
+    /// How a diagnostic writes what a `uses` clause lists: `nothing`, or the list as written.
+    fn show_reach(&self, reach: &Reach) -> String {
+        if reach.is_empty() {
+            return "nothing".into();
+        }
+        format!("`{}`", self.p.decls.display_in(&Ty::reach(reach.clone()), &self.param_names))
     }
 
     /// Reports each generic type that holds itself, directly or through other generic types,
@@ -2035,16 +2132,25 @@ impl Checker<'_> {
         while let Some(ty) = work.pop() {
             let named = match ty {
                 Ty::Adt(id, _) => self.adt_vis.get(id).map(|&vis| (Ok(*id), vis)),
-                Ty::Cap(cap) => self.cap_vis.get(&cap.iface).map(|&vis| (Err(cap.iface), vis)),
                 _ => None,
             };
-            if let Some((named, vis)) = named
-                && least.is_none_or(|(_, least)| reach(vis) < reach(least))
-            {
-                least = Some((named, vis));
-                if reach(vis) == 0 {
-                    break;
+            // A capability type names its interface and those it uses, and a function type
+            // those it uses.
+            let ifaces = match ty {
+                Ty::Cap(cap) => {
+                    std::iter::once(cap.iface).chain(cap.uses.caps().iter().map(|&(iface, _)| iface)).collect()
                 }
+                Ty::Reach(uses) => uses.caps().iter().map(|&(iface, _)| iface).collect(),
+                _ => Vec::new(),
+            };
+            let caps = ifaces.into_iter().filter_map(|iface| self.cap_vis.get(&iface).map(|&vis| (Err(iface), vis)));
+            for (named, vis) in named.into_iter().chain(caps) {
+                if least.is_none_or(|(_, least)| reach(vis) < reach(least)) {
+                    least = Some((named, vis));
+                }
+            }
+            if least.is_some_and(|(_, vis)| reach(vis) == 0) {
+                break;
             }
             if let Some(parts) = ty.parts()
                 && seen.insert(Arc::as_ptr(parts) as *const Ty as usize)
@@ -2198,6 +2304,7 @@ impl Checker<'_> {
         self.param_names = vec!["Self".into()];
         for k in 0..self.ifaces.len() {
             let IfaceSrc { id, decl, vis } = self.ifaces[k];
+            self.cap_self = decl.cap.is_some();
             let mut methods: Vec<IfaceMethod> = Vec::new();
             let mut incomplete = decl.recovered;
             'methods: for method in &decl.methods {
@@ -2284,6 +2391,7 @@ impl Checker<'_> {
             def.incomplete = incomplete;
         }
         self.self_ty = None;
+        self.cap_self = false;
         self.param_names.clear();
     }
 
@@ -3349,7 +3457,31 @@ impl Checker<'_> {
         let te = &m.types[t];
         match te.kind {
             TypeExprKind::Named(name) => self.type_name(name),
-            TypeExprKind::Fn { ref params, ret, fails } => self.fn_type(params, ret, fails),
+            TypeExprKind::Fn { ref params, ret, fails, ref uses } => self.fn_type(params, ret, fails, uses),
+            // Slice 3.3 decides whether the `cap record` that implements it may use more.
+            TypeExprKind::Uses { base, .. }
+                if self.cap_self && matches!(m.types[base].kind, TypeExprKind::SelfType) =>
+            {
+                self.not_implemented(te.span, "`uses` clauses after a `cap interface`'s `Self`", Planned::Phase(3));
+                Ty::Error
+            }
+            TypeExprKind::Uses { base, ref uses } => {
+                let base_ty = self.resolve_type(base);
+                let uses = self.uses_list(uses);
+                match (base_ty, uses) {
+                    (Ty::Cap(cap), Some(uses)) => Ty::cap_uses(cap.iface, cap.perms, cap.uses.union(&uses)),
+                    (Ty::Error, _) | (_, None) => Ty::Error,
+                    (ty, Some(_)) => {
+                        let message = format!(
+                            "`{}` isn't a capability type, so it has no `uses`; a capability type or a function type has one (§9.2, §9.4)",
+                            self.show(&ty)
+                        );
+                        self.error(codes::UNKNOWN_TYPE, m.types[base].span, message);
+                        Ty::Error
+                    }
+                }
+            }
+            TypeExprKind::Rejected => Ty::Error,
             TypeExprKind::Tuple(ref elements) => {
                 let tys = elements.iter().map(|&t| self.part_type(t, "a tuple's element")).collect();
                 self.p.decls.tuple_ty(tys)
@@ -3477,15 +3609,59 @@ impl Checker<'_> {
         Ty::Error
     }
 
-    /// `fn(A, inout B) -> R fails E` (REFERENCE §9.4). A parameter may be a function too.
-    fn fn_type(&mut self, params: &[(ParamMode, TypeId)], ret: Option<TypeId>, fails: Option<TypeId>) -> Ty {
+    /// `fn(A, inout B) -> R fails E uses C` (REFERENCE §9.4). A parameter may be a function
+    /// too.
+    fn fn_type(
+        &mut self,
+        params: &[(ParamMode, TypeId)],
+        ret: Option<TypeId>,
+        fails: Option<TypeId>,
+        uses: &[TypeId],
+    ) -> Ty {
         let modes = params.iter().map(|&(mode, _)| mode).collect();
         let tys = params.iter().map(|&(_, t)| self.resolve_type(t)).collect();
         let ret = ret.map_or(Ty::Unit, |t| self.part_type(t, "a result"));
         let at = fails;
         let fails = fails.map(|t| self.part_type(t, "an error type")).filter(|t| *t != Ty::Never);
         let fails = self.error_type(fails, at).unwrap_or(Ty::Never);
-        Ty::func(modes, tys, ret, fails)
+        match self.uses_list(uses) {
+            Some(uses) => Ty::func_uses(modes, tys, ret, fails, Ty::reach(uses)),
+            None => Ty::Error,
+        }
+    }
+
+    /// What the capability types `uses` lists reach together: each of them and what it uses
+    /// (REFERENCE §9.2). `None` when one isn't a capability type, which is reported, or has an
+    /// error.
+    fn uses_list(&mut self, uses: &[TypeId]) -> Option<Reach> {
+        self.exposed_uses(uses, None)
+    }
+
+    /// [`Self::uses_list`] of the declaration `item`, declared with a visibility, which may not
+    /// name a capability less visible than itself (§3).
+    fn exposed_uses(&mut self, uses: &[TypeId], item: Option<(Ident, Visibility)>) -> Option<Reach> {
+        let mut reach = Reach::default();
+        let mut known = true;
+        for &t in uses {
+            match self.resolve_type(t) {
+                Ty::Cap(cap) => {
+                    reach.extend(&Reach::of_cap(&cap));
+                    if let Some((name, vis)) = item {
+                        self.exposes(name, vis, &Ty::Cap(cap), t);
+                    }
+                }
+                Ty::Error => known = false,
+                ty => {
+                    let message = format!(
+                        "`uses` lists capability types, such as `Out` or `Dir[read]`, and `{}` isn't one (§9.4)",
+                        self.show(&ty)
+                    );
+                    self.error(codes::UNKNOWN_TYPE, self.m.types[t].span, message);
+                    known = false;
+                }
+            }
+        }
+        known.then_some(reach)
     }
 
     fn type_name(&mut self, name: Ident) -> Ty {
@@ -4497,6 +4673,7 @@ impl Checker<'_> {
     /// `known` only if nothing else does (OPEN_QUESTIONS P5).
     fn element(&mut self, x: ExprId, known: Ty) -> Ty {
         self.copying = true;
+        self.siblings.insert(x);
         match self.joined(x, &known) {
             Ty::Never => self.vars.join(&known, &Ty::Never).unwrap_or(known),
             ty => ty,
@@ -4719,15 +4896,12 @@ impl Checker<'_> {
         }
     }
 
-    /// The code of a value of type `actual` where `expected` is required: E0603 when the two
-    /// differ only in the permissions of capabilities, which the value lacks (REFERENCE §9.2),
-    /// and E0301 otherwise.
+    /// The code of a value of type `actual` where `expected` is required: E0603 or E0602 when
+    /// the two differ only in the permissions or the `uses` of capabilities and function types
+    /// (see [`reach_mismatch`]), and E0301 otherwise.
     fn mismatch_code(&self, expected: &Ty, actual: &Ty) -> Code {
-        if same_but_perms(&self.vars.defaulted(expected), &self.vars.defaulted(actual)) {
-            codes::PERMISSION_NOT_GRANTED
-        } else {
-            codes::TYPE_MISMATCH
-        }
+        reach_mismatch(&self.vars.defaulted(expected), &self.vars.defaulted(actual), false)
+            .unwrap_or(codes::TYPE_MISMATCH)
     }
 
     /// Checks `e` against `expected`, reports a mismatch, and returns the actual type.
@@ -5205,11 +5379,18 @@ impl Checker<'_> {
             None => self.option_fallbacks += 1,
         }
         // The form's own expected type gives the fallback its type when the value doesn't.
-        let expected = match &unwrapped {
-            Ty::Never => expected.cloned().filter(|ty| !ty.is_unknown()),
-            ty => Some(ty.clone()),
+        let inherited = self.siblings.remove(&e);
+        let (expected, sibling) = match &unwrapped {
+            Ty::Never => (expected.cloned().filter(|ty| !ty.is_unknown()), inherited),
+            ty => (Some(ty.clone()), true),
         };
         let expected = expected.as_ref();
+        if sibling {
+            self.mark_sibling(match fallback {
+                Fallback::Value(x) => Some(*x),
+                Fallback::Block(block) => self.tail(block),
+            });
+        }
         let (fallback_ty, tail) = match fallback {
             Fallback::Value(x) => {
                 self.copying = copying;
@@ -5623,6 +5804,9 @@ impl Checker<'_> {
         let m = self.m;
         let sibling = std::mem::take(&mut self.sibling_closure);
         let span = self.span(e);
+        // A written function type, rather than one a variable or another branch gave, is where
+        // the closure goes, so it may admit a capture whose type is settled later (§9.4).
+        let written = expected.filter(|ty| !sibling && matches!(ty.fn_uses(), Some(Ty::Reach(_)))).cloned();
         let expected = expected.map(|ty| self.vars.resolve(ty));
         let mut rejected = false;
         // Where the call it is passed to was rejected, or a value of another type is expected,
@@ -5696,9 +5880,10 @@ impl Checker<'_> {
             (None, None) => (self.vars.fresh(Kind::Any, Origin::Defaulted), None),
         };
         // An error type that only `Never` gives is `Never`, so a closure without one can't fail.
+        // Another branch's error is only a guide too, which the join widens (issue #61).
         let fails = match &expected {
-            Some((_, _, fails, _)) => fails.clone(),
-            None => self.vars.open_nevers(&Ty::Never),
+            Some((_, _, fails, _)) if !sibling => fails.clone(),
+            _ => self.vars.open_nevers(&Ty::Never),
         };
         // The closure's own state: its result and error, and no loops to leave.
         let base = self.f.locals.len() as u32;
@@ -5711,7 +5896,13 @@ impl Checker<'_> {
             std::mem::take(&mut self.markers),
         );
         let labels = outer.2.iter().filter_map(|l| l.label).collect();
-        self.closure_scopes.push(ClosureScope { base, captures: Vec::new(), unmarked: false, labels });
+        self.closure_scopes.push(ClosureScope {
+            base,
+            captures: Vec::new(),
+            spans: Vec::new(),
+            unmarked: false,
+            labels,
+        });
         self.f.scopes.push(Vec::new());
         let mut locals = Vec::new();
         for ((param, ty), mode) in closure.params.iter().zip(&params).zip(&modes) {
@@ -5719,7 +5910,13 @@ impl Checker<'_> {
             let mutable = quiet || matches!(mode, ParamMode::Inout | ParamMode::InoutPartial);
             locals.push(self.declare(param.name, ty.clone(), mutable, "parameter", *mode != ParamMode::Take));
         }
-        let body = self.block_value(&closure.body, Some(guide.as_ref().unwrap_or(&ret)), true);
+        // A body without a value gives `()`, whatever another branch's result is (issue #61).
+        let expected_body = match &guide {
+            Some(_) if self.tail(&closure.body).is_none() => None,
+            Some(guide) => Some(guide),
+            None => Some(&ret),
+        };
+        let body = self.block_value(&closure.body, expected_body, true);
         // A body that always leaves gives `Never`, however it leaves (OPEN_QUESTIONS Q33).
         if diverges_ty(&body) {
             let _ = self.vars.subsume(&ret, &Ty::Never);
@@ -5745,6 +5942,17 @@ impl Checker<'_> {
         }
         (self.f.ret, self.f.fails, self.f.loops, self.f.returns, self.markers) = outer;
         let needs = scope.captures.iter().map(|(id, _)| self.local_needs(*id)).max().unwrap_or(0);
+        // Its reach is what its captures reach (REFERENCE §9.4). One whose type is still open
+        // is checked against it once the type settles.
+        let mut uses = Reach::default();
+        for (&(id, _), &span) in scope.captures.iter().zip(&scope.spans) {
+            let ty = self.vars.zonk(&self.f.locals[id.index()].ty);
+            if self.vars.has_open(&ty) {
+                self.f.late_captures.push((e, id, span, written.clone()));
+            } else {
+                uses.extend(&self.reach(&ty));
+            }
+        }
         self.f.needs.insert(e, needs);
         self.f.closures.push(e);
         self.p.closures.insert(
@@ -5755,7 +5963,7 @@ impl Checker<'_> {
             self.rejected.insert(e);
             return Ty::Error;
         }
-        Ty::func(modes, params, ret, fails)
+        Ty::func_uses(modes, params, ret, fails, Ty::reach(uses))
     }
 
     /// How many locals a value held in local `id` needs alive (see [`FnState::needs`]): `id`
@@ -5808,43 +6016,20 @@ impl Checker<'_> {
     }
 
     /// Notes that the closures being checked capture local `id`, used at `span`, when it is
-    /// declared before them. A capability, or a value that holds one, gives a closure reach,
-    /// which phase 3 brings (REFERENCE §9.4).
+    /// declared before them. What it reaches, a closure reaches too (REFERENCE §9.4).
     fn capture(&mut self, id: LocalId, name: &str, span: Span) {
-        let mut first = false;
         for scope in &mut self.closure_scopes {
             if id.0 < scope.base && !scope.captures.iter().any(|(captured, _)| *captured == id) {
                 scope.captures.push((id, name.into()));
-                first = true;
+                scope.spans.push(span);
             }
-        }
-        if !first {
-            return;
-        }
-        let ty = self.vars.zonk(&self.f.locals[id.index()].ty);
-        if self.vars.has_open(&ty) {
-            self.f.late_captures.push((id, span));
-        } else if self.may_reach(&ty) {
-            self.reaching_capture(span);
         }
     }
 
-    /// Whether a value of type `ty` may hold a capability: it does, or it holds a value of a
-    /// type parameter without `Copy`, whose type argument may (REFERENCE §5.1, Q31).
-    fn may_reach(&self, ty: &Ty) -> bool {
-        fn open_param(ty: &Ty, bounds: &[Vec<IfaceId>]) -> bool {
-            match ty {
-                Ty::Param(i) => bounds.get(*i as usize).is_none_or(|b| !b.contains(&IfaceId::COPY)),
-                // A function value holds none of the values its type names.
-                Ty::Fn(..) => false,
-                _ => ty.parts().is_some_and(|parts| parts.iter().any(|part| open_param(part, bounds))),
-            }
-        }
-        self.p.decls.has_reach(ty) || open_param(ty, &self.f.bounds)
-    }
-
-    fn reaching_capture(&mut self, span: Span) {
-        self.not_implemented(span, "closures that capture a capability or a value that holds one", Planned::Phase(3));
+    /// What a value of type `ty` may reach in the function being checked, where a type
+    /// parameter without `Copy` may reach what its type argument does (REFERENCE §5.1, Q31).
+    fn reach(&self, ty: &Ty) -> Reach {
+        self.p.decls.reach(ty, &self.f.bounds)
     }
 
     /// Whether local `id` is one the innermost closure being checked captures, which it may
@@ -6487,7 +6672,7 @@ impl Checker<'_> {
     }
 
     /// `x.only::[read]()`: the capability `x` of `iface`, narrowed to the permissions it
-    /// names, which `x` must have (REFERENCE §9.2).
+    /// names, which `x` must have, and using what `x` uses (REFERENCE §9.2).
     #[allow(clippy::too_many_arguments)]
     fn only_call(
         &mut self,
@@ -6535,7 +6720,12 @@ impl Checker<'_> {
             self.error(codes::PERMISSION_NOT_GRANTED, method.span, message);
         }
         self.p.res.insert(e, Res::Method(Builtin::Only));
-        Ty::cap(iface, kept)
+        // The implementation is the same, so it uses what it did.
+        let uses = match receiver_ty {
+            Ty::Cap(cap) => cap.uses.clone(),
+            _ => Reach::default(),
+        };
+        Ty::cap_uses(iface, kept, uses)
     }
 
     /// `Int.parse(text)`: an associated function of a scalar type (STD.md). Only the integer
@@ -7447,7 +7637,8 @@ impl Checker<'_> {
                 self.show(&actual)
             );
             // The callee may store a capability with fewer permissions in it (OPEN_QUESTIONS P3).
-            let code = self.mismatch_code(ty, &actual);
+            let (ty_d, actual_d) = (self.vars.defaulted(ty), self.vars.defaulted(&actual));
+            let code = reach_mismatch(&ty_d, &actual_d, true).unwrap_or(codes::TYPE_MISMATCH);
             self.error(code, span, message);
             self.vars.poison(&actual);
             self.vars.quiet(ty);
@@ -7659,10 +7850,14 @@ impl Checker<'_> {
             unreachable!("if_expr is called on `if` expressions")
         };
         let copying = std::mem::take(&mut self.tail_copying);
+        let inherited = self.siblings.remove(&e);
         // The bindings of an `is` in the condition scope over the then-block (REFERENCE §6.4).
         let base = self.f.locals.len() as u32;
         self.f.scopes.push(Vec::new());
         self.condition(*cond);
+        if inherited {
+            self.mark_sibling(self.tail(then_block));
+        }
         let then_ty = match (mode, else_branch) {
             (Mode::Stmt | Mode::Tail(_), _) => {
                 let tail = match mode {
@@ -7706,8 +7901,18 @@ impl Checker<'_> {
                 // The branches' types are joined, so either may give the other its type
                 // arguments and literal types (OPEN_QUESTIONS P5; issue #10). The then-branch's
                 // type, joined with the expected one, is what the else-branch meets.
-                let known = if then_ty.is_unknown() { expected.cloned() } else { Some(then_ty.clone()) };
+                // A written function type is what each branch's closure must be (issue #61), and
+                // the `if`'s type is still the join of both.
+                let required = !inherited && self.requires_fn(expected);
+                let from_then = !then_ty.is_unknown() && !required;
+                let known = if from_then { Some(then_ty.clone()) } else { expected.cloned() };
                 let expected = known.as_ref();
+                if inherited || from_then {
+                    self.mark_sibling(match branch {
+                        ElseBranch::Block(block) => self.tail(block),
+                        ElseBranch::If(nested) => Some(*nested),
+                    });
+                }
                 let else_ty = match branch {
                     ElseBranch::Block(block) => self.block_value(block, expected, copying),
                     ElseBranch::If(nested) => {
@@ -7730,6 +7935,7 @@ impl Checker<'_> {
                         self.mismatched.insert(e);
                         Ty::Error
                     }
+                    _ if required => self.join_branches(then_ty, else_ty, else_tail),
                     // The else-branch's type is the join, unless it has none of its own.
                     Some(known) if else_ty.is_unknown() => known.clone(),
                     _ => else_ty,
@@ -7740,13 +7946,38 @@ impl Checker<'_> {
         ty
     }
 
+    /// The join of `known`, what earlier branches gave, and `ty`, what the branch `tail`
+    /// gives, where both were checked against a written function type. A mismatch is reported
+    /// at `tail`.
+    fn join_branches(&mut self, known: Ty, ty: Ty, tail: Option<ExprId>) -> Ty {
+        if ty.is_unknown() || diverges_ty(&ty) {
+            return known;
+        }
+        if known.is_unknown() || diverges_ty(&known) {
+            return ty;
+        }
+        self.vars.join(&known, &ty).unwrap_or_else(|| {
+            let message = format!("expected `{}`, found `{}`", self.show(&known), self.show(&ty));
+            let code = self.mismatch_code(&known, &ty);
+            match tail {
+                Some(tail) => {
+                    self.mismatch(tail, code, self.span(tail), message);
+                    self.mismatched.insert(tail);
+                }
+                None => self.vars.quiet(&known),
+            }
+            self.vars.poison(&ty);
+            Ty::Error
+        })
+    }
+
     /// Checks `e`, a branch's value or a tuple's element, where the others give `known`,
     /// and returns the type of either: their join, where a `Never` part of `known` gives way
     /// (OPEN_QUESTIONS P5). A mismatch is reported at `e`.
     fn joined(&mut self, e: ExprId, known: &Ty) -> Ty {
         // Another branch's closure only guides this one's parameters, whose written types the
-        // join meets (OPEN_QUESTIONS P3, decided for phase 3).
-        self.sibling_closure = matches!(self.m.exprs[e].kind, ExprKind::Closure(_));
+        // join meets (OPEN_QUESTIONS P3, decided for phase 3). A written type is required.
+        self.sibling_closure = matches!(self.m.exprs[e].kind, ExprKind::Closure(_)) && self.siblings.remove(&e);
         let ty = self.expr(e, Some(known));
         if ty == Ty::Error {
             self.vars.quiet(known);
@@ -7763,6 +7994,17 @@ impl Checker<'_> {
             self.mismatched.insert(e);
             Ty::Error
         })
+    }
+
+    /// Whether `expected`, a branching expression's, is a function type that each branch must
+    /// have, rather than one the branches' join decides.
+    fn requires_fn(&self, expected: Option<&Ty>) -> bool {
+        expected.is_some_and(|ty| matches!(self.vars.resolve(ty), Ty::Fn(..)))
+    }
+
+    /// Notes that `e`, if there is one, is expected to have the type another branch gave.
+    fn mark_sibling(&mut self, e: Option<ExprId>) {
+        self.siblings.extend(e);
     }
 
     /// Whether `tail`, the value a branch gives, has a type that didn't match the others'.
@@ -7962,6 +8204,10 @@ impl Checker<'_> {
         let mut mismatched = false;
         let mut leaves = Ty::Never;
         let mut tys = Vec::new();
+        let mut sibling = self.siblings.remove(&e);
+        // A written function type is what each arm's closure must be, and the arms still join.
+        let required = !sibling && self.requires_fn(expected.as_ref());
+        let mut joined = Ty::Never;
         for arm in arms {
             // An arm's bindings scope over its guard and body.
             let base = self.f.locals.len() as u32;
@@ -7982,9 +8228,15 @@ impl Checker<'_> {
                 Mode::Value(_) => {
                     // Each arm's type is joined with what the others gave, in any order
                     // (OPEN_QUESTIONS P5; issue #10).
+                    if sibling {
+                        self.mark_sibling(self.tail(&arm.body));
+                    }
                     let ty = self.block_value(&arm.body, expected.as_ref(), copying);
-                    if !ty.is_unknown() {
+                    if required {
+                        joined = self.join_branches(joined, ty.clone(), self.tail(&arm.body));
+                    } else if !ty.is_unknown() {
                         expected = Some(ty.clone());
+                        sibling = true;
                     }
                     mismatched |= self.mismatched_tail(self.tail(&arm.body));
                     // A closure the arm gives can't capture its bindings (Q34).
@@ -8033,6 +8285,7 @@ impl Checker<'_> {
                 self.mismatched.insert(e);
                 Ty::Error
             }
+            Mode::Value(_) if required && joined != Ty::Never => joined,
             Mode::Value(_) => expected.unwrap_or(Ty::Error),
         };
         self.record(e, ty.clone());
@@ -8564,7 +8817,7 @@ fn holds_fn(ty: &Ty) -> bool {
                 inside
                     || (seen.insert((Arc::as_ptr(parts) as *const Ty as usize, false))
                         && (parts[..2].iter().any(|part| walk(part, true, seen))
-                            || parts[2..].iter().any(|part| walk(part, false, seen))))
+                            || parts[FN_PARAMS..].iter().any(|part| walk(part, false, seen))))
             }
             Ty::Adt(_, args) => {
                 seen.insert((Arc::as_ptr(args) as *const Ty as usize, true))
@@ -8576,23 +8829,67 @@ fn holds_fn(ty: &Ty) -> bool {
     walk(ty, false, &mut HashSet::new())
 }
 
-/// Whether `a` and `b` are built alike and name the same capability interfaces, so they differ
-/// at most in permissions. Each pair of shared parts is walked once, so types that double at
-/// each level cost their depth (issue #55).
-fn same_but_perms(a: &Ty, b: &Ty) -> bool {
-    fn walk(a: &Ty, b: &Ty, seen: &mut HashSet<(usize, usize)>) -> bool {
-        let parts = |xs: &Arc<[Ty]>, ys: &Arc<[Ty]>, seen: &mut HashSet<(usize, usize)>| {
-            let key = (Arc::as_ptr(xs) as *const Ty as usize, Arc::as_ptr(ys) as *const Ty as usize);
-            xs.len() == ys.len() && (!seen.insert(key) || xs.iter().zip(ys.iter()).all(|(x, y)| walk(x, y, seen)))
-        };
-        match (a, b) {
-            (Ty::Cap(x), Ty::Cap(y)) => x.iface == y.iface,
-            (Ty::Adt(x, xs), Ty::Adt(y, ys)) => x == y && parts(xs, ys, seen),
-            (Ty::Fn(xm, xs), Ty::Fn(ym, ys)) => xm == ym && parts(xs, ys, seen),
-            (a, b) => a == b,
+/// The code of a value of type `actual` where `expected` is required, when the two are built
+/// alike and name the same capability interfaces, so they differ at most in permissions and
+/// `uses`: E0603 when the value lacks a permission, which is reported first, and E0602 when
+/// it reaches more than the expected type admits (REFERENCE §9.2, §9.4). A function type's
+/// parameters compare the other way, and an `inout` one both ways, as do the whole types when
+/// `exact`. `None` for any other mismatch. Each pair of shared parts is walked once in each direction, so types that double
+/// at each level cost their depth (issue #55).
+fn reach_mismatch(expected: &Ty, actual: &Ty, exact: bool) -> Option<Code> {
+    #[derive(Default)]
+    struct Walk {
+        perms: bool,
+        uses: bool,
+        seen: HashSet<(usize, usize, bool)>,
+    }
+    impl Walk {
+        fn parts(&mut self, xs: &Arc<[Ty]>, ys: &Arc<[Ty]>, flipped: bool, modes: &[ParamMode]) -> bool {
+            let key = (Arc::as_ptr(xs) as *const Ty as usize, Arc::as_ptr(ys) as *const Ty as usize, flipped);
+            if xs.len() != ys.len() || !self.seen.insert(key) {
+                return xs.len() == ys.len();
+            }
+            xs.iter().zip(ys.iter()).enumerate().all(|(i, (x, y))| match i.checked_sub(FN_PARAMS) {
+                Some(p) if !modes.is_empty() && modes[p].is_inout() => {
+                    self.walk(x, y, flipped) && self.walk(x, y, !flipped)
+                }
+                Some(_) if !modes.is_empty() => self.walk(x, y, !flipped),
+                _ => self.walk(x, y, flipped),
+            })
+        }
+
+        fn walk(&mut self, expected: &Ty, actual: &Ty, flipped: bool) -> bool {
+            let (want, have) = if flipped { (actual, expected) } else { (expected, actual) };
+            match (expected, actual) {
+                (Ty::Var(_), _) | (_, Ty::Var(_)) => true,
+                (Ty::Cap(_), Ty::Cap(_)) => {
+                    let (Ty::Cap(want), Ty::Cap(have)) = (want, have) else { unreachable!("both capabilities") };
+                    self.perms |= !want.perms.is_subset(have.perms);
+                    self.uses |= !have.uses.covered_by(&want.uses);
+                    want.iface == have.iface
+                }
+                (Ty::Reach(_), Ty::Reach(_)) => {
+                    let (Ty::Reach(want), Ty::Reach(have)) = (want, have) else { unreachable!("both reach sets") };
+                    self.uses |= !have.covered_by(want);
+                    true
+                }
+                (Ty::Adt(x, xs), Ty::Adt(y, ys)) => x == y && self.parts(xs, ys, flipped, &[]),
+                (Ty::Fn(xm, xs), Ty::Fn(ym, ys)) => xm == ym && self.parts(xs, ys, flipped, xm),
+                (a, b) => a == b,
+            }
         }
     }
-    walk(a, b, &mut HashSet::new())
+    let mut walk = Walk::default();
+    if !walk.walk(expected, actual, false) || exact && !walk.walk(expected, actual, true) {
+        return None;
+    }
+    if walk.perms {
+        Some(codes::PERMISSION_NOT_GRANTED)
+    } else if walk.uses {
+        Some(codes::REACH_NOT_ADMITTED)
+    } else {
+        None
+    }
 }
 
 /// Whether a value of this type may never be produced. An error counts, because the code it

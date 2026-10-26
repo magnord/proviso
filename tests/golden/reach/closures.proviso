@@ -1,0 +1,59 @@
+// phase: 3.2
+// A closure's type records its reach: the union of the reach of everything it captures, a
+// capability, a record that holds one, or another closure (REFERENCE §9.4, Q34). A function
+// type's `uses` admits a closure whose reach it covers, so a closure that captures nothing
+// fits any of them, and a function value of a declared function reaches nothing. `debug`
+// writes a closure's type with its `uses`.
+use std.io { In, IoError, Out }
+
+record Sink {
+    out: Out
+}
+
+fn run(f: fn() fails IoError uses Out) fails IoError {
+    try f()
+}
+
+fn run_both(f: fn(Text) fails IoError uses (Out, In)) fails IoError {
+    try f("both")
+}
+
+fn plain(f: fn() -> Int) -> Int {
+    return f()
+}
+
+fn five() -> Int {
+    return 5
+}
+
+fn closures(out: Out, sink: Sink, input: In) fails IoError {
+    try run(f: || try out.write_line("captured"))
+    let w = || try out.write_line("bound to a local")
+    try run(f: || try w())
+    try run(f: || try sink.out.write_line("through a record"))
+    try run(f: || ())
+    try run_both(f: |t| try out.write_line(t))
+    let r = || attempt input.read_line()
+    let s = || try sink.out.write_line("unused")
+    debug(w, || try w(), r, s, run, five)
+    let n = plain(f: || 5) + plain(f: five)
+    try out.write_line(f"{n}")
+}
+
+pub fn main(sys: keep System) fails IoError {
+    try closures(out: sys.stdout, sink: Sink(out: sys.stderr), input: sys.stdin)
+}
+
+fn admits(f: fn() uses Out) {}
+
+fn takes_out(o: Out) {}
+
+// A capture whose type is settled later is admitted by the written function type the closure
+// is passed as.
+fn late_admitted(out: Out) {
+    let f = |p| {
+        admits(f: || debug(p))
+        takes_out(o: p)
+    }
+    f(out)
+}

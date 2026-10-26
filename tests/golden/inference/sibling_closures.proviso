@@ -1,0 +1,50 @@
+// phase: 3.2
+// A closure beside another branch takes its own result and error from its body, and the join
+// widens them, so the closure may come first or second (OPEN_QUESTIONS P5, Closures beside
+// other branches; issue #61). A body without a value gives `()`.
+use std.io { IoError, Out }
+
+enum Oops derives(Show) {
+    Bad
+}
+
+fn risky(n: Int) -> Int fails Oops {
+    if n < 0 {
+        fail Oops.Bad
+    }
+    return n
+}
+
+fn plain() -> Int {
+    return 2
+}
+
+fn errors(flag: Bool) -> Int fails Oops {
+    let b = if flag { plain } else { || try risky(n: 3) }
+    let c = if flag { || try risky(n: 4) } else { plain }
+    return (try b()) + (try c())
+}
+
+fn stop() -> Never {
+    unreachable
+}
+
+fn units(flag: Bool) {
+    let a = if flag { stop } else { || {
+        let w = 1
+    } }
+    let b = match flag {
+        false => || {
+            let w = 2
+        }
+        true => stop
+    }
+    a()
+    b()
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let n = errors(flag: false) else 0
+    units(flag: false)
+    try sys.stdout.write_line(f"{n}")
+}

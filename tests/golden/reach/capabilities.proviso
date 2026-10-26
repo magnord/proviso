@@ -1,0 +1,60 @@
+// phase: 3.2
+// A capability type lists the capabilities its implementation uses, as in `Dir[read] uses
+// Out`, and a bare `Dir[read]` uses none (REFERENCE §9.2). It is accepted where a type with
+// fewer permissions is expected whose `uses` covers its own (OPEN_QUESTIONS P5, Reach sets).
+// `uses` takes one capability type or several in parentheses, so it ends before the next
+// parameter of a function type (Q41), and comes before or after `fails`. Narrowing with
+// `only` keeps what the implementation uses. An alias names a capability result with `uses`
+// (OPEN_QUESTIONS P5).
+use std.io { Out }
+
+cap interface Dir observes(read) effects(write) {
+    fn read_text(self, path: Text) -> Text                      needs read
+    fn write_text(self, path: Text, text: Text)                 needs write
+}
+
+cap interface Log effects(append) {
+    fn append(self, line: Text)                                 needs append
+}
+
+fn logged(d: Dir[read] uses Log) -> Text {
+    return d.read_text(path: "a")
+}
+
+fn both(d: Dir[read] uses (Log, Out)) -> Text {
+    return d.read_text(path: "b")
+}
+
+fn applies(f: fn(fn() -> Text uses Dir[read], Int) -> Text, d: Dir[read]) -> Text {
+    return f(|| d.read_text(path: "c"), 1)
+}
+
+fn calls(plain: Dir[read], logging: Dir[read] uses Log, writing: Dir[read, write] uses Log[append]) -> Text {
+    let a = logged(d: plain)
+    let b = logged(d: writing)
+    let c = both(d: logging)
+    let d = logged(d: writing.only::[read]())
+    let e = applies(f: |g, n| g(), d: plain)
+    debug(logging, writing, writing.only::[read]())
+    return f"{a}{b}{c}{d}{e}"
+}
+
+fn options(logging: Dir[read] uses Log) -> Option[Dir[read] uses (Log, Out)] {
+    return Some(logging)
+}
+
+enum Oops {
+    Bad
+}
+
+fn either_order(f: fn() -> Text uses Log fails Oops, g: fn() -> Text fails Oops uses Log) -> Text fails Oops {
+    let a = try f()
+    let b = try g()
+    return f"{a}{b}"
+}
+
+type LoggingDir = Dir[read] uses Log
+
+fn result(d: keep Dir[read] uses Log) -> LoggingDir {
+    return d
+}

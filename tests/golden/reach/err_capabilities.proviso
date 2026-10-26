@@ -1,0 +1,46 @@
+// phase: 3.2
+// expect-error: E0602
+// expect-error: E0603
+// A capability whose `uses` the expected type doesn't cover is E0602, also inside a type
+// such as `Option[…]`, and narrowing it with `only` doesn't change what it uses. One that
+// lacks a permission is E0603, which is reported first. An `&` argument has its parameter's
+// type exactly, so one that reaches less is E0602 too (OPEN_QUESTIONS P5).
+cap interface Dir observes(read) effects(write) {
+    fn read_text(self, path: Text) -> Text                      needs read
+    fn write_text(self, path: Text, text: Text)                 needs write
+}
+
+cap interface Log effects(append) {
+    fn append(self, line: Text)                                 needs append
+}
+
+fn reads(d: Dir[read]) -> Text {
+    return d.read_text(path: "a")
+}
+
+fn writes(d: Dir[read, write]) -> Text {
+    return d.read_text(path: "a")
+}
+
+fn appends(d: Dir[read] uses Log[append]) -> Text {
+    return d.read_text(path: "a")
+}
+
+fn calls(logging: Dir[read] uses Log, writing: Dir[read, write] uses Log) -> Text {
+    let a = reads(d: logging)                                   // <- E0602
+    let b = reads(d: writing.only::[read]())                    // <- E0602
+    let c = writes(d: logging)                                  // <- E0603
+    let d = appends(d: writing)
+    return f"{a}{b}{c}{d}"
+}
+
+fn options(logging: Dir[read] uses Log) -> Option[Dir[read]] {
+    return Some(logging)                                        // <- E0602
+}
+
+fn narrow(d: inout Dir[read] uses Log, other: Dir[read] uses Log) {}
+
+fn inouts(plain: keep Dir[read], logging: keep Dir[read] uses Log) {
+    var d = plain
+    narrow(d: &d, other: logging)                               // <- E0602
+}

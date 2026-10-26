@@ -11,7 +11,8 @@
 // names its interface's permissions, once each. A capability interface is a type, so it
 // can't be a constraint (OPEN_QUESTIONS Q31). Every capability has `only`, so an operation
 // can't take its name. An `interface` that declares permissions is read as the `cap
-// interface` it was meant to be. `cap record`, `uses` and `with` come in later slices, and
+// interface` it was meant to be. A function declares no `uses`, since its parameters carry
+// its authority (OPEN_QUESTIONS Q41). `cap record` comes in a later slice, and
 // implementations for a capability type are not yet scheduled. A rejected declaration's
 // uses aren't reported again (REFERENCE §15.1).
 use std.io { Out }
@@ -21,7 +22,7 @@ cap interface Log observes(read) effects(append) {
     fn append(self, line: Text)                 needs append
     fn twice(self) -> Text                      needs read, read        // <- E0210
     fn lost(self) -> Text                       needs nosuch            // <- E0303
-    fn later(self) -> Text                      needs read uses Log     // <- E0901
+    fn later(self) -> Text                      needs read uses Log     // <- E0101
 }
 
 cap interface Twice observes(read) effects(read) {                      // <- E0210
@@ -109,7 +110,7 @@ fn plain_broken(b: PlainBroken[read]) -> Text {
 }
 
 record Reaching {
-    log: Log[read] uses Out                                             // <- E0901
+    log: Log[read] uses Out
 }
 
 cap interface Narrowing observes(read) {

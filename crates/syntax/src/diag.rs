@@ -110,7 +110,7 @@ pub mod codes {
             "An f-string interpolation `{}` with no expression inside.";
 
         UNEXPECTED_TOKEN = "E0101", "unexpected_token",
-            "The parser expected something else here, or a permission or `needs` clause is declared outside a `cap interface`, also on a function (REFERENCE §9.2).";
+            "The parser expected something else here, or a permission or `needs` clause is declared outside a `cap interface`, also on a function. So is `uses` on a function or on a record that isn't `opaque`, or an empty `uses` list (REFERENCE §9.2).";
         BARE_VALUE_STATEMENT = "E0102", "bare_value_statement",
             "An expression statement must be a call, an assignment or a control expression (REFERENCE §2).";
         CHAINED_COMPARISON = "E0103", "chained_comparison",
@@ -166,7 +166,7 @@ pub mod codes {
         UNSUPPORTED_OPERATOR = "E0306", "unsupported_operator",
             "An operator or interpolation that the operand's type doesn't support, a literal or range pattern that the matched type doesn't support, such as a `Float` literal (REFERENCE §12.2), an index on anything but a list or a pool, or a change to a pool's element through `pool[h]` (STD.md).";
         UNKNOWN_TYPE = "E0307", "unknown_type",
-            "A type or interface name that does not resolve to one, a type with the wrong number of type arguments, a capability interface used as a constraint (OPEN_QUESTIONS Q31), or an `only` whose `::[…]` holds something other than a permission's name.";
+            "A type or interface name that does not resolve to one, a type with the wrong number of type arguments, a capability interface used as a constraint (OPEN_QUESTIONS Q31), an `only` whose `::[…]` holds something other than a permission's name, or a type in or before a `uses` list that isn't a capability type (REFERENCE §9.4).";
         INVALID_MAIN = "E0308", "invalid_main",
             "A program needs `pub fn main(sys: keep System)`, optionally with `fails E` (REFERENCE §7.4).";
         MISSING_IMPLEMENTATION = "E0309", "missing_implementation",
@@ -229,7 +229,7 @@ pub mod codes {
         EFFECTS_CALL_IN_OBSERVES = "E0601", "effects_call_in_observes",
             "An operation that needs only `observes` permissions calls an `effects` operation (REFERENCE §9.2).";
         REACH_NOT_ADMITTED = "E0602", "reach_not_admitted",
-            "A value's reach is not admitted by the expected type's `uses` or `with E` (REFERENCE §9.4).";
+            "A value's reach is not admitted by the expected type's `uses` or `with E` (REFERENCE §9.4), or a field of an `opaque record` reaches more than the record's `uses` declares (REFERENCE §9.2).";
         PERMISSION_NOT_GRANTED = "E0603", "permission_not_granted",
             "A capability's static type lacks a permission: an operation the type doesn't permit is called, the capability is used where a type with more permissions is expected, or `only` names a permission it doesn't have (REFERENCE §9.2). A call through the observes-only view of `self` is E0601 instead.";
         SYSTEM_CONSTRUCTED = "E0604", "system_constructed",

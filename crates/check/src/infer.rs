@@ -17,7 +17,7 @@ use proviso_syntax::source::Span;
 
 use crate::FnId;
 use crate::decls::{AdtId, IfaceId};
-use crate::types::{FloatTy, Perms, Ty};
+use crate::types::{FN_PARAMS, FloatTy, Perms, Reach, Ty};
 
 /// What a variable may become.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -42,35 +42,115 @@ pub enum Origin {
     Defaulted,
 }
 
-/// What a variable that capabilities of one interface met may have as permissions. Values
-/// that flow into it bound it from above, and the places it flows into from below, so it
-/// settles as the same type whichever came first (OPEN_QUESTIONS P3, decided for phase 3).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct CapBounds {
-    pub iface: IfaceId,
-    /// The permissions every capability that flowed in has, or `None` before one did.
-    pub at_most: Option<Perms>,
-    /// The permissions some place it flowed into needs.
-    pub at_least: Perms,
+/// What a variable that capabilities of one interface, or the `uses` of function types, met
+/// may be. Values that flow into it bound it from one side, and the places it flows into from
+/// the other, so it settles as the same type whichever came first (OPEN_QUESTIONS P3, decided
+/// for phase 3).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Bounds {
+    /// A capability of `iface`.
+    Cap {
+        iface: IfaceId,
+        /// The permissions every capability that flowed in has, or `None` before one did.
+        at_most: Option<Perms>,
+        /// The permissions some place it flowed into needs.
+        at_least: Perms,
+        uses: ReachBounds,
+    },
+    /// A function type's `uses`.
+    Reach(ReachBounds),
 }
 
-impl CapBounds {
-    /// The permissions it settles as: all that the values give it, or else what its places need.
-    pub fn solution(self) -> Perms {
-        self.at_most.unwrap_or(self.at_least)
+/// What a variable for a reach set, a capability's or a function type's `uses`, may be.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ReachBounds {
+    /// What the values that flowed in reach together, or `None` before one did.
+    pub given: Option<Reach>,
+    /// What every place it flowed into admits, or `None` before it flowed into one.
+    pub admitted: Option<Reach>,
+}
+
+impl ReachBounds {
+    fn new(reach: &Reach, flow: Flow) -> ReachBounds {
+        match flow {
+            Flow::In => ReachBounds { given: Some(reach.clone()), admitted: None },
+            Flow::Out => ReachBounds { given: None, admitted: Some(reach.clone()) },
+        }
     }
 
-    fn holds(self) -> bool {
-        self.at_most.is_none_or(|most| self.at_least.is_subset(most))
+    /// What it settles as: what the values reach, or else what its places admit.
+    pub fn solution(&self) -> Reach {
+        self.given.clone().or_else(|| self.admitted.clone()).unwrap_or_default()
     }
 
-    fn meet(self, other: CapBounds) -> Option<CapBounds> {
-        let at_most = match (self.at_most, other.at_most) {
-            (Some(a), Some(b)) => Some(a.intersect(b)),
-            (a, b) => a.or(b),
+    fn meet(&self, other: &ReachBounds) -> Option<ReachBounds> {
+        let given = match (&self.given, &other.given) {
+            (Some(a), Some(b)) => Some(a.union(b)),
+            (a, b) => a.clone().or_else(|| b.clone()),
         };
-        let bounds = CapBounds { iface: self.iface, at_most, at_least: self.at_least.union(other.at_least) };
-        (self.iface == other.iface && bounds.holds()).then_some(bounds)
+        let admitted = match (&self.admitted, &other.admitted) {
+            (Some(a), Some(b)) => Some(a.intersect(b)),
+            (a, b) => a.clone().or_else(|| b.clone()),
+        };
+        let holds = match (&given, &admitted) {
+            (Some(given), Some(admitted)) => given.covered_by(admitted),
+            _ => true,
+        };
+        holds.then_some(ReachBounds { given, admitted })
+    }
+}
+
+impl Bounds {
+    /// The bounds a value of type `ty` gives where it flows `flow`, if it is a capability or a
+    /// reach set. A value that flows in gives a capability at most its permissions and at least
+    /// its `uses`, and a place it flows into gives the reverse.
+    fn of(ty: &Ty, flow: Flow) -> Option<Bounds> {
+        match ty {
+            Ty::Cap(cap) => {
+                let (at_most, at_least) = match flow {
+                    Flow::In => (Some(cap.perms), Perms::NONE),
+                    Flow::Out => (None, cap.perms),
+                };
+                Some(Bounds::Cap { iface: cap.iface, at_most, at_least, uses: ReachBounds::new(&cap.uses, flow) })
+            }
+            Ty::Reach(reach) => Some(Bounds::Reach(ReachBounds::new(reach, flow))),
+            _ => None,
+        }
+    }
+
+    /// The type it settles as. A capability has all the permissions the values give it, or
+    /// else what its places need.
+    pub fn solution(&self) -> Ty {
+        match self {
+            Bounds::Cap { iface, at_most, at_least, uses } => {
+                Ty::cap_uses(*iface, at_most.unwrap_or(*at_least), uses.solution())
+            }
+            Bounds::Reach(reach) => Ty::reach(reach.solution()),
+        }
+    }
+
+    fn meet(&self, other: &Bounds) -> Option<Bounds> {
+        match (self, other) {
+            (
+                Bounds::Cap { iface, at_most, at_least, uses },
+                Bounds::Cap { iface: other_iface, at_most: other_most, at_least: other_least, uses: other_uses },
+            ) if iface == other_iface => {
+                let at_most = match (at_most, other_most) {
+                    (Some(a), Some(b)) => Some(a.intersect(*b)),
+                    (a, b) => a.or(*b),
+                };
+                let at_least = at_least.union(*other_least);
+                let uses = uses.meet(other_uses)?;
+                at_most.is_none_or(|most| at_least.is_subset(most)).then_some(Bounds::Cap {
+                    iface: *iface,
+                    at_most,
+                    at_least,
+                    uses,
+                })
+            }
+            (Bounds::Reach(a), Bounds::Reach(b)) => a.meet(b).map(Bounds::Reach),
+            _ => None,
+        }
     }
 }
 
@@ -87,6 +167,23 @@ impl Flow {
         match self {
             Flow::In => Flow::Out,
             Flow::Out => Flow::In,
+        }
+    }
+}
+
+/// Which way [`Vars::bound_in`] bounds two types: from above, as the join of two values, or
+/// from below, as the meet of two places they go, such as a function's parameters.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Variance {
+    Co,
+    Contra,
+}
+
+impl Variance {
+    fn flip(self) -> Variance {
+        match self {
+            Variance::Co => Variance::Contra,
+            Variance::Contra => Variance::Co,
         }
     }
 }
@@ -112,8 +209,8 @@ pub struct Open {
     /// type arguments. It holds how many handlers enclose the outermost one that marks it, so
     /// an inner handler that ends doesn't clear what an outer one still joins.
     pub handled: Option<u32>,
-    /// It is a capability of this interface, whose permissions are still open.
-    pub cap: Option<CapBounds>,
+    /// It is a capability, or a function type's `uses`, that is still open.
+    pub bounds: Option<Bounds>,
     pub origin: Origin,
 }
 
@@ -128,7 +225,8 @@ enum State {
 pub struct Shape {
     pub var: bool,
     pub never: bool,
-    /// A capability, whose permissions inference opens where it flows (see [`Vars::open_caps`]).
+    /// A capability or a function type's `uses`, which inference opens where it flows (see
+    /// [`Vars::open_caps`]).
     pub cap: bool,
 }
 
@@ -170,23 +268,32 @@ type Depths = HashMap<usize, (Arc<[Ty]>, u32, bool), BuildHasherDefault<AddressH
 /// doubling chains built apart do, then cost each pair of parts once (issue #53).
 #[derive(Default)]
 struct Pairs {
-    done: HashMap<(usize, usize), Option<Ty>>,
+    done: HashMap<(usize, usize, Option<Variance>), Option<Ty>>,
     held: Vec<Arc<[Ty]>>,
 }
 
 impl Pairs {
-    fn key(a: &Arc<[Ty]>, b: &Arc<[Ty]>) -> (usize, usize) {
-        (Arc::as_ptr(a) as *const Ty as usize, Arc::as_ptr(b) as *const Ty as usize)
+    fn key(a: &Arc<[Ty]>, b: &Arc<[Ty]>, v: Option<Variance>) -> (usize, usize, Option<Variance>) {
+        (Arc::as_ptr(a) as *const Ty as usize, Arc::as_ptr(b) as *const Ty as usize, v)
     }
 
-    /// What `a` and `b` gave when they were walked, if they were: `Some(None)` for a
-    /// subsumption, which is recorded only once it holds.
-    fn get(&self, a: &Arc<[Ty]>, b: &Arc<[Ty]>) -> Option<&Option<Ty>> {
-        self.done.get(&Self::key(a, b))
+    /// Whether `actual` was found to fit `expected`, which is recorded only once it holds.
+    fn get(&self, expected: &Arc<[Ty]>, actual: &Arc<[Ty]>) -> Option<&Option<Ty>> {
+        self.done.get(&Self::key(expected, actual, None))
     }
 
-    fn insert(&mut self, a: &Arc<[Ty]>, b: &Arc<[Ty]>, joined: Option<Ty>) {
-        self.done.insert(Self::key(a, b), joined);
+    fn insert(&mut self, expected: &Arc<[Ty]>, actual: &Arc<[Ty]>) {
+        self.done.insert(Self::key(expected, actual, None), None);
+        self.held.extend([expected.clone(), actual.clone()]);
+    }
+
+    /// What `a` and `b` gave when they were bounded in direction `v`, if they were.
+    fn get_in(&self, a: &Arc<[Ty]>, b: &Arc<[Ty]>, v: Variance) -> Option<&Option<Ty>> {
+        self.done.get(&Self::key(a, b, Some(v)))
+    }
+
+    fn insert_in(&mut self, a: &Arc<[Ty]>, b: &Arc<[Ty]>, v: Variance, bounded: Ty) {
+        self.done.insert(Self::key(a, b, Some(v)), Some(bounded));
         self.held.extend([a.clone(), b.clone()]);
     }
 }
@@ -261,7 +368,7 @@ impl Vars {
         match ty {
             Ty::Var(_) => Shape { var: true, ..Shape::default() },
             Ty::Never => Shape { never: true, ..Shape::default() },
-            Ty::Cap(_) => Shape { cap: true, ..Shape::default() },
+            Ty::Cap(_) | Ty::Reach(_) => Shape { cap: true, ..Shape::default() },
             _ if let Some(args) = ty.parts() => {
                 let key = Arc::as_ptr(args) as *const Ty as usize;
                 if let Some((_, shape)) = self.shapes.borrow().get(&key) {
@@ -292,23 +399,18 @@ impl Vars {
             owed: false,
             hole: false,
             handled: None,
-            cap: None,
+            bounds: None,
             origin,
         }));
         Ty::Var(self.count() - 1)
     }
 
-    /// A variable for a capability of `iface` whose permissions are open, where a value with
-    /// `perms` flows in or out.
-    fn cap_var(&mut self, iface: IfaceId, perms: Perms, flow: Flow) -> Ty {
-        let cap = match flow {
-            Flow::In => CapBounds { iface, at_most: Some(perms), at_least: Perms::NONE },
-            Flow::Out => CapBounds { iface, at_most: None, at_least: perms },
-        };
+    /// A variable for a capability or a reach set that stays open, with `bounds`.
+    fn bounds_var(&mut self, bounds: Bounds) -> Ty {
         let ty = self.fresh(Kind::Any, Origin::Defaulted);
         let Ty::Var(v) = ty else { unreachable!("fresh makes a variable") };
         let State::Open(open) = &mut self.states[v as usize] else { unreachable!("fresh is open") };
-        open.cap = Some(cap);
+        open.bounds = Some(bounds);
         ty
     }
 
@@ -322,7 +424,7 @@ impl Vars {
             owed: false,
             hole: false,
             handled: None,
-            cap: None,
+            bounds: None,
             origin: Origin::Defaulted,
         }));
         Ty::Var(self.count() - 1)
@@ -452,10 +554,10 @@ impl Vars {
     /// [`Vars::as_never`], which reads each shared type argument list once, by address.
     fn as_never_part(&self, ty: &Ty, seen: &mut HashMap<usize, Ty>) -> Ty {
         match self.resolve(ty) {
-            Ty::Var(v) => match self.open(v).map(|open| (open.kind, open.cap)) {
+            Ty::Var(v) => match self.open(v).map(|open| (open.kind, &open.bounds)) {
                 Some((Kind::Int, _)) => Ty::INT,
                 Some((Kind::Float, _)) => Ty::Float(FloatTy::F64),
-                Some((_, Some(cap))) => Ty::cap(cap.iface, cap.solution()),
+                Some((_, Some(bounds))) => bounds.solution(),
                 _ => Ty::Never,
             },
             ty if !self.has_var(&ty) => ty,
@@ -482,10 +584,10 @@ impl Vars {
     /// [`Vars::defaulted`], where `memo` holds what each shared part gave.
     fn defaulted_part(&self, ty: &Ty, memo: &mut HashMap<usize, Ty>) -> Ty {
         match self.resolve(ty) {
-            Ty::Var(v) => match self.open(v).map(|open| (open.kind, open.never, open.cap)) {
+            Ty::Var(v) => match self.open(v).map(|open| (open.kind, open.never, &open.bounds)) {
                 Some((Kind::Int, ..)) => Ty::INT,
                 Some((Kind::Float, ..)) => Ty::Float(FloatTy::F64),
-                Some((_, _, Some(cap))) => Ty::cap(cap.iface, cap.solution()),
+                Some((_, _, Some(bounds))) => bounds.solution(),
                 // Only `Never` has reached it, as a closure's error type when nothing fails.
                 Some((_, true, _)) => Ty::Never,
                 _ => Ty::Var(self.root(v)),
@@ -702,9 +804,10 @@ impl Vars {
     }
 
     /// `ty` with each capability in it a variable whose permissions stay open, where a value of
-    /// type `ty` flows `flow` (OPEN_QUESTIONS P3, decided for phase 3). A function type's
-    /// parameters flow the other way, and an `inout` one keeps its permissions, since what is
-    /// passed must have exactly those. Parts without a capability are shared.
+    /// type `ty` flows `flow` (OPEN_QUESTIONS P3, decided for phase 3), and each `Never` that
+    /// flows in a variable that a later value may widen. A function type's parameters flow
+    /// the other way, and an `inout` one keeps its permissions, since what is passed must have
+    /// exactly those. Parts without either are shared.
     fn open_caps(&mut self, ty: &Ty, flow: Flow) -> Ty {
         self.open_caps_part(ty, flow, &mut HashMap::new()).unwrap_or_else(|| ty.clone())
     }
@@ -713,11 +816,18 @@ impl Vars {
     /// address and flow, was opened already, so a type that shares its parts costs each part
     /// once (issue #55), and a shared part's capabilities share their variables.
     fn open_caps_part(&mut self, ty: &Ty, flow: Flow, seen: &mut HashMap<(usize, Flow), Option<Ty>>) -> Option<Ty> {
-        if let Ty::Cap(cap) = ty {
-            return Some(self.cap_var(cap.iface, cap.perms, flow));
+        match ty {
+            Ty::Cap(_) | Ty::Reach(_) => {
+                return Some(self.bounds_var(Bounds::of(ty, flow).expect("a capability or a reach set")));
+            }
+            // A `Never` that flows in, as a function's result does, may widen, as one in a type
+            // argument does (see [`Vars::open_nevers`]).
+            Ty::Never if flow == Flow::In => return Some(self.never()),
+            _ => {}
         }
-        // A part without a capability is shared, and its shape is known once.
-        if !self.shape(ty).cap {
+        // A part without either is shared, and its shape is known once.
+        let shape = self.shape(ty);
+        if !shape.cap && !(shape.never && flow == Flow::In) {
             return None;
         }
         let parts = ty.parts()?;
@@ -727,7 +837,7 @@ impl Vars {
         }
         let new: Vec<Option<Ty>> = match ty {
             Ty::Fn(modes, _) => (parts.iter().enumerate())
-                .map(|(i, part)| match i.checked_sub(2).map(|p| modes[p]) {
+                .map(|(i, part)| match i.checked_sub(FN_PARAMS).map(|p| modes[p]) {
                     None => self.open_caps_part(part, flow, seen),
                     Some(ParamMode::Inout | ParamMode::InoutPartial) => None,
                     Some(_) => self.open_caps_part(part, flow.flip(), seen),
@@ -768,17 +878,12 @@ impl Vars {
         (own.len() == parts.len() && own.iter().zip(parts).all(|(a, b)| same(a, b))).then(|| origin.clone())
     }
 
-    /// Whether a capability of type `ty` may flow `flow` through open variable `v`, a capability
-    /// whose permissions are open, which narrows its bounds.
-    fn cap_meets(&mut self, v: u32, cap: CapBounds, ty: &Ty, flow: Flow) -> bool {
-        let Ty::Cap(given) = ty else { return false };
-        let other = match flow {
-            Flow::In => CapBounds { iface: given.iface, at_most: Some(given.perms), at_least: Perms::NONE },
-            Flow::Out => CapBounds { iface: given.iface, at_most: None, at_least: given.perms },
-        };
-        let Some(met) = cap.meet(other) else { return false };
+    /// Whether a value of type `ty` may flow `flow` through open variable `v`, a capability or
+    /// reach set with `bounds`, which narrows them.
+    fn bounds_meet(&mut self, v: u32, bounds: &Bounds, ty: &Ty, flow: Flow) -> bool {
+        let Some(met) = Bounds::of(ty, flow).and_then(|other| bounds.meet(&other)) else { return false };
         let State::Open(open) = &mut self.states[v as usize] else { unreachable!("roots are open") };
-        open.cap = Some(met);
+        open.bounds = Some(met);
         true
     }
 
@@ -835,12 +940,12 @@ impl Vars {
             (x, y) if x == y => x,
             _ => return false,
         };
-        let cap = match (kept.cap, other.cap) {
+        let bounds = match (&kept.bounds, &other.bounds) {
             (Some(a), Some(b)) => match a.meet(b) {
                 Some(met) => Some(met),
                 None => return false,
             },
-            (Some(cap), None) | (None, Some(cap)) if kind == Kind::Any => Some(cap),
+            (Some(bounds), None) | (None, Some(bounds)) if kind == Kind::Any => Some(bounds.clone()),
             (Some(_), None) | (None, Some(_)) => return false,
             (None, None) => None,
         };
@@ -853,7 +958,7 @@ impl Vars {
         // An error about the class names the value that first left it open.
         let origin = if matches!(kept.origin, Origin::Defaulted) { other.origin } else { kept.origin };
         self.states[keep as usize] =
-            State::Open(Open { kind, never, quiet, unmarked, owed, hole, handled, cap, origin });
+            State::Open(Open { kind, never, quiet, unmarked, owed, hole, handled, bounds, origin });
         self.states[gone as usize] = State::Bound(Ty::Var(keep));
         self.trail.push(gone);
         true
@@ -868,8 +973,8 @@ impl Vars {
             open.never = true;
             return true;
         }
-        if let Some(cap) = open.cap {
-            return self.cap_meets(v, cap, ty, Flow::In);
+        if let Some(bounds) = open.bounds.clone() {
+            return self.bounds_meet(v, &bounds, ty, Flow::In);
         }
         let (kind, marks) = (open.kind, (open.quiet, open.hole, open.handled));
         if !Self::fits(kind, ty) || self.occurs(v, ty) {
@@ -900,8 +1005,8 @@ impl Vars {
     fn exact(&mut self, v: u32, ty: &Ty) -> bool {
         let v = self.root(v);
         let State::Open(open) = &self.states[v as usize] else { unreachable!("roots are open") };
-        if let Some(cap) = open.cap {
-            return self.cap_meets(v, cap, ty, Flow::Out);
+        if let Some(bounds) = open.bounds.clone() {
+            return self.bounds_meet(v, &bounds, ty, Flow::Out);
         }
         let marks = (open.quiet, open.hole, open.handled);
         if !Self::fits(open.kind, ty) || self.occurs(v, ty) {
@@ -944,7 +1049,7 @@ impl Vars {
                 }
                 let fits = args.iter().zip(actual_args.iter()).all(|(arg, actual)| self.subsume_in(arg, actual, pairs));
                 if fits {
-                    pairs.insert(args, actual_args, None);
+                    pairs.insert(args, actual_args);
                 }
                 fits
             }
@@ -956,22 +1061,27 @@ impl Vars {
                     return true;
                 }
                 // An `inout` parameter's value goes in and comes back, so its type must be the
-                // same both ways.
-                let fits = self.subsume_in(&parts[0], &actual_parts[0], pairs)
-                    && self.subsume_in(&parts[1], &actual_parts[1], pairs)
-                    && (parts[2..].iter().zip(&actual_parts[2..]).zip(modes.iter())).all(|((param, actual), mode)| {
-                        self.subsume_in(actual, param, pairs)
-                            && (!mode.is_inout() || self.subsume_in(param, actual, pairs))
-                    });
+                // same both ways. Its `uses` must cover the value's (REFERENCE §9.4).
+                let fits = (0..FN_PARAMS).all(|i| self.subsume_in(&parts[i], &actual_parts[i], pairs))
+                    && (parts[FN_PARAMS..].iter().zip(&actual_parts[FN_PARAMS..]).zip(modes.iter())).all(
+                        |((param, actual), mode)| {
+                            self.subsume_in(actual, param, pairs)
+                                && (!mode.is_inout() || self.subsume_in(param, actual, pairs))
+                        },
+                    );
                 if fits {
-                    pairs.insert(parts, actual_parts, None);
+                    pairs.insert(parts, actual_parts);
                 }
                 fits
             }
-            // A capability fits where fewer permissions are expected (REFERENCE §9.2).
+            // A capability fits where fewer permissions are expected and its `uses` are covered
+            // (REFERENCE §9.2).
             (Ty::Cap(expected), Ty::Cap(actual)) => {
-                expected.iface == actual.iface && expected.perms.is_subset(actual.perms)
+                expected.iface == actual.iface
+                    && expected.perms.is_subset(actual.perms)
+                    && actual.uses.covered_by(&expected.uses)
             }
+            (Ty::Reach(expected), Ty::Reach(actual)) => actual.covered_by(expected),
             (expected, actual) => expected == actual,
         }
     }
@@ -980,11 +1090,16 @@ impl Vars {
     /// is one. `Never` gives way to the other side, also as a type argument, so
     /// `Option[Never]` and `Option[Int]` join to `Option[Int]`. `None` when there is none.
     pub fn join(&mut self, a: &Ty, b: &Ty) -> Option<Ty> {
-        self.join_in(a, b, &mut Pairs::default())
+        self.bound_in(a, b, Variance::Co, &mut Pairs::default())
     }
 
-    /// [`Vars::join`], where `pairs` holds the joins of the pairs of parts already joined.
-    fn join_in(&mut self, a: &Ty, b: &Ty, pairs: &mut Pairs) -> Option<Ty> {
+    /// The type that bounds `a` and `b` from above, as [`Vars::join`] does, or, `Contra`, from
+    /// below: the type of a parameter that takes either, so a function that takes it serves
+    /// as either. Each case holds both directions, and a function's parameters flip it, so the
+    /// two can't drift apart (OPEN_QUESTIONS P3, decided for phase 3). Nothing in it depends
+    /// on which of `a` and `b` comes first. `pairs` holds the bounds of the pairs of parts
+    /// already bounded, by direction.
+    fn bound_in(&mut self, a: &Ty, b: &Ty, v: Variance, pairs: &mut Pairs) -> Option<Ty> {
         let (a, b) = (self.resolve(a), self.resolve(b));
         match (&a, &b) {
             (Ty::Error, other) | (other, Ty::Error) => {
@@ -992,117 +1107,182 @@ impl Vars {
                 Some(Ty::Error)
             }
             (Ty::Var(x), Ty::Var(y)) => self.union(*x, *y).then(|| self.resolve(&a)),
+            // Above, a value flows into the variable. Below, what either needs flows out to it,
+            // and `Never` still meets a variable whose kind or permissions it can't settle, such
+            // as an integer literal's, which then defaults as it would.
             (Ty::Var(x), ty) | (ty, Ty::Var(x)) => {
                 let x = *x;
-                self.lower(x, ty).then(|| self.resolve(&Ty::Var(x)))
+                match v {
+                    Variance::Co => self.lower(x, ty).then(|| self.resolve(&Ty::Var(x))),
+                    Variance::Contra if self.exact(x, ty) => Some(self.resolve(&Ty::Var(x))),
+                    Variance::Contra => (*ty == Ty::Never).then_some(Ty::Never),
+                }
             }
-            (Ty::Never, ty) | (ty, Ty::Never) => Some(ty.clone()),
+            // `Never` is a subtype of every type (REFERENCE §9.2), so it gives way above and
+            // serves as either below.
+            (Ty::Never, ty) | (ty, Ty::Never) => Some(if v == Variance::Co { ty.clone() } else { Ty::Never }),
             (Ty::Adt(id, args), Ty::Adt(other, other_args)) if id == other && args.len() == other_args.len() => {
                 if Arc::ptr_eq(args, other_args) {
                     return Some(a.clone());
                 }
-                if let Some(Some(joined)) = pairs.get(args, other_args) {
-                    return Some(joined.clone());
+                if let Some(Some(known)) = pairs.get_in(args, other_args, v) {
+                    return Some(known.clone());
                 }
-                let joined = (args.iter().zip(other_args.iter()))
-                    .map(|(x, y)| self.join_in(x, y, pairs))
+                let parts = (args.iter().zip(other_args.iter()))
+                    .map(|(x, y)| self.bound_in(x, y, v, pairs))
                     .collect::<Option<Vec<_>>>()?;
-                let joined = Ty::applied(*id, joined);
-                pairs.insert(args, other_args, Some(joined.clone()));
-                Some(joined)
+                let bounded = Ty::applied(*id, parts);
+                pairs.insert_in(args, other_args, v, bounded.clone());
+                Some(bounded)
             }
-            // Two function values join when their parameters are the same types: their
-            // results and errors join, as a branch's value would.
+            // A function's result and error vary as it does, and its parameters against it, so
+            // above it takes what either function needs and gives what either gives. An `inout`
+            // parameter goes in and comes back, so it must be the same.
             (Ty::Fn(modes, parts), Ty::Fn(other_modes, other_parts)) if modes == other_modes => {
                 if Arc::ptr_eq(parts, other_parts) {
                     return Some(a.clone());
                 }
-                if let Some(Some(joined)) = pairs.get(parts, other_parts) {
-                    return Some(joined.clone());
+                if let Some(Some(known)) = pairs.get_in(parts, other_parts, v) {
+                    return Some(known.clone());
                 }
-                // A parameter takes what either function needs, so neither is passed less than
-                // it declares, and an `inout` one must be the same (OPEN_QUESTIONS P3).
-                let mut params = Vec::new();
-                for ((x, y), mode) in parts[2..].iter().zip(&other_parts[2..]).zip(modes.iter()) {
-                    params.push(if mode.is_inout() { self.same(x, y)? } else { self.meet(x, y)? });
+                let mut bounded = Vec::with_capacity(parts.len());
+                for (i, (x, y)) in parts.iter().zip(other_parts.iter()).enumerate() {
+                    bounded.push(match i.checked_sub(FN_PARAMS).map(|p| modes[p]) {
+                        None => self.bound_in(x, y, v, pairs)?,
+                        Some(mode) if mode.is_inout() => self.same(x, y)?,
+                        Some(_) => self.bound_in(x, y, v.flip(), pairs)?,
+                    });
                 }
-                let mut joined = vec![
-                    self.join_in(&parts[0], &other_parts[0], pairs)?,
-                    self.join_in(&parts[1], &other_parts[1], pairs)?,
-                ];
-                joined.extend(params);
-                let joined = a.with_parts(joined);
-                pairs.insert(parts, other_parts, Some(joined.clone()));
-                Some(joined)
+                let bounded = a.with_parts(bounded);
+                pairs.insert_in(parts, other_parts, v, bounded.clone());
+                Some(bounded)
             }
-            // A value that is either capability has the permissions both have.
-            (Ty::Cap(x), Ty::Cap(y)) if x.iface == y.iface => Some(Ty::cap(x.iface, x.perms.intersect(y.perms))),
+            // A value that is either capability has the permissions both have and uses what
+            // either uses, and a parameter that takes either needs every permission either needs
+            // and admits only what both admit.
+            (Ty::Cap(x), Ty::Cap(y)) if x.iface == y.iface => Some(match v {
+                Variance::Co => Ty::cap_uses(x.iface, x.perms.intersect(y.perms), x.uses.union(&y.uses)),
+                Variance::Contra => Ty::cap_uses(x.iface, x.perms.union(y.perms), x.uses.intersect(&y.uses)),
+            }),
+            (Ty::Reach(x), Ty::Reach(y)) => Some(Ty::reach(match v {
+                Variance::Co => x.union(y),
+                Variance::Contra => x.intersect(y),
+            })),
             (x, y) => (x == y).then(|| a.clone()),
-        }
-    }
-
-    /// The type of a parameter that takes either an `a` or a `b`: a capability with every
-    /// permission either needs, as in a record or variant's fields. Any other pair must be the
-    /// same type. `None` when there is none.
-    fn meet(&mut self, a: &Ty, b: &Ty) -> Option<Ty> {
-        self.meet_in(a, b, &mut Pairs::default())
-    }
-
-    /// [`Vars::meet`], where `pairs` holds the pairs of parts met already.
-    fn meet_in(&mut self, a: &Ty, b: &Ty, pairs: &mut Pairs) -> Option<Ty> {
-        let (a, b) = (self.resolve(a), self.resolve(b));
-        match (&a, &b) {
-            (Ty::Error, _) | (_, Ty::Error) => Some(Ty::Error),
-            (Ty::Var(x), Ty::Var(y)) => self.union(*x, *y).then(|| self.resolve(&a)),
-            // What either needs flows out to the variable, which then needs it too.
-            (Ty::Var(x), ty) | (ty, Ty::Var(x)) => {
-                let x = *x;
-                if self.exact(x, ty) {
-                    Some(self.resolve(&Ty::Var(x)))
-                } else {
-                    // `Never` still meets a variable whose kind or permissions it can't settle,
-                    // such as an integer literal's, which then defaults as it would.
-                    (*ty == Ty::Never).then_some(Ty::Never)
-                }
-            }
-            // `Never` is a subtype of every type, so it serves as either (REFERENCE §9.2).
-            (Ty::Never, _) | (_, Ty::Never) => Some(Ty::Never),
-            (Ty::Cap(x), Ty::Cap(y)) if x.iface == y.iface => Some(Ty::cap(x.iface, x.perms.union(y.perms))),
-            // A function that serves as either takes what either takes and gives what both
-            // give, so its parameters join and its result and error meet.
-            (Ty::Fn(modes, parts), Ty::Fn(other_modes, other_parts)) if modes == other_modes => {
-                if Arc::ptr_eq(parts, other_parts) {
-                    return Some(a.clone());
-                }
-                let mut met = vec![
-                    self.meet_in(&parts[0], &other_parts[0], pairs)?,
-                    self.meet_in(&parts[1], &other_parts[1], pairs)?,
-                ];
-                for ((x, y), mode) in parts[2..].iter().zip(&other_parts[2..]).zip(modes.iter()) {
-                    met.push(if mode.is_inout() { self.same(x, y)? } else { self.join(x, y)? });
-                }
-                Some(a.with_parts(met))
-            }
-            (Ty::Adt(id, args), Ty::Adt(other, other_args)) if id == other && args.len() == other_args.len() => {
-                if Arc::ptr_eq(args, other_args) {
-                    return Some(a.clone());
-                }
-                if let Some(Some(met)) = pairs.get(args, other_args) {
-                    return Some(met.clone());
-                }
-                let met = (args.iter().zip(other_args.iter()))
-                    .map(|(x, y)| self.meet_in(x, y, pairs))
-                    .collect::<Option<Vec<_>>>()?;
-                let met = Ty::applied(*id, met);
-                pairs.insert(args, other_args, Some(met.clone()));
-                Some(met)
-            }
-            _ => self.same(&a, &b),
         }
     }
 
     /// `a`, binding variables so that `b` is the same type, or `None` when it can't be.
     fn same(&mut self, a: &Ty, b: &Ty) -> Option<Ty> {
         (self.subsume(a, b) && self.subsume(b, a)).then(|| a.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decls::Decls;
+
+    /// Types to bound in pairs: scalars, `Never` and capabilities with several permission
+    /// sets, and each of them as a type argument, a result and a parameter of each mode.
+    fn universe() -> Vec<Ty> {
+        let net = |bits| Ty::cap(IfaceId::NET, Perms(bits));
+        let leaves = vec![
+            Ty::INT,
+            Ty::Text,
+            Ty::Never,
+            Ty::out(),
+            Ty::cap(IfaceId::OUT, Perms::NONE),
+            net(0),
+            net(1),
+            net(2),
+            net(3),
+        ];
+        let takes = |mode, x: Ty| Ty::func(vec![mode], vec![x], Ty::Unit, Ty::Never);
+        let gives = |x: Ty| Ty::func(Vec::new(), Vec::new(), x, Ty::Never);
+        let mut all = leaves.clone();
+        for x in &leaves {
+            all.push(Ty::option(x.clone()));
+            all.push(Ty::result(x.clone(), Ty::Text));
+            all.push(gives(x.clone()));
+            all.push(Ty::func(Vec::new(), Vec::new(), Ty::Unit, x.clone()));
+            all.push(takes(ParamMode::Borrow, x.clone()));
+            all.push(takes(ParamMode::Inout, x.clone()));
+            all.push(takes(ParamMode::Borrow, takes(ParamMode::Borrow, x.clone())));
+            all.push(Ty::option(takes(ParamMode::Take, Ty::option(x.clone()))));
+        }
+        all
+    }
+
+    fn show(ty: &Ty) -> String {
+        Decls::default().display(ty).to_string()
+    }
+
+    fn bound(a: &Ty, b: &Ty, v: Variance) -> Option<Ty> {
+        let mut vars = Vars::default();
+        let bounded = vars.bound_in(a, b, v, &mut Pairs::default())?;
+        Some(vars.defaulted(&bounded))
+    }
+
+    /// Bounding two types gives the same type in either order, a type bounded with itself
+    /// is that type, and each input fits the bound: a value of either type where the join is
+    /// expected, and a value of the meet where either is (OPEN_QUESTIONS P3).
+    #[test]
+    fn bounds_are_symmetric_idempotent_and_bound_their_inputs() {
+        let all = universe();
+        for v in [Variance::Co, Variance::Contra] {
+            for a in &all {
+                assert_eq!(bound(a, a, v).as_ref(), Some(a), "{v:?} of {} with itself", show(a));
+                for b in &all {
+                    let (ab, ba) = (bound(a, b, v), bound(b, a, v));
+                    let pair = format!("{v:?} of {} and {}", show(a), show(b));
+                    assert_eq!(ab, ba, "{pair} depends on their order");
+                    let Some(ab) = ab else { continue };
+                    for input in [a, b] {
+                        let fits = match v {
+                            Variance::Co => Vars::default().subsume(&ab, input),
+                            Variance::Contra => Vars::default().subsume(input, &ab),
+                        };
+                        assert!(fits, "{pair} is {}, which doesn't bound {}", show(&ab), show(input));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether `ty` has a `Never` where a function takes it: a parameter, or the result of a
+    /// function-typed parameter. Such a part can't narrow once a variable holds it, which is
+    /// a limit of inference (OPEN_QUESTIONS P5).
+    fn takes_never(ty: &Ty, flipped: bool) -> bool {
+        match ty {
+            Ty::Never => flipped,
+            Ty::Fn(..) => {
+                let (_, ret, fails, params) = ty.fn_parts().expect("a function type");
+                takes_never(ret, flipped)
+                    || takes_never(fails, flipped)
+                    || params.iter().any(|param| takes_never(param, !flipped))
+            }
+            _ => ty.parts().is_some_and(|parts| parts.iter().any(|part| takes_never(part, flipped))),
+        }
+    }
+
+    /// Two values that flow into one variable, as two arguments for one type parameter do,
+    /// give it their join, whichever flows in first.
+    #[test]
+    fn values_flowing_into_a_variable_give_their_join_in_either_order() {
+        let all: Vec<Ty> = universe().into_iter().filter(|ty| !takes_never(ty, false)).collect();
+        let flow = |first: &Ty, second: &Ty| {
+            let mut vars = Vars::default();
+            let var = vars.fresh(Kind::Any, Origin::Defaulted);
+            (vars.subsume(&var, first) && vars.subsume(&var, second)).then(|| vars.defaulted(&var))
+        };
+        for a in &all {
+            for b in &all {
+                let pair = format!("{} and {}", show(a), show(b));
+                let (ab, ba) = (flow(a, b), flow(b, a));
+                assert_eq!(ab, ba, "{pair} flowing into a variable depends on their order");
+                assert_eq!(ab, bound(a, b, Variance::Co), "{pair} flowing into a variable isn't their join");
+            }
+        }
     }
 }

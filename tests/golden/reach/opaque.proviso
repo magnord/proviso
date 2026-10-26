@@ -1,0 +1,50 @@
+// phase: 3.2
+// An opaque record declares its reach with `uses`, which must cover its fields' reach and may
+// say more. Its reach is what it declares, so a closure that captures one reaches that
+// (REFERENCE §9.2, §9.4). A generic one also reaches what its type arguments reach.
+cap interface Dir observes(read) effects(write) {
+    fn read_text(self, path: Text) -> Text                      needs read
+    fn write_text(self, path: Text, text: Text)                 needs write
+}
+
+cap interface Log effects(append) {
+    fn append(self, line: Text)                                 needs append
+}
+
+opaque record Cache uses Dir[read] {
+    dir: Dir[read]
+}
+
+opaque record Wide uses (Dir[read, write], Log) {
+    dir: Dir[read]
+}
+
+opaque record Pure uses Log {
+    count: Int
+}
+
+opaque record Boxed[T] uses Log {
+    log: Log
+    item: T
+}
+
+fn cached(f: fn() -> Text uses Dir[read]) -> Text {
+    return f()
+}
+
+fn wide(f: fn() -> Text uses (Dir[read, write], Log)) -> Text {
+    return f()
+}
+
+fn closures(c: Cache, w: Wide, p: Pure) -> Text {
+    let a = cached(f: || c.dir.read_text(path: "a"))
+    let b = wide(f: || w.dir.read_text(path: "b"))
+    let n = p.count
+    let d = wide(f: || f"{n}{p.count}")
+    debug(|| c, || w, || p.count)
+    return f"{a}{b}{d}"
+}
+
+fn generic(b: Boxed[Dir[read]]) -> Text {
+    return wide(f: || b.item.read_text(path: "c"))
+}
