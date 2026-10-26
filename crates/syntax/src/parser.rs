@@ -1360,10 +1360,13 @@ impl Parser<'_> {
             }
         }
         self.close(&open, T::RParen, "`,` or `)`")?;
-        let ret = if self.eat(T::Arrow) { Some(self.clause_type()?) } else { None };
+        let mut ret = if self.eat(T::Arrow) { Some(self.clause_type()?) } else { None };
         let mut fails = None;
         let mut needs: Option<Vec<Ident>> = None;
         loop {
+            // A rejected `uses` right after the result type may have been meant for it, so the
+            // result is left unknown rather than checked without it (§15.1).
+            let after_ret = ret.filter(|&t| self.m.types[t].span.hi == self.prev_span().hi);
             match self.kind() {
                 T::Keyword(Kw::Fails) => {
                     let keyword = self.bump();
@@ -1400,6 +1403,10 @@ impl Parser<'_> {
                     self.uses_list()?;
                     let message = "a function declares no `uses`; its parameters carry its authority, so their types say what it may reach (§9.2)";
                     self.error(codes::UNEXPECTED_TOKEN, keyword.span, message);
+                    if let Some(t) = after_ret {
+                        let span = self.m.types[t].span;
+                        ret = Some(self.m.types.alloc(TypeExpr { kind: TypeExprKind::Rejected, span }));
+                    }
                 }
                 // Effect variables come in slice 3.6.
                 T::Keyword(Kw::With) => {
@@ -1534,8 +1541,18 @@ impl Parser<'_> {
         }
         self.close(&open, T::RParen, "`,` or `)`")?;
         let ret = if self.eat(T::Arrow) { Some(self.clause_type()?) } else { None };
-        let fails = if self.eat(T::Keyword(Kw::Fails)) { Some(self.clause_type()?) } else { None };
-        let uses = if self.eat(T::Keyword(Kw::Uses)) { self.uses_list()? } else { Vec::new() };
+        // `fails` and `uses` come in either order, as a declaration's clauses do.
+        let (mut fails, mut uses) = (None, None);
+        loop {
+            if fails.is_none() && self.eat(T::Keyword(Kw::Fails)) {
+                fails = Some(self.clause_type()?);
+            } else if uses.is_none() && self.eat(T::Keyword(Kw::Uses)) {
+                uses = Some(self.uses_list()?);
+            } else {
+                break;
+            }
+        }
+        let uses = uses.unwrap_or_default();
         // Effect variables come in slice 3.6.
         if self.at_kw(Kw::With) {
             return self.not_implemented("`with` on function types", Planned::Phase(3));
@@ -1546,7 +1563,10 @@ impl Parser<'_> {
     /// A signature's result or error type, which a `uses` clause may follow.
     fn clause_type(&mut self) -> PResult<TypeId> {
         self.before_clause = true;
-        self.nested(Self::type_expr)
+        let ty = self.nested(Self::type_expr);
+        // `nested` may refuse before `type_expr` takes the flag.
+        self.before_clause = false;
+        ty
     }
 
     fn type_expr(&mut self) -> PResult<TypeId> {
@@ -1555,7 +1575,7 @@ impl Parser<'_> {
         let kind = match self.kind() {
             T::Ident => {
                 let name = self.ident("a type")?;
-                let kind = if self.at(T::LBracket) {
+                if self.at(T::LBracket) {
                     // A numeric type takes a unit, and `Array[T, N]` a length, which are not
                     // types (REFERENCE §4.2, §4.7).
                     let args = if takes_non_type_args(self.m.text(name.sym)) {
@@ -1567,20 +1587,15 @@ impl Parser<'_> {
                     TypeExprKind::Applied { name, args }
                 } else {
                     TypeExprKind::Named(name)
-                };
-                // A capability type's reach, as in `Dir[read] uses Out` (§9.2). After a result or
-                // error type, `uses` is the function's.
-                if self.at_kw(Kw::Uses) && !clause {
-                    let span = start.to(self.prev_span());
-                    let base = self.m.types.alloc(TypeExpr { kind, span });
-                    self.bump();
-                    TypeExprKind::Uses { base, uses: self.uses_list()? }
-                } else {
-                    kind
                 }
             }
-            T::Keyword(Kw::Fn) => self.fn_type()?,
-            T::Keyword(Kw::Scoped) => return self.not_implemented("`scoped` function types", Planned::Phase(3)),
+            // A function type reads its own `uses`.
+            T::Keyword(Kw::Fn) => {
+                let kind = self.fn_type()?;
+                let span = start.to(self.prev_span());
+                return Ok(self.m.types.alloc(TypeExpr { kind, span }));
+            }
+            T::Keyword(Kw::Scoped) => return self.not_implemented("`scoped` function types", Planned::Phase(6)),
             T::Keyword(Kw::Any) => return self.not_implemented("`any` types", Planned::PastV1),
             T::Keyword(Kw::SelfType) => {
                 self.bump();
@@ -1589,6 +1604,15 @@ impl Parser<'_> {
             T::LParen => TypeExprKind::Tuple(self.tuple(Self::type_expr, "tuple type")?),
             _ => return self.unexpected("a type"),
         };
+        let span = start.to(self.prev_span());
+        let base = self.m.types.alloc(TypeExpr { kind, span });
+        // A capability type's reach, as in `Dir[read] uses Out` (§9.2). After a result or error
+        // type, `uses` is the function's. The checker rejects it after another type.
+        if !self.at_kw(Kw::Uses) || clause {
+            return Ok(base);
+        }
+        self.bump();
+        let kind = TypeExprKind::Uses { base, uses: self.uses_list()? };
         let span = start.to(self.prev_span());
         Ok(self.m.types.alloc(TypeExpr { kind, span }))
     }

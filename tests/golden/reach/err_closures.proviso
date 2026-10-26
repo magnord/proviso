@@ -2,7 +2,7 @@
 // expect-error: E0602
 // A function type without `uses` admits only closures that capture no capability, and one
 // with `uses` only those whose reach it covers, permissions included (REFERENCE §9.4,
-// OPEN_QUESTIONS P3). These are §F rows 5 and 13 with a test-local `Dir`: a closure that
+// OPEN_QUESTIONS P5, Reach sets). These are §F rows 5 and 13 with a test-local `Dir`: a closure that
 // writes through a captured capability, and one that captures only such a closure (Q34).
 // A record that holds a capability reaches it, and so may a value of a type parameter
 // without `Copy`, whose type argument may (Q31). A capture whose type is settled after the
@@ -81,4 +81,35 @@ fn late(dir: Dir[read]) {
         takes_dir(d: p)
     }
     f(dir)
+}
+
+fn generic_late[T](x: T, k: fn(T)) {
+    let f = |p| {
+        let t = g(|| {
+            debug(p)                                            // <- E0602
+            "p"
+        })
+        k(p)
+    }
+    f(x)
+}
+
+resource record Held {
+    dir: Dir[read]
+}
+
+impl Held {
+    fn read(self) -> Text {
+        return self.dir.read_text(path: "h")
+    }
+}
+
+impl Abandon for Held {
+    fn abandon(take self) {}
+}
+
+fn held_resource(h: take Held) -> Text {
+    let t = g(|| h.read())                                      // <- E0602
+    h.abandon()
+    return t
 }

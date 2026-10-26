@@ -1,7 +1,7 @@
 // phase: 2.9
 // expect-error: E0901
-// Later slices of phase 3 bring `with E` on a function type, effect variables, `scoped fn`
-// and `keep fn` parameters, and `keep` parameters of function types (REFERENCE §9.4, §6.7).
+// Later slices bring `with E` on a function type, effect variables, `keep fn` parameters and
+// `keep` parameters of function types, and phase 6 brings `scoped fn` (REFERENCE §9.4, §6.7).
 // So do closures that change a `var` they capture (§5.3), and the operations of `List` and
 // `Map` that take a closure, such as `map` and `filter`. `inout(partial)` parameters of
 // function types, and an `impl` for a function type, are not scheduled. A closure passed as

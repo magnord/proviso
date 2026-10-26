@@ -3,7 +3,8 @@
 // expect-error: E0602
 // An opaque record's `uses` must cover each field's reach, and is all a closure that
 // captures one may be said to reach, however little its fields reach. Only an opaque record
-// declares its reach. Another record's is its fields' (REFERENCE §9.2).
+// declares its reach, and one without `uses` declares that it reaches nothing. Another
+// record's reach is its fields' (REFERENCE §9.2, OPEN_QUESTIONS P5).
 cap interface Dir observes(read) effects(write) {
     fn read_text(self, path: Text) -> Text                      needs read
     fn write_text(self, path: Text, text: Text)                 needs write
@@ -24,6 +25,10 @@ opaque record Writer uses Dir[read] {
 
 opaque record Wide uses (Dir[read], Log) {
     dir: Dir[read]
+}
+
+opaque record Silent {
+    log: Log                                                    // <- E0602
 }
 
 record Plain uses Log {                                         // <- E0101

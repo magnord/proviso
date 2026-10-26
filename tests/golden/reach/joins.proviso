@@ -1,6 +1,6 @@
 // phase: 3.2
 // Reach joins by variance, so neither the order of a call's arguments nor that of an `if`'s
-// branches decides a type (OPEN_QUESTIONS P3, decided for phase 3). Where values meet, their
+// branches decides a type (OPEN_QUESTIONS P5, Reach inference). Where values meet, their
 // join uses what any of them uses, and has the permissions all of them have. Where closures'
 // parameters meet, a function-typed parameter of the join admits only what all of them admit,
 // so no closure is handed a function that reaches more than it declares. Each group writes

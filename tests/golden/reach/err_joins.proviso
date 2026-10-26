@@ -2,7 +2,7 @@
 // expect-error: E0602
 // The joins of reach/joins, in both orders, pinned from the other side: a join of values
 // uses what any of them uses, and a function-typed parameter of a join of closures admits
-// only what all of them admit (OPEN_QUESTIONS P3, decided for phase 3).
+// only what all of them admit (OPEN_QUESTIONS P5, Reach inference).
 cap interface Dir observes(read) effects(write) {
     fn read_text(self, path: Text) -> Text                      needs read
     fn write_text(self, path: Text, text: Text)                 needs write

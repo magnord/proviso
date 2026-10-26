@@ -311,6 +311,8 @@ pub enum TypeExprKind {
     /// `Dir[read] uses Out`: a capability type and the capability types its implementation
     /// uses (REFERENCE §9.2).
     Uses { base: TypeId, uses: Vec<TypeId> },
+    /// A type the parser rejected after reporting it, which checks as unknown.
+    Rejected,
 }
 
 pub struct Block {

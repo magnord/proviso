@@ -1,7 +1,7 @@
 // phase: 3.2
 // A closure beside another branch takes its own result and error from its body, and the join
-// widens them, so the closure may come first or second (OPEN_QUESTIONS P3, decided for phase
-// 3; issue #61). A body without a value gives `()`.
+// widens them, so the closure may come first or second (OPEN_QUESTIONS P5, Closures beside
+// other branches; issue #61). A body without a value gives `()`.
 use std.io { IoError, Out }
 
 enum Oops derives(Show) {

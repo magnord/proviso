@@ -1,9 +1,11 @@
 // phase: 3.2
 // A capability type lists the capabilities its implementation uses, as in `Dir[read] uses
 // Out`, and a bare `Dir[read]` uses none (REFERENCE §9.2). It is accepted where a type with
-// fewer permissions is expected whose `uses` covers its own (OPEN_QUESTIONS P3). `uses`
-// takes one capability type or several in parentheses, so it ends before the next parameter
-// of a function type (Q41). Narrowing with `only` keeps what the implementation uses.
+// fewer permissions is expected whose `uses` covers its own (OPEN_QUESTIONS P5, Reach sets).
+// `uses` takes one capability type or several in parentheses, so it ends before the next
+// parameter of a function type (Q41), and comes before or after `fails`. Narrowing with
+// `only` keeps what the implementation uses. An alias names a capability result with `uses`
+// (OPEN_QUESTIONS P5).
 use std.io { Out }
 
 cap interface Dir observes(read) effects(write) {
@@ -39,4 +41,20 @@ fn calls(plain: Dir[read], logging: Dir[read] uses Log, writing: Dir[read, write
 
 fn options(logging: Dir[read] uses Log) -> Option[Dir[read] uses (Log, Out)] {
     return Some(logging)
+}
+
+enum Oops {
+    Bad
+}
+
+fn either_order(f: fn() -> Text uses Log fails Oops, g: fn() -> Text fails Oops uses Log) -> Text fails Oops {
+    let a = try f()
+    let b = try g()
+    return f"{a}{b}"
+}
+
+type LoggingDir = Dir[read] uses Log
+
+fn result(d: keep Dir[read] uses Log) -> LoggingDir {
+    return d
 }

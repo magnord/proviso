@@ -349,6 +349,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         markers: Vec::new(),
         inhabited: None,
         self_ty: None,
+        cap_self: false,
         generic_scope: Vec::new(),
         param_names: Vec::new(),
         impl_generics: Vec::new(),
@@ -710,6 +711,8 @@ struct Checker<'a> {
     operators: Vec<(AdtId, IfaceId, Ident)>,
     /// What `Self` means here: the type of an `impl` block, or `Param(0)` in an interface.
     self_ty: Option<Ty>,
+    /// `Self` is the type that implements a `cap interface`, which comes with `cap record`.
+    cap_self: bool,
     /// The type parameters in scope, by name, with their indices; `None` for one whose
     /// constraint is rejected, which stands for an unknown type.
     generic_scope: Vec<(Symbol, Option<u32>)>,
@@ -1811,7 +1814,7 @@ impl Checker<'_> {
         while let Some(t) = work.pop() {
             match &self.m.types[t].kind {
                 TypeExprKind::Named(name) if self.aliases.contains_key(&name.sym) => found.push(name.sym),
-                TypeExprKind::Named(_) | TypeExprKind::SelfType => {}
+                TypeExprKind::Named(_) | TypeExprKind::SelfType | TypeExprKind::Rejected => {}
                 TypeExprKind::Applied { name, args } => {
                     if self.aliases.contains_key(&name.sym) {
                         found.push(name.sym);
@@ -1926,7 +1929,7 @@ impl Checker<'_> {
             // A declared reach that has a mistake in it is unknown, so the record reaches what
             // its fields do, and nothing more is reported (§15.1).
             if let Some(uses) = self.adts[k].uses {
-                let declared = self.uses_list(uses);
+                let declared = self.exposed_uses(uses, Some((name, vis)));
                 if declared.is_none() {
                     self.adts[k].uses = None;
                 }
@@ -2106,16 +2109,25 @@ impl Checker<'_> {
         while let Some(ty) = work.pop() {
             let named = match ty {
                 Ty::Adt(id, _) => self.adt_vis.get(id).map(|&vis| (Ok(*id), vis)),
-                Ty::Cap(cap) => self.cap_vis.get(&cap.iface).map(|&vis| (Err(cap.iface), vis)),
                 _ => None,
             };
-            if let Some((named, vis)) = named
-                && least.is_none_or(|(_, least)| reach(vis) < reach(least))
-            {
-                least = Some((named, vis));
-                if reach(vis) == 0 {
-                    break;
+            // A capability type names its interface and those it uses, and a function type
+            // those it uses.
+            let ifaces = match ty {
+                Ty::Cap(cap) => {
+                    std::iter::once(cap.iface).chain(cap.uses.caps().iter().map(|&(iface, _)| iface)).collect()
                 }
+                Ty::Reach(uses) => uses.caps().iter().map(|&(iface, _)| iface).collect(),
+                _ => Vec::new(),
+            };
+            let caps = ifaces.into_iter().filter_map(|iface| self.cap_vis.get(&iface).map(|&vis| (Err(iface), vis)));
+            for (named, vis) in named.into_iter().chain(caps) {
+                if least.is_none_or(|(_, least)| reach(vis) < reach(least)) {
+                    least = Some((named, vis));
+                }
+            }
+            if least.is_some_and(|(_, vis)| reach(vis) == 0) {
+                break;
             }
             if let Some(parts) = ty.parts()
                 && seen.insert(Arc::as_ptr(parts) as *const Ty as usize)
@@ -2269,6 +2281,7 @@ impl Checker<'_> {
         self.param_names = vec!["Self".into()];
         for k in 0..self.ifaces.len() {
             let IfaceSrc { id, decl, vis } = self.ifaces[k];
+            self.cap_self = decl.cap.is_some();
             let mut methods: Vec<IfaceMethod> = Vec::new();
             let mut incomplete = decl.recovered;
             'methods: for method in &decl.methods {
@@ -2355,6 +2368,7 @@ impl Checker<'_> {
             def.incomplete = incomplete;
         }
         self.self_ty = None;
+        self.cap_self = false;
         self.param_names.clear();
     }
 
@@ -3421,6 +3435,13 @@ impl Checker<'_> {
         match te.kind {
             TypeExprKind::Named(name) => self.type_name(name),
             TypeExprKind::Fn { ref params, ret, fails, ref uses } => self.fn_type(params, ret, fails, uses),
+            // Slice 3.3 decides whether the `cap record` that implements it may use more.
+            TypeExprKind::Uses { base, .. }
+                if self.cap_self && matches!(m.types[base].kind, TypeExprKind::SelfType) =>
+            {
+                self.not_implemented(te.span, "`uses` clauses after a `cap interface`'s `Self`", Planned::Phase(3));
+                Ty::Error
+            }
             TypeExprKind::Uses { base, ref uses } => {
                 let base_ty = self.resolve_type(base);
                 let uses = self.uses_list(uses);
@@ -3437,6 +3458,7 @@ impl Checker<'_> {
                     }
                 }
             }
+            TypeExprKind::Rejected => Ty::Error,
             TypeExprKind::Tuple(ref elements) => {
                 let tys = elements.iter().map(|&t| self.part_type(t, "a tuple's element")).collect();
                 self.p.decls.tuple_ty(tys)
@@ -3589,11 +3611,22 @@ impl Checker<'_> {
     /// (REFERENCE §9.2). `None` when one isn't a capability type, which is reported, or has an
     /// error.
     fn uses_list(&mut self, uses: &[TypeId]) -> Option<Reach> {
+        self.exposed_uses(uses, None)
+    }
+
+    /// [`Self::uses_list`] of the declaration `item`, declared with a visibility, which may not
+    /// name a capability less visible than itself (§3).
+    fn exposed_uses(&mut self, uses: &[TypeId], item: Option<(Ident, Visibility)>) -> Option<Reach> {
         let mut reach = Reach::default();
         let mut known = true;
         for &t in uses {
             match self.resolve_type(t) {
-                Ty::Cap(cap) => reach.extend(&Reach::of_cap(&cap)),
+                Ty::Cap(cap) => {
+                    reach.extend(&Reach::of_cap(&cap));
+                    if let Some((name, vis)) = item {
+                        self.exposes(name, vis, &Ty::Cap(cap), t);
+                    }
+                }
                 Ty::Error => known = false,
                 ty => {
                     let message = format!(
