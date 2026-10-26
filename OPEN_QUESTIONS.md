@@ -638,7 +638,7 @@ Writing the §F rows as complete programs ([tests/golden](tests/golden/README.md
 | Which conversions §12.1 means beyond the ones STD.md now declares, such as `saturating_from`, `Int.from`, `try_from` and `wrapping_from` from a float, and narrowing `Float` to `Float32` (§12.1, §12.2) | types/conversions, types/err_conversions | P5 |
 | Where `expect` may appear, what a failing `expect` reports, and how `proviso test` names a test (§14) | testing/tests, testing/failing, testing/err_tests | P5 |
 | Whether an alias may take type parameters, what a cycle of aliases is, and whether an alias names its type's constructor and variants (§4.6) | types/aliases, types/err_aliases | P5 |
-| How a declaration writes a result that is a capability type with `uses`, since `-> Log uses Out` reads as the function's own `uses` in a function type (§9.2, §9.4, Q41) | reach/err_syntax, reach/capabilities | P5 |
+| How a declaration or a function type writes a result that is a capability type with `uses`, since `-> Log uses Out` reads as the function's own `uses`. Diagnostics show such a function type as `fn() -> Log uses Out uses In`, which doesn't parse back (§9.2, §9.4, Q41) | reach/err_syntax, reach/capabilities | P5 |
 | P3's phase 2 lacks features its own rows need: `check` (§17's `parse_user`), closures and function types with modes (row 15), and `keep` parameters and capability-typed fields (f08, f09, f14 print through a stored `Out`; retention can still wait for phase 3). P3 also places `supervise` in no phase (f18, phase 6). | f08, f09, f14, f15, f18 | P3 |
 
 The P3 row, Q33, Q35, Q36 and T10 now have decisions for phase 2. Each one still lists the parts that stay open.
