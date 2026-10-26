@@ -1,0 +1,88 @@
+// phase: 3.1
+// A `cap interface` declares its `observes` and `effects` permissions, and each operation
+// `needs` some of them (REFERENCE §9.2). `Log[read]` names a subset, and a bare `Log` has every
+// permission the interface declares (OPEN_QUESTIONS Q6). A capability fits where a type with
+// fewer permissions is expected, and `only::[…]()` narrows one by type. Operations the static
+// type permits may be called, as a method or as `Log.append(x, …)`. Nothing implements a
+// user-declared capability interface before slice 3.3, so this file is only checked.
+use std.io { Out }
+
+cap interface Log observes(read, count) effects(append, clear) {
+    fn read(self) -> Text                       needs read
+    fn lines(self) -> Int                       needs read, count
+    fn append(self, line: Text)                 needs append
+    fn reset(self, kept: Int) -> Int            needs count, clear
+    fn name(self) -> Text
+}
+
+cap interface Clockwork {
+    fn tick(self)
+}
+
+cap interface Backwards effects(write) observes(peek) {
+    fn peek(self) -> Text                       needs peek
+}
+
+cap interface Sink effects(write) {
+    fn put(self, line: Text) -> Self            needs write
+}
+
+record Holder {
+    log: Log[read]
+    sink: Sink
+}
+
+fn reads(log: Log[read]) -> Text {
+    return f"{log.read()} {log.name()}"
+}
+
+fn counts(log: Log[read, count]) -> Int {
+    return log.lines()
+}
+
+fn writes(log: Log[append]) {
+    log.append("one")
+    Log.append(log, "two")
+}
+
+fn spelled(a: Log[count, read], b: Log[read, count, append, clear]) -> Int {
+    return counts(log: a) + b.reset(kept: 1)
+}
+
+fn full(log: Log, sink: Sink[write]) -> Text {
+    writes(log: log)
+    let r: Log[read] = log
+    let rc: Log[read, count] = log
+    let h = Holder(log: log, sink: sink)
+    return f"{reads(log: r)} {reads(log: h.log)} {counts(log: rc)}"
+}
+
+fn narrowed(log: keep Log) -> Log[read] {
+    let only_read = log.only::[read]()
+    let none = log.only::[]()
+    let n = none.name()
+    return only_read
+}
+
+fn narrowed_again(log: Log[read, append]) -> Text {
+    let r = log.only::[read]().only::[read]()
+    return r.read()
+}
+
+fn sinks(s: keep Sink) -> Sink {
+    return s.put(line: "x").put(line: "y")
+}
+
+fn backwards(b: Backwards[peek]) -> Text {
+    return b.peek()
+}
+
+fn ticks(c: Clockwork) {
+    c.tick()
+    Clockwork.tick(c)
+}
+
+fn outs(o: Out, w: keep Out[write]) -> Out[write] {
+    let o2 = o.only::[write]()
+    return w
+}

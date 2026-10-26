@@ -1,0 +1,61 @@
+// phase: 3.1
+// expect-error: E0208
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0307
+// expect-error: E0317
+// expect-error: E0603
+// A call of an operation that the static type doesn't permit, a capability where a type with
+// more permissions is expected, and an `only` that names a permission the type lacks are each
+// rejected (REFERENCE §9.2). The call is still checked as the operation's, so its `try` marks
+// a call that can fail, and nothing else is reported (§15.1).
+use std.io { In, IoError, Out }
+
+cap interface Log observes(read) effects(append) {
+    fn read(self) -> Text                       needs read
+    fn append(self, line: Text)                 needs append
+    fn copy(self) -> Text                       needs read, append
+}
+
+fn appends(log: Log[append]) -> Text {
+    return ""
+}
+
+record Holder {
+    log: Log[append]
+}
+
+fn writes(log: Log[append]) {
+    log.append("x")
+}
+
+fn calls(log: Log[read]) {
+    log.append("x")                                         // <- E0603
+    Log.append(log, "x")                                    // <- E0603
+    writes(log: log)                                        // <- E0603
+    let a: Log[append] = log                                // <- E0603
+    let h = Holder(log: log)                                // <- E0603
+    let o: Option[Log[append]] = Some(log)                  // <- E0603
+    let wider = log.only::[read, append]()                  // <- E0603
+    let unknown = log.only::[nosuch]()                      // <- E0303
+    let r = log.nosuch()                                    // <- E0303
+    let with_args = log.only::[read](1)                     // <- E0208
+    let bare = log.only()                                   // <- E0317
+    let typed = log.only::[List[Int]]()                     // <- E0307
+    let copied = log.copy()                                 // <- E0603
+    let f: fn(Log[read]) -> Text = appends                  // <- E0603
+    let n = 5.only::[read]()                                // <- E0303
+    let q = Log.read(5)                                     // <- E0301
+    let qualified = Log.only::[read](log)                   // <- E0303
+}
+
+fn returned(log: keep Log[read]) -> Log {
+    return log                                              // <- E0603
+}
+
+fn streams(i: In, o: Out) -> Text fails IoError {
+    try o.only::[]().write_line("x")                        // <- E0603
+    let none = i.only::[]()
+    let line = try none.read_line()                         // <- E0603
+    return line else ""
+}

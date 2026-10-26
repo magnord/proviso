@@ -1,0 +1,29 @@
+// phase: 3.1
+// `System` has every field REFERENCE §9.1 lists except `fs`, which comes with `std.fs` in
+// slice 3.5. `Net`, `Process`, `Clock`, `Random` and `Env` have §9.1's permissions and no
+// operations yet (OPEN_QUESTIONS Q6). Each field fits where fewer permissions are expected.
+use std.io { In, IoError, Out }
+
+record Streams {
+    input: In
+    output: Out[write]
+    errors: Out
+}
+
+fn streams(sys: keep System) -> Streams {
+    return Streams(input: sys.stdin, output: sys.stdout, errors: sys.stderr)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let net = sys.net
+    let connect = net.only::[connect]()
+    let listen = sys.net.only::[listen]()
+    let none = sys.process.only::[]()
+    let spawn = sys.process.only::[spawn]()
+    let clock = sys.clock
+    let random = sys.random
+    let env = sys.env.only::[]()
+    let s = streams(sys: sys)
+    try s.output.write_line("streams")
+    try s.errors.write_line("errors")
+}

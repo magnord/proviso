@@ -1,0 +1,199 @@
+// phase: 3.1
+// expect-error: E0101
+// expect-error: E0204
+// expect-error: E0210
+// expect-error: E0301
+// expect-error: E0303
+// expect-error: E0307
+// expect-error: E0901
+// Only a `cap interface` declares permissions, and only its operations have `needs`
+// clauses, which name permissions it declares, once each (REFERENCE §9.2). A capability type
+// names its interface's permissions, once each. A capability interface is a type, so it
+// can't be a constraint (OPEN_QUESTIONS Q31). Every capability has `only`, so an operation
+// can't take its name. An `interface` that declares permissions is read as the `cap
+// interface` it was meant to be. `cap record`, `uses` and `with` come in later slices, and
+// implementations for a capability type are not yet scheduled. A rejected declaration's
+// uses aren't reported again (REFERENCE §15.1).
+use std.io { Out }
+
+cap interface Log observes(read) effects(append) {
+    fn read(self) -> Text                       needs read
+    fn append(self, line: Text)                 needs append
+    fn twice(self) -> Text                      needs read, read        // <- E0210
+    fn lost(self) -> Text                       needs nosuch            // <- E0303
+    fn later(self) -> Text                      needs read uses Log     // <- E0901
+}
+
+cap interface Twice observes(read) effects(read) {                      // <- E0210
+    fn read(self) -> Text                       needs read
+}
+
+cap interface Cased observes(Read) {                                    // <- E0204
+    fn read(self) -> Text
+}
+
+cap interface lower observes(read) {                                    // <- E0204
+    fn read(self) -> Text                       needs read
+}
+
+fn lowered(l: lower[read]) -> Text {
+    return l.read()
+}
+
+cap interface Big observes(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19, p20, p21, p22, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36, p37, p38, p39, p40, p41, p42, p43, p44, p45, p46, p47, p48, p49, p50, p51, p52, p53, p54, p55, p56, p57, p58, p59, p60, p61, p62, p63, p64, p65) {    // <- E0901
+    fn last(self) -> Text                       needs p65
+}
+
+fn big(b: Big[p64]) -> Text {
+    return b.last()
+}
+
+interface Plain observes(read) {                                        // <- E0101
+    fn read(self) -> Text                       needs read
+}
+
+fn plain(p: Plain[read]) -> Text {
+    return p.read()
+}
+
+impl Plain for Data {
+    fn read(self) -> Text {
+        return ""
+    }
+}
+
+fn plain_constrained[T: Plain](x: T) -> Int {
+    return 0
+}
+
+cap interface Again observes(read) observes(count) {                    // <- E0101
+    fn read(self) -> Text                       needs read
+    fn count(self) -> Int                       needs count
+}
+
+fn again(a: Again[count]) -> Int {
+    return a.count()
+}
+
+cap fn capped() {                                                       // <- E0101
+}
+
+cap                                                                     // <- E0101
+interface Split observes(read) {
+    fn read(self) -> Text                       needs read
+}
+
+fn split(s: Split[read]) -> Text {
+    return s.read()
+}
+
+cap                                                                     // <- E0101
+fn after_cap() -> Int {
+    return "kept"                                                       // <- E0301
+}
+
+cap interface Broken observes(read {                                    // <- E0101
+    fn read(self) -> Text                       needs read
+}
+
+fn broken(b: Broken[read]) -> Text {
+    return b.read()
+}
+
+interface PlainBroken observes(read {                                   // <- E0101, E0101
+    fn read(self) -> Text                       needs read
+}
+
+fn plain_broken(b: PlainBroken[read]) -> Text {
+    return b.read()
+}
+
+record Reaching {
+    log: Log[read] uses Out                                             // <- E0901
+}
+
+cap interface Narrowing observes(read) {
+    fn only(self) -> Int                        needs read              // <- E0210
+    fn read(self) -> Int                        needs read
+}
+
+fn narrowing(n: Narrowing) -> Int {
+    let t: Text = n.read()                                              // <- E0301
+    let u = n.typo()                                                    // <- E0303
+    let v = Narrowing.typo(n)                                           // <- E0303
+    return n.only() + Narrowing.only(n) + n.only::[read]().read()
+}
+
+interface PlainOnly observes(read) {                                    // <- E0101
+    fn only(self) -> Int                        needs read
+}
+
+interface Needy {
+    fn read(self) -> Text                       needs read              // <- E0101
+}
+
+fn helper(x: Int) -> Int needs read {                                   // <- E0101
+    return x
+}
+
+fn kept(x: Int) -> Int observes(read) {                                 // <- E0101
+    return x
+}
+
+fn now(x: Int) observes Clock {                                         // <- E0101
+    return
+}
+
+fn tick(x: Int) -> Int effects Clock {                                  // <- E0101
+    return x
+}
+
+fn clocked() -> Int {
+    now(x: 1)
+    return tick(x: helper(x: kept(x: 2)))
+}
+
+cap record Counter {                                                    // <- E0901
+    n: Int
+}
+
+record Data {
+    n: Int
+}
+
+fn types(a: Log[nosuch], b: Log[read, read], c: Log[read]) -> Text {    // <- E0303, E0210
+    return c.read()
+}
+
+fn rejected_types(a: Log[nosuch]) -> Text {                             // <- E0303
+    a.append("x")
+    return a.read()
+}
+
+fn constrained[T: Log](x: T) -> Int {                                   // <- E0307
+    return 0
+}
+
+fn logged[T: Out](x: T) -> Int {                                        // <- E0307
+    return 0
+}
+
+impl Show for Log {                                                     // <- E0901
+    fn show(self) -> Text {
+        return "log"
+    }
+}
+
+impl Log for Data {                                                     // <- E0901
+    fn read(self) -> Text {
+        return ""
+    }
+}
+
+fn shown(log: Log, c: Counter, p: Data) -> Text {
+    return f"{log.show()} {c.read()} {p.read()} {Log.read(p)}"
+}
+
+fn made(p: Data) -> Out {
+    return Out.of(p)                                                    // <- E0901
+}

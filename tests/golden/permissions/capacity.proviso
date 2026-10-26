@@ -1,0 +1,60 @@
+// phase: 3.1
+// A record whose type doubles at each of 40 lets, with a capability at the bottom, checks and
+// runs in linear time. Inference opens the permissions of each shared part of the type once
+// (OPEN_QUESTIONS P5).
+use std.io { IoError, Out }
+
+record Pair[A, B] {
+    first: A
+    second: B
+}
+
+fn doubling(out: keep Out) -> Out[write] {
+    let p0 = Pair(first: out, second: out.only::[write]())
+    let p1 = Pair(first: p0, second: p0)
+    let p2 = Pair(first: p1, second: p1)
+    let p3 = Pair(first: p2, second: p2)
+    let p4 = Pair(first: p3, second: p3)
+    let p5 = Pair(first: p4, second: p4)
+    let p6 = Pair(first: p5, second: p5)
+    let p7 = Pair(first: p6, second: p6)
+    let p8 = Pair(first: p7, second: p7)
+    let p9 = Pair(first: p8, second: p8)
+    let p10 = Pair(first: p9, second: p9)
+    let p11 = Pair(first: p10, second: p10)
+    let p12 = Pair(first: p11, second: p11)
+    let p13 = Pair(first: p12, second: p12)
+    let p14 = Pair(first: p13, second: p13)
+    let p15 = Pair(first: p14, second: p14)
+    let p16 = Pair(first: p15, second: p15)
+    let p17 = Pair(first: p16, second: p16)
+    let p18 = Pair(first: p17, second: p17)
+    let p19 = Pair(first: p18, second: p18)
+    let p20 = Pair(first: p19, second: p19)
+    let p21 = Pair(first: p20, second: p20)
+    let p22 = Pair(first: p21, second: p21)
+    let p23 = Pair(first: p22, second: p22)
+    let p24 = Pair(first: p23, second: p23)
+    let p25 = Pair(first: p24, second: p24)
+    let p26 = Pair(first: p25, second: p25)
+    let p27 = Pair(first: p26, second: p26)
+    let p28 = Pair(first: p27, second: p27)
+    let p29 = Pair(first: p28, second: p28)
+    let p30 = Pair(first: p29, second: p29)
+    let p31 = Pair(first: p30, second: p30)
+    let p32 = Pair(first: p31, second: p31)
+    let p33 = Pair(first: p32, second: p32)
+    let p34 = Pair(first: p33, second: p33)
+    let p35 = Pair(first: p34, second: p34)
+    let p36 = Pair(first: p35, second: p35)
+    let p37 = Pair(first: p36, second: p36)
+    let p38 = Pair(first: p37, second: p37)
+    let p39 = Pair(first: p38, second: p38)
+    let p40 = Pair(first: p39, second: p39)
+    return p40.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first.second.first
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let out = doubling(out: sys.stdout)
+    try out.write_line("doubled")
+}

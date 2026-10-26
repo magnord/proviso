@@ -39,7 +39,7 @@ let limit = 4                                       // <- E0901
 extern "C" fn crc(n: Int) -> Int                    // <- E0901
     trusted pure
 
-cap interface Flag effects(write) {                 // <- E0901
+cap interface Flag effects(write) {
     fn raise(self)
 }
 

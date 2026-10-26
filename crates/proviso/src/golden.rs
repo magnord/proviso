@@ -241,8 +241,10 @@ fn run_file(path: &Path, name: &str, phase: Phase, bless: bool) -> Result<Verdic
 
     let out_path = path.with_extension("out");
     let err_path = path.with_extension("err");
+    let in_path = path.with_extension("in");
     let runs = out_path.exists()
         || err_path.exists()
+        || in_path.exists()
         || header.expect_exit != 0
         || !header.expect_reports.is_empty()
         || header.test;
@@ -278,12 +280,21 @@ fn run_file(path: &Path, name: &str, phase: Phase, bless: bool) -> Result<Verdic
     if compiled.program.main.is_none() && !header.test {
         return Ok(Verdict::Pass);
     }
+    // The `.in` file is the run's standard input, which is empty without one.
+    let input = match fs::read(&in_path) {
+        Ok(_) if header.test => {
+            return Err("examples and tests read no input, so `run: test` has no `.in` file".to_string());
+        }
+        Ok(input) => input,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => return Err(format!("cannot read {}: {err}", in_path.display())),
+    };
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let code = if header.test {
         test(&compiled, true, &mut stdout, &mut stderr)
     } else {
-        run(&compiled, &mut stdout, &mut stderr)
+        run(&compiled, &mut &input[..], &mut stdout, &mut stderr)
     };
     let stdout = String::from_utf8_lossy(&stdout).into_owned();
     let stderr = String::from_utf8_lossy(&stderr).into_owned();

@@ -3,18 +3,19 @@
 pub mod golden;
 
 use std::fmt::Write as _;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::Path;
 
 use proviso_check::{ExampleInfo, Options, Program, check_module};
-use proviso_interp::{Defect, ExampleOutcome, Outcome, Report, quote, run_examples, run_main};
+use proviso_interp::{Defect, ExampleOutcome, Outcome, Report, Streams, quote, run_examples, run_main};
 use proviso_syntax::ast::{ItemKind, Module, TypeExprKind};
 use proviso_syntax::diag::{Diagnostic, Diagnostics, Severity};
 use proviso_syntax::parse_module;
 use proviso_syntax::source::{SourceFile, Span};
 
-/// How far this toolchain implements the v1 plan (OPEN_QUESTIONS P3): phases 1 and 2.
-pub const IMPLEMENTED_PHASE: Phase = Phase::whole(2);
+/// How far this toolchain implements the v1 plan (OPEN_QUESTIONS P3): phases 1 and 2, and
+/// slice 3.1 of phase 3.
+pub const IMPLEMENTED_PHASE: Phase = Phase::slice(3, 1);
 
 /// A point in the v1 plan: a whole phase, or a slice of one. A phase delivered over several
 /// pull requests numbers its slices `2.1`, `2.2` and so on, and each pull request turns its
@@ -261,10 +262,16 @@ impl Compiled {
     }
 }
 
-/// Runs a compiled program without errors and returns its exit code. The program writes to
-/// `stdout`; failures and defects are reported on `stderr`.
-pub fn run(compiled: &Compiled, stdout: &mut (dyn Write + Send), stderr: &mut (dyn Write + Send)) -> i32 {
-    let outcome = run_main(&compiled.file, &compiled.module, &compiled.program, stdout, stderr);
+/// Runs a compiled program without errors and returns its exit code. The program reads
+/// `stdin` and writes to `stdout` and `stderr`; failures and defects are reported on `stderr`.
+pub fn run(
+    compiled: &Compiled,
+    stdin: &mut (dyn BufRead + Send),
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+) -> i32 {
+    let streams = Streams { stdin, stdout: &mut *stdout, stderr: &mut *stderr };
+    let outcome = run_main(&compiled.file, &compiled.module, &compiled.program, streams);
     let _ = stdout.flush();
     match outcome {
         Ok(Outcome::Done) => exit::OK,

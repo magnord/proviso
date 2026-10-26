@@ -413,7 +413,7 @@ impl Write for Closed {
 fn main_that_fails_exits_with_1_and_shows_its_error() {
     let compiled = proviso::compile("hello.proviso", HELLO.to_string(), Default::default());
     let mut err = Vec::new();
-    let code = proviso::run(&compiled, &mut Closed, &mut err);
+    let code = proviso::run(&compiled, &mut std::io::empty(), &mut Closed, &mut err);
     assert_eq!(code, proviso::exit::FAILED);
     assert_eq!(String::from_utf8_lossy(&err), "cannot write to stdout: closed\n");
 }

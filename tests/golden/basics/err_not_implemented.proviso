@@ -44,14 +44,6 @@ fn id(x: Int) -> Int requires x > 0 {               // <- E0901
     return x
 }
 
-fn now(x: Int) observes Clock {                     // <- E0901
-    return
-}
-
-fn tick(x: Int) -> Int effects Clock {              // <- E0901
-    return x
-}
-
 effect Foo                                          // <- E0901
 
 fn uses_poisoned() -> Int {
@@ -61,6 +53,4 @@ fn uses_poisoned() -> Int {
 fn main_like() {
     let z = id(x: 1)
     let w = pair(p: 1)
-    now(x: 1)
-    let t = tick(x: 2)
 }

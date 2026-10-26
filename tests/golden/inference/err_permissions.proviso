@@ -1,0 +1,78 @@
+// phase: 3.1
+// expect-error: E0603
+// A join of capabilities has only the permissions every value has, and a join of closures
+// takes a capability with every permission any of them needs, so what each settles as is
+// checked as that type, in either order (OPEN_QUESTIONS P3, decided for phase 3). An
+// `inout` capability must have exactly the parameter's permissions, since the callee may
+// store a narrower one in it.
+cap interface Log observes(read) effects(append) {
+    fn read(self) -> Text                       needs read
+    fn append(self, line: Text)                 needs append
+}
+
+fn pick[T](a: take T, b: take T) -> T {
+    return a
+}
+
+fn narrow(log: inout Log[read], other: keep Log[read]) {
+    log = other
+}
+
+fn narrow_all(logs: inout List[Log[read]], other: keep Log[read]) {
+    logs.push(other)
+}
+
+fn values(full: keep Log, reader: keep Log[read], flag: Bool) {
+    pick(a: full, b: reader).append("x")                    // <- E0603
+    pick(a: reader, b: full).append("x")                    // <- E0603
+    let c = if flag { full } else { reader }
+    c.append("x")                                           // <- E0603
+    let d = if flag { reader } else { full }
+    d.append("x")                                           // <- E0603
+}
+
+fn closures(reader: Log[read], flag: Bool) {
+    let c = if flag { |l: Log[read]| l.read() } else { |l: Log| l.read() }
+    let d = if flag { |l: Log| l.read() } else { |l: Log[read]| l.read() }
+    let x = c(reader)                                       // <- E0603
+    let y = d(reader)                                       // <- E0603
+}
+
+fn inouts(full: keep Log, reader: keep Log[read]) {
+    var log = full
+    narrow(log: &log, other: reader)                        // <- E0603
+    var logs = [full]
+    narrow_all(logs: &logs, other: reader)                  // <- E0603
+}
+
+fn appends(log: Log) -> Int {
+    return 1
+}
+
+fn reads_only(log: Log[read]) -> Int {
+    return 0
+}
+
+fn apply[T](f: fn(T) -> Int, x: T) -> Int {
+    return f(x)
+}
+
+fn functions(reader: Log[read], flag: Bool) -> Int {
+    let a = apply(f: if flag { appends } else { reads_only }, x: reader)    // <- E0603
+    let b = apply(f: if flag { reads_only } else { appends }, x: reader)    // <- E0603
+    return a + b
+}
+
+fn reads_with(f: fn(Log[read]) -> Int) -> Int {
+    return 0
+}
+
+fn appends_with(f: fn(Log) -> Int) -> Int {
+    return 1
+}
+
+fn higher(flag: Bool) -> Int {
+    let a = if flag { reads_with } else { appends_with }
+    let b = if flag { appends_with } else { reads_with }
+    return a(appends) + b(appends)                          // <- E0603, E0603
+}

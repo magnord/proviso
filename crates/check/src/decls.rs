@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use proviso_syntax::ast::{ExprId, ParamMode};
 
-use crate::types::{FloatTy, IntTy, Ty};
+use crate::types::{FloatTy, IntTy, Perms, Ty};
 
 /// A record or enum declared in Proviso. The prelude's come first, at fixed ids.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -46,8 +46,8 @@ impl AdtId {
     }
 }
 
-/// An interface: one of the prelude's, `std.io`'s `Out`, or one the module declares. The
-/// prelude's come first, at fixed ids.
+/// An interface: one of the prelude's, a capability interface of the standard library, or
+/// one the module declares. The built-in ones come first, at fixed ids.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct IfaceId(u32);
 
@@ -67,16 +67,29 @@ impl IfaceId {
     pub const MUL: IfaceId = IfaceId(10);
     pub const DIV: IfaceId = IfaceId(11);
     pub const NEG: IfaceId = IfaceId(12);
+    /// `std.io`'s input stream.
+    pub const IN: IfaceId = IfaceId(13);
+    /// The capabilities of `System` that have no operations yet (REFERENCE §9.1; OPEN_QUESTIONS
+    /// Q6). No module declares them yet, so only `System`'s fields name them.
+    pub const NET: IfaceId = IfaceId(14);
+    pub const PROCESS: IfaceId = IfaceId(15);
+    pub const CLOCK: IfaceId = IfaceId(16);
+    pub const RANDOM: IfaceId = IfaceId(17);
+    pub const ENV: IfaceId = IfaceId(18);
 
     /// The interfaces declared before the module's, in id order: the prelude's (REFERENCE §3),
-    /// and `std.io`'s `Out`.
-    const BUILT_IN: [&str; 13] =
-        ["Eq", "Ord", "Show", "Out", "Hash", "Copy", "Abandon", "Index", "Add", "Sub", "Mul", "Div", "Neg"];
+    /// and the standard library's capability interfaces.
+    const BUILT_IN: [&str; 19] = [
+        "Eq", "Ord", "Show", "Out", "Hash", "Copy", "Abandon", "Index", "Add", "Sub", "Mul", "Div", "Neg", "In", "Net",
+        "Process", "Clock", "Random", "Env",
+    ];
 
-    /// The prelude interface named `name`. `Out` comes from `std.io`, so it isn't one.
+    /// The prelude interface named `name`. The capability interfaces come from the standard
+    /// library's modules, so they aren't.
     pub fn prelude(name: &str) -> Option<IfaceId> {
-        let i = Self::BUILT_IN.iter().position(|n| *n == name && name != "Out")?;
-        Some(IfaceId(i as u32))
+        let i = Self::BUILT_IN.iter().position(|n| *n == name)?;
+        let id = IfaceId(i as u32);
+        (id != IfaceId::OUT && i < IfaceId::IN.index()).then_some(id)
     }
 
     pub fn index(self) -> usize {
@@ -98,6 +111,8 @@ impl IfaceId {
 /// An interface's declaration.
 pub struct IfaceDef {
     pub name: Box<str>,
+    /// The permissions of a `cap interface`, or `None` for an interface that isn't one.
+    pub cap: Option<CapDef>,
     pub methods: Vec<IfaceMethod>,
     /// A rejected method declaration may be the one an implementation or a call names, so
     /// neither is checked against the methods it lists (REFERENCE §15.1).
@@ -107,6 +122,31 @@ pub struct IfaceDef {
 impl IfaceDef {
     pub fn method(&self, name: &str) -> Option<usize> {
         self.methods.iter().position(|m| &*m.name == name)
+    }
+
+    /// Every permission it declares, which a capability type that names it bare has (OPEN_QUESTIONS
+    /// Q6).
+    pub fn all_perms(&self) -> Perms {
+        self.cap.as_ref().map_or(Perms::NONE, |cap| Perms::all(cap.perms.len()))
+    }
+}
+
+/// What a `cap interface` declares about its permissions (REFERENCE §9.2).
+pub struct CapDef {
+    /// The permissions' names, `observes` ones first, in declaration order, which is the
+    /// order of their bits in a [`Perms`].
+    pub perms: Vec<Box<str>>,
+    /// Which of them are `observes` permissions, which can't change anything outside the
+    /// program. The others are `effects` permissions.
+    pub observes: Perms,
+    /// Whether it declares more than [`Perms::MAX`], which is reported, so a name it doesn't
+    /// list may be one of those past the limit.
+    pub lost: bool,
+}
+
+impl CapDef {
+    pub fn perm(&self, name: &str) -> Option<usize> {
+        self.perms.iter().position(|p| &**p == name)
     }
 }
 
@@ -122,6 +162,8 @@ pub struct IfaceMethod {
     pub modes: Vec<ParamMode>,
     pub ret: Ty,
     pub fails: Option<Ty>,
+    /// The permissions an operation of a `cap interface` needs (REFERENCE §9.2).
+    pub needs: Perms,
 }
 
 /// The type an `impl` is for, told apart as its values tell it at run time: by its name,
@@ -542,7 +584,24 @@ pub struct Decls {
 impl Default for Decls {
     /// The prelude, with each declaration at the id its constant names.
     fn default() -> Decls {
-        let mut system = AdtDef::record("System", vec![FieldDef { name: "stdout".into(), ty: Ty::out() }]);
+        // REFERENCE §9.1's fields, but `fs`, which comes with `std.fs` in slice 3.5.
+        let field = |name: &str, iface: IfaceId, perms: usize| FieldDef {
+            name: name.into(),
+            ty: Ty::cap(iface, Perms::all(perms)),
+        };
+        let mut system = AdtDef::record(
+            "System",
+            vec![
+                field("net", IfaceId::NET, 2),
+                field("clock", IfaceId::CLOCK, 0),
+                field("random", IfaceId::RANDOM, 0),
+                field("env", IfaceId::ENV, 0),
+                field("stdin", IfaceId::IN, 1),
+                field("stdout", IfaceId::OUT, 1),
+                field("stderr", IfaceId::OUT, 1),
+                field("process", IfaceId::PROCESS, 1),
+            ],
+        );
         system.reach = true;
         // As STD.md declares them, so `Some` comes before `None`.
         let generic = |name: &str, params: usize, variants: [(&str, Option<(&str, u32)>); 2]| {
@@ -587,6 +646,12 @@ impl Default for Decls {
             params: params.into_iter().map(|(n, t)| (n.into(), t)).collect(),
             ret,
             fails: None,
+            needs: Perms::NONE,
+        };
+        // The standard library's capability interfaces and their permissions, all `effects`
+        // ones (REFERENCE §9.1; OPEN_QUESTIONS Q6).
+        let cap = |perms: &[&str]| {
+            Some(CapDef { perms: perms.iter().map(|&p| p.into()).collect(), observes: Perms::NONE, lost: false })
         };
         let ifaces = IfaceId::BUILT_IN
             .iter()
@@ -599,9 +664,28 @@ impl Default for Decls {
                     "Abandon" => {
                         vec![IfaceMethod { self_mode: ParamMode::Take, ..method("abandon", vec![], Ty::Unit) }]
                     }
+                    // `std.io`'s operations (STD.md; OPEN_QUESTIONS Q6).
+                    "Out" => vec![IfaceMethod {
+                        fails: Some(Ty::IoError),
+                        needs: Perms::one(0),
+                        ..method("write_line", vec![("text", Ty::Text)], Ty::Unit)
+                    }],
+                    "In" => vec![IfaceMethod {
+                        fails: Some(Ty::IoError),
+                        needs: Perms::one(0),
+                        ..method("read_line", vec![], Ty::option(Ty::Text))
+                    }],
                     _ => Vec::new(),
                 };
-                IfaceDef { name: name.into(), methods, incomplete: false }
+                let cap = match name {
+                    "Out" => cap(&["write"]),
+                    "In" => cap(&["read"]),
+                    "Net" => cap(&["connect", "listen"]),
+                    "Process" => cap(&["spawn"]),
+                    "Clock" | "Random" | "Env" => cap(&[]),
+                    _ => None,
+                };
+                IfaceDef { name: name.into(), cap, methods, incomplete: false }
             })
             .collect();
         // A list and a map implement what their type arguments do (STD.md).
@@ -723,6 +807,13 @@ impl Decls {
                 }
             }
         }
+    }
+
+    /// How diagnostics list `perms` of capability interface `iface`, as in `read, write`.
+    pub fn perm_names(&self, iface: IfaceId, perms: Perms) -> String {
+        let Some(cap) = &self.iface(iface).cap else { return String::new() };
+        let names: Vec<&str> = perms.iter().filter_map(|i| cap.perms.get(i)).map(|p| &**p).collect();
+        names.join(", ")
     }
 
     pub fn iface_mut(&mut self, id: IfaceId) -> &mut IfaceDef {
@@ -905,8 +996,11 @@ impl Decls {
             }
             Ty::Unit => matches!(iface, IfaceId::EQ | IfaceId::HASH) || self.by_impl(ty, iface, params, memo),
             Ty::IoError => iface == IfaceId::SHOW || self.by_impl(ty, iface, params, memo),
+            // A capability implements its own interface, which its value dispatches to
+            // (REFERENCE §9.2).
+            Ty::Cap(cap) => cap.iface == iface,
             // A function value implements nothing, so it isn't compared or shown (OPEN_QUESTIONS P5).
-            Ty::Cap(_) | Ty::Fn(..) | Ty::Never | Ty::Error | Ty::Var(_) => false,
+            Ty::Fn(..) | Ty::Never | Ty::Error | Ty::Var(_) => false,
         }
     }
 
@@ -1215,8 +1309,12 @@ impl Decls {
             return f.write_str("…");
         }
         budget.set(budget.get() - 1);
+        // A built-in type is qualified where a module type or interface has its name.
         let std = |name: &'static str, qualified: &'static str| {
-            if self.adts[AdtId::BUILT_IN..].iter().any(|adt| &*adt.name == name) { qualified } else { name }
+            let shadowed = self.adts[AdtId::BUILT_IN..].iter().any(|adt| &*adt.name == name)
+                || self.ifaces[IfaceId::BUILT_IN.len()..].iter().any(|iface| &*iface.name == name)
+                || names.iter().any(|param| &**param == name);
+            if shadowed { qualified } else { name }
         };
         let list = |f: &mut fmt::Formatter, args: &[Ty]| -> fmt::Result {
             for (i, arg) in args.iter().enumerate() {
@@ -1279,6 +1377,25 @@ impl Decls {
         {
             return f.write_str(name);
         }
+        // A capability with every permission is written bare (OPEN_QUESTIONS Q6).
+        if let Ty::Cap(cap) = ty {
+            let def = self.iface(cap.iface);
+            f.write_str(match cap.iface {
+                IfaceId::OUT => std("Out", "std.io.Out"),
+                IfaceId::IN => std("In", "std.io.In"),
+                // No module exports these yet, so they are named for where they come from.
+                IfaceId::NET => std("Net", "System.Net"),
+                IfaceId::CLOCK => std("Clock", "System.Clock"),
+                IfaceId::RANDOM => std("Random", "System.Random"),
+                IfaceId::ENV => std("Env", "System.Env"),
+                IfaceId::PROCESS => std("Process", "System.Process"),
+                _ => &def.name,
+            })?;
+            if cap.perms != def.all_perms() {
+                write!(f, "[{}]", self.perm_names(cap.iface, cap.perms))?;
+            }
+            return Ok(());
+        }
         f.write_str(match ty {
             Ty::Int(it) => it.name(),
             Ty::Float(ft) => ft.name(),
@@ -1291,8 +1408,7 @@ impl Decls {
             Ty::Adt(AdtId::CONVERSION_ERROR, _) => std("ConversionError", "std.num.ConversionError"),
             Ty::Adt(id, _) => &self.adt(*id).name,
             Ty::IoError => std("IoError", "std.io.IoError"),
-            Ty::Cap(cap) if cap.iface == IfaceId::OUT => std("Out", "std.io.Out"),
-            Ty::Cap(cap) => &self.iface(cap.iface).name,
+            Ty::Cap(_) => unreachable!("written above"),
             Ty::Param(_) | Ty::Var(_) => "_",
             Ty::Error => "{unknown}",
             Ty::Fn(..) => unreachable!("written above"),

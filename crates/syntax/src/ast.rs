@@ -25,8 +25,8 @@ pub struct Module {
     pub poisoned: HashSet<Symbol>,
     /// Names of functions whose declarations failed to parse, among the `poisoned` ones.
     pub lost_fns: HashSet<Symbol>,
-    /// Names declared by a later phase's item, such as a `cap interface`, whose arguments
-    /// may not be types, among the `poisoned` ones.
+    /// Names declared by a later phase's item, such as a `cap record`, or by a `cap interface`
+    /// that failed to parse, whose arguments may not be types, among the `poisoned` ones.
     pub planned_names: HashSet<Symbol>,
     /// Types named by a rejected `impl` block, such as `Point` in `impl Show for Point`. The
     /// block may have given them methods and interfaces, so uses of those aren't reported.
@@ -151,6 +151,8 @@ pub struct FnDecl {
     pub params: Vec<Param>,
     pub ret: Option<TypeId>,
     pub fails: Option<TypeId>,
+    /// The permissions an operation of a `cap interface` `needs` (REFERENCE §9.2), each once.
+    pub needs: Vec<Ident>,
     /// `None` for an interface's method, which has no body (Q13).
     pub body: Option<Block>,
     /// The body needed error recovery, so its control flow is unknown.
@@ -193,10 +195,19 @@ pub struct Method {
 /// `interface Show { fn show(self) -> Text }` (REFERENCE §4.9).
 pub struct InterfaceDecl {
     pub name: Ident,
+    /// The permissions of a `cap interface`, or `None` for an interface that isn't one.
+    pub cap: Option<CapPerms>,
     pub methods: Vec<FnDecl>,
     /// A method's declaration was rejected, so implementations may have methods it doesn't
     /// list, and calls of them aren't reported.
     pub recovered: bool,
+}
+
+/// What `cap interface Dir observes(read, list) effects(write)` declares (REFERENCE §9.2).
+/// `observes` permissions can't change anything outside the program, and `effects` ones may.
+pub struct CapPerms {
+    pub observes: Vec<Ident>,
+    pub effects: Vec<Ident>,
 }
 
 pub struct Param {
@@ -213,6 +224,13 @@ pub enum ParamMode {
     InoutPartial,
     Take,
     Keep,
+}
+
+impl ParamMode {
+    /// Whether the value goes in and comes back, as `inout` or `inout(partial)` (REFERENCE §5.2).
+    pub fn is_inout(self) -> bool {
+        matches!(self, ParamMode::Inout | ParamMode::InoutPartial)
+    }
 }
 
 /// `record Span derives(Eq) { lo: Int, hi: Int } where lo <= hi` (REFERENCE §4.4).

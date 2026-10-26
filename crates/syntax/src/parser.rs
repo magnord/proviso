@@ -70,6 +70,8 @@ pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> M
         too_deep_reported: false,
         field_indent: None,
         arm_depth: 0,
+        cap_ops: false,
+        before_clause: false,
     };
     parser.items();
     parser.m
@@ -105,6 +107,11 @@ struct Parser<'a> {
     /// How many `match`es' arms are being parsed. Within them, a line with `=>` starts an arm
     /// (see [`Parser::starts_arm`]).
     arm_depth: u32,
+    /// Set while parsing the operations of a `cap interface`, which may have `needs` clauses.
+    cap_ops: bool,
+    /// Whether the type about to be read ends a signature, where a `uses` that follows it is
+    /// the signature's clause, not the type's reach.
+    before_clause: bool,
 }
 
 impl Parser<'_> {
@@ -472,7 +479,30 @@ impl Parser<'_> {
                 }
                 ItemKind::Impl(self.impl_decl()?)
             }
-            T::Keyword(Kw::Interface) => ItemKind::Interface(self.interface_decl()?),
+            T::Keyword(Kw::Interface) => ItemKind::Interface(self.interface_decl(false)?),
+            T::Keyword(Kw::Cap) if self.nth(1) == T::Keyword(Kw::Interface) => {
+                self.bump();
+                ItemKind::Interface(self.interface_decl(true)?)
+            }
+            T::Keyword(Kw::Cap) if self.nth(1) != T::Keyword(Kw::Record) => {
+                // Only a name on `cap`'s own line is poisoned. An item on the next is kept.
+                self.poison_declared_name();
+                let span = self.bump().span;
+                let message = "`cap` goes right before `interface` or `record`, on the same line, as in `cap interface Log { … }` (§9.2)";
+                self.error(codes::UNEXPECTED_TOKEN, span, message);
+                // A `cap interface` split over two lines is still the capability interface.
+                let mut n = 0;
+                while self.nth(n) == T::Newline {
+                    n += 1;
+                }
+                if self.nth(n) != T::Keyword(Kw::Interface) {
+                    return Err(());
+                }
+                while self.at(T::Newline) {
+                    self.bump();
+                }
+                ItemKind::Interface(self.interface_decl(true)?)
+            }
             T::Keyword(Kw::Example) => {
                 // The example is kept, so it is still checked.
                 if vis != Visibility::Private && written {
@@ -1091,20 +1121,69 @@ impl Parser<'_> {
         Ok(TestDecl { name, name_span: token.span, body })
     }
 
-    /// `interface Shape { fn area(self) -> Int }` (REFERENCE §4.9).
-    fn interface_decl(&mut self) -> PResult<InterfaceDecl> {
+    /// `interface Shape { fn area(self) -> Int }` (REFERENCE §4.9), or `cap interface Log
+    /// observes(read) effects(append) { fn append(self, line: Text) needs append }` (§9.2),
+    /// whose `cap` is already eaten.
+    fn interface_decl(&mut self, cap: bool) -> PResult<InterfaceDecl> {
         self.bump();
         let name = self.ident("an interface name")?;
-        let decl = self.interface_rest(name);
+        self.cap_ops = cap;
+        let decl = self.interface_rest(name, cap);
+        // A plain interface that declared permissions is read as a capability interface.
+        let cap = std::mem::take(&mut self.cap_ops);
         if decl.is_err() {
             self.m.poisoned.insert(name.sym);
+            // A capability interface's arguments are permissions, not types.
+            if cap {
+                self.m.planned_names.insert(name.sym);
+            }
         }
         decl
     }
 
-    fn interface_rest(&mut self, name: Ident) -> PResult<InterfaceDecl> {
+    fn interface_rest(&mut self, name: Ident, mut cap: bool) -> PResult<InterfaceDecl> {
         if self.at(T::LBracket) {
             return self.not_implemented("generic interfaces", Planned::Unscheduled);
+        }
+        let mut perms = CapPerms { observes: Vec::new(), effects: Vec::new() };
+        // The clauses come in either order, each once.
+        let mut seen = (false, false);
+        while self.at_kw(Kw::Observes) || self.at_kw(Kw::Effects) {
+            let effects = self.at_kw(Kw::Effects);
+            let keyword = self.bump();
+            let text = self.file.slice(keyword.span);
+            if !cap {
+                let message = format!(
+                    "only a `cap interface` declares permissions, as in `cap interface {} {text}(…)` (§9.2)",
+                    self.file.slice(name.span),
+                );
+                self.error(codes::UNEXPECTED_TOKEN, keyword.span, message);
+                // The rest is read as the capability interface it was meant to be, even if it
+                // fails to parse, so its `needs` clauses aren't reported again, and its uses
+                // aren't checked (§15.1).
+                cap = true;
+                self.cap_ops = true;
+                self.m.poisoned.insert(name.sym);
+            }
+            let names = self.perm_list()?;
+            let twice = if effects { &mut seen.1 } else { &mut seen.0 };
+            if std::mem::replace(twice, true) {
+                let message = format!("`{text}` is declared twice; list all its permissions in one clause");
+                self.error(codes::UNEXPECTED_TOKEN, keyword.span, message);
+                // Its permissions are still declared, so their uses aren't reported (§15.1).
+                let list = if effects { &mut perms.effects } else { &mut perms.observes };
+                for name in names {
+                    if !list.iter().any(|p| p.sym == name.sym) {
+                        list.push(name);
+                    }
+                }
+                continue;
+            }
+            if effects {
+                perms.effects = names;
+            } else {
+                perms.observes = names;
+            }
         }
         let open = self.expect(T::LBrace, "`{` and the interface's methods")?;
         let (methods, recovered) = self.members(&open, |p| {
@@ -1115,7 +1194,30 @@ impl Parser<'_> {
             let name = p.ident("a method name")?;
             p.fn_rest(name, FnKind::Signature)
         })?;
-        Ok(InterfaceDecl { name, methods, recovered })
+        Ok(InterfaceDecl { name, cap: cap.then_some(perms), methods, recovered })
+    }
+
+    /// The `(read, list)` after `observes` or `effects`.
+    fn perm_list(&mut self) -> PResult<Vec<Ident>> {
+        let open = self.expect(T::LParen, "`(` and the permissions")?;
+        let mut names = Vec::new();
+        while !self.at(T::RParen) {
+            names.push(self.ident("a permission")?);
+            if !self.eat(T::Comma) {
+                break;
+            }
+        }
+        self.close(&open, T::RParen, "`,` or `)`")?;
+        Ok(names)
+    }
+
+    /// The permissions after `needs`, as in `needs read, list`.
+    fn needs_list(&mut self) -> PResult<Vec<Ident>> {
+        let mut names = vec![self.ident("a permission")?];
+        while self.eat(T::Comma) {
+            names.push(self.ident("a permission")?);
+        }
+        Ok(names)
     }
 
     /// The type parameters of a record or enum, as in `record Pair[A, B]`, or none. A
@@ -1214,13 +1316,14 @@ impl Parser<'_> {
             }
         }
         self.close(&open, T::RParen, "`,` or `)`")?;
-        let ret = if self.eat(T::Arrow) { Some(self.nested(Self::type_expr)?) } else { None };
+        let ret = if self.eat(T::Arrow) { Some(self.clause_type()?) } else { None };
         let mut fails = None;
+        let mut needs: Option<Vec<Ident>> = None;
         loop {
             match self.kind() {
                 T::Keyword(Kw::Fails) => {
                     let keyword = self.bump();
-                    let ty = self.type_expr()?;
+                    let ty = self.clause_type()?;
                     if fails.is_some() {
                         self.error(
                             codes::UNEXPECTED_TOKEN,
@@ -1233,11 +1336,32 @@ impl Parser<'_> {
                 T::Keyword(Kw::Requires | Kw::Ensures) => {
                     return self.not_implemented("`requires` and `ensures` clauses", Planned::Phase(4));
                 }
-                T::Keyword(Kw::Needs | Kw::Uses | Kw::With) => {
-                    return self.not_implemented("`needs`, `uses` and `with` clauses", Planned::Phase(3));
+                T::Keyword(Kw::Needs) => {
+                    let keyword = self.bump();
+                    let names = self.needs_list()?;
+                    if kind != FnKind::Signature || !self.cap_ops {
+                        let message = "only an operation of a `cap interface` has a `needs` clause, which names the permissions it needs (§9.2)";
+                        self.error(codes::UNEXPECTED_TOKEN, keyword.span, message);
+                    } else if needs.is_some() {
+                        let message = "an operation declares at most one `needs` clause; list its permissions in it";
+                        self.error(codes::UNEXPECTED_TOKEN, keyword.span, message);
+                    } else {
+                        needs = Some(names);
+                    }
+                }
+                // Reach comes in slice 3.2, and effect variables in slice 3.6.
+                T::Keyword(Kw::Uses | Kw::With) => {
+                    return self.not_implemented("`uses` and `with` clauses", Planned::Phase(3));
                 }
                 T::Keyword(Kw::Observes | Kw::Effects) => {
-                    return self.not_implemented("`observes` and `effects` permissions", Planned::Phase(3));
+                    let keyword = self.bump();
+                    if self.at(T::LParen) {
+                        self.perm_list()?;
+                    } else {
+                        self.type_expr()?;
+                    }
+                    let message = "a function declares no permissions; a `cap interface` declares them, and its operations say what they `needs` (§9.2)";
+                    self.error(codes::UNEXPECTED_TOKEN, keyword.span, message);
                 }
                 T::Keyword(Kw::Where | Kw::Invariant) => {
                     return self.not_implemented("refinement clauses", Planned::Phase(5));
@@ -1256,6 +1380,7 @@ impl Parser<'_> {
                 params,
                 ret,
                 fails,
+                needs: Vec::new(),
                 body: Some(body),
                 recovered: self.recovered,
             });
@@ -1274,7 +1399,8 @@ impl Parser<'_> {
             );
             self.block()?;
         }
-        Ok(FnDecl { name, generics, receiver, params, ret, fails, body: None, recovered: false })
+        let needs = needs.unwrap_or_default();
+        Ok(FnDecl { name, generics, receiver, params, ret, fails, needs, body: None, recovered: false })
     }
 
     fn param(&mut self) -> PResult<Param> {
@@ -1355,20 +1481,27 @@ impl Parser<'_> {
             }
         }
         self.close(&open, T::RParen, "`,` or `)`")?;
-        let ret = if self.eat(T::Arrow) { Some(self.nested(Self::type_expr)?) } else { None };
-        let fails = if self.eat(T::Keyword(Kw::Fails)) { Some(self.nested(Self::type_expr)?) } else { None };
+        let ret = if self.eat(T::Arrow) { Some(self.clause_type()?) } else { None };
+        let fails = if self.eat(T::Keyword(Kw::Fails)) { Some(self.clause_type()?) } else { None };
         if matches!(self.kind(), T::Keyword(Kw::Uses | Kw::With)) {
             return self.not_implemented("`uses` and `with` on function types", Planned::Phase(3));
         }
         Ok(TypeExprKind::Fn { params, ret, fails })
     }
 
+    /// A signature's result or error type, which a `uses` clause may follow.
+    fn clause_type(&mut self) -> PResult<TypeId> {
+        self.before_clause = true;
+        self.nested(Self::type_expr)
+    }
+
     fn type_expr(&mut self) -> PResult<TypeId> {
+        let clause = std::mem::take(&mut self.before_clause);
         let start = self.peek().span;
         let kind = match self.kind() {
             T::Ident => {
                 let name = self.ident("a type")?;
-                if self.at(T::LBracket) {
+                let kind = if self.at(T::LBracket) {
                     // A numeric type takes a unit, and `Array[T, N]` a length, which are not
                     // types (REFERENCE §4.2, §4.7).
                     let args = if takes_non_type_args(self.m.text(name.sym)) {
@@ -1380,7 +1513,12 @@ impl Parser<'_> {
                     TypeExprKind::Applied { name, args }
                 } else {
                     TypeExprKind::Named(name)
+                };
+                // A capability type's reach, as in `Dir[read] uses Out`, comes in slice 3.2 (§9.2).
+                if self.at_kw(Kw::Uses) && !clause {
+                    return self.not_implemented("`uses` on capability types", Planned::Phase(3));
                 }
+                kind
             }
             T::Keyword(Kw::Fn) => self.fn_type()?,
             T::Keyword(Kw::Scoped) => return self.not_implemented("`scoped` function types", Planned::Phase(3)),
@@ -2673,7 +2811,8 @@ fn item_keyword(kw: Kw) -> bool {
 /// Item keywords that belong to later phases, with what to call them.
 fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
     Some(match kw {
-        Kw::Cap => ("capability declarations", Planned::Phase(3)),
+        // `cap interface` is parsed, and `cap record` comes in slice 3.3.
+        Kw::Cap => ("capability records", Planned::Phase(3)),
         Kw::Effect => ("effect parameters", Planned::Phase(3)),
         Kw::Pred => ("`pred` functions", Planned::Phase(5)),
         Kw::Unit | Kw::Tag => ("units and tags", Planned::PastV1),

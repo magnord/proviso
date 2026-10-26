@@ -2,9 +2,9 @@
 
 This file lists the standard library items that phases 1 and 2 implement (OPEN_QUESTIONS Q36, P3). Each item is written as its declaration without a body. From phase 4, `proviso sig std` serves the same information from the installed toolchain (REFERENCE §16), and this file goes away.
 
-- **Phase 1** already has `System.stdout`, `Out.write_line` and `IoError`. Everything else here is phase 2.
+- **Phase 1** already has `System.stdout`, `Out.write_line` and `IoError`. Slice 3.1 adds `In.read_line` and the permissions of `Out` and `In`. Everything else here is phase 2.
 - **Contracts.** An `ensures` clause is listed where the verifier will need it (phase 5). The other items get theirs when `sig` exists (phase 4, T11). The toolchain implements these items natively and trusts them to meet their contracts, so the v1 profile doesn't check std contracts at runtime.
-- **Later phases.** `map`, `filter` and the other operations that take a closure that may fail need effect variables (§9.5), which arrive in phase 3. `Dir` and `In`'s operations also arrive in phase 3 (Q6). `File` and `Dir.sub` are not yet scheduled (Q6, Q36).
+- **Later phases.** `map`, `filter` and the other operations that take a closure that may fail need effect variables (§9.5), which arrive in phase 3. `Dir` also arrives in phase 3 (Q6). `File` and `Dir.sub` are not yet scheduled (Q6, Q36).
 
 ## The prelude
 
@@ -215,20 +215,23 @@ Every integer type has `try_from` and `wrapping_from`, and `Float` and `Float32`
 ## std.io
 
 ```proviso
-/// A text output stream, such as `System.stdout`.
-pub cap interface Out {
+/// A text output stream, such as `System.stdout` or `System.stderr`.
+pub cap interface Out effects(write) {
     /// Writes `text` followed by a newline.
-    fn write_line(self, text: Text) fails IoError
+    fn write_line(self, text: Text) fails IoError                needs write
 }
 
-/// A text input stream, such as `System.stdin`. Its operations arrive with `stdin` in phase 3.
-pub cap interface In {}
+/// A text input stream, such as `System.stdin`.
+pub cap interface In effects(read) {
+    /// The next line, without its `\n` or `\r\n`, or `None` at the end of the input.
+    fn read_line(self) -> Option[Text] fails IoError             needs read
+}
 
 /// An I/O failure. `show` gives the operating system's message.
 pub opaque record IoError derives(Show)
 ```
 
-`Out` has no permission list yet (Q6).
+Reading a line consumes it, so `read` is an `effects` permission (Q6). `System`'s `net`, `clock`, `random`, `env` and `process` fields have the types `Net[connect, listen]`, `Clock`, `Random`, `Env` and `Process[spawn]`, which no module exports yet and which have no operations yet. Their permissions are `effects` permissions (OPEN_QUESTIONS P5).
 
 ## std.pool
 

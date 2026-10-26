@@ -26,12 +26,12 @@ use proviso_syntax::intern::Symbol;
 use proviso_syntax::source::Span;
 
 use crate::decls::{
-    AdtDef, AdtId, AdtKind, Decls, FieldDef, FieldIdx, IfaceDef, IfaceId, IfaceMethod, ImplDef, ImplKey, Inhabited,
-    Pred, VariantDef, VariantIdx, matches_target,
+    AdtDef, AdtId, AdtKind, CapDef, Decls, FieldDef, FieldIdx, IfaceDef, IfaceId, IfaceMethod, ImplDef, ImplKey,
+    Inhabited, Pred, VariantDef, VariantIdx, matches_target,
 };
 use crate::exhaust::{Ctor, Space};
 use crate::infer::{Kind, Origin, Vars};
-use crate::types::{FloatTy, IntTy, Ty};
+use crate::types::{FloatTy, IntTy, Perms, Ty};
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Options {
@@ -56,8 +56,8 @@ pub type FnId = usize;
 /// Operations the toolchain provides directly in phase 1.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Builtin {
-    /// `Out.write_line(text: Text) fails IoError`
-    WriteLine,
+    /// `x.only::[p, …]()` on a capability, which narrows its type (REFERENCE §9.2).
+    Only,
     /// `Text.byte_len() -> Int`
     ByteLen,
     /// `Text.is_empty() -> Bool`, and the same for `List` and `Map`.
@@ -332,8 +332,11 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         main_lost: m.lost_fns.iter().any(|&sym| m.text(sym) == "main"),
         adts: Vec::new(),
         adt_vis: HashMap::new(),
+        cap_vis: HashMap::new(),
+        only_declared: HashSet::new(),
         iface_names: HashMap::new(),
         ifaces: Vec::new(),
+        cap_decls: HashSet::new(),
         inherent: HashMap::new(),
         rejected_abandon: HashSet::new(),
         rejected_abandon_for: Vec::new(),
@@ -341,6 +344,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         operators: Vec::new(),
         f: FnState::new(Ty::Unit, None),
         in_chain: false,
+        sibling_closure: false,
         markers: Vec::new(),
         inhabited: None,
         self_ty: None,
@@ -634,8 +638,8 @@ enum Flow {
     Waits(u32),
 }
 
-/// The fields of `System` that phase 3 adds (REFERENCE §9.1).
-const LATER_SYSTEM_FIELDS: &[&str] = &["fs", "net", "clock", "random", "env", "stdin", "stderr", "process"];
+/// The fields of `System` that come with `std.fs` in slice 3.5 (REFERENCE §9.1).
+const LATER_SYSTEM_FIELDS: &[&str] = &["fs"];
 
 struct Checker<'a> {
     m: &'a Module,
@@ -657,10 +661,17 @@ struct Checker<'a> {
     adts: Vec<AdtSrc<'a>>,
     /// The visibility of each of [`Checker::adts`].
     adt_vis: HashMap<AdtId, Visibility>,
+    /// The visibility of each of the module's capability interfaces, which are types.
+    cap_vis: HashMap<IfaceId, Visibility>,
+    /// The capability interfaces that declare an operation named `only`, which is rejected.
+    only_declared: HashSet<IfaceId>,
     /// The function being checked, or the record whose refinements are.
     f: FnState,
     /// Set while checking the postfix chain a `try` or `attempt` covers (REFERENCE §6.1).
     in_chain: bool,
+    /// Set while checking a closure whose expected type is another branch's, which it joins
+    /// rather than meets.
+    sibling_closure: bool,
     /// The enclosing `try` and `attempt` markers, innermost last.
     markers: Vec<Marker>,
     /// Which types have values (see [`Decls::inhabited`]), once every declaration is known.
@@ -668,6 +679,9 @@ struct Checker<'a> {
     /// The module's interfaces.
     iface_names: HashMap<Symbol, IfaceId>,
     ifaces: Vec<IfaceSrc<'a>>,
+    /// The names the module declares capability interfaces with, including those that are
+    /// rejected after they parse, such as a wrongly cased one.
+    cap_decls: HashSet<Symbol>,
     /// The methods and associated functions of each record and enum, in declaration order.
     inherent: HashMap<AdtId, Vec<Inherent>>,
     /// The methods of a rejected `impl Abandon`, whose `self` isn't reported as left over,
@@ -1179,6 +1193,8 @@ impl Checker<'_> {
                 Kind::Int => Ty::INT,
                 Kind::Float => Ty::Float(FloatTy::F64),
                 Kind::Any if open.quiet => Ty::Error,
+                // A capability whose permissions the values and places it met leave open.
+                Kind::Any if let Some(cap) = open.cap => Ty::cap(cap.iface, cap.solution()),
                 Kind::Any if open.never || open.hole => Ty::Never,
                 Kind::Any if open.unmarked && !open.owed => Ty::Error,
                 Kind::Any => {
@@ -1452,7 +1468,9 @@ impl Checker<'_> {
         let joined = path.join(".");
         let span = decl.path[0].span.to(decl.path[decl.path.len() - 1].span);
         let available: Option<Vec<(&str, Ty)>> = match path.as_slice() {
-            ["std", "io"] => Some(vec![("IoError", Ty::IoError), ("Out", Ty::out())]),
+            ["std", "io"] => {
+                Some(vec![("In", Ty::cap(IfaceId::IN, Perms::all(1))), ("IoError", Ty::IoError), ("Out", Ty::out())])
+            }
             // `ParseError` is the only item `std.text` declares (STD.md).
             ["std", "text"] => Some(vec![("ParseError", Ty::adt(AdtId::PARSE_ERROR))]),
             // A generic import names its type without type arguments, which each use gives.
@@ -1979,11 +1997,14 @@ impl Checker<'_> {
         if reach(vis) == 0 {
             return;
         }
-        let Some((record, record_vis)) = self.least_visible(ty) else { return };
-        if reach(record_vis) < reach(vis) {
-            let name = self.p.decls.adt(record).name.clone();
+        let Some((named, named_vis)) = self.least_visible(ty) else { return };
+        if reach(named_vis) < reach(vis) {
+            let name = match named {
+                Ok(record) => self.p.decls.adt(record).name.clone(),
+                Err(iface) => self.p.decls.iface(iface).name.clone(),
+            };
             let span = self.m.types[at].span;
-            self.too_visible(item, vis, &name, record_vis, span);
+            self.too_visible(item, vis, &name, named_vis, span);
         }
     }
 
@@ -2003,19 +2024,24 @@ impl Checker<'_> {
         self.error(codes::PRIVATE_IN_PUBLIC, span, message);
     }
 
-    /// The least visible module record or enum that `ty` mentions, the first one written of
-    /// those equally visible, which is the first private one if there is one. A shared part is looked at once, so a type that repeats a part
-    /// costs what its source does (issue #18).
-    fn least_visible(&self, ty: &Ty) -> Option<(AdtId, Visibility)> {
-        let mut least: Option<(AdtId, Visibility)> = None;
+    /// The least visible module record, enum or capability interface that `ty` mentions, the
+    /// first one written of those equally visible, which is the first private one if there
+    /// is one. A shared part is looked at once, so a type that repeats a part costs what its
+    /// source does (issue #18).
+    fn least_visible(&self, ty: &Ty) -> Option<(Result<AdtId, IfaceId>, Visibility)> {
+        let mut least: Option<(Result<AdtId, IfaceId>, Visibility)> = None;
         let mut seen = HashSet::new();
         let mut work = vec![ty];
         while let Some(ty) = work.pop() {
-            if let Ty::Adt(id, _) = ty
-                && let Some(&vis) = self.adt_vis.get(id)
+            let named = match ty {
+                Ty::Adt(id, _) => self.adt_vis.get(id).map(|&vis| (Ok(*id), vis)),
+                Ty::Cap(cap) => self.cap_vis.get(&cap.iface).map(|&vis| (Err(cap.iface), vis)),
+                _ => None,
+            };
+            if let Some((named, vis)) = named
                 && least.is_none_or(|(_, least)| reach(vis) < reach(least))
             {
-                least = Some((*id, vis));
+                least = Some((named, vis));
                 if reach(vis) == 0 {
                     break;
                 }
@@ -2036,9 +2062,14 @@ impl Checker<'_> {
         for item in &m.items {
             let ItemKind::Interface(decl) = &item.kind else { continue };
             let text = m.text(decl.name.sym);
-            let def = IfaceDef { name: text.into(), methods: Vec::new(), incomplete: decl.recovered };
+            let cap = decl.cap.as_ref().map(|perms| self.cap_def(decl.name, perms));
+            let def = IfaceDef { name: text.into(), cap, methods: Vec::new(), incomplete: decl.recovered };
             let id = self.p.decls.push_iface(def);
             self.ifaces.push(IfaceSrc { id, decl, vis: item.vis });
+            if decl.cap.is_some() {
+                self.cap_decls.insert(decl.name.sym);
+                self.cap_vis.insert(id, item.vis);
+            }
             let cased = self.pascal_case(decl.name, "interface");
             if !cased || prelude_type(text) {
                 if cased {
@@ -2058,6 +2089,63 @@ impl Checker<'_> {
                 self.iface_names.insert(decl.name.sym, id);
             }
         }
+    }
+
+    /// The permissions a `cap interface` named `name` declares, each once (REFERENCE §9.2). A
+    /// wrongly cased one stands for the one it misspells, so it is kept as written.
+    fn cap_def(&mut self, name: Ident, perms: &CapPerms) -> CapDef {
+        let mut def = CapDef { perms: Vec::new(), observes: Perms::NONE, lost: false };
+        let declared = perms.observes.iter().map(|p| (p, true)).chain(perms.effects.iter().map(|p| (p, false)));
+        for (perm, observes) in declared {
+            let text = self.m.text(perm.sym);
+            self.snake_case(*perm, "permission");
+            if def.perm(text).is_some() {
+                self.error(codes::DUPLICATE_NAME, perm.span, format!("permission `{text}` is declared twice"));
+                continue;
+            }
+            if def.perms.len() == Perms::MAX {
+                let what = format!(
+                    "capability interfaces with more than {} permissions, such as `{}`,",
+                    Perms::MAX,
+                    self.m.text(name.sym)
+                );
+                self.not_implemented(perm.span, &what, Planned::Unscheduled);
+                def.lost = true;
+                break;
+            }
+            if observes {
+                def.observes = def.observes.union(Perms::one(def.perms.len()));
+            }
+            def.perms.push(text.into());
+        }
+        def
+    }
+
+    /// The permissions of capability interface `iface` that `names` lists, each once, as an
+    /// operation's `needs`, a capability type's brackets or `only::[…]` write them. One that
+    /// isn't declared is reported, and left out, as is one written twice. `None` when one was.
+    fn perms_named(&mut self, iface: IfaceId, names: &[Ident], what: &str) -> (Perms, bool) {
+        let mut perms = Perms::NONE;
+        let mut ok = true;
+        for name in names {
+            let text = self.m.text(name.sym);
+            let def = self.p.decls.iface(iface);
+            match def.cap.as_ref().and_then(|cap| cap.perm(text)) {
+                Some(i) if perms.contains(i) => {
+                    self.error(codes::DUPLICATE_NAME, name.span, format!("{what} names `{text}` twice"));
+                    ok = false;
+                }
+                Some(i) => perms = perms.union(Perms::one(i)),
+                // It may be one of those past the limit, which was reported (§15.1).
+                None if def.cap.as_ref().is_some_and(|cap| cap.lost) => ok = false,
+                None => {
+                    let message = format!("`{}` declares no permission `{text}`", def.name);
+                    self.error(codes::UNKNOWN_MEMBER, name.span, message);
+                    ok = false;
+                }
+            }
+        }
+        (perms, ok)
     }
 
     /// Marks the prelude and standard library types that an `impl` block the parser rejected
@@ -2124,6 +2212,17 @@ impl Checker<'_> {
                 } else if duplicate {
                     self.error(codes::DUPLICATE_NAME, method.name.span, format!("method `{text}` is declared twice"));
                 }
+                // Every capability has `only`, which narrows its permissions (REFERENCE §9.2).
+                // The operation's calls may mean either, so they aren't checked (§15.1). An
+                // interface the parser rejected may not have been meant as a capability.
+                let only = cased && decl.cap.is_some() && text == "only";
+                if only {
+                    if !m.poisoned.contains(&decl.name.sym) {
+                        let message = "every capability has a method `only`, which narrows its permissions, so an operation can't be named `only`";
+                        self.error(codes::DUPLICATE_NAME, method.name.span, message);
+                    }
+                    self.only_declared.insert(id);
+                }
                 let receiver = method.receiver.expect("the parser keeps only interface methods with `self`");
                 let later = match receiver.mode {
                     ParamMode::Borrow | ParamMode::Take => None,
@@ -2167,7 +2266,8 @@ impl Checker<'_> {
                 if let Some(at) = method.fails {
                     self.exposes(decl.name, vis, &fails.clone().unwrap_or(Ty::Never), at);
                 }
-                if cased && !duplicate {
+                let (needs, _) = self.perms_named(id, &method.needs, "`needs`");
+                if cased && !duplicate && !only {
                     methods.push(IfaceMethod {
                         name: text.into(),
                         self_mode: receiver.mode,
@@ -2175,6 +2275,7 @@ impl Checker<'_> {
                         modes,
                         ret,
                         fails,
+                        needs,
                     });
                 }
             }
@@ -2617,17 +2718,33 @@ impl Checker<'_> {
             || self.iface_names.contains_key(&sym)
     }
 
-    /// Whether `sym` names a capability interface such as `Out`, which phase 3 lets programs
-    /// implement and use as constraints (REFERENCE §9.6).
+    /// Whether `sym` names a capability interface such as `Out`, which is a type of its own
+    /// rather than a constraint (REFERENCE §9.2).
     fn names_cap(&self, sym: Symbol) -> bool {
-        matches!(self.imports.get(&sym), Some(Import::Type(Ty::Cap(_))))
+        self.cap_named(sym).is_some()
+    }
+
+    /// The capability interface `sym` names: the module's, or one imported from the standard
+    /// library, such as `Out`.
+    fn cap_named(&self, sym: Symbol) -> Option<IfaceId> {
+        if self.poisoned.contains(&sym) {
+            return None;
+        }
+        match (self.iface_names.get(&sym), self.imports.get(&sym)) {
+            (Some(&id), _) if self.p.decls.iface(id).cap.is_some() => Some(id),
+            (_, Some(Import::Type(Ty::Cap(cap)))) => Some(cap.iface),
+            _ => None,
+        }
     }
 
     /// The interface a parameter's type names, when it is one, which makes the parameter
-    /// generic (REFERENCE §4.9).
+    /// generic (REFERENCE §4.9). A capability interface is a type of its own.
     fn param_iface(&self, t: TypeId) -> Option<Ident> {
         let TypeExprKind::Named(name) = self.m.types[t].kind else { return None };
-        if self.poisoned.contains(&name.sym) || self.generic_scope.iter().any(|(sym, _)| *sym == name.sym) {
+        if self.poisoned.contains(&name.sym)
+            || self.generic_scope.iter().any(|(sym, _)| *sym == name.sym)
+            || self.names_cap(name.sym)
+        {
             return None;
         }
         let iface = self.iface_names.contains_key(&name.sym) || IfaceId::prelude(self.m.text(name.sym)).is_some();
@@ -2641,20 +2758,21 @@ impl Checker<'_> {
         if self.poisoned.contains(&name.sym) {
             return None;
         }
+        // A capability interface always dispatches, so `x: T` with `T: Out` would say no more
+        // than `x: Out` (OPEN_QUESTIONS Q31).
+        if self.names_cap(name.sym) {
+            let message = format!(
+                "`{text}` is a capability interface, which is a type of its own, so it can't be a constraint; write the parameter's type as `{text}`"
+            );
+            self.error(codes::UNKNOWN_TYPE, name.span, message);
+            return None;
+        }
         if let Some(&id) = self.iface_names.get(&name.sym) {
             let own = self.ifaces.iter().find(|src| src.id == id).map_or(Visibility::Pub, |src| src.vis);
             if reach(own) < reach(vis) {
                 self.too_visible(item, vis, text, own, name.span);
             }
             return Some(id);
-        }
-        if self.names_cap(name.sym) {
-            self.not_implemented(
-                name.span,
-                "constraints that name capability interfaces such as `Out`",
-                Planned::Phase(3),
-            );
-            return None;
         }
         match IfaceId::prelude(text) {
             Some(iface @ (IfaceId::EQ | IfaceId::ORD | IfaceId::SHOW | IfaceId::HASH | IfaceId::COPY)) => Some(iface),
@@ -2782,6 +2900,15 @@ impl Checker<'_> {
             }
             return;
         }
+        // A capability type gets its operations from its interface. Whether it may have methods
+        // or implement interfaces of its own isn't decided (OPEN_QUESTIONS P5).
+        if let Ty::Cap(_) = target {
+            let what = format!("implementations for capability types such as `{}`", self.show(&target));
+            self.not_implemented(target_span, &what, Planned::Unscheduled);
+            self.declare_rejected(item, decl, &target);
+            self.unknown_ty(&target);
+            return;
+        }
         let own = matches!(&target, Ty::Adt(id, _) if self.adts.iter().any(|adt| adt.id == *id));
         let target_text = self.show(&target).to_string();
         let key = ImplKey::of(&target);
@@ -2842,14 +2969,9 @@ impl Checker<'_> {
             self.reject_impl(item, decl, &target, rejected);
             return;
         }
-        // Dispatch reads the type of the receiver's value, which `Never` has none of, and
-        // capabilities come in phase 3.
+        // Dispatch reads the type of the receiver's value, which `Never` has none of.
         let Some(key) = key else {
-            let (what, planned) = match target {
-                Ty::Cap(_) => ("implementations for capability types such as `Out`", Planned::Phase(3)),
-                _ => ("implementations for `Never`", Planned::Unscheduled),
-            };
-            self.not_implemented(target_span, what, planned);
+            self.not_implemented(target_span, "implementations for `Never`", Planned::Unscheduled);
             self.unknown_ty(&target);
             return;
         };
@@ -3008,13 +3130,14 @@ impl Checker<'_> {
         if self.poisoned.contains(&name.sym) {
             return Err(Rejected { unknown: true, bodies: true });
         }
+        // `cap record`s implement capability interfaces, in slice 3.3.
+        if self.names_cap(name.sym) {
+            let what = format!("implementations of capability interfaces such as `{text}`");
+            self.not_implemented(name.span, &what, Planned::Phase(3));
+            return Err(Rejected { unknown: true, bodies: false });
+        }
         if let Some(&id) = self.iface_names.get(&name.sym) {
             return Ok(id);
-        }
-        if self.names_cap(name.sym) {
-            let what = "implementations of capability interfaces such as `Out`";
-            self.not_implemented(name.span, what, Planned::Phase(3));
-            return Err(Rejected { unknown: true, bodies: false });
         }
         let Some(iface) = IfaceId::prelude(text) else {
             let message = if self.names_type(name.sym) {
@@ -3242,10 +3365,10 @@ impl Checker<'_> {
             TypeExprKind::Applied { name, ref args } => {
                 let text = m.text(name.sym);
                 // A rejected declaration's type arguments mean the same whichever one it was.
-                // A later phase's item, such as a capability, may take arguments that aren't
-                // types, as in `Logger[write]`.
+                // A later phase's item, such as a capability record, or a rejected capability
+                // interface takes permissions, which aren't types, as in `Logger[write]`.
                 if self.poisoned.contains(&name.sym) {
-                    if !m.planned_names.contains(&name.sym) {
+                    if !m.planned_names.contains(&name.sym) && !self.cap_decls.contains(&name.sym) {
                         for &arg in args.as_deref().unwrap_or_default() {
                             self.resolve_type(arg);
                         }
@@ -3255,6 +3378,9 @@ impl Checker<'_> {
                 if self.generic_scope.iter().any(|(sym, _)| *sym == name.sym) {
                     self.error(codes::UNKNOWN_TYPE, te.span, format!("`{text}` takes no type arguments"));
                     return Ty::Error;
+                }
+                if let Some(iface) = self.cap_named(name.sym) {
+                    return self.cap_type(iface, args.as_deref().unwrap_or_default());
                 }
                 // `x: Show[Int]` means `[T: Show[Int]]` (REFERENCE §4.9), and generic
                 // interfaces are not yet scheduled (OPEN_QUESTIONS P5; issue #53).
@@ -3299,13 +3425,41 @@ impl Checker<'_> {
                     None if prelude_enum(text).is_some() => {
                         self.error(codes::UNKNOWN_TYPE, te.span, format!("`{text}` takes no type arguments"))
                     }
-                    None => match later_type(text) {
+                    None => match later_type(text).or_else(|| unexported_type(text)) {
                         Some(planned) => self.not_implemented(name.span, &format!("`{text}` types"), planned),
                         None => self.error(codes::UNKNOWN_TYPE, name.span, format!("unknown type `{text}`")),
                     },
                 }
                 Ty::Error
             }
+        }
+    }
+
+    /// `Log[read, append]`: capability interface `iface` with the permissions `args` name, each
+    /// once (REFERENCE §9.2). A mistake in them makes the type unknown, so its uses aren't
+    /// reported (§15.1).
+    fn cap_type(&mut self, iface: IfaceId, args: &[TypeId]) -> Ty {
+        let m = self.m;
+        let mut names = Vec::new();
+        for &arg in args {
+            match m.types[arg].kind {
+                TypeExprKind::Named(name) => names.push(name),
+                _ => {
+                    let def = self.p.decls.iface(iface);
+                    let message = format!(
+                        "a capability type names permissions of `{}`, as in `{}[{}]`",
+                        def.name,
+                        def.name,
+                        self.p.decls.perm_names(iface, def.all_perms())
+                    );
+                    self.error(codes::UNKNOWN_TYPE, m.types[arg].span, message);
+                    return Ty::Error;
+                }
+            }
+        }
+        match self.perms_named(iface, &names, "a capability type") {
+            (perms, true) => Ty::cap(iface, perms),
+            _ => Ty::Error,
         }
     }
 
@@ -3369,6 +3523,10 @@ impl Checker<'_> {
             }
             None => {}
         }
+        // A bare capability interface has every permission it declares (OPEN_QUESTIONS Q6).
+        if let Some(iface) = self.cap_named(name.sym) {
+            return Ty::cap(iface, self.p.decls.iface(iface).all_perms());
+        }
         if self.iface_names.contains_key(&name.sym) || IfaceId::prelude(text).is_some() {
             let message = format!(
                 "`{text}` is an interface, not a type; only a parameter may have an interface type, which makes it generic (§4.9)"
@@ -3376,7 +3534,7 @@ impl Checker<'_> {
             self.error(codes::UNKNOWN_TYPE, name.span, message);
             return Ty::Error;
         }
-        match later_type(text) {
+        match later_type(text).or_else(|| unexported_type(text)) {
             Some(planned) => self.not_implemented(name.span, &format!("`{text}` types"), planned),
             None => self.error(codes::UNKNOWN_TYPE, name.span, format!("unknown type `{text}`")),
         }
@@ -4546,18 +4704,29 @@ impl Checker<'_> {
         }
     }
 
-    /// Reports that `e`'s type doesn't fit where it is. A mismatched place moves nothing. Any
+    /// Reports that `e`'s type doesn't fit where it is, as `code`. A mismatched place moves nothing. Any
     /// other value, such as a call, still takes what it is given, and the mismatch is about
     /// the value it gives.
-    fn mismatch(&mut self, e: ExprId, span: Span, message: String) {
+    fn mismatch(&mut self, e: ExprId, code: Code, span: Span, message: String) {
         if matches!(
             self.m.exprs[e].kind,
             ExprKind::Name(_) | ExprKind::It | ExprKind::Field { .. } | ExprKind::Index { .. }
         ) {
-            self.error_of(e, codes::TYPE_MISMATCH, span, message);
+            self.error_of(e, code, span, message);
         } else {
-            self.error(codes::TYPE_MISMATCH, span, message);
+            self.error(code, span, message);
             self.inner_errors += 1;
+        }
+    }
+
+    /// The code of a value of type `actual` where `expected` is required: E0603 when the two
+    /// differ only in the permissions of capabilities, which the value lacks (REFERENCE §9.2),
+    /// and E0301 otherwise.
+    fn mismatch_code(&self, expected: &Ty, actual: &Ty) -> Code {
+        if same_but_perms(&self.vars.defaulted(expected), &self.vars.defaulted(actual)) {
+            codes::PERMISSION_NOT_GRANTED
+        } else {
+            codes::TYPE_MISMATCH
         }
     }
 
@@ -4567,7 +4736,8 @@ impl Checker<'_> {
         if !self.vars.subsume(expected, &actual) {
             let span = self.span(e);
             let message = format!("expected `{}`, found `{}`", self.show(expected), self.show(&actual));
-            self.mismatch(e, span, message);
+            let code = self.mismatch_code(expected, &actual);
+            self.mismatch(e, code, span, message);
             // What the value leaves open has no other way to be given, and what the expected
             // type leaves open may have been the value's to give (§15.1).
             self.vars.poison(&actual);
@@ -5399,9 +5569,8 @@ impl Checker<'_> {
             ExprKind::Name(name) if self.unqualified_variant(name) => {}
             ExprKind::Name(name) if self.poisoned.contains(&name.sym) => {}
             ExprKind::Name(name) if self.aliases.contains_key(&name.sym) => self.alias_value(name),
-            // Phase 3 gives `System` the rest of its fields (REFERENCE §9.1).
-            ExprKind::Name(name) if m.text(name.sym) == "System" => {
-                self.not_implemented(callee_span, "constructions of `System`", Planned::Phase(3))
+            ExprKind::Name(name) if m.text(name.sym) == "System" && !self.poisoned.contains(&name.sym) => {
+                self.system_constructed(callee_span, "built");
             }
             ExprKind::Name(name) if let Some(target) = builtin_type(m.text(name.sym)) => {
                 return self.conversion(callee, name, target, targs, args, span);
@@ -5452,6 +5621,7 @@ impl Checker<'_> {
     /// by reference, so it can't change them or capture a capability yet (phase 3).
     fn closure(&mut self, e: ExprId, closure: &Closure, expected: Option<&Ty>) -> Ty {
         let m = self.m;
+        let sibling = std::mem::take(&mut self.sibling_closure);
         let span = self.span(e);
         let expected = expected.map(|ty| self.vars.resolve(ty));
         let mut rejected = false;
@@ -5492,6 +5662,7 @@ impl Checker<'_> {
                     let ty = self.resolve_type(t);
                     // The closure takes what the function type passes it (§9.4).
                     if let Some((_, given)) = given
+                        && !sibling
                         && !self.vars.subsume(&ty, &given)
                     {
                         let message = format!(
@@ -5499,7 +5670,8 @@ impl Checker<'_> {
                             self.show(&ty),
                             self.show(&given)
                         );
-                        self.error(codes::TYPE_MISMATCH, m.types[t].span, message);
+                        let code = self.mismatch_code(&ty, &given);
+                        self.error(code, m.types[t].span, message);
                         self.inner_errors += 1;
                         rejected = true;
                     }
@@ -5513,10 +5685,15 @@ impl Checker<'_> {
             };
             params.push(ty);
         }
-        let ret = match (closure.ret, &expected) {
-            (Some(t), _) => self.part_type(t, "a result"),
-            (None, Some((_, ret, _, _))) => ret.clone(),
-            (None, None) => self.vars.fresh(Kind::Any, Origin::Defaulted),
+        // Another branch's result only guides the body, whose own value gives the result, so
+        // the join decides the type (OPEN_QUESTIONS P5).
+        let (ret, guide) = match (closure.ret, &expected) {
+            (Some(t), _) => (self.part_type(t, "a result"), None),
+            (None, Some((_, ret, _, _))) if sibling => {
+                (self.vars.fresh(Kind::Any, Origin::Defaulted), Some(ret.clone()))
+            }
+            (None, Some((_, ret, _, _))) => (ret.clone(), None),
+            (None, None) => (self.vars.fresh(Kind::Any, Origin::Defaulted), None),
         };
         // An error type that only `Never` gives is `Never`, so a closure without one can't fail.
         let fails = match &expected {
@@ -5542,12 +5719,20 @@ impl Checker<'_> {
             let mutable = quiet || matches!(mode, ParamMode::Inout | ParamMode::InoutPartial);
             locals.push(self.declare(param.name, ty.clone(), mutable, "parameter", *mode != ParamMode::Take));
         }
-        let body = self.block_value(&closure.body, Some(&ret), true);
+        let body = self.block_value(&closure.body, Some(guide.as_ref().unwrap_or(&ret)), true);
         // A body that always leaves gives `Never`, however it leaves (OPEN_QUESTIONS Q33).
         if diverges_ty(&body) {
             let _ = self.vars.subsume(&ret, &Ty::Never);
-        } else if body != Ty::Error {
-            let _ = self.vars.subsume(&ret, &body);
+        } else if body != Ty::Error && !self.vars.subsume(&ret, &body) {
+            // The tail joins the result as a branch would, so a value that only fits the
+            // join, such as an `Int` where `Never` is required, is reported here.
+            if let Some(tail) = self.tail(&closure.body) {
+                let message = format!("expected `{}`, found `{}`", self.show(&ret), self.show(&body));
+                let code = self.mismatch_code(&ret, &body);
+                self.mismatch(tail, code, self.span(tail), message);
+                self.vars.poison(&body);
+                self.vars.quiet(&ret);
+            }
         }
         // A body that never fails gives the error type `Never`, as a call of a function
         // without `fails` does, so a type argument nothing else gives settles as `Never`.
@@ -6099,7 +6284,9 @@ impl Checker<'_> {
                 return self.iface_call(e, iface, method, targs, args, span, chain);
             }
             // `Set` and `Array` come later, also as the receivers of their functions (Q37).
+            let generic = self.generic_scope.iter().any(|(sym, _)| *sym == receiver_name.sym);
             if let Some(planned) = later_type(m.text(receiver_name.sym))
+                .or_else(|| unexported_type(m.text(receiver_name.sym)).filter(|_| !generic))
                 && !self.poisoned.contains(&receiver_name.sym)
             {
                 let what = format!("`{}` types", m.text(receiver_name.sym));
@@ -6121,13 +6308,8 @@ impl Checker<'_> {
             if let Some(ty) = builtin_type(m.text(receiver_name.sym)).filter(|ty| ty.is_numeric() || is_scalar(ty)) {
                 return self.scalar_call(e, &ty, receiver_name, method, targs, args, span, chain);
             }
-            let cap = self.names_cap(receiver_name.sym);
-            if cap {
-                let what = "calls of capability interface methods such as `Out.write_line(…)`";
-                self.not_implemented(receiver_name.span, what, Planned::Phase(3));
-            }
             // A rejected declaration may have had the name.
-            if cap || self.poisoned.contains(&receiver_name.sym) {
+            if self.poisoned.contains(&receiver_name.sym) {
                 self.rejected_args(args);
                 return Ty::Error;
             }
@@ -6143,6 +6325,14 @@ impl Checker<'_> {
             Ty::Adt(AdtId::LIST | AdtId::MAP | AdtId::POOL, _) if builtin_method(&open, name).is_some() => open,
             _ => self.force_receiver(&receiver_ty),
         };
+        if let Ty::Cap(cap) = &receiver_ty {
+            return self.cap_call(e, cap.iface, cap.perms, (receiver, &receiver_ty), method, targs, args, span, chain);
+        }
+        if let (Ty::Adt(AdtId::SYSTEM, _), "with") = (&receiver_ty, name) {
+            self.system_constructed(method.span, "copied with `with`");
+            self.rejected_args(args);
+            return Ty::Error;
+        }
         if let (Ty::Adt(id, _), "with") = (&receiver_ty, name)
             && self.p.decls.adt(*id).kind == AdtKind::Record
             && !self.p.decls.adt(*id).tuple
@@ -6235,6 +6425,117 @@ impl Checker<'_> {
                 Ty::Error
             }
         }
+    }
+
+    /// `x.f(…)` on a capability of `iface` with `perms`: an operation of its interface, which
+    /// the static type must permit, or `x.only::[…]()` (REFERENCE §9.2). A call the type
+    /// doesn't permit is still checked as the operation's, so nothing else is reported (§15.1).
+    #[allow(clippy::too_many_arguments)]
+    fn cap_call(
+        &mut self,
+        e: ExprId,
+        iface: IfaceId,
+        perms: Perms,
+        (receiver, receiver_ty): (ExprId, &Ty),
+        method: Ident,
+        targs: Option<&[TypeId]>,
+        args: &[Arg],
+        span: Span,
+        chain: bool,
+    ) -> Ty {
+        let name = self.m.text(method.sym);
+        if name == "only" {
+            if self.only_declared.contains(&iface) {
+                self.rejected_args(args);
+                return Ty::Error;
+            }
+            return self.only_call(e, iface, perms, receiver_ty, method, targs, args, span);
+        }
+        let def = self.p.decls.iface(iface);
+        let Some(j) = def.method(name) else {
+            if matches!(iface, IfaceId::NET | IfaceId::PROCESS | IfaceId::CLOCK | IfaceId::RANDOM | IfaceId::ENV) {
+                let what = format!("the operations of `{}`", def.name);
+                self.not_implemented(method.span, &what, Planned::Unscheduled);
+            } else if !def.incomplete
+                // A rejected `impl` for the capability type may have declared the method (§15.1).
+                && !self.unknown_tys.iter().any(|ty| matches!(ty, Ty::Cap(cap) if cap.iface == iface))
+            {
+                let message = format!("`{}` has no operation `{name}`", self.show(receiver_ty));
+                self.error(codes::UNKNOWN_MEMBER, method.span, message);
+            }
+            self.rejected_args(args);
+            return Ty::Error;
+        };
+        self.permits(iface, perms, j, receiver_ty, method.span);
+        self.dispatch_call(e, iface, j, (receiver, receiver_ty), method, targs, args, span, chain, false)
+    }
+
+    /// Reports a call of operation `j` of `iface` on a capability of type `ty`, whose
+    /// permissions `perms` lack some that it needs (REFERENCE §9.2).
+    fn permits(&mut self, iface: IfaceId, perms: Perms, j: usize, ty: &Ty, span: Span) {
+        let method = &self.p.decls.iface(iface).methods[j];
+        let missing = method.needs.minus(perms);
+        if missing == Perms::NONE {
+            return;
+        }
+        let (name, missing) = (method.name.clone(), self.p.decls.perm_names(iface, missing));
+        let message = format!(
+            "`{}` doesn't permit `{name}`, which needs `{missing}`; pass a capability that has it",
+            self.show(ty)
+        );
+        self.error(codes::PERMISSION_NOT_GRANTED, span, message);
+    }
+
+    /// `x.only::[read]()`: the capability `x` of `iface`, narrowed to the permissions it
+    /// names, which `x` must have (REFERENCE §9.2).
+    #[allow(clippy::too_many_arguments)]
+    fn only_call(
+        &mut self,
+        e: ExprId,
+        iface: IfaceId,
+        perms: Perms,
+        receiver_ty: &Ty,
+        method: Ident,
+        targs: Option<&[TypeId]>,
+        args: &[Arg],
+        span: Span,
+    ) -> Ty {
+        let m = self.m;
+        let Some(targs) = targs else {
+            let message = "`only` names the permissions it keeps, as in `x.only::[read]()`";
+            self.error(codes::TYPE_ARGUMENT_COUNT, method.span, message);
+            self.rejected_args(args);
+            return Ty::Error;
+        };
+        if !args.is_empty() {
+            let message = "`only` takes no arguments; it names the permissions it keeps in `::[…]`";
+            self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
+            self.rejected_args(args);
+        }
+        let mut names = Vec::new();
+        for &t in targs {
+            let TypeExprKind::Named(name) = m.types[t].kind else {
+                let message = "`only` names permissions, as in `x.only::[read]()`";
+                self.error(codes::UNKNOWN_TYPE, m.types[t].span, message);
+                return Ty::Error;
+            };
+            names.push(name);
+        }
+        let (kept, ok) = self.perms_named(iface, &names, "`only`");
+        if !ok {
+            return Ty::Error;
+        }
+        let missing = kept.minus(perms);
+        if missing != Perms::NONE {
+            let message = format!(
+                "`{}` lacks `{}`, so `only` can't keep it; `only` narrows a capability and never widens one",
+                self.show(receiver_ty),
+                self.p.decls.perm_names(iface, missing)
+            );
+            self.error(codes::PERMISSION_NOT_GRANTED, method.span, message);
+        }
+        self.p.res.insert(e, Res::Method(Builtin::Only));
+        Ty::cap(iface, kept)
     }
 
     /// `Int.parse(text)`: an associated function of a scalar type (STD.md). Only the integer
@@ -6627,12 +6928,15 @@ impl Checker<'_> {
         Ty::applied(AdtId::POOL, vec![element])
     }
 
-    /// The interface that `sym` names, the module's or the prelude's.
+    /// The interface that `sym` names: the module's, the prelude's, or a capability interface
+    /// imported from the standard library.
     fn iface_named(&self, sym: Symbol) -> Option<IfaceId> {
         if self.poisoned.contains(&sym) {
             return None;
         }
-        self.iface_names.get(&sym).copied().or_else(|| IfaceId::prelude(self.m.text(sym)))
+        (self.iface_names.get(&sym).copied())
+            .or_else(|| IfaceId::prelude(self.m.text(sym)))
+            .or_else(|| self.cap_named(sym))
     }
 
     /// `I.f(x, …)`, which calls `I`'s method on `x`, unlabelled (REFERENCE §3, H3).
@@ -6650,13 +6954,28 @@ impl Checker<'_> {
         let name = self.m.text(method.sym);
         let iface_text = self.iface_name(iface).to_string();
         let def = self.p.decls.iface(iface);
-        let found = def.method(name);
+        let (found, cap) = (def.method(name), def.cap.is_some());
         let rejected = match found {
             None if iface.methods_later() => {
                 self.not_implemented(method.span, &format!("calls of `{iface_text}`'s methods"), Planned::Unscheduled);
                 true
             }
             None if def.incomplete => true,
+            // `Dir.of(x)` makes a capability of a `cap record` (REFERENCE §9.3), in slice 3.3.
+            None if cap && name == "of" => {
+                self.not_implemented(
+                    method.span,
+                    &format!("capabilities made with `{iface_text}.of`"),
+                    Planned::Phase(3),
+                );
+                true
+            }
+            None if cap && name == "only" && self.only_declared.contains(&iface) => true,
+            None if cap && name == "only" => {
+                let message = "`only` has no qualified form; call it on the capability, as in `x.only::[…]()`";
+                self.error(codes::UNKNOWN_MEMBER, method.span, message);
+                true
+            }
             None => {
                 let message = format!("`{iface_text}` has no method `{name}`");
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);
@@ -6686,11 +7005,20 @@ impl Checker<'_> {
             return Ty::Error;
         }
         if !receiver_ty.is_unknown() && !self.implements(&receiver_ty, iface) {
-            let message = format!("`{}` does not implement `{iface_text}`", self.show(&receiver_ty));
             let at = self.span(first.value);
-            self.error(codes::MISSING_IMPLEMENTATION, at, message);
+            // A capability interface is a type, so its receiver is a value of that type (Q31).
+            if cap {
+                let message = format!("expected `{iface_text}`, found `{}`", self.show(&receiver_ty));
+                self.error(codes::TYPE_MISMATCH, at, message);
+            } else {
+                let message = format!("`{}` does not implement `{iface_text}`", self.show(&receiver_ty));
+                self.error(codes::MISSING_IMPLEMENTATION, at, message);
+            }
             self.rejected_args(rest);
             return Ty::Error;
+        }
+        if let Ty::Cap(cap) = &receiver_ty {
+            self.permits(iface, cap.perms, j, &receiver_ty, method.span);
         }
         self.dispatch_call(e, iface, j, (first.value, &receiver_ty), method, targs, rest, span, chain, true)
     }
@@ -6771,11 +7099,7 @@ impl Checker<'_> {
         }
         match (base_ty, text) {
             (Ty::Adt(AdtId::SYSTEM, _), text) if LATER_SYSTEM_FIELDS.contains(&text) => {
-                self.not_implemented(
-                    name.span,
-                    &format!("`System` fields other than `stdout`, such as `{text}`,"),
-                    Planned::Phase(3),
-                );
+                self.not_implemented(name.span, &format!("`sys.{text}` and the rest of `std.fs`"), Planned::Phase(3));
                 Ty::Error
             }
             (Ty::Error, _) => Ty::Error,
@@ -6793,6 +7117,15 @@ impl Checker<'_> {
                 Ty::Error
             }
         }
+    }
+
+    /// Reports a `System` that is `how`: built, copied with `with` or matched by a pattern.
+    /// The runtime gives `main` the only one (REFERENCE §9.1).
+    fn system_constructed(&mut self, span: Span, how: &str) {
+        let message = format!(
+            "a `System` can't be {how}; the runtime gives `main` the only one, and its fields are read by name, as in `sys.stdout` (§9.1)"
+        );
+        self.error(codes::SYSTEM_CONSTRUCTED, span, message);
     }
 
     /// Checks the arguments of `with`. They label the fields they replace, at least one, once
@@ -6831,12 +7164,6 @@ impl Checker<'_> {
                     self.span(arg.value),
                     "each argument of `with` is labelled with the field it replaces".to_string(),
                 )),
-                (Some((label, text)), None) if id == AdtId::SYSTEM && LATER_SYSTEM_FIELDS.contains(&text) => {
-                    let what = format!("`System` fields other than `stdout`, such as `{text}`,");
-                    self.not_implemented(label.span, &what, Planned::Phase(3));
-                    labels_reported = true;
-                    None
-                }
                 (Some((label, text)), None) => {
                     Some((codes::UNKNOWN_MEMBER, label.span, format!("`{record}` has no field `{text}`")))
                 }
@@ -7119,7 +7446,9 @@ impl Checker<'_> {
                 self.show(ty),
                 self.show(&actual)
             );
-            self.error(codes::TYPE_MISMATCH, span, message);
+            // The callee may store a capability with fewer permissions in it (OPEN_QUESTIONS P3).
+            let code = self.mismatch_code(ty, &actual);
+            self.error(code, span, message);
             self.vars.poison(&actual);
             self.vars.quiet(ty);
         }
@@ -7415,6 +7744,9 @@ impl Checker<'_> {
     /// and returns the type of either: their join, where a `Never` part of `known` gives way
     /// (OPEN_QUESTIONS P5). A mismatch is reported at `e`.
     fn joined(&mut self, e: ExprId, known: &Ty) -> Ty {
+        // Another branch's closure only guides this one's parameters, whose written types the
+        // join meets (OPEN_QUESTIONS P3, decided for phase 3).
+        self.sibling_closure = matches!(self.m.exprs[e].kind, ExprKind::Closure(_));
         let ty = self.expr(e, Some(known));
         if ty == Ty::Error {
             self.vars.quiet(known);
@@ -7424,7 +7756,8 @@ impl Checker<'_> {
         }
         self.vars.join(known, &ty).unwrap_or_else(|| {
             let message = format!("expected `{}`, found `{}`", self.show(known), self.show(&ty));
-            self.mismatch(e, self.span(e), message);
+            let code = self.mismatch_code(known, &ty);
+            self.mismatch(e, code, self.span(e), message);
             self.vars.poison(&ty);
             self.vars.quiet(known);
             self.mismatched.insert(e);
@@ -7832,6 +8165,10 @@ impl Checker<'_> {
         let m = self.m;
         let text = m.text(name.sym);
         let span = m.pats[pat].span;
+        if let Ty::Adt(AdtId::SYSTEM, _) = ty {
+            self.system_constructed(span, "matched by a pattern");
+            return self.unknown_parts(fields);
+        }
         // A collection has no constructor to match, as a scalar has none (REFERENCE §6.4).
         let adt = match ty {
             Ty::Adt(id, targs) if !self.p.decls.adt(*id).is_native() => Some((id, targs)),
@@ -8239,6 +8576,25 @@ fn holds_fn(ty: &Ty) -> bool {
     walk(ty, false, &mut HashSet::new())
 }
 
+/// Whether `a` and `b` are built alike and name the same capability interfaces, so they differ
+/// at most in permissions. Each pair of shared parts is walked once, so types that double at
+/// each level cost their depth (issue #55).
+fn same_but_perms(a: &Ty, b: &Ty) -> bool {
+    fn walk(a: &Ty, b: &Ty, seen: &mut HashSet<(usize, usize)>) -> bool {
+        let parts = |xs: &Arc<[Ty]>, ys: &Arc<[Ty]>, seen: &mut HashSet<(usize, usize)>| {
+            let key = (Arc::as_ptr(xs) as *const Ty as usize, Arc::as_ptr(ys) as *const Ty as usize);
+            xs.len() == ys.len() && (!seen.insert(key) || xs.iter().zip(ys.iter()).all(|(x, y)| walk(x, y, seen)))
+        };
+        match (a, b) {
+            (Ty::Cap(x), Ty::Cap(y)) => x.iface == y.iface,
+            (Ty::Adt(x, xs), Ty::Adt(y, ys)) => x == y && parts(xs, ys, seen),
+            (Ty::Fn(xm, xs), Ty::Fn(ym, ys)) => xm == ym && parts(xs, ys, seen),
+            (a, b) => a == b,
+        }
+    }
+    walk(a, b, &mut HashSet::new())
+}
+
 /// Whether a value of this type may never be produced. An error counts, because the code it
 /// stands for might diverge.
 fn diverges_ty(ty: &Ty) -> bool {
@@ -8285,9 +8641,6 @@ struct BuiltinSig {
 fn builtin_method(ty: &Ty, name: &str) -> Option<BuiltinSig> {
     let sig = |builtin, params, ret| BuiltinSig { builtin, params, ret, fails: None, takes: false, needs: None };
     Some(match (ty, name) {
-        (Ty::Cap(cap), "write_line") if cap.iface == IfaceId::OUT => {
-            BuiltinSig { fails: Some(Ty::IoError), ..sig(Builtin::WriteLine, vec![("text", Ty::Text)], Ty::Unit) }
-        }
         (Ty::Text, "byte_len") => sig(Builtin::ByteLen, vec![], Ty::INT),
         (Ty::Text, "is_empty") => sig(Builtin::IsEmpty, vec![], Ty::Bool),
         (Ty::Text, "trim") => sig(Builtin::Trim, vec![], Ty::Text),
@@ -8503,6 +8856,12 @@ fn prelude_type(name: &str) -> bool {
         || bare_variant(name).is_some()
         || later_type(name).is_some()
         || IfaceId::prelude(name).is_some()
+}
+
+/// The types of `System`'s fields that no module exports yet, so a program can't name them,
+/// though a module may declare its own (REFERENCE §9.1; OPEN_QUESTIONS P5).
+fn unexported_type(name: &str) -> Option<Planned> {
+    matches!(name, "Net" | "Clock" | "Random" | "Env" | "Process").then_some(Planned::Unscheduled)
 }
 
 /// Prelude types that later phases implement.
