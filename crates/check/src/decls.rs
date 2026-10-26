@@ -1312,7 +1312,8 @@ impl Decls {
         // A built-in type is qualified where a module type or interface has its name.
         let std = |name: &'static str, qualified: &'static str| {
             let shadowed = self.adts[AdtId::BUILT_IN..].iter().any(|adt| &*adt.name == name)
-                || self.ifaces[IfaceId::BUILT_IN.len()..].iter().any(|iface| &*iface.name == name);
+                || self.ifaces[IfaceId::BUILT_IN.len()..].iter().any(|iface| &*iface.name == name)
+                || names.iter().any(|param| &**param == name);
             if shadowed { qualified } else { name }
         };
         let list = |f: &mut fmt::Formatter, args: &[Ty]| -> fmt::Result {

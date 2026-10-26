@@ -334,6 +334,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         adt_vis: HashMap::new(),
         iface_names: HashMap::new(),
         ifaces: Vec::new(),
+        cap_decls: HashSet::new(),
         inherent: HashMap::new(),
         rejected_abandon: HashSet::new(),
         rejected_abandon_for: Vec::new(),
@@ -672,6 +673,8 @@ struct Checker<'a> {
     /// The module's interfaces.
     iface_names: HashMap<Symbol, IfaceId>,
     ifaces: Vec<IfaceSrc<'a>>,
+    /// The names the module declares capability interfaces with, rejected ones included.
+    cap_decls: HashSet<Symbol>,
     /// The methods and associated functions of each record and enum, in declaration order.
     inherent: HashMap<AdtId, Vec<Inherent>>,
     /// The methods of a rejected `impl Abandon`, whose `self` isn't reported as left over,
@@ -2048,6 +2051,9 @@ impl Checker<'_> {
             let def = IfaceDef { name: text.into(), cap, methods: Vec::new(), incomplete: decl.recovered };
             let id = self.p.decls.push_iface(def);
             self.ifaces.push(IfaceSrc { id, decl, vis: item.vis });
+            if decl.cap.is_some() {
+                self.cap_decls.insert(decl.name.sym);
+            }
             let cased = self.pascal_case(decl.name, "interface");
             if !cased || prelude_type(text) {
                 if cased {
@@ -3335,8 +3341,7 @@ impl Checker<'_> {
                 // A later phase's item, such as a capability record, or a rejected capability
                 // interface takes permissions, which aren't types, as in `Logger[write]`.
                 if self.poisoned.contains(&name.sym) {
-                    let cap = self.ifaces.iter().any(|src| src.decl.name.sym == name.sym && src.decl.cap.is_some());
-                    if !m.planned_names.contains(&name.sym) && !cap {
+                    if !m.planned_names.contains(&name.sym) && !self.cap_decls.contains(&name.sym) {
                         for &arg in args.as_deref().unwrap_or_default() {
                             self.resolve_type(arg);
                         }
@@ -6239,7 +6244,8 @@ impl Checker<'_> {
                 return self.iface_call(e, iface, method, targs, args, span, chain);
             }
             // `Set` and `Array` come later, also as the receivers of their functions (Q37).
-            if let Some(planned) = later_type(m.text(receiver_name.sym))
+            if let Some(planned) =
+                later_type(m.text(receiver_name.sym)).or_else(|| unexported_type(m.text(receiver_name.sym)))
                 && !self.poisoned.contains(&receiver_name.sym)
             {
                 let what = format!("`{}` types", m.text(receiver_name.sym));

@@ -62,3 +62,17 @@ fn functions(reader: Log[read], flag: Bool) -> Int {
     let b = apply(f: if flag { reads_only } else { appends }, x: reader)    // <- E0603
     return a + b
 }
+
+fn reads_with(f: fn(Log[read]) -> Int) -> Int {
+    return 0
+}
+
+fn appends_with(f: fn(Log) -> Int) -> Int {
+    return 1
+}
+
+fn higher(flag: Bool) -> Int {
+    let a = if flag { reads_with } else { appends_with }
+    let b = if flag { appends_with } else { reads_with }
+    return a(appends) + b(appends)                          // <- E0603, E0603
+}

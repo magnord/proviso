@@ -22,6 +22,7 @@ fn system(sys: System) -> Int {
     }
     let fs = sys.fs                                         // <- E0901
     let now = sys.clock.now()                               // <- E0901
+    let later = Clock.now(sys.clock)                        // <- E0901
     let nothing = sys.stdout.nosuch()                       // <- E0303
     return d
 }

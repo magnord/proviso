@@ -54,11 +54,35 @@ fn plain(p: Plain[read]) -> Text {
     return p.read()
 }
 
+impl Plain for Data {
+    fn read(self) -> Text {
+        return ""
+    }
+}
+
+fn plain_constrained[T: Plain](x: T) -> Int {
+    return 0
+}
+
 cap interface Again observes(read) observes(count) {                    // <- E0101
     fn read(self) -> Text                       needs read
+    fn count(self) -> Int                       needs count
+}
+
+fn again(a: Again[count]) -> Int {
+    return a.count()
 }
 
 cap fn capped() {                                                       // <- E0101
+}
+
+cap                                                                     // <- E0101
+interface Split observes(read) {
+    fn read(self) -> Text                       needs read
+}
+
+fn split(s: Split[read]) -> Text {
+    return s.read()
 }
 
 record Reaching {

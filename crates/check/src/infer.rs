@@ -1060,6 +1060,21 @@ impl Vars {
                 self.exact(x, ty).then(|| self.resolve(&Ty::Var(x)))
             }
             (Ty::Cap(x), Ty::Cap(y)) if x.iface == y.iface => Some(Ty::cap(x.iface, x.perms.union(y.perms))),
+            // A function that serves as either takes what either takes and gives what both
+            // give, so its parameters join and its result and error meet.
+            (Ty::Fn(modes, parts), Ty::Fn(other_modes, other_parts)) if modes == other_modes => {
+                if Arc::ptr_eq(parts, other_parts) {
+                    return Some(a.clone());
+                }
+                let mut met = vec![
+                    self.meet_in(&parts[0], &other_parts[0], pairs)?,
+                    self.meet_in(&parts[1], &other_parts[1], pairs)?,
+                ];
+                for ((x, y), mode) in parts[2..].iter().zip(&other_parts[2..]).zip(modes.iter()) {
+                    met.push(if mode.is_inout() { self.same(x, y)? } else { self.join(x, y)? });
+                }
+                Some(a.with_parts(met))
+            }
             (Ty::Adt(id, args), Ty::Adt(other, other_args)) if id == other && args.len() == other_args.len() => {
                 if Arc::ptr_eq(args, other_args) {
                     return Some(a.clone());
