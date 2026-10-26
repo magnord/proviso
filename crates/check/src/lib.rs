@@ -345,6 +345,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         f: FnState::new(Ty::Unit, None),
         in_chain: false,
         sibling_closure: false,
+        siblings: HashSet::new(),
         markers: Vec::new(),
         inhabited: None,
         self_ty: None,
@@ -672,6 +673,10 @@ struct Checker<'a> {
     /// Set while checking a closure whose expected type is another branch's, which it joins
     /// rather than meets.
     sibling_closure: bool,
+    /// The values whose expected type is what another branch, arm or element gave, rather
+    /// than one written or required (see [`Checker::joined`]). A branch that is an `if` or
+    /// `match` passes this on to its own branches.
+    siblings: HashSet<ExprId>,
     /// The enclosing `try` and `attempt` markers, innermost last.
     markers: Vec<Marker>,
     /// Which types have values (see [`Decls::inhabited`]), once every declaration is known.
@@ -4497,6 +4502,7 @@ impl Checker<'_> {
     /// `known` only if nothing else does (OPEN_QUESTIONS P5).
     fn element(&mut self, x: ExprId, known: Ty) -> Ty {
         self.copying = true;
+        self.siblings.insert(x);
         match self.joined(x, &known) {
             Ty::Never => self.vars.join(&known, &Ty::Never).unwrap_or(known),
             ty => ty,
@@ -5205,11 +5211,18 @@ impl Checker<'_> {
             None => self.option_fallbacks += 1,
         }
         // The form's own expected type gives the fallback its type when the value doesn't.
-        let expected = match &unwrapped {
-            Ty::Never => expected.cloned().filter(|ty| !ty.is_unknown()),
-            ty => Some(ty.clone()),
+        let inherited = self.siblings.remove(&e);
+        let (expected, sibling) = match &unwrapped {
+            Ty::Never => (expected.cloned().filter(|ty| !ty.is_unknown()), inherited),
+            ty => (Some(ty.clone()), true),
         };
         let expected = expected.as_ref();
+        if sibling {
+            self.mark_sibling(match fallback {
+                Fallback::Value(x) => Some(*x),
+                Fallback::Block(block) => self.tail(block),
+            });
+        }
         let (fallback_ty, tail) = match fallback {
             Fallback::Value(x) => {
                 self.copying = copying;
@@ -5696,9 +5709,10 @@ impl Checker<'_> {
             (None, None) => (self.vars.fresh(Kind::Any, Origin::Defaulted), None),
         };
         // An error type that only `Never` gives is `Never`, so a closure without one can't fail.
+        // Another branch's error is only a guide too, which the join widens (issue #61).
         let fails = match &expected {
-            Some((_, _, fails, _)) => fails.clone(),
-            None => self.vars.open_nevers(&Ty::Never),
+            Some((_, _, fails, _)) if !sibling => fails.clone(),
+            _ => self.vars.open_nevers(&Ty::Never),
         };
         // The closure's own state: its result and error, and no loops to leave.
         let base = self.f.locals.len() as u32;
@@ -5719,7 +5733,13 @@ impl Checker<'_> {
             let mutable = quiet || matches!(mode, ParamMode::Inout | ParamMode::InoutPartial);
             locals.push(self.declare(param.name, ty.clone(), mutable, "parameter", *mode != ParamMode::Take));
         }
-        let body = self.block_value(&closure.body, Some(guide.as_ref().unwrap_or(&ret)), true);
+        // A body without a value gives `()`, whatever another branch's result is (issue #61).
+        let expected_body = match &guide {
+            Some(_) if self.tail(&closure.body).is_none() => None,
+            Some(guide) => Some(guide),
+            None => Some(&ret),
+        };
+        let body = self.block_value(&closure.body, expected_body, true);
         // A body that always leaves gives `Never`, however it leaves (OPEN_QUESTIONS Q33).
         if diverges_ty(&body) {
             let _ = self.vars.subsume(&ret, &Ty::Never);
@@ -7659,10 +7679,14 @@ impl Checker<'_> {
             unreachable!("if_expr is called on `if` expressions")
         };
         let copying = std::mem::take(&mut self.tail_copying);
+        let inherited = self.siblings.remove(&e);
         // The bindings of an `is` in the condition scope over the then-block (REFERENCE §6.4).
         let base = self.f.locals.len() as u32;
         self.f.scopes.push(Vec::new());
         self.condition(*cond);
+        if inherited {
+            self.mark_sibling(self.tail(then_block));
+        }
         let then_ty = match (mode, else_branch) {
             (Mode::Stmt | Mode::Tail(_), _) => {
                 let tail = match mode {
@@ -7706,8 +7730,16 @@ impl Checker<'_> {
                 // The branches' types are joined, so either may give the other its type
                 // arguments and literal types (OPEN_QUESTIONS P5; issue #10). The then-branch's
                 // type, joined with the expected one, is what the else-branch meets.
-                let known = if then_ty.is_unknown() { expected.cloned() } else { Some(then_ty.clone()) };
+                // A written function type is what each branch's closure must be (issue #61).
+                let from_then = !then_ty.is_unknown() && !self.requires_fn(expected);
+                let known = if from_then { Some(then_ty.clone()) } else { expected.cloned() };
                 let expected = known.as_ref();
+                if inherited || from_then {
+                    self.mark_sibling(match branch {
+                        ElseBranch::Block(block) => self.tail(block),
+                        ElseBranch::If(nested) => Some(*nested),
+                    });
+                }
                 let else_ty = match branch {
                     ElseBranch::Block(block) => self.block_value(block, expected, copying),
                     ElseBranch::If(nested) => {
@@ -7745,8 +7777,8 @@ impl Checker<'_> {
     /// (OPEN_QUESTIONS P5). A mismatch is reported at `e`.
     fn joined(&mut self, e: ExprId, known: &Ty) -> Ty {
         // Another branch's closure only guides this one's parameters, whose written types the
-        // join meets (OPEN_QUESTIONS P3, decided for phase 3).
-        self.sibling_closure = matches!(self.m.exprs[e].kind, ExprKind::Closure(_));
+        // join meets (OPEN_QUESTIONS P3, decided for phase 3). A written type is required.
+        self.sibling_closure = matches!(self.m.exprs[e].kind, ExprKind::Closure(_)) && self.siblings.remove(&e);
         let ty = self.expr(e, Some(known));
         if ty == Ty::Error {
             self.vars.quiet(known);
@@ -7763,6 +7795,17 @@ impl Checker<'_> {
             self.mismatched.insert(e);
             Ty::Error
         })
+    }
+
+    /// Whether `expected`, a branching expression's, is a function type that each branch must
+    /// have, rather than one the branches' join decides.
+    fn requires_fn(&self, expected: Option<&Ty>) -> bool {
+        expected.is_some_and(|ty| matches!(self.vars.resolve(ty), Ty::Fn(..)))
+    }
+
+    /// Notes that `e`, if there is one, is expected to have the type another branch gave.
+    fn mark_sibling(&mut self, e: Option<ExprId>) {
+        self.siblings.extend(e);
     }
 
     /// Whether `tail`, the value a branch gives, has a type that didn't match the others'.
@@ -7962,6 +8005,8 @@ impl Checker<'_> {
         let mut mismatched = false;
         let mut leaves = Ty::Never;
         let mut tys = Vec::new();
+        let mut sibling = self.siblings.remove(&e);
+        let required = self.requires_fn(expected.as_ref());
         for arm in arms {
             // An arm's bindings scope over its guard and body.
             let base = self.f.locals.len() as u32;
@@ -7982,9 +8027,13 @@ impl Checker<'_> {
                 Mode::Value(_) => {
                     // Each arm's type is joined with what the others gave, in any order
                     // (OPEN_QUESTIONS P5; issue #10).
+                    if sibling {
+                        self.mark_sibling(self.tail(&arm.body));
+                    }
                     let ty = self.block_value(&arm.body, expected.as_ref(), copying);
-                    if !ty.is_unknown() {
+                    if !ty.is_unknown() && !required {
                         expected = Some(ty.clone());
+                        sibling = true;
                     }
                     mismatched |= self.mismatched_tail(self.tail(&arm.body));
                     // A closure the arm gives can't capture its bindings (Q34).

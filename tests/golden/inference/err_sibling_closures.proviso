@@ -1,0 +1,11 @@
+// phase: 3.2
+// expect-error: E0301
+// A written function type is what each branch's closure must be, so a mistake in either is
+// reported in its body, not at the whole `if` or `match` (issue #61).
+fn annotated(flag: Bool) {
+    let f: fn() -> Never = if flag { || 5 } else { || 6 }            // <- E0301, E0301
+    let g: fn() -> Never = match flag {
+        true => || 7                                                 // <- E0301
+        false => || 8                                                // <- E0301
+    }
+}
