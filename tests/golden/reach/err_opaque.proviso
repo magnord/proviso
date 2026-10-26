@@ -1,5 +1,6 @@
 // phase: 3.2
 // expect-error: E0101
+// expect-error: E0210
 // expect-error: E0602
 // An opaque record's `uses` must cover each field's reach, and is all a closure that
 // captures one may be said to reach, however little its fields reach. Only an opaque record
@@ -25,6 +26,12 @@ opaque record Writer uses Dir[read] {
 
 opaque record Wide uses (Dir[read], Log) {
     dir: Dir[read]
+}
+
+opaque record Twice uses Dir[read] {
+    dir: Dir[read]
+    dir: Dir[read]                                              // <- E0210
+    log: Log                                                    // <- E0602
 }
 
 opaque record Silent {

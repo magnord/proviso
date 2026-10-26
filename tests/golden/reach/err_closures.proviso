@@ -12,6 +12,10 @@ cap interface Dir observes(read) effects(write) {
     fn write_text(self, path: Text, text: Text)                 needs write
 }
 
+cap interface Log effects(append) {
+    fn append(self, line: Text)                                 needs append
+}
+
 record Holder {
     dir: Dir[read]
 }
@@ -123,4 +127,21 @@ fn late_nested(dir: Dir[read]) {
         takes_dir(d: p)
     }
     f(dir)
+}
+
+fn takes_log(l: Log) {}
+
+fn reads_only(f: fn() -> Text uses Dir[read]) -> Text {
+    return f()
+}
+
+fn late_written(log: Log) {
+    let f = |p| {
+        let t = reads_only(f: || {
+            debug(p)                                            // <- E0602
+            "p"
+        })
+        takes_log(l: p)
+    }
+    f(log)
 }

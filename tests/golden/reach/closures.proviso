@@ -43,3 +43,17 @@ fn closures(out: Out, sink: Sink, input: In) fails IoError {
 pub fn main(sys: keep System) fails IoError {
     try closures(out: sys.stdout, sink: Sink(out: sys.stderr), input: sys.stdin)
 }
+
+fn admits(f: fn() uses Out) {}
+
+fn takes_out(o: Out) {}
+
+// A capture whose type is settled later is admitted by the written function type the closure
+// is passed as.
+fn late_admitted(out: Out) {
+    let f = |p| {
+        admits(f: || debug(p))
+        takes_out(o: p)
+    }
+    f(out)
+}

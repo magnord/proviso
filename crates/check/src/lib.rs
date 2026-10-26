@@ -559,9 +559,10 @@ struct FnState {
     /// The function values `debug` is given, which it writes as their types.
     debugged: Vec<ExprId>,
     /// The captures whose type wasn't known when their closure's type was given, each with
-    /// the closure and where it is used, whose reach the closure's `uses` must cover once it
-    /// is (REFERENCE §9.4).
-    late_captures: Vec<(ExprId, LocalId, Span)>,
+    /// the closure, where it is used, and the written function type the closure was checked
+    /// as, if any. Once the capture's type is known, that type's `uses`, or else the
+    /// closure's own, must cover its reach (REFERENCE §9.4).
+    late_captures: Vec<(ExprId, LocalId, Span, Option<Ty>)>,
     /// How many of the function's locals, counted from the first, a closure, or a local that
     /// holds one, needs to stay alive: one more than the last local it captures, at any
     /// depth. A block can't yield a function value that needs one it declares.
@@ -1395,18 +1396,26 @@ impl Checker<'_> {
         }
         // Each closure around a capture captures it, and the innermost one is reported.
         let mut reported = HashSet::new();
-        for (e, id, span) in std::mem::take(&mut self.f.late_captures) {
+        for (e, id, span, written) in std::mem::take(&mut self.f.late_captures) {
             let ty = &self.f.locals[id.index()].ty;
             let reach = self.reach(ty);
-            let Some(Ty::Reach(uses)) = self.p.ty(e).fn_uses() else { continue };
-            if !ty.is_unknown() && !reach.covered_by(uses) && reported.insert((span.lo, span.hi)) {
-                let message = format!(
+            let Some(Ty::Reach(uses)) = written.as_ref().or(Some(self.p.ty(e))).and_then(Ty::fn_uses) else { continue };
+            if ty.is_unknown() || reach.covered_by(uses) || !reported.insert((span.lo, span.hi)) {
+                continue;
+            }
+            let message = match &written {
+                Some(written) => format!(
+                    "this closure captures a value of type `{}`, which reaches more than `{}` admits (§9.4)",
+                    self.show(ty),
+                    self.show(written)
+                ),
+                None => format!(
                     "this closure captures a value of type `{}`, which was inferred after the closure's type `{}`, so the closure's `uses` doesn't cover what it reaches; give the value a type where it is declared (§9.4)",
                     self.show(ty),
                     self.show(self.p.ty(e))
-                );
-                self.error(codes::REACH_NOT_ADMITTED, span, message);
-            }
+                ),
+            };
+            self.error(codes::REACH_NOT_ADMITTED, span, message);
         }
         self.vars.clear();
         // A closure owns its `take` parameters of a resource type, which a failure abandons.
@@ -1954,7 +1963,14 @@ impl Checker<'_> {
             let Some((_, decls)) = self.adts[k].variants.first().copied() else { continue };
             let fields: Vec<(Box<str>, Ty)> =
                 self.p.decls.adt(id).variant().fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-            for ((field, ty), decl) in fields.iter().zip(decls) {
+            // The variant keeps the first of fields declared twice, so a field is found by name.
+            let mut seen = HashSet::new();
+            for decl in decls {
+                if !seen.insert(decl.name.sym) {
+                    continue;
+                }
+                let text = m.text(decl.name.sym);
+                let Some((field, ty)) = fields.iter().find(|(field, _)| **field == *text) else { continue };
                 let reach = self.p.decls.reach(ty, &[]).without_params();
                 if *ty == Ty::Error || reach.covered_by(&declared) {
                     continue;
@@ -5784,6 +5800,9 @@ impl Checker<'_> {
         let m = self.m;
         let sibling = std::mem::take(&mut self.sibling_closure);
         let span = self.span(e);
+        // A written function type, rather than one a variable or another branch gave, is where
+        // the closure goes, so it may admit a capture whose type is settled later (§9.4).
+        let written = expected.filter(|ty| !sibling && matches!(ty.fn_uses(), Some(Ty::Reach(_)))).cloned();
         let expected = expected.map(|ty| self.vars.resolve(ty));
         let mut rejected = false;
         // Where the call it is passed to was rejected, or a value of another type is expected,
@@ -5925,7 +5944,7 @@ impl Checker<'_> {
         for (&(id, _), &span) in scope.captures.iter().zip(&scope.spans) {
             let ty = self.vars.zonk(&self.f.locals[id.index()].ty);
             if self.vars.has_open(&ty) {
-                self.f.late_captures.push((e, id, span));
+                self.f.late_captures.push((e, id, span, written.clone()));
             } else {
                 uses.extend(&self.reach(&ty));
             }
