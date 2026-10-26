@@ -2213,13 +2213,15 @@ impl Checker<'_> {
                     self.error(codes::DUPLICATE_NAME, method.name.span, format!("method `{text}` is declared twice"));
                 }
                 // Every capability has `only`, which narrows its permissions (REFERENCE §9.2).
-                // The operation's calls may mean either, so they aren't checked (§15.1).
+                // The operation's calls may mean either, so they aren't checked (§15.1). An
+                // interface the parser rejected may not have been meant as a capability.
                 let only = cased && decl.cap.is_some() && text == "only";
                 if only {
-                    let message = "every capability has a method `only`, which narrows its permissions, so an operation can't be named `only`";
-                    self.error(codes::DUPLICATE_NAME, method.name.span, message);
+                    if !m.poisoned.contains(&decl.name.sym) {
+                        let message = "every capability has a method `only`, which narrows its permissions, so an operation can't be named `only`";
+                        self.error(codes::DUPLICATE_NAME, method.name.span, message);
+                    }
                     self.only_declared.insert(id);
-                    incomplete = true;
                 }
                 let receiver = method.receiver.expect("the parser keeps only interface methods with `self`");
                 let later = match receiver.mode {
@@ -6968,6 +6970,7 @@ impl Checker<'_> {
                 );
                 true
             }
+            None if cap && name == "only" && self.only_declared.contains(&iface) => true,
             None if cap && name == "only" => {
                 let message = "`only` has no qualified form; call it on the capability, as in `x.only::[…]()`";
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);

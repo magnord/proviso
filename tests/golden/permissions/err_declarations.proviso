@@ -119,7 +119,13 @@ cap interface Narrowing observes(read) {
 
 fn narrowing(n: Narrowing) -> Int {
     let t: Text = n.read()                                              // <- E0301
+    let u = n.typo()                                                    // <- E0303
+    let v = Narrowing.typo(n)                                           // <- E0303
     return n.only() + Narrowing.only(n) + n.only::[read]().read()
+}
+
+interface PlainOnly observes(read) {                                    // <- E0101
+    fn only(self) -> Int                        needs read
 }
 
 interface Needy {
