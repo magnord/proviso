@@ -1,5 +1,5 @@
 // §F row 4: an observes operation may not call an effects operation
-// phase: 3
+// phase: 3.3
 // expect-error: E0601
 //
 // `read_text` needs only `read`, an observes permission, so it sees `self`

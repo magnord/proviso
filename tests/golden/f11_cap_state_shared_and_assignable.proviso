@@ -1,5 +1,5 @@
 // §F row 11: a cap record's effects operations update `state` through plain self
-// phase: 3
+// phase: 3.3
 //
 // `write_text` mutates a `state` map and assigns a `state` counter through a
 // plain `self` (§9.6). State is shared by every copy of the capability, so

@@ -1,6 +1,6 @@
 // phase: 2.1
 // expect-error: E0901
-// A record's generated validator comes with the verifier in phase 5, and capability records in slice 3.3. Uses of what they declare aren't reported again (REFERENCE §15.1).
+// A record's generated validator comes with the verifier in phase 5. Uses of what they declare aren't reported again (REFERENCE §15.1).
 unique record Token {
     id: Int
 }
@@ -19,7 +19,7 @@ fn later_types(t: Token) -> Int {
     return 0
 }
 
-cap record Counter {                                // <- E0901
+cap record Counter {
     n: Int
 }
 

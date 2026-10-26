@@ -5,6 +5,7 @@
 // expect-error: E0301
 // expect-error: E0303
 // expect-error: E0307
+// expect-error: E0316
 // expect-error: E0901
 // Only a `cap interface` declares permissions, and only its operations have `needs`
 // clauses, which name permissions it declares, once each (REFERENCE §9.2). A capability type
@@ -12,9 +13,9 @@
 // can't be a constraint (OPEN_QUESTIONS Q31). Every capability has `only`, so an operation
 // can't take its name. An `interface` that declares permissions is read as the `cap
 // interface` it was meant to be. A function declares no `uses`, since its parameters carry
-// its authority (OPEN_QUESTIONS Q41). `cap record` comes in a later slice, and
-// implementations for a capability type are not yet scheduled. A rejected declaration's
-// uses aren't reported again (REFERENCE §15.1).
+// its authority (OPEN_QUESTIONS Q41). Only a `cap record` implements a capability
+// interface (§9.6), and implementations for a capability type are not yet scheduled. A
+// rejected declaration's uses aren't reported again (REFERENCE §15.1).
 use std.io { Out }
 
 cap interface Log observes(read) effects(append) {
@@ -154,7 +155,7 @@ fn clocked() -> Int {
     return tick(x: helper(x: kept(x: 2)))
 }
 
-cap record Counter {                                                    // <- E0901
+cap record Counter {
     n: Int
 }
 
@@ -185,16 +186,16 @@ impl Show for Log {                                                     // <- E0
     }
 }
 
-impl Log for Data {                                                     // <- E0901
+impl Log for Data {                                                     // <- E0316
     fn read(self) -> Text {
         return ""
     }
 }
 
 fn shown(log: Log, c: Counter, p: Data) -> Text {
-    return f"{log.show()} {c.read()} {p.read()} {Log.read(p)}"
+    return f"{log.show()} {p.read()} {Log.read(p)}"
 }
 
 fn made(p: Data) -> Out {
-    return Out.of(p)                                                    // <- E0901
+    return Out.of(p)                                                    // <- E0301
 }

@@ -31,7 +31,7 @@ use crate::decls::{
 };
 use crate::exhaust::{Ctor, Space};
 use crate::infer::{Kind, Origin, Vars};
-use crate::types::{FN_PARAMS, FloatTy, IntTy, Perms, Reach, Ty};
+use crate::types::{CapTy, FN_PARAMS, FloatTy, IntTy, Perms, Reach, Ty};
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Options {
@@ -576,6 +576,26 @@ struct FnState {
     /// For an operation of a `cap record` that needs no `effects` permission, its interface
     /// and name. Its body sees `self` through the observes-only view (OPEN_QUESTIONS Q39).
     view: Option<(IfaceId, Box<str>)>,
+    /// In such an operation, the expressions that are `self` or a path from it.
+    view_paths: HashSet<ExprId>,
+    /// The ones that may leave the view, until a parent uses them in a way it allows.
+    escapes: HashMap<ExprId, Escape>,
+    /// The capabilities the view narrowed, and locals bound to one, with their types outside
+    /// the view, so a permission only the view took away is E0601 rather than E0603.
+    unnarrowed: HashMap<ExprId, Ty>,
+    unnarrowed_locals: HashMap<LocalId, Ty>,
+}
+
+/// A value in an operation with the observes-only view that could change what `self` reaches
+/// if it left the view (OPEN_QUESTIONS Q39).
+#[derive(Clone, Copy)]
+enum Escape {
+    /// `self`.
+    SelfValue,
+    /// A `cap record` at the end of a path from `self`.
+    Record,
+    /// Another value at the end of such a path, with `effects` reach.
+    Reaches,
 }
 
 impl FnState {
@@ -600,6 +620,10 @@ impl FnState {
             needs: HashMap::new(),
             local_needs: HashMap::new(),
             view: None,
+            view_paths: HashSet::new(),
+            escapes: HashMap::new(),
+            unnarrowed: HashMap::new(),
+            unnarrowed_locals: HashMap::new(),
         }
     }
 }
@@ -3912,6 +3936,9 @@ impl Checker<'_> {
         let start = self.diags.iter().count();
         self.fn_body(decl, body);
         self.settle();
+        if self.f.view.is_some() {
+            self.view_escapes();
+        }
         let found = self.found(start);
         // The resources it owns from the start: its `take` parameters and a `take self`.
         let info = &self.p.fns[id];
@@ -4238,6 +4265,7 @@ impl Checker<'_> {
         match &stmt.kind {
             StmtKind::Let { mutable, pat, ty, init } => {
                 let declared = ty.map(|t| self.resolve_type(t));
+                let typed = declared.is_some();
                 // Binding a value to a new name copies it (REFERENCE §4.8). Taking it apart
                 // matches it, which borrows its parts when it is borrowed, as in a `match` (§6.4).
                 let destructures = !matches!(self.m.pats[*pat].kind, PatKind::Bind(_) | PatKind::Wild);
@@ -4258,6 +4286,13 @@ impl Checker<'_> {
                 self.pattern_borrowed = destructures && self.borrowed_value(*init);
                 self.let_pattern(*pat, &ty, *mutable, false);
                 self.pattern_borrowed = false;
+                // A local bound to a capability the view narrowed is narrowed too.
+                if let Some(orig) = self.f.unnarrowed.get(init).cloned()
+                    && !typed
+                    && let Some(&id) = self.p.pat_local.get(*pat)
+                {
+                    self.f.unnarrowed_locals.insert(id, orig);
+                }
                 // The local holds what its function value captures alive (see `FnState::needs`).
                 let needs = self.value_needs(*init);
                 if needs > 0
@@ -4537,15 +4572,177 @@ impl Checker<'_> {
     /// the change is to the state that the copies share (OPEN_QUESTIONS P5). An operation
     /// with the observes-only view can't change its own (Q39).
     fn changes_state(&mut self, id: LocalId, span: Span) {
-        if id == LocalId(0)
-            && let Some((iface, op)) = &self.f.view
-        {
-            let message = format!(
-                "`{op}` needs no `effects` permission of `{}`, so it sees `self` through the observes-only view, which can't change its state (§9.6)",
-                self.iface_name(*iface)
-            );
+        if id == LocalId(0) && self.f.view.is_some() {
+            let message = self.view_message("its `state` is read-only");
             self.error(codes::EFFECTS_CALL_IN_OBSERVES, span, message);
         }
+    }
+
+    /// A message about operation `f.view`, which sees `self` through the observes-only view,
+    /// where `what` is the problem (OPEN_QUESTIONS Q39).
+    fn view_message(&self, what: &str) -> String {
+        let (iface, op) = self.f.view.as_ref().expect("an operation with the view");
+        format!(
+            "`{op}` needs no `effects` permission of `{}`, so it sees `self` through the observes-only view, where {what} (§9.6)",
+            self.iface_name(*iface)
+        )
+    }
+
+    /// In an operation with the observes-only view, notes how `e`, of type `ty`, uses `self`
+    /// (OPEN_QUESTIONS Q39). A path from `self` is read through, and a capability at its end
+    /// is narrowed to its `observes` permissions, as is what it uses. `self`, a `cap record`
+    /// at a path's end, and any other end with `effects` reach may be the base of a longer
+    /// path, or the receiver of an operation that needs no `effects` permission, which their
+    /// parents note. The rest leave the view, and are reported once the body is checked.
+    fn view_expr(&mut self, e: ExprId, ty: Ty) -> Ty {
+        match self.m.exprs[e].kind {
+            ExprKind::Name(_) => match self.p.res(e) {
+                Some(Res::Local(LocalId(0))) if ty != Ty::Error => {
+                    self.f.view_paths.insert(e);
+                    self.f.escapes.insert(e, Escape::SelfValue);
+                }
+                Some(Res::Local(id)) => {
+                    if let Some(orig) = self.f.unnarrowed_locals.get(&id).cloned() {
+                        self.f.unnarrowed.insert(e, orig);
+                    }
+                }
+                _ => {}
+            },
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } if self.f.view_paths.contains(&base) => {
+                self.f.escapes.remove(&base);
+                if ty == Ty::Error {
+                    return ty;
+                }
+                self.f.view_paths.insert(e);
+                match &ty {
+                    Ty::Cap(cap) => {
+                        let narrowed = Ty::Cap(std::sync::Arc::new(self.observes_only(cap)));
+                        if narrowed != ty {
+                            self.f.unnarrowed.insert(e, ty);
+                            return narrowed;
+                        }
+                    }
+                    Ty::Adt(id, _) if self.p.decls.adt(*id).cap => {
+                        self.f.escapes.insert(e, Escape::Record);
+                    }
+                    _ if self.effects_reach(&ty) => {
+                        self.f.escapes.insert(e, Escape::Reaches);
+                    }
+                    _ => {}
+                }
+            }
+            // The receiver of `I.f(x)` is its first argument.
+            ExprKind::MethodCall { receiver, ref args, .. } => match self.p.res(e) {
+                res @ Some(Res::Dispatch { qualified: true, .. }) => {
+                    if let Some(first) = args.first() {
+                        self.view_receiver(e, first.value, res);
+                    }
+                }
+                res => self.view_receiver(e, receiver, res),
+            },
+            _ => {}
+        }
+        ty
+    }
+
+    /// Call `call` on `receiver`, which resolved to `res`, in an operation with the
+    /// observes-only view. `self`, or a value at the end of a path from it that may leave
+    /// the view, may be the receiver of an operation that needs no `effects` permission
+    /// only (OPEN_QUESTIONS Q39).
+    fn view_receiver(&mut self, call: ExprId, receiver: ExprId, res: Option<Res>) {
+        let Some(escape) = self.f.escapes.remove(&receiver) else { return };
+        let decls = &self.p.decls;
+        match res {
+            // A call that resolved to nothing is reported already (§15.1).
+            None => return,
+            Some(Res::Dispatch { iface, method, .. })
+                if matches!(escape, Escape::SelfValue | Escape::Record)
+                    && decls
+                        .iface(iface)
+                        .cap
+                        .as_ref()
+                        .is_some_and(|cap| decls.iface(iface).methods[method].needs.is_subset(cap.observes)) =>
+            {
+                return;
+            }
+            _ => {}
+        }
+        let what = match escape {
+            Escape::SelfValue => "`self`".to_string(),
+            Escape::Record | Escape::Reaches => format!("this `{}`", self.show(&self.p.ty(receiver))),
+        };
+        let message = self.view_message(&format!(
+            "a call on {what} may change what `self` reaches; only operations of a `cap interface` that need no `effects` permission are called on it"
+        ));
+        let span = self.span(call);
+        self.error(codes::EFFECTS_CALL_IN_OBSERVES, span, message);
+    }
+
+    /// Reports each value that leaves the observes-only view, once the body is checked.
+    fn view_escapes(&mut self) {
+        let mut escapes: Vec<(ExprId, Escape)> = self.f.escapes.drain().collect();
+        escapes.sort_by_key(|(e, _)| self.span(*e).lo);
+        for (e, escape) in escapes {
+            let what = match escape {
+                Escape::SelfValue => {
+                    "`self` may only be read through, or be the receiver of an operation that needs no `effects` permission".to_string()
+                }
+                Escape::Record => format!(
+                    "this `{}` may only be read through, or be the receiver of an operation that needs no `effects` permission",
+                    self.show(&self.p.ty(e))
+                ),
+                Escape::Reaches => format!(
+                    "this `{}` reaches `effects` permissions, so it may only be read through",
+                    self.show(&self.p.ty(e))
+                ),
+            };
+            let message = self.view_message(&what);
+            let span = self.span(e);
+            self.error(codes::EFFECTS_CALL_IN_OBSERVES, span, message);
+        }
+    }
+
+    /// `cap` narrowed to its interface's `observes` permissions, and using only theirs.
+    fn observes_only(&self, cap: &CapTy) -> CapTy {
+        let observes = |iface: IfaceId| self.p.decls.iface(iface).cap.as_ref().map_or(Perms::NONE, |c| c.observes);
+        let mut uses = Reach::default();
+        for &(iface, perms) in cap.uses.caps() {
+            let kept = perms.intersect(observes(iface));
+            if kept != Perms::NONE {
+                uses.add_cap(iface, kept);
+            }
+        }
+        for &i in cap.uses.params() {
+            uses.extend(&Reach::param(i));
+        }
+        CapTy { iface: cap.iface, perms: cap.perms.intersect(observes(cap.iface)), uses }
+    }
+
+    /// Whether a value of type `ty` reaches an `effects` permission, or a type parameter.
+    fn effects_reach(&self, ty: &Ty) -> bool {
+        let reach = self.reach(ty);
+        !reach.params().is_empty()
+            || reach.caps().iter().any(|&(iface, perms)| {
+                let observes = self.p.decls.iface(iface).cap.as_ref().map_or(Perms::NONE, |c| c.observes);
+                perms.minus(observes) != Perms::NONE
+            })
+    }
+
+    /// Reports a call of operation `j` on `receiver`, a capability of `iface` with `perms`
+    /// that the observes-only view narrowed, which it would permit outside the view.
+    fn view_permits(&mut self, receiver: ExprId, iface: IfaceId, perms: Perms, j: usize, span: Span) -> bool {
+        let Some(Ty::Cap(orig)) = self.f.unnarrowed.get(&receiver) else { return false };
+        let method = &self.p.decls.iface(iface).methods[j];
+        if method.needs.is_subset(perms) || !method.needs.is_subset(orig.perms) {
+            return false;
+        }
+        let missing = self.p.decls.perm_names(iface, method.needs.minus(perms));
+        let name = method.name.clone();
+        let message = self.view_message(&format!(
+            "this capability has its `observes` permissions only, so it can't call `{name}`, which needs `{missing}`"
+        ));
+        self.error(codes::EFFECTS_CALL_IN_OBSERVES, span, message);
+        true
     }
 
     /// For function `f`, an operation of a capability interface that a `cap record` implements
@@ -5056,8 +5253,20 @@ impl Checker<'_> {
         let actual = self.expr(e, Some(expected));
         if !self.vars.subsume(expected, &actual) {
             let span = self.span(e);
-            let message = format!("expected `{}`, found `{}`", self.show(expected), self.show(&actual));
-            let code = self.mismatch_code(expected, &actual);
+            let mut message = format!("expected `{}`, found `{}`", self.show(expected), self.show(&actual));
+            let mut code = self.mismatch_code(expected, &actual);
+            // A capability the observes-only view narrowed fits where it would have outside it.
+            if let Some(orig) = self.f.unnarrowed.get(&e)
+                && [codes::PERMISSION_NOT_GRANTED, codes::REACH_NOT_ADMITTED].contains(&code)
+                && reach_mismatch(&self.vars.defaulted(expected), &self.vars.defaulted(orig), false).is_none()
+            {
+                code = codes::EFFECTS_CALL_IN_OBSERVES;
+                message = self.view_message(&format!(
+                    "this capability is `{}`, and `{}` is expected",
+                    self.show(&actual),
+                    self.show(expected)
+                ));
+            }
             self.mismatch(e, code, span, message);
             // What the value leaves open has no other way to be given, and what the expected
             // type leaves open may have been the value's to give (§15.1).
@@ -5081,6 +5290,7 @@ impl Checker<'_> {
         let ty = self.expr_kind(e, expected.as_ref(), chain, copying);
         let ty = self.vars.resolve(&ty);
         let ty = self.shallow(e, ty, before);
+        let ty = if self.f.view.is_some() { self.view_expr(e, ty) } else { ty };
         if copying {
             self.copied(e, &ty);
             self.consumed.insert(e);
@@ -6798,7 +7008,9 @@ impl Checker<'_> {
             self.rejected_args(args);
             return Ty::Error;
         };
-        self.permits(iface, perms, j, receiver_ty, method.span);
+        if !self.view_permits(receiver, iface, perms, j, method.span) {
+            self.permits(iface, perms, j, receiver_ty, method.span);
+        }
         self.dispatch_call(e, iface, j, (receiver, receiver_ty), method, targs, args, span, chain, false)
     }
 
