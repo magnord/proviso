@@ -1,1 +1,2 @@
 through a record
+[debug reach/closures.proviso:38:5] fn() fails IoError uses Out, fn() fails IoError uses Out, fn() -> Result[Option[Text], IoError] uses In, fn() fails IoError uses Out, fn(fn() fails IoError uses Out) fails IoError, fn() -> Int

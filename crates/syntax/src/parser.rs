@@ -457,7 +457,7 @@ impl Parser<'_> {
             // (OPEN_QUESTIONS P5).
             T::Keyword(Kw::Opaque) if matches!(self.nth(1), T::Keyword(Kw::Record | Kw::Unique | Kw::Resource)) => {
                 self.bump();
-                ItemKind::Record(self.kinded_record_decl()?)
+                ItemKind::Record(RecordDecl { opaque: true, ..self.kinded_record_decl()? })
             }
             T::Keyword(Kw::Opaque) => {
                 self.poison_declared_type();
@@ -465,7 +465,16 @@ impl Parser<'_> {
                 self.error(codes::UNEXPECTED_TOKEN, span, "`opaque` marks a record, as in `opaque record Cache { … }`");
                 return Err(());
             }
-            T::Keyword(Kw::Record | Kw::Unique | Kw::Resource) => ItemKind::Record(self.kinded_record_decl()?),
+            T::Keyword(Kw::Record | Kw::Unique | Kw::Resource) => {
+                let decl = self.kinded_record_decl()?;
+                // Another record's reach is its fields' (REFERENCE §9.2).
+                if let Some(&first) = decl.uses.as_ref().and_then(|uses| uses.first()) {
+                    let span = self.m.types[first].span;
+                    let message = "only an `opaque record` declares what it `uses`; another record reaches what its fields reach (§9.2)";
+                    self.error(codes::UNEXPECTED_TOKEN, span, message);
+                }
+                ItemKind::Record(decl)
+            }
             T::Keyword(Kw::Enum) => ItemKind::Enum(self.enum_decl()?),
             T::Keyword(Kw::Impl) => {
                 // The block is kept, so its methods are still checked.
@@ -727,9 +736,7 @@ impl Parser<'_> {
             self.diags.not_implemented(name.span, "generic resource records", Planned::Unscheduled);
             return Err(());
         }
-        if self.at(T::Keyword(Kw::Uses)) {
-            return self.not_implemented("the `uses` of a record", Planned::Phase(3));
-        }
+        let uses = if self.eat(T::Keyword(Kw::Uses)) { Some(self.uses_list()?) } else { None };
         let derives = self.derives()?;
         let open = self.expect(T::LBrace, "`{` and the record's fields")?;
         let mut fields = Vec::new();
@@ -763,7 +770,18 @@ impl Parser<'_> {
         if refinement.is_some() {
             derives = self.late_derives(derives, place)?;
         }
-        Ok(RecordDecl { name, generics, unique: false, resource: false, derives, fields, refinement, distinct: false })
+        Ok(RecordDecl {
+            name,
+            generics,
+            unique: false,
+            resource: false,
+            derives,
+            fields,
+            refinement,
+            distinct: false,
+            opaque: false,
+            uses,
+        })
     }
 
     /// `derives(Eq, Show)`, or nothing.
@@ -1100,6 +1118,8 @@ impl Parser<'_> {
             fields: vec![FieldDecl { name: value, ty: target, refinement: None }],
             refinement,
             distinct: true,
+            opaque: false,
+            uses: None,
         }))
     }
 
@@ -1209,6 +1229,30 @@ impl Parser<'_> {
         }
         self.close(&open, T::RParen, "`,` or `)`")?;
         Ok(names)
+    }
+
+    /// The capability types after `uses`: one, or several in parentheses, as in `uses (Dir[read],
+    /// Out)`, so the list ends before the next parameter of a function type (OPEN_QUESTIONS
+    /// Q41).
+    fn uses_list(&mut self) -> PResult<Vec<TypeId>> {
+        if !self.at(T::LParen) {
+            return Ok(vec![self.nested(Self::type_expr)?]);
+        }
+        let open = self.bump();
+        let mut uses = Vec::new();
+        while !self.at(T::RParen) {
+            uses.push(self.nested(Self::type_expr)?);
+            if !self.eat(T::Comma) {
+                break;
+            }
+        }
+        self.close(&open, T::RParen, "`,` or `)`")?;
+        if uses.is_empty() {
+            let message = "`uses` lists at least one capability type; a type without `uses` uses nothing";
+            self.error(codes::UNEXPECTED_TOKEN, open.span, message);
+            return Err(());
+        }
+        Ok(uses)
     }
 
     /// The permissions after `needs`, as in `needs read, list`.
@@ -1349,9 +1393,17 @@ impl Parser<'_> {
                         needs = Some(names);
                     }
                 }
-                // Reach comes in slice 3.2, and effect variables in slice 3.6.
-                T::Keyword(Kw::Uses | Kw::With) => {
-                    return self.not_implemented("`uses` and `with` clauses", Planned::Phase(3));
+                // A function's parameters carry its authority (REFERENCE §9.2, OPEN_QUESTIONS
+                // Q41). The list is read and dropped, so what follows is still checked.
+                T::Keyword(Kw::Uses) => {
+                    let keyword = self.bump();
+                    self.uses_list()?;
+                    let message = "a function declares no `uses`; its parameters carry its authority, so their types say what it may reach (§9.2)";
+                    self.error(codes::UNEXPECTED_TOKEN, keyword.span, message);
+                }
+                // Effect variables come in slice 3.6.
+                T::Keyword(Kw::With) => {
+                    return self.not_implemented("`with` clauses", Planned::Phase(3));
                 }
                 T::Keyword(Kw::Observes | Kw::Effects) => {
                     let keyword = self.bump();
@@ -1483,10 +1535,12 @@ impl Parser<'_> {
         self.close(&open, T::RParen, "`,` or `)`")?;
         let ret = if self.eat(T::Arrow) { Some(self.clause_type()?) } else { None };
         let fails = if self.eat(T::Keyword(Kw::Fails)) { Some(self.clause_type()?) } else { None };
-        if matches!(self.kind(), T::Keyword(Kw::Uses | Kw::With)) {
-            return self.not_implemented("`uses` and `with` on function types", Planned::Phase(3));
+        let uses = if self.eat(T::Keyword(Kw::Uses)) { self.uses_list()? } else { Vec::new() };
+        // Effect variables come in slice 3.6.
+        if self.at_kw(Kw::With) {
+            return self.not_implemented("`with` on function types", Planned::Phase(3));
         }
-        Ok(TypeExprKind::Fn { params, ret, fails })
+        Ok(TypeExprKind::Fn { params, ret, fails, uses })
     }
 
     /// A signature's result or error type, which a `uses` clause may follow.
@@ -1514,11 +1568,16 @@ impl Parser<'_> {
                 } else {
                     TypeExprKind::Named(name)
                 };
-                // A capability type's reach, as in `Dir[read] uses Out`, comes in slice 3.2 (§9.2).
+                // A capability type's reach, as in `Dir[read] uses Out` (§9.2). After a result or
+                // error type, `uses` is the function's.
                 if self.at_kw(Kw::Uses) && !clause {
-                    return self.not_implemented("`uses` on capability types", Planned::Phase(3));
+                    let span = start.to(self.prev_span());
+                    let base = self.m.types.alloc(TypeExpr { kind, span });
+                    self.bump();
+                    TypeExprKind::Uses { base, uses: self.uses_list()? }
+                } else {
+                    kind
                 }
-                kind
             }
             T::Keyword(Kw::Fn) => self.fn_type()?,
             T::Keyword(Kw::Scoped) => return self.not_implemented("`scoped` function types", Planned::Phase(3)),

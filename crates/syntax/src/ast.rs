@@ -250,6 +250,10 @@ pub struct RecordDecl {
     /// Declared `type Name = distinct T`: its one field is `value`, of type `T`, and its
     /// `where` names that value as `self` (REFERENCE §4.6).
     pub distinct: bool,
+    /// Declared `opaque record`, which declares its reach (REFERENCE §9.2).
+    pub opaque: bool,
+    /// The capability types after `uses`, which only an opaque record may have.
+    pub uses: Option<Vec<TypeId>>,
 }
 
 /// `enum Shape derives(Show) { Circle(radius: Float), Empty }` (REFERENCE §4.5).
@@ -301,8 +305,12 @@ pub enum TypeExprKind {
     SelfType,
     /// `(A, B)`, with at least two elements.
     Tuple(Vec<TypeId>),
-    /// `fn(A, inout B) -> R fails E` (REFERENCE §9.4). Without `-> R`, the result is `Unit`.
-    Fn { params: Vec<(ParamMode, TypeId)>, ret: Option<TypeId>, fails: Option<TypeId> },
+    /// `fn(A, inout B) -> R fails E uses C` (REFERENCE §9.4). Without `-> R`, the result is
+    /// `Unit`, and without `uses`, it uses nothing.
+    Fn { params: Vec<(ParamMode, TypeId)>, ret: Option<TypeId>, fails: Option<TypeId>, uses: Vec<TypeId> },
+    /// `Dir[read] uses Out`: a capability type and the capability types its implementation
+    /// uses (REFERENCE §9.2).
+    Uses { base: TypeId, uses: Vec<TypeId> },
 }
 
 pub struct Block {

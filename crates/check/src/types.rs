@@ -106,9 +106,13 @@ pub enum Ty {
     IoError,
     /// A capability interface type such as `Out`. Copies of its values share state (REFERENCE §9.6).
     Cap(Arc<CapTy>),
-    /// A function type: the modes of its parameters, and its parts, `[result, error,
-    /// parameters…]`, where the error of one that can't fail is `Never` (REFERENCE §9.4).
+    /// A function type: the modes of its parameters, and its parts, `[result, error, uses,
+    /// parameters…]`, where the error of one that can't fail is `Never` and `uses` is a
+    /// [`Ty::Reach`] (REFERENCE §9.4).
     Fn(Arc<[ParamMode]>, Arc<[Ty]>),
+    /// The `uses` of a function type, which is one of its parts so that inference can leave it
+    /// open as it does a type argument. No value has this type.
+    Reach(Arc<Reach>),
     /// The type parameter at this index of the generic declaration whose fields mention it,
     /// such as `T` in the prelude's `Option[T]`.
     Param(u32),
@@ -120,12 +124,105 @@ pub enum Ty {
     Error,
 }
 
-/// A capability type: its interface and the permissions it has (REFERENCE §9.2). Slice 3.2
-/// adds the capabilities it `uses`.
+/// Where a function type's parameters start in its parts: after its result, error and `uses`.
+pub const FN_PARAMS: usize = 3;
+
+/// A capability type: its interface, the permissions it has, and the capabilities its
+/// implementation `uses` (REFERENCE §9.2).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct CapTy {
     pub iface: IfaceId,
     pub perms: Perms,
+    pub uses: Reach,
+}
+
+/// What a value may reach (REFERENCE §9.2, §9.4): each capability interface it may reach a
+/// capability of, with the permissions it may use, and each type parameter whose type
+/// argument may reach more (OPEN_QUESTIONS Q31). Capabilities of one interface are one
+/// entry with the permissions of all of them, so a set has one spelling, and the `uses` of
+/// a capability it reaches are in it too. Effect parameters join it in slice 3.6.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
+pub struct Reach {
+    /// Sorted by interface, each once.
+    caps: Vec<(IfaceId, Perms)>,
+    /// Sorted, each once.
+    params: Vec<u32>,
+}
+
+impl Reach {
+    pub fn is_empty(&self) -> bool {
+        self.caps.is_empty() && self.params.is_empty()
+    }
+
+    pub fn caps(&self) -> &[(IfaceId, Perms)] {
+        &self.caps
+    }
+
+    pub fn params(&self) -> &[u32] {
+        &self.params
+    }
+
+    /// What a value of type parameter `i` without `Copy` may reach.
+    pub fn param(i: u32) -> Reach {
+        Reach { caps: Vec::new(), params: vec![i] }
+    }
+
+    /// What it reaches apart from type parameters.
+    pub fn without_params(mut self) -> Reach {
+        self.params.clear();
+        self
+    }
+
+    /// What a capability of `cap`'s type reaches: itself and what it uses.
+    pub fn of_cap(cap: &CapTy) -> Reach {
+        let mut reach = cap.uses.clone();
+        reach.add_cap(cap.iface, cap.perms);
+        reach
+    }
+
+    pub fn add_cap(&mut self, iface: IfaceId, perms: Perms) {
+        match self.caps.binary_search_by_key(&iface, |&(i, _)| i) {
+            Ok(at) => self.caps[at].1 = self.caps[at].1.union(perms),
+            Err(at) => self.caps.insert(at, (iface, perms)),
+        }
+    }
+
+    pub fn union(&self, other: &Reach) -> Reach {
+        let mut union = self.clone();
+        union.extend(other);
+        union
+    }
+
+    pub fn extend(&mut self, other: &Reach) {
+        for &(iface, perms) in &other.caps {
+            self.add_cap(iface, perms);
+        }
+        for &i in &other.params {
+            if let Err(at) = self.params.binary_search(&i) {
+                self.params.insert(at, i);
+            }
+        }
+    }
+
+    /// What both reach: each interface both reach, with the permissions both have.
+    pub fn intersect(&self, other: &Reach) -> Reach {
+        let caps = (self.caps.iter())
+            .filter_map(|&(iface, perms)| other.perms(iface).map(|theirs| (iface, perms.intersect(theirs))))
+            .collect();
+        let params = self.params.iter().copied().filter(|i| other.params.contains(i)).collect();
+        Reach { caps, params }
+    }
+
+    fn perms(&self, iface: IfaceId) -> Option<Perms> {
+        self.caps.binary_search_by_key(&iface, |&(i, _)| i).ok().map(|at| self.caps[at].1)
+    }
+
+    /// Whether `other` covers this: it reaches each interface this does, with at least its
+    /// permissions, and each type parameter (OPEN_QUESTIONS P3, decided for phase 3).
+    pub fn covered_by(&self, other: &Reach) -> bool {
+        self.caps.iter().all(|&(iface, perms)| other.perms(iface).is_some_and(|theirs| perms.is_subset(theirs)))
+            && self.params.iter().all(|i| other.params.contains(i))
+    }
 }
 
 /// A set of the permissions one capability interface declares, as bits in the order it
@@ -185,12 +282,21 @@ impl Ty {
         if args.contains(&Ty::Error) { Ty::Error } else { Ty::Adt(id, args.into()) }
     }
 
-    /// The function type with these parameters, result and error. A part that has an error
-    /// makes the whole type one, as [`Ty::applied`] does.
+    /// The function type with these parameters, result and error, which uses nothing. A part
+    /// that has an error makes the whole type one, as [`Ty::applied`] does.
     pub fn func(modes: Vec<ParamMode>, params: Vec<Ty>, ret: Ty, fails: Ty) -> Ty {
-        let mut parts = vec![ret, fails];
+        Ty::func_uses(modes, params, ret, fails, Ty::reach(Reach::default()))
+    }
+
+    /// [`Ty::func`] with `uses`, a [`Ty::Reach`] or a variable for one.
+    pub fn func_uses(modes: Vec<ParamMode>, params: Vec<Ty>, ret: Ty, fails: Ty, uses: Ty) -> Ty {
+        let mut parts = vec![ret, fails, uses];
         parts.extend(params);
         Ty::func_parts(modes.into(), parts)
+    }
+
+    pub fn reach(reach: Reach) -> Ty {
+        Ty::Reach(Arc::new(reach))
     }
 
     fn func_parts(modes: Arc<[ParamMode]>, parts: Vec<Ty>) -> Ty {
@@ -270,9 +376,14 @@ impl Ty {
         Ty::adt(AdtId::SYSTEM)
     }
 
-    /// `iface` with the permissions `perms`.
+    /// `iface` with the permissions `perms`, which uses nothing.
     pub fn cap(iface: IfaceId, perms: Perms) -> Ty {
-        Ty::Cap(Arc::new(CapTy { iface, perms }))
+        Ty::cap_uses(iface, perms, Reach::default())
+    }
+
+    /// `iface` with the permissions `perms`, which uses `uses`.
+    pub fn cap_uses(iface: IfaceId, perms: Perms, uses: Reach) -> Ty {
+        Ty::Cap(Arc::new(CapTy { iface, perms, uses }))
     }
 
     /// `std.io`'s `Out`, with its one permission, `write` (OPEN_QUESTIONS Q6).
@@ -283,7 +394,16 @@ impl Ty {
     /// A function type's result, error and parameters.
     pub fn fn_parts(&self) -> Option<(&[ParamMode], &Ty, &Ty, &[Ty])> {
         match self {
-            Ty::Fn(modes, parts) => Some((modes, &parts[0], &parts[1], &parts[2..])),
+            Ty::Fn(modes, parts) => Some((modes, &parts[0], &parts[1], &parts[FN_PARAMS..])),
+            _ => None,
+        }
+    }
+
+    /// A function type's `uses`: a [`Ty::Reach`], or a variable for one while inference
+    /// leaves it open.
+    pub fn fn_uses(&self) -> Option<&Ty> {
+        match self {
+            Ty::Fn(_, parts) => Some(&parts[2]),
             _ => None,
         }
     }

@@ -83,7 +83,7 @@ fn constructors(decls: &Decls, inhabited: &Inhabited, ty: &Ty) -> Option<Vec<(Ct
         Ty::Bool => Some(vec![(Ctor::Bool(false), Vec::new()), (Ctor::Bool(true), Vec::new())]),
         Ty::Unit => Some(vec![(Ctor::Unit, Vec::new())]),
         // A variable left here has been reported as one that can't be inferred.
-        Ty::Never | Ty::Error | Ty::Var(_) => Some(Vec::new()),
+        Ty::Never | Ty::Error | Ty::Var(_) | Ty::Reach(_) => Some(Vec::new()),
         // A type parameter stands for any type, so its values can't be listed.
         Ty::Int(_) | Ty::Float(_) | Ty::Char | Ty::Text | Ty::IoError | Ty::Cap(_) | Ty::Fn(..) | Ty::Param(_) => None,
     }

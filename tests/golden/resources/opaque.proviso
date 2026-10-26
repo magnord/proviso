@@ -1,7 +1,7 @@
 // phase: 2.8
 // An `opaque` record hides its fields from other modules (REFERENCE §9.2). A program is one
 // module in phase 2, so inside it an `opaque` record is used like any other, and it may be
-// `unique` or a `resource`. What it `uses` is checked against its fields in phase 3.
+// `unique` or a `resource`. What it `uses` covers what its fields reach.
 use std.io { IoError }
 
 opaque record Secret {

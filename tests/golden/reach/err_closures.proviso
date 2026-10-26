@@ -50,7 +50,7 @@ fn held(h: Holder) -> Text {
     return g(|| h.dir.read_text(path: "b"))                     // <- E0602
 }
 
-fn generic[T, C: Copy](x: T, c: C) -> Text {
+fn generic[T, C: Copy](x: T, xs: List[T], c: C, cs: List[C]) -> Text {
     let a = g(|| {                                              // <- E0602
         debug(x)
         "x"
@@ -59,15 +59,23 @@ fn generic[T, C: Copy](x: T, c: C) -> Text {
         debug(c)
         "c"
     })
-    return f"{a}{b}"
+    let d = g(|| {                                              // <- E0602
+        debug(xs)
+        "xs"
+    })
+    let e = g(|| {
+        debug(cs)
+        "cs"
+    })
+    return f"{a}{b}{d}{e}"
 }
 
 fn takes_dir(d: Dir[read]) {}
 
 fn late(dir: Dir[read]) {
     let f = |p| {
-        let t = g(|| {                                          // <- E0602
-            debug(p)
+        let t = g(|| {
+            debug(p)                                              // <- E0602
             "p"
         })
         takes_dir(d: p)
