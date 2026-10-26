@@ -1,0 +1,52 @@
+// phase: 3.3
+// expect-exit: 70
+// expect-report: defect reentrant_call
+// Calls on one capability object run one at a time, so a call through a capability handle
+// to an object whose operation is still running is a defect (REFERENCE §9.6). Inside an
+// operation, `self.count()` is a direct call, which is ordinary, and `Counter.of(self).count()`
+// is a handle call back into the same object (OPEN_QUESTIONS Q30). A handle to another
+// object of the same record is a different object, so calling it is not a re-entry.
+use std.io { Out }
+
+cap interface Counter observes(read) effects(bump) {
+    fn count(self) -> Int                                       needs read
+    fn bump(self) -> Int                                        needs bump
+    fn bump_and_ask(self, other: Counter[read]) -> Int          needs bump
+    fn recount(self) -> Int                                     needs bump
+}
+
+cap record Tally {
+    out: Out
+    state total: Int
+}
+
+impl Counter for Tally {
+    fn count(self) -> Int {
+        return self.total
+    }
+
+    fn bump(self) -> Int {
+        self.total += 1
+        return self.count()
+    }
+
+    fn bump_and_ask(self, other: Counter[read]) -> Int {
+        self.total += 1
+        let _ = attempt self.out.write_line(f"bumped to {self.count()}, asking")
+        return other.count()
+    }
+
+    fn recount(self) -> Int {
+        self.total += 1
+        let _ = attempt self.out.write_line(f"recounting at {self.count()}")
+        return Counter.of(self).count()
+    }
+}
+
+pub fn main(sys: keep System) {
+    let a = Counter.of(Tally(out: sys.stdout, total: 0))
+    let b = Counter.of(Tally(out: sys.stdout, total: 10))
+    let _ = attempt sys.stdout.write_line(f"other object: {a.bump_and_ask(other: b)}")
+    let _ = attempt sys.stdout.write_line(f"same object: {a.recount()}")
+    let _ = attempt sys.stdout.write_line("not reached")
+}

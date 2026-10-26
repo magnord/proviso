@@ -1,0 +1,148 @@
+// phase: 3.3
+// expect-error: E0601
+// expect-error: E0603
+// An operation that needs no `effects` permission sees `self` through an observes-only view
+// (REFERENCE §9.2; OPEN_QUESTIONS Q39). A path from `self` may be read through, and a
+// capability at its end is narrowed to its `observes` permissions, as is what it uses. Its
+// `state` is read-only. `self`, and another `cap record` at the end of a path, may be only
+// the root of a path or the receiver of an operation of its own that needs no `effects`
+// permission. Any other value with `effects` reach can't be bound, passed or returned. A
+// closure may capture `self`, since its body is checked with the same view. Each way out of
+// the view is E0601, also through a local bound to a narrowed capability. A permission the
+// static type never had is E0603, as anywhere else.
+use std.io { Out }
+
+enum StoreError {
+    NotFound(key: Text)
+}
+
+cap interface Log observes(peek) effects(append) {
+    fn peek(self) -> Text                                       needs peek
+    fn append(self, line: Text)                                 needs append
+}
+
+cap interface Store observes(read) effects(write) {
+    fn read_text(self, key: Text) -> Text fails StoreError      needs read
+    fn size(self) -> Int                                        needs read
+    fn write_text(self, key: Text, text: Text)                  needs write
+    fn again(self) -> Self                                      needs read
+    fn name(self) -> Text
+}
+
+record Sinks {
+    label: Text
+    out: Out
+    logs: List[Log]
+}
+
+cap record Audited {
+    log: Log
+    reader: Log[peek]
+    sinks: Sinks
+    inner: Plain
+    state files: Map[Text, Text]
+    state reads: Int
+}
+
+cap record Plain {
+    state n: Int
+}
+
+impl Store for Plain {
+    fn read_text(self, key: Text) -> Text fails StoreError {
+        fail StoreError.NotFound(key: key)
+    }
+
+    fn size(self) -> Int {
+        return self.n
+    }
+
+    fn write_text(self, key: Text, text: Text) {
+        self.n += 1
+    }
+
+    fn again(self) -> Self {
+        return Plain(n: self.n)
+    }
+
+    fn name(self) -> Text {
+        return "plain"
+    }
+}
+
+fn appends(log: Log[append]) {
+    log.append("x")
+}
+
+fn peeks(log: Log[peek]) -> Text {
+    return log.peek()
+}
+
+fn takes_store(s: Audited) -> Int {
+    return 0
+}
+
+fn takes_sinks(s: Sinks) -> Int {
+    return 0
+}
+
+impl Store for Audited {
+    // What the view allows.
+    fn read_text(self, key: Text) -> Text fails StoreError {
+        let log = self.log
+        let seen = f"{self.log.peek()} {log.peek()} {peeks(log: self.log)} {self.reader.peek()}"
+        let label = self.sinks.label
+        let first = self.sinks.logs[0]
+        let count = self.files.len() + self.size() + self.inner.size() + Store.size(self) + self.reads
+        let text = self.files.get(key) else fail StoreError.NotFound(key: key)
+        return f"{seen} {label} {first.peek()} {count} {text}"
+    }
+
+    // Calls the view forbids.
+    fn size(self) -> Int {
+        self.log.append("size")                                 // <- E0601
+        appends(log: self.log)                                  // <- E0601
+        self.sinks.logs[0].append("size")                       // <- E0601
+        self.write_text(key: "k", text: "v")                    // <- E0601
+        Store.write_text(self, key: "k", text: "v")             // <- E0601
+        self.inner.write_text(key: "k", text: "v")              // <- E0601
+        self.reader.append("never")                             // <- E0603
+        let out = self.sinks.out
+        out.write_line("x") else {}                             // <- E0601
+        return self.files.len()
+    }
+
+    // `state` is read-only through the view.
+    fn again(self) -> Self {
+        self.reads += 1                                         // <- E0601
+        self.files.set(key: "k", value: "v")                    // <- E0601
+        return self                                             // <- E0601
+    }
+
+    // `self`, and values with `effects` reach, stay on their paths.
+    fn name(self) -> Text {
+        let me = self                                           // <- E0601
+        let sinks = self.sinks                                  // <- E0601
+        let inner = self.inner                                  // <- E0601
+        let a = takes_store(s: self)                            // <- E0601
+        let b = takes_sinks(s: self.sinks)                      // <- E0601
+        let c = Store.of(self)                                  // <- E0601
+        let f = || self.files.len()
+        let g = || self.sinks.label
+        let logs = self.sinks.logs                              // <- E0601
+        for log in self.sinks.logs {                            // <- E0601
+        }
+        return self.inner.name()
+    }
+
+    // An `effects` operation sees `self` whole.
+    fn write_text(self, key: Text, text: Text) {
+        self.log.append(f"write {key}")
+        appends(log: self.log)
+        self.files.set(key: key, value: text)
+        self.inner.write_text(key: key, text: text)
+        let me = self
+        let c = Store.of(self)
+        let sinks = self.sinks
+    }
+}

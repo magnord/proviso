@@ -1,0 +1,66 @@
+// phase: 3.3
+// An operation of a `cap record` commits its `state` changes only if it succeeds, so one
+// that fails leaves `state` as it was (REFERENCE §9.6). So does each method of the record,
+// called directly or through a handle, so an operation that handles the failure of a direct
+// call keeps only what the calls that succeeded changed (OPEN_QUESTIONS P5).
+use std.io { IoError }
+
+enum LedgerError {
+    Overdrawn(by: Int)
+}
+
+cap interface Ledger observes(read) effects(post) {
+    fn balance(self) -> Int                                     needs read
+    fn post(self, amount: Int) fails LedgerError                needs post
+    fn post_all(self, amounts: List[Int]) -> Int                needs post
+}
+
+cap record Book {
+    state total: Int
+    state entries: List[Int]
+}
+
+impl Ledger for Book {
+    fn balance(self) -> Int {
+        return self.total
+    }
+
+    fn post(self, amount: Int) fails LedgerError {
+        self.entries.push(amount)
+        self.total += amount
+        check self.total >= 0 else fail LedgerError.Overdrawn(by: -self.total)
+    }
+
+    // Each failed entry is skipped, and the ones before it stay posted.
+    fn post_all(self, amounts: List[Int]) -> Int {
+        var skipped = 0
+        for amount in amounts {
+            self.post(amount) else {
+                skipped += 1
+            }
+        }
+        return skipped
+    }
+}
+
+impl Book {
+    fn size(self) -> Int {
+        return self.entries.len()
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let book = Book(total: 0, entries: [])
+    let ledger = Ledger.of(book)
+    ledger.post(10) else {}
+    let failed = attempt ledger.post(-25)
+    try sys.stdout.write_line(f"after a failed post: {ledger.balance()} in {book.size()} entries")
+    book.post(-30) else {}
+    try sys.stdout.write_line(f"after a failed direct post: {book.balance()} in {book.size()} entries")
+    let skipped = ledger.post_all([5, -100, 7])
+    try sys.stdout.write_line(f"post_all skipped {skipped}: {ledger.balance()} in {book.size()} entries")
+    match failed {
+        Err(LedgerError.Overdrawn(by)) => try sys.stdout.write_line(f"overdrawn by {by}")
+        Ok(()) => {}
+    }
+}

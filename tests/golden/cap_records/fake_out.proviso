@@ -1,0 +1,49 @@
+// phase: 3.3
+// A `cap record` may implement a standard capability interface, so `Out.of(r)` is a fake
+// `Out` that code taking an `Out` can't tell from the real one (REFERENCE §9.6). It holds the
+// real `Out`, which its `uses` needn't name, since a capability reaches its own interface
+// whole. It may implement interfaces that aren't capabilities too, whose methods are direct
+// calls (OPEN_QUESTIONS Q30).
+use std.io { IoError, Out }
+
+cap record Recorder {
+    prefix: Text
+    real: Out
+    state lines: List[Text]
+}
+
+impl Out for Recorder {
+    fn write_line(self, text: Text) fails IoError {
+        self.lines.push(f"{self.prefix}{text}")
+        try self.real.write_line(f"[echo] {text}")
+    }
+}
+
+interface Summary {
+    fn summary(self) -> Text
+}
+
+impl Summary for Recorder {
+    fn summary(self) -> Text {
+        return f"{self.lines.len()} lines, last {self.lines.get(self.lines.len() - 1) else "none"}"
+    }
+}
+
+fn greet(out: Out, name: Text) fails IoError {
+    try out.write_line(f"hello {name}")
+}
+
+fn greet_all(out: Out, names: List[Text]) fails IoError {
+    for name in names {
+        try greet(out: out, name: name)
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let rec = Recorder(prefix: "> ", real: sys.stdout, lines: [])
+    let out = Out.of(rec)
+    try greet_all(out: out, names: ["ada", "bo"])
+    try out.only::[write]().write_line("narrowed")
+    try sys.stdout.write_line(rec.summary())
+    try sys.stdout.write_line(Summary.summary(rec))
+}

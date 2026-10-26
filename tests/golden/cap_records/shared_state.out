@@ -1,0 +1,4 @@
+direct: 7 handle: 7 reader: t=7
+t=27 u=27 trail 2,5,6,7,17,27
+after reset: t=0 []
+o=1 t=0

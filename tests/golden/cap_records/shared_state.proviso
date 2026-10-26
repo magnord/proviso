@@ -1,0 +1,86 @@
+// phase: 3.3
+// A `cap record` value is a capability handle, and copies of it share its `state` (REFERENCE
+// §9.6). `Counter.of(t)` makes a capability of it, through which calls dispatch to the
+// `impl`. A call on a value of the record's own type is direct, and a call through the
+// capability type is a handle call (OPEN_QUESTIONS Q30). Either way the same object changes.
+// `with` replaces plain fields only, and the copy it makes shares `state` (Q40).
+use std.io { IoError }
+
+cap interface Counter observes(read) effects(bump) {
+    fn count(self) -> Int                                       needs read
+    fn label(self) -> Text                                      needs read
+    fn bump(self, by: Int) -> Int                               needs bump
+    fn bump_twice(self) -> Int                                  needs bump
+}
+
+cap record Tally {
+    name: Text
+    state total: Int
+    state history: List[Int]
+}
+
+impl Counter for Tally {
+    fn count(self) -> Int {
+        return self.total
+    }
+
+    fn label(self) -> Text {
+        return f"{self.name}={self.count()}"
+    }
+
+    fn bump(self, by: Int) -> Int {
+        self.total += by
+        self.history.push(self.total)
+        return self.total
+    }
+
+    // A direct call of the record's own operation is an ordinary call.
+    fn bump_twice(self) -> Int {
+        self.bump(by: 1)
+        return self.bump(by: 1)
+    }
+}
+
+impl Tally {
+    fn trail(self) -> Text {
+        var out = ""
+        for (i, n) in self.history.enumerate() {
+            out = if i == 0 { f"{n}" } else { f"{out},{n}" }
+        }
+        return out
+    }
+
+    fn reset(self) {
+        self.total = 0
+        self.history = []
+    }
+}
+
+fn bump_all(counters: List[Counter[bump]], by: Int) {
+    for c in counters {
+        c.bump(by: by)
+    }
+}
+
+fn show(c: Counter[read]) -> Text {
+    return c.label()
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let t = Tally(name: "t", total: 0, history: [])
+    let copy = t
+    copy.bump(by: 2)
+    Counter.bump(t, 3)
+    let handle = Counter.of(t)
+    let reader: Counter[read] = handle
+    handle.bump_twice()
+    try sys.stdout.write_line(f"direct: {t.count()} handle: {handle.count()} reader: {show(c: reader)}")
+    let renamed = t.with(name: "u")
+    bump_all(counters: [handle, Counter.of(renamed)], by: 10)
+    try sys.stdout.write_line(f"{t.label()} {renamed.label()} trail {copy.trail()}")
+    renamed.reset()
+    try sys.stdout.write_line(f"after reset: {show(c: handle)} [{t.trail()}]")
+    let other = Tally(name: "o", total: 0, history: [])
+    other.bump(by: 1)
+    try sys.stdout.write_line(f"{show(c: Counter.of(other))} {t.label()}")
+}

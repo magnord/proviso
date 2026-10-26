@@ -1,0 +1,87 @@
+// phase: 3.3
+// expect-error: E0301
+// expect-error: E0309
+// expect-error: E0316
+// expect-error: E0901
+// Only a `cap record` implements a capability interface (REFERENCE §9.6), and `X.of(r)` takes
+// one that implements `X`. A `cap record` is a handle that copies share, so its fields can't be
+// unique or resources. Type parameters, `derives` and refinements on one aren't scheduled. In a
+// `cap interface`, `Self` may be an operation's result but not a parameter's type, since a
+// handle's argument may come from another implementation, and `Self` with `uses` isn't
+// scheduled either (OPEN_QUESTIONS P5; issue #64).
+use std.io { Out }
+
+cap interface Gauge observes(read) {
+    fn read(self) -> Int                                        needs read
+    fn copy(self) -> Self                                       needs read
+}
+
+cap interface Merge effects(merge) {
+    fn merge(self, other: Self)                                 needs merge  // <- E0901
+    fn merge_all(self, others: List[Self])                      needs merge  // <- E0901
+}
+
+cap interface Wide effects(go) {
+    fn wider(self) -> Option[Self uses Out]                     needs go  // <- E0901
+    fn each(self, f: fn() uses Self)                            needs go  // <- E0901
+    fn logs(self) -> Option[Out uses Self]                      needs go  // <- E0901
+}
+
+record Fixed {
+    n: Int
+}
+
+impl Gauge for Fixed {                                          // <- E0316
+    fn read(self) -> Int {
+        return self.n
+    }
+
+    fn copy(self) -> Self {
+        return self
+    }
+}
+
+cap record Dial {
+    state n: Int
+}
+
+impl Gauge for Dial {
+    fn read(self) -> Int {
+        return self.n
+    }
+
+    fn copy(self) -> Self {
+        return Dial(n: self.n)
+    }
+}
+
+cap record Unread {
+    n: Int
+}
+
+cap record Boxed[T] {                                           // <- E0901
+    state value: T
+}
+
+cap record Shown derives(Show) {                                // <- E0901
+    n: Int
+}
+
+cap record Bounded {
+    state n: Int where n >= 0                                   // <- E0901
+}
+
+unique record Token {
+    id: Int
+}
+
+cap record Holder {
+    state token: Token                                          // <- E0901
+}
+
+fn gauges() -> Int {
+    let a = Gauge.of(Dial(n: 1))
+    let b = Gauge.of(Unread(n: 2))                              // <- E0309
+    let c = Gauge.of(3)                                         // <- E0301
+    return a.read() + a.copy().read()
+}

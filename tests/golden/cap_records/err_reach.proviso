@@ -1,0 +1,87 @@
+// phase: 3.3
+// expect-error: E0309
+// expect-error: E0602
+// A `cap record` reaches what its fields reach and every capability interface it implements,
+// with every permission, since a direct call may run any of its operations (OPEN_QUESTIONS
+// P5). So it isn't `Copy`, and a closure that captures one reaches those interfaces.
+// `X.of(r)` has every permission of `X`, and `uses` what `r` reaches besides `X` (REFERENCE
+// §9.6), so the capabilities in `r`'s fields and the other interfaces `r` implements.
+use std.io { Out }
+
+cap interface Log effects(append) {
+    fn append(self, line: Text)                                 needs append
+}
+
+cap interface Store observes(read) effects(write) {
+    fn read_text(self, key: Text) -> Text                       needs read
+    fn write_text(self, key: Text, text: Text)                  needs write
+}
+
+cap record Mem {
+    state files: Map[Text, Text]
+}
+
+impl Store for Mem {
+    fn read_text(self, key: Text) -> Text {
+        return self.files.get(key) else ""
+    }
+
+    fn write_text(self, key: Text, text: Text) {
+        self.files.set(key: key, value: text)
+    }
+}
+
+cap record Logged {
+    out: Out
+    state lines: List[Text]
+}
+
+impl Store for Logged {
+    fn read_text(self, key: Text) -> Text {
+        return key
+    }
+
+    fn write_text(self, key: Text, text: Text) {
+        self.lines.push(text)
+    }
+}
+
+impl Log for Logged {
+    fn append(self, line: Text) {
+        self.lines.push(line)
+    }
+}
+
+fn run(f: fn() -> Text uses Store) -> Text {
+    return f()
+}
+
+fn run_pure(f: fn() -> Text) -> Text {
+    return f()
+}
+
+fn copies[T: Copy](x: T) -> T {
+    return x
+}
+
+fn plain(s: Store) -> Text {
+    return s.read_text(key: "k")
+}
+
+fn logged(s: Store uses (Out, Log)) -> Text {
+    return s.read_text(key: "k")
+}
+
+fn main_like(out: Out) {
+    let m = Mem(files: [:])
+    let l = Logged(out: out, lines: [])
+    let a = run(f: || m.read_text(key: "a"))
+    let b = run_pure(f: || m.read_text(key: "b"))               // <- E0602
+    let c = run(f: || l.read_text(key: "c"))                    // <- E0602
+    let d = copies(x: m)                                        // <- E0309
+    let e = plain(s: Store.of(m))
+    let f = logged(s: Store.of(l))
+    let g = plain(s: Store.of(l))                               // <- E0602
+    let h: Store uses (Out, Log) = Store.of(l)
+    let i: Store uses Out = Store.of(l)                         // <- E0602
+}
