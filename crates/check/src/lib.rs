@@ -6910,6 +6910,15 @@ impl Checker<'_> {
                 true
             }
             None if def.incomplete => true,
+            // `Dir.of(x)` makes a capability of a `cap record` (REFERENCE §9.3), in slice 3.3.
+            None if cap && name == "of" => {
+                self.not_implemented(
+                    method.span,
+                    &format!("capabilities made with `{iface_text}.of`"),
+                    Planned::Phase(3),
+                );
+                true
+            }
             None if cap && name == "only" => {
                 let message = "`only` has no qualified form; call it on the capability, as in `x.only::[…]()`";
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);

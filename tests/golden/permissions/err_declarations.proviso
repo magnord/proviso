@@ -130,3 +130,7 @@ impl Log for Data {                                                     // <- E0
 fn shown(log: Log, c: Counter, p: Data) -> Text {
     return f"{log.show()} {c.read()} {p.read()} {Log.read(p)}"
 }
+
+fn made(p: Data) -> Out {
+    return Out.of(p)                                                    // <- E0901
+}

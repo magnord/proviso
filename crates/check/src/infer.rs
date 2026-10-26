@@ -128,6 +128,8 @@ enum State {
 pub struct Shape {
     pub var: bool,
     pub never: bool,
+    /// A capability, whose permissions inference opens where it flows (see [`Vars::open_caps`]).
+    pub cap: bool,
 }
 
 #[derive(Default)]
@@ -257,8 +259,9 @@ impl Vars {
 
     pub fn shape(&self, ty: &Ty) -> Shape {
         match ty {
-            Ty::Var(_) => Shape { var: true, never: false },
-            Ty::Never => Shape { var: false, never: true },
+            Ty::Var(_) => Shape { var: true, ..Shape::default() },
+            Ty::Never => Shape { never: true, ..Shape::default() },
+            Ty::Cap(_) => Shape { cap: true, ..Shape::default() },
             _ if let Some(args) = ty.parts() => {
                 let key = Arc::as_ptr(args) as *const Ty as usize;
                 if let Some((_, shape)) = self.shapes.borrow().get(&key) {
@@ -266,7 +269,7 @@ impl Vars {
                 }
                 let shape = args.iter().fold(Shape::default(), |acc, arg| {
                     let part = self.shape(arg);
-                    Shape { var: acc.var || part.var, never: acc.never || part.never }
+                    Shape { var: acc.var || part.var, never: acc.never || part.never, cap: acc.cap || part.cap }
                 });
                 self.shapes.borrow_mut().insert(key, (args.clone(), shape));
                 shape
@@ -712,6 +715,10 @@ impl Vars {
     fn open_caps_part(&mut self, ty: &Ty, flow: Flow, seen: &mut HashMap<(usize, Flow), Option<Ty>>) -> Option<Ty> {
         if let Ty::Cap(cap) = ty {
             return Some(self.cap_var(cap.iface, cap.perms, flow));
+        }
+        // A part without a capability is shared, and its shape is known once.
+        if !self.shape(ty).cap {
+            return None;
         }
         let parts = ty.parts()?;
         let key = (Arc::as_ptr(parts) as *const Ty as usize, flow);
