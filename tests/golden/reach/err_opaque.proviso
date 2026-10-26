@@ -1,0 +1,39 @@
+// phase: 3.2
+// expect-error: E0101
+// expect-error: E0602
+// An opaque record's `uses` must cover each field's reach, and is all a closure that
+// captures one may be said to reach, however little its fields reach. Only an opaque record
+// declares its reach. Another record's is its fields' (REFERENCE §9.2).
+cap interface Dir observes(read) effects(write) {
+    fn read_text(self, path: Text) -> Text                      needs read
+    fn write_text(self, path: Text, text: Text)                 needs write
+}
+
+cap interface Log effects(append) {
+    fn append(self, line: Text)                                 needs append
+}
+
+opaque record Leaky uses Dir[read] {
+    dir: Dir[read]
+    log: Log                                                    // <- E0602
+}
+
+opaque record Writer uses Dir[read] {
+    dir: Dir[read, write]                                       // <- E0602
+}
+
+opaque record Wide uses (Dir[read], Log) {
+    dir: Dir[read]
+}
+
+record Plain uses Log {                                         // <- E0101
+    log: Log
+}
+
+fn cached(f: fn() -> Text uses Dir[read]) -> Text {
+    return f()
+}
+
+fn closures(w: Wide) -> Text {
+    return cached(f: || w.dir.read_text(path: "a"))            // <- E0602
+}

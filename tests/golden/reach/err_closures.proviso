@@ -1,0 +1,76 @@
+// phase: 3.2
+// expect-error: E0602
+// A function type without `uses` admits only closures that capture no capability, and one
+// with `uses` only those whose reach it covers, permissions included (REFERENCE §9.4,
+// OPEN_QUESTIONS P3). These are §F rows 5 and 13 with a test-local `Dir`: a closure that
+// writes through a captured capability, and one that captures only such a closure (Q34).
+// A record that holds a capability reaches it, and so may a value of a type parameter
+// without `Copy`, whose type argument may (Q31). A capture whose type is settled after the
+// closure is checked once it is.
+cap interface Dir observes(read) effects(write) {
+    fn read_text(self, path: Text) -> Text                      needs read
+    fn write_text(self, path: Text, text: Text)                 needs write
+}
+
+record Holder {
+    dir: Dir[read]
+}
+
+fn g(f: fn() -> Text) -> Text {
+    return f()
+}
+
+fn reads(f: fn() -> Text uses Dir[read]) -> Text {
+    return f()
+}
+
+fn row5(dir: Dir[write]) -> Text {
+    return g(|| {                                               // <- E0602
+        dir.write_text(path: "note.txt", text: "x")
+        "t"
+    })
+}
+
+fn row13(dir: Dir[write]) -> Text {
+    let w = || dir.write_text(path: "audit.log", text: "x")
+    return g(|| {                                               // <- E0602
+        w()
+        "t"
+    })
+}
+
+fn wider(dir: Dir[read, write]) -> Text {
+    let r = reads(f: || dir.read_text(path: "a"))               // <- E0602
+    let narrowed = dir.only::[read]()
+    let n = reads(f: || narrowed.read_text(path: "a"))
+    return f"{n}{r}"
+}
+
+fn held(h: Holder) -> Text {
+    return g(|| h.dir.read_text(path: "b"))                     // <- E0602
+}
+
+fn generic[T, C: Copy](x: T, c: C) -> Text {
+    let a = g(|| {                                              // <- E0602
+        debug(x)
+        "x"
+    })
+    let b = g(|| {
+        debug(c)
+        "c"
+    })
+    return f"{a}{b}"
+}
+
+fn takes_dir(d: Dir[read]) {}
+
+fn late(dir: Dir[read]) {
+    let f = |p| {
+        let t = g(|| {                                          // <- E0602
+            debug(p)
+            "p"
+        })
+        takes_dir(d: p)
+    }
+    f(dir)
+}

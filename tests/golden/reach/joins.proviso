@@ -1,0 +1,68 @@
+// phase: 3.2
+// Reach joins by variance, so neither the order of a call's arguments nor that of an `if`'s
+// branches decides a type (OPEN_QUESTIONS P3, decided for phase 3). Where values meet, their
+// join uses what any of them uses, and has the permissions all of them have. Where closures'
+// parameters meet, a function-typed parameter of the join admits only what all of them admit,
+// so no closure is handed a function that reaches more than it declares. Each group writes
+// one meeting in both orders, and the uses after it pin the type it settles as. The
+// rejected uses are in reach/err_joins.
+cap interface Dir observes(read) effects(write) {
+    fn read_text(self, path: Text) -> Text                      needs read
+    fn write_text(self, path: Text, text: Text)                 needs write
+}
+
+cap interface Log effects(append) {
+    fn append(self, line: Text)                                 needs append
+}
+
+fn pick[T](a: take T, b: take T) -> T {
+    return a
+}
+
+fn logged(d: Dir[read] uses Log) -> Text {
+    return d.read_text(path: "a")
+}
+
+fn capabilities(plain: keep Dir[read, write], logging: keep Dir[read] uses Log, flag: Bool) -> Text {
+    let a = pick(a: plain, b: logging)
+    let b = pick(a: logging, b: plain)
+    let c = if flag { plain } else { logging }
+    let d = if flag { logging } else { plain }
+    let e = pick(a: Some(plain), b: None)
+    let f = pick(a: None, b: Some(logging))
+    let g = [plain, logging]
+    return f"{logged(d: a)}{logged(d: b)}{logged(d: c)}{logged(d: d)}{logged(d: e else c)}{logged(d: f else d)}{logged(d: g[0])}"
+}
+
+fn run(f: fn() -> Int uses Log) -> Int {
+    return f()
+}
+
+fn closures(log: Log, flag: Bool) -> Int {
+    let a = if flag { || 1 } else { || {
+        log.append("a")
+        2
+    } }
+    let b = if flag { || {
+        log.append("b")
+        3
+    } } else { || 4 }
+    let c = match flag {
+        true => || 5
+        false => || {
+            log.append("c")
+            6
+        }
+    }
+    return run(f: a) + run(f: b) + run(f: c)
+}
+
+fn give(f: fn(fn() -> Int) -> Int) -> Int {
+    return f(|| 7)
+}
+
+fn params(flag: Bool) -> Int {
+    let a = if flag { |g: fn() -> Int uses Log| g() } else { |g: fn() -> Int| g() }
+    let b = if flag { |g: fn() -> Int| g() } else { |g: fn() -> Int uses Log| g() }
+    return give(f: a) + give(f: b)
+}

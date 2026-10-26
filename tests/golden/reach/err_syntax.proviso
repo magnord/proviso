@@ -1,0 +1,23 @@
+// phase: 3.2
+// expect-error: E0101
+// expect-error: E0307
+// `uses` follows a capability type, a function type or an opaque record's name, and takes
+// one capability type or several in parentheses (OPEN_QUESTIONS Q41). A function or
+// operation declares no `uses`, since its parameters carry its authority (§9.2). A type that
+// isn't a capability, such as `Int` or a type parameter, can't be listed.
+use std.io { Out }
+
+cap interface Log effects(append) {
+    fn append(self, line: Text)                                 needs append
+    fn later(self) -> Text                      needs append uses Out   // <- E0101
+}
+
+fn declared() uses Out {}                                       // <- E0101
+
+fn not_capability(f: fn() uses Int) {}                          // <- E0307
+
+fn parameter[T](f: fn() uses T) {}                              // <- E0307
+
+fn empty(f: fn() uses ()) {}                                    // <- E0101
+
+fn nested(d: Log uses (Out, Int)) {}                            // <- E0307

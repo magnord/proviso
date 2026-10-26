@@ -1,0 +1,63 @@
+// phase: 3.2
+// expect-error: E0602
+// The joins of reach/joins, in both orders, pinned from the other side: a join of values
+// uses what any of them uses, and a function-typed parameter of a join of closures admits
+// only what all of them admit (OPEN_QUESTIONS P3, decided for phase 3).
+cap interface Dir observes(read) effects(write) {
+    fn read_text(self, path: Text) -> Text                      needs read
+    fn write_text(self, path: Text, text: Text)                 needs write
+}
+
+cap interface Log effects(append) {
+    fn append(self, line: Text)                                 needs append
+}
+
+fn pick[T](a: take T, b: take T) -> T {
+    return a
+}
+
+fn reads(d: Dir[read]) -> Text {
+    return d.read_text(path: "a")
+}
+
+fn capabilities(plain: keep Dir[read, write], logging: keep Dir[read] uses Log, flag: Bool) -> Text {
+    let a = pick(a: plain, b: logging)
+    let b = pick(a: logging, b: plain)
+    let c = if flag { plain } else { logging }
+    let d = if flag { logging } else { plain }
+    let e = reads(d: a)                                         // <- E0602
+    let f = reads(d: b)                                         // <- E0602
+    let g = reads(d: c)                                         // <- E0602
+    let h = reads(d: d)                                         // <- E0602
+    return f"{e}{f}{g}{h}"
+}
+
+fn run(f: fn() -> Int) -> Int {
+    return f()
+}
+
+fn closures(log: Log, flag: Bool) -> Int {
+    let a = if flag { || 1 } else { || {
+        log.append("a")
+        2
+    } }
+    let b = if flag { || {
+        log.append("b")
+        3
+    } } else { || 4 }
+    let c = run(f: a)                                           // <- E0602
+    let d = run(f: b)                                           // <- E0602
+    return c + d
+}
+
+fn take_reaching(f: fn(fn() -> Int uses Log) -> Int) -> Int {
+    return 0
+}
+
+fn params(flag: Bool) -> Int {
+    let a = if flag { |g: fn() -> Int uses Log| g() } else { |g: fn() -> Int| g() }
+    let b = if flag { |g: fn() -> Int| g() } else { |g: fn() -> Int uses Log| g() }
+    let c = take_reaching(f: a)                                 // <- E0602
+    let d = take_reaching(f: b)                                 // <- E0602
+    return c + d
+}
