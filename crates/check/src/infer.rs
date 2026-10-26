@@ -1057,7 +1057,13 @@ impl Vars {
             // What either needs flows out to the variable, which then needs it too.
             (Ty::Var(x), ty) | (ty, Ty::Var(x)) => {
                 let x = *x;
-                self.exact(x, ty).then(|| self.resolve(&Ty::Var(x)))
+                if self.exact(x, ty) {
+                    Some(self.resolve(&Ty::Var(x)))
+                } else {
+                    // `Never` still meets a variable whose kind or permissions it can't settle,
+                    // such as an integer literal's, which then defaults as it would.
+                    (*ty == Ty::Never).then_some(Ty::Never)
+                }
             }
             // `Never` is a subtype of every type, so it serves as either (REFERENCE §9.2).
             (Ty::Never, _) | (_, Ty::Never) => Some(Ty::Never),

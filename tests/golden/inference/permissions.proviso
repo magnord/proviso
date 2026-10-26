@@ -106,4 +106,32 @@ fn never_params(flag: Bool) {
     let b = if flag { nothing } else { whatever }
     let c = if flag { |x| 0 } else { nothing }
     let d = if flag { nothing } else { |x| 0 }
+    let e = if flag { |x| x + 1 } else { nothing }
+    let f = if flag { nothing } else { |x| x + 1 }
+    let g = if flag { |x| reads_only(x) } else { nothing }
+    let h = if flag { nothing } else { |x| reads_only(x) }
+}
+
+fn none_int() -> Option[Int] {
+    return None
+}
+
+fn keeps(log: take Log) -> Log {
+    return log
+}
+
+// A closure beside another branch gives its own result, and the join decides the type.
+fn sibling_results(flag: Bool, log: Log) -> Int {
+    let a = if flag { stop } else { || 5 }
+    let b = if flag { || 5 } else { stop }
+    let c = if flag { stop } else { || {
+        return 5
+    } }
+    let d = if flag { none_int } else { || None }
+    let e = if flag { || None } else { none_int }
+    let f = if flag { keeps } else { |l: Log[read]| l }
+    let x: Int = a() + b() + c()
+    let y: Option[Int] = d()
+    let z: Option[Int] = e()
+    return f(log).read().byte_len()
 }

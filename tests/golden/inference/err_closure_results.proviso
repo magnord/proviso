@@ -4,7 +4,8 @@
 // A closure's body gives its result, which must fit the function type it is checked as,
 // directly or through a join, in either order (REFERENCE §9.2). A body that returns can't
 // be a `fn() -> Never`, and a capability with fewer permissions can't be the result of a
-// function type that promises more.
+// function type that promises more. A closure beside another branch gives its own result,
+// and the join decides the type (OPEN_QUESTIONS P5).
 cap interface Log observes(read) effects(append) {
     fn read(self) -> Text                       needs read
     fn append(self, line: Text)                 needs append
@@ -35,4 +36,19 @@ fn full_log(make: fn(take Log[read]) -> Log) -> Int {
 
 fn narrowed() -> Int {
     return full_log(|l| l)                                              // <- E0603
+}
+
+fn stop() -> Never {
+    unreachable
+}
+
+fn keeps(log: take Log) -> Log {
+    return log
+}
+
+fn sibling_results(flag: Bool, log: Log) {
+    let a = if flag { stop } else { || 5 }
+    let t: Text = a()                                                   // <- E0301
+    let f = if flag { keeps } else { |l: Log[read]| l }
+    f(log).append("x")                                                  // <- E0603
 }

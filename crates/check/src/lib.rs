@@ -5659,10 +5659,15 @@ impl Checker<'_> {
             };
             params.push(ty);
         }
-        let ret = match (closure.ret, &expected) {
-            (Some(t), _) => self.part_type(t, "a result"),
-            (None, Some((_, ret, _, _))) => ret.clone(),
-            (None, None) => self.vars.fresh(Kind::Any, Origin::Defaulted),
+        // Another branch's result only guides the body, whose own value gives the result, so
+        // the join decides the type (OPEN_QUESTIONS P5).
+        let (ret, guide) = match (closure.ret, &expected) {
+            (Some(t), _) => (self.part_type(t, "a result"), None),
+            (None, Some((_, ret, _, _))) if sibling => {
+                (self.vars.fresh(Kind::Any, Origin::Defaulted), Some(ret.clone()))
+            }
+            (None, Some((_, ret, _, _))) => (ret.clone(), None),
+            (None, None) => (self.vars.fresh(Kind::Any, Origin::Defaulted), None),
         };
         // An error type that only `Never` gives is `Never`, so a closure without one can't fail.
         let fails = match &expected {
@@ -5688,18 +5693,14 @@ impl Checker<'_> {
             let mutable = quiet || matches!(mode, ParamMode::Inout | ParamMode::InoutPartial);
             locals.push(self.declare(param.name, ty.clone(), mutable, "parameter", *mode != ParamMode::Take));
         }
-        let body = self.block_value(&closure.body, Some(&ret), true);
+        let body = self.block_value(&closure.body, Some(guide.as_ref().unwrap_or(&ret)), true);
         // A body that always leaves gives `Never`, however it leaves (OPEN_QUESTIONS Q33).
         if diverges_ty(&body) {
             let _ = self.vars.subsume(&ret, &Ty::Never);
         } else if body != Ty::Error && !self.vars.subsume(&ret, &body) {
             // The tail joins the result as a branch would, so a value that only fits the
             // join, such as an `Int` where `Never` is required, is reported here.
-            let tail = closure.body.stmts.last().and_then(|&s| match self.m.stmts[s].kind {
-                StmtKind::Expr(e) => Some(e),
-                _ => None,
-            });
-            if let Some(tail) = tail {
+            if let Some(tail) = self.tail(&closure.body) {
                 let message = format!("expected `{}`, found `{}`", self.show(&ret), self.show(&body));
                 let code = self.mismatch_code(&ret, &body);
                 self.mismatch(tail, code, self.span(tail), message);
