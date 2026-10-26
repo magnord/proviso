@@ -1555,7 +1555,7 @@ impl Parser<'_> {
         let uses = uses.unwrap_or_default();
         // Effect variables come in slice 3.6.
         if self.at_kw(Kw::With) {
-            return self.not_implemented("`with` on function types", Planned::Phase(3));
+            return self.not_implemented("`with` clauses on function types", Planned::Phase(3));
         }
         Ok(TypeExprKind::Fn { params, ret, fails, uses })
     }

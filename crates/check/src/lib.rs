@@ -1299,11 +1299,12 @@ impl Checker<'_> {
                 if ty.is_unknown() || self.vars.has_open(&ty) {
                     return;
                 }
-                if self.fn_targ(&ty, span) {
-                    return;
-                }
+                // A map literal's function key is reported where it goes in (E0509).
                 if *callee == *"Map" {
                     self.key_bound(&ty, span);
+                    return;
+                }
+                if self.fn_targ(&ty, span) {
                     return;
                 }
                 if self.resource_targ(&ty, &callee, &param, span) {
