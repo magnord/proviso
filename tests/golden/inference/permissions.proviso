@@ -92,3 +92,18 @@ fn never(flag: Bool) -> Int {
     let b = if flag { takes_int } else { takes_never }
     return a(stop) + b(stop)
 }
+
+fn whatever[T](x: T) -> Int {
+    return 0
+}
+
+fn nothing(x: Never) -> Int {
+    return 1
+}
+
+fn never_params(flag: Bool) {
+    let a = if flag { whatever } else { nothing }
+    let b = if flag { nothing } else { whatever }
+    let c = if flag { |x| 0 } else { nothing }
+    let d = if flag { nothing } else { |x| 0 }
+}

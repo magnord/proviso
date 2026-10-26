@@ -99,6 +99,14 @@ fn broken(b: Broken[read]) -> Text {
     return b.read()
 }
 
+interface PlainBroken observes(read {                                   // <- E0101, E0101
+    fn read(self) -> Text                       needs read
+}
+
+fn plain_broken(b: PlainBroken[read]) -> Text {
+    return b.read()
+}
+
 record Reaching {
     log: Log[read] uses Out                                             // <- E0901
 }

@@ -1129,7 +1129,8 @@ impl Parser<'_> {
         let name = self.ident("an interface name")?;
         self.cap_ops = cap;
         let decl = self.interface_rest(name, cap);
-        self.cap_ops = false;
+        // A plain interface that declared permissions is read as a capability interface.
+        let cap = std::mem::take(&mut self.cap_ops);
         if decl.is_err() {
             self.m.poisoned.insert(name.sym);
             // A capability interface's arguments are permissions, not types.
@@ -1150,8 +1151,21 @@ impl Parser<'_> {
         while self.at_kw(Kw::Observes) || self.at_kw(Kw::Effects) {
             let effects = self.at_kw(Kw::Effects);
             let keyword = self.bump();
-            let names = self.perm_list()?;
             let text = self.file.slice(keyword.span);
+            if !cap {
+                let message = format!(
+                    "only a `cap interface` declares permissions, as in `cap interface {} {text}(…)` (§9.2)",
+                    self.file.slice(name.span),
+                );
+                self.error(codes::UNEXPECTED_TOKEN, keyword.span, message);
+                // The rest is read as the capability interface it was meant to be, even if it
+                // fails to parse, so its `needs` clauses aren't reported again, and its uses
+                // aren't checked (§15.1).
+                cap = true;
+                self.cap_ops = true;
+                self.m.poisoned.insert(name.sym);
+            }
+            let names = self.perm_list()?;
             let twice = if effects { &mut seen.1 } else { &mut seen.0 };
             if std::mem::replace(twice, true) {
                 let message = format!("`{text}` is declared twice; list all its permissions in one clause");
@@ -1164,18 +1178,6 @@ impl Parser<'_> {
                     }
                 }
                 continue;
-            }
-            if !cap {
-                let message = format!(
-                    "only a `cap interface` declares permissions, as in `cap interface {} {text}(…)` (§9.2)",
-                    self.file.slice(name.span),
-                );
-                self.error(codes::UNEXPECTED_TOKEN, keyword.span, message);
-                // The rest is read as the capability interface it was meant to be, so its
-                // `needs` clauses aren't reported again, and its uses aren't checked (§15.1).
-                cap = true;
-                self.cap_ops = true;
-                self.m.poisoned.insert(name.sym);
             }
             if effects {
                 perms.effects = names;

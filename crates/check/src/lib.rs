@@ -5692,8 +5692,20 @@ impl Checker<'_> {
         // A body that always leaves gives `Never`, however it leaves (OPEN_QUESTIONS Q33).
         if diverges_ty(&body) {
             let _ = self.vars.subsume(&ret, &Ty::Never);
-        } else if body != Ty::Error {
-            let _ = self.vars.subsume(&ret, &body);
+        } else if body != Ty::Error && !self.vars.subsume(&ret, &body) {
+            // The tail joins the result as a branch would, so a value that only fits the
+            // join, such as an `Int` where `Never` is required, is reported here.
+            let tail = closure.body.stmts.last().and_then(|&s| match self.m.stmts[s].kind {
+                StmtKind::Expr(e) => Some(e),
+                _ => None,
+            });
+            if let Some(tail) = tail {
+                let message = format!("expected `{}`, found `{}`", self.show(&ret), self.show(&body));
+                let code = self.mismatch_code(&ret, &body);
+                self.mismatch(tail, code, self.span(tail), message);
+                self.vars.poison(&body);
+                self.vars.quiet(&ret);
+            }
         }
         // A body that never fails gives the error type `Never`, as a call of a function
         // without `fails` does, so a type argument nothing else gives settles as `Never`.
