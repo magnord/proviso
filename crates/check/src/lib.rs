@@ -332,6 +332,8 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         main_lost: m.lost_fns.iter().any(|&sym| m.text(sym) == "main"),
         adts: Vec::new(),
         adt_vis: HashMap::new(),
+        cap_vis: HashMap::new(),
+        only_declared: HashSet::new(),
         iface_names: HashMap::new(),
         ifaces: Vec::new(),
         cap_decls: HashSet::new(),
@@ -659,6 +661,10 @@ struct Checker<'a> {
     adts: Vec<AdtSrc<'a>>,
     /// The visibility of each of [`Checker::adts`].
     adt_vis: HashMap<AdtId, Visibility>,
+    /// The visibility of each of the module's capability interfaces, which are types.
+    cap_vis: HashMap<IfaceId, Visibility>,
+    /// The capability interfaces that declare an operation named `only`, which is rejected.
+    only_declared: HashSet<IfaceId>,
     /// The function being checked, or the record whose refinements are.
     f: FnState,
     /// Set while checking the postfix chain a `try` or `attempt` covers (REFERENCE §6.1).
@@ -1991,11 +1997,14 @@ impl Checker<'_> {
         if reach(vis) == 0 {
             return;
         }
-        let Some((record, record_vis)) = self.least_visible(ty) else { return };
-        if reach(record_vis) < reach(vis) {
-            let name = self.p.decls.adt(record).name.clone();
+        let Some((named, named_vis)) = self.least_visible(ty) else { return };
+        if reach(named_vis) < reach(vis) {
+            let name = match named {
+                Ok(record) => self.p.decls.adt(record).name.clone(),
+                Err(iface) => self.p.decls.iface(iface).name.clone(),
+            };
             let span = self.m.types[at].span;
-            self.too_visible(item, vis, &name, record_vis, span);
+            self.too_visible(item, vis, &name, named_vis, span);
         }
     }
 
@@ -2015,19 +2024,24 @@ impl Checker<'_> {
         self.error(codes::PRIVATE_IN_PUBLIC, span, message);
     }
 
-    /// The least visible module record or enum that `ty` mentions, the first one written of
-    /// those equally visible, which is the first private one if there is one. A shared part is looked at once, so a type that repeats a part
-    /// costs what its source does (issue #18).
-    fn least_visible(&self, ty: &Ty) -> Option<(AdtId, Visibility)> {
-        let mut least: Option<(AdtId, Visibility)> = None;
+    /// The least visible module record, enum or capability interface that `ty` mentions, the
+    /// first one written of those equally visible, which is the first private one if there
+    /// is one. A shared part is looked at once, so a type that repeats a part costs what its
+    /// source does (issue #18).
+    fn least_visible(&self, ty: &Ty) -> Option<(Result<AdtId, IfaceId>, Visibility)> {
+        let mut least: Option<(Result<AdtId, IfaceId>, Visibility)> = None;
         let mut seen = HashSet::new();
         let mut work = vec![ty];
         while let Some(ty) = work.pop() {
-            if let Ty::Adt(id, _) = ty
-                && let Some(&vis) = self.adt_vis.get(id)
+            let named = match ty {
+                Ty::Adt(id, _) => self.adt_vis.get(id).map(|&vis| (Ok(*id), vis)),
+                Ty::Cap(cap) => self.cap_vis.get(&cap.iface).map(|&vis| (Err(cap.iface), vis)),
+                _ => None,
+            };
+            if let Some((named, vis)) = named
                 && least.is_none_or(|(_, least)| reach(vis) < reach(least))
             {
-                least = Some((*id, vis));
+                least = Some((named, vis));
                 if reach(vis) == 0 {
                     break;
                 }
@@ -2054,6 +2068,7 @@ impl Checker<'_> {
             self.ifaces.push(IfaceSrc { id, decl, vis: item.vis });
             if decl.cap.is_some() {
                 self.cap_decls.insert(decl.name.sym);
+                self.cap_vis.insert(id, item.vis);
             }
             let cased = self.pascal_case(decl.name, "interface");
             if !cased || prelude_type(text) {
@@ -2197,6 +2212,15 @@ impl Checker<'_> {
                 } else if duplicate {
                     self.error(codes::DUPLICATE_NAME, method.name.span, format!("method `{text}` is declared twice"));
                 }
+                // Every capability has `only`, which narrows its permissions (REFERENCE §9.2).
+                // The operation's calls may mean either, so they aren't checked (§15.1).
+                let only = cased && decl.cap.is_some() && text == "only";
+                if only {
+                    let message = "every capability has a method `only`, which narrows its permissions, so an operation can't be named `only`";
+                    self.error(codes::DUPLICATE_NAME, method.name.span, message);
+                    self.only_declared.insert(id);
+                    incomplete = true;
+                }
                 let receiver = method.receiver.expect("the parser keeps only interface methods with `self`");
                 let later = match receiver.mode {
                     ParamMode::Borrow | ParamMode::Take => None,
@@ -2241,7 +2265,7 @@ impl Checker<'_> {
                     self.exposes(decl.name, vis, &fails.clone().unwrap_or(Ty::Never), at);
                 }
                 let (needs, _) = self.perms_named(id, &method.needs, "`needs`");
-                if cased && !duplicate {
+                if cased && !duplicate && !only {
                     methods.push(IfaceMethod {
                         name: text.into(),
                         self_mode: receiver.mode,
@@ -6419,6 +6443,10 @@ impl Checker<'_> {
     ) -> Ty {
         let name = self.m.text(method.sym);
         if name == "only" {
+            if self.only_declared.contains(&iface) {
+                self.rejected_args(args);
+                return Ty::Error;
+            }
             return self.only_call(e, iface, perms, receiver_ty, method, targs, args, span);
         }
         let def = self.p.decls.iface(iface);

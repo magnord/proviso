@@ -1,0 +1,70 @@
+// phase: 3.1
+// expect-error: E0211
+// A capability interface is a type, so a `pub` item may not mention a private one in its
+// signature (REFERENCE §3, §9.2). Nor may an operation of a `pub` capability interface, or
+// a field of a `pub record` or `pub enum`. This holds inside another type, with permissions
+// named, and for a `pub(pkg)` item. A private item may.
+cap interface Secret observes(read) {
+    fn read(self) -> Text                       needs read
+}
+
+pub(pkg) cap interface Shared observes(read) {
+    fn read(self) -> Text                       needs read
+}
+
+pub cap interface Open observes(read) {
+    fn read(self) -> Text                       needs read
+}
+
+pub cap interface Leaky observes(read) {
+    fn pass(self, s: Secret) -> Text            needs read             // <- E0211
+}
+
+pub fn takes(s: Secret) -> Int {                                        // <- E0211
+    return 0
+}
+
+pub fn takes_read(s: Secret[read]) -> Int {                             // <- E0211
+    return 0
+}
+
+pub fn nested(s: Option[Secret]) -> Int {                               // <- E0211
+    return 0
+}
+
+pub fn gives(s: keep Secret) -> Secret {                                // <- E0211, E0211
+    return s
+}
+
+pub fn fails_with() -> Int fails Secret {                               // <- E0211
+    return 0
+}
+
+pub fn shared(s: Shared) -> Int {                                       // <- E0211
+    return 0
+}
+
+pub(pkg) fn shared_ok(s: Shared) -> Int {
+    return 0
+}
+
+pub(pkg) fn secret_pkg(s: Secret) -> Int {                              // <- E0211
+    return 0
+}
+
+fn private_ok(s: Secret) -> Int {
+    return 0
+}
+
+pub fn open_ok(s: Open) -> Int {
+    return 0
+}
+
+pub record Holder {
+    s: Secret                                                           // <- E0211
+}
+
+pub enum Choice {
+    Has(s: Secret),                                                     // <- E0211
+    Not,
+}

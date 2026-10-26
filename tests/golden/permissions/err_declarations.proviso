@@ -9,10 +9,11 @@
 // Only a `cap interface` declares permissions, and only its operations have `needs`
 // clauses, which name permissions it declares, once each (REFERENCE §9.2). A capability type
 // names its interface's permissions, once each. A capability interface is a type, so it
-// can't be a constraint (OPEN_QUESTIONS Q31). An `interface` that declares permissions is read
-// as the `cap interface` it was meant to be. `cap record`, `uses` and `with` come in later
-// slices, and implementations for a capability type are not yet scheduled. A rejected
-// declaration's uses aren't reported again (REFERENCE §15.1).
+// can't be a constraint (OPEN_QUESTIONS Q31). Every capability has `only`, so an operation
+// can't take its name. An `interface` that declares permissions is read as the `cap
+// interface` it was meant to be. `cap record`, `uses` and `with` come in later slices, and
+// implementations for a capability type are not yet scheduled. A rejected declaration's
+// uses aren't reported again (REFERENCE §15.1).
 use std.io { Out }
 
 cap interface Log observes(read) effects(append) {
@@ -109,6 +110,16 @@ fn plain_broken(b: PlainBroken[read]) -> Text {
 
 record Reaching {
     log: Log[read] uses Out                                             // <- E0901
+}
+
+cap interface Narrowing observes(read) {
+    fn only(self) -> Int                        needs read              // <- E0210
+    fn read(self) -> Int                        needs read
+}
+
+fn narrowing(n: Narrowing) -> Int {
+    let t: Text = n.read()                                              // <- E0301
+    return n.only() + Narrowing.only(n) + n.only::[read]().read()
 }
 
 interface Needy {
