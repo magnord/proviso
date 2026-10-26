@@ -1038,13 +1038,34 @@ impl Vars {
     /// permission either needs, as in a record or variant's fields. Any other pair must be the
     /// same type. `None` when there is none.
     fn meet(&mut self, a: &Ty, b: &Ty) -> Option<Ty> {
+        self.meet_in(a, b, &mut Pairs::default())
+    }
+
+    /// [`Vars::meet`], where `pairs` holds the pairs of parts met already.
+    fn meet_in(&mut self, a: &Ty, b: &Ty, pairs: &mut Pairs) -> Option<Ty> {
         let (a, b) = (self.resolve(a), self.resolve(b));
         match (&a, &b) {
+            (Ty::Error, _) | (_, Ty::Error) => Some(Ty::Error),
+            (Ty::Var(x), Ty::Var(y)) => self.union(*x, *y).then(|| self.resolve(&a)),
+            // What either needs flows out to the variable, which then needs it too.
+            (Ty::Var(x), ty) | (ty, Ty::Var(x)) => {
+                let x = *x;
+                self.exact(x, ty).then(|| self.resolve(&Ty::Var(x)))
+            }
             (Ty::Cap(x), Ty::Cap(y)) if x.iface == y.iface => Some(Ty::cap(x.iface, x.perms.union(y.perms))),
             (Ty::Adt(id, args), Ty::Adt(other, other_args)) if id == other && args.len() == other_args.len() => {
-                let met =
-                    args.iter().zip(other_args.iter()).map(|(x, y)| self.meet(x, y)).collect::<Option<Vec<_>>>()?;
-                Some(Ty::applied(*id, met))
+                if Arc::ptr_eq(args, other_args) {
+                    return Some(a.clone());
+                }
+                if let Some(Some(met)) = pairs.get(args, other_args) {
+                    return Some(met.clone());
+                }
+                let met = (args.iter().zip(other_args.iter()))
+                    .map(|(x, y)| self.meet_in(x, y, pairs))
+                    .collect::<Option<Vec<_>>>()?;
+                let met = Ty::applied(*id, met);
+                pairs.insert(args, other_args, Some(met.clone()));
+                Some(met)
             }
             _ => self.same(&a, &b),
         }

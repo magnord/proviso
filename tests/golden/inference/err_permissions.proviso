@@ -44,3 +44,21 @@ fn inouts(full: keep Log, reader: keep Log[read]) {
     var logs = [full]
     narrow_all(logs: &logs, other: reader)                  // <- E0603
 }
+
+fn appends(log: Log) -> Int {
+    return 1
+}
+
+fn reads_only(log: Log[read]) -> Int {
+    return 0
+}
+
+fn apply[T](f: fn(T) -> Int, x: T) -> Int {
+    return f(x)
+}
+
+fn functions(reader: Log[read], flag: Bool) -> Int {
+    let a = apply(f: if flag { appends } else { reads_only }, x: reader)    // <- E0603
+    let b = apply(f: if flag { reads_only } else { appends }, x: reader)    // <- E0603
+    return a + b
+}

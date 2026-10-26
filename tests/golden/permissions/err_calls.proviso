@@ -46,6 +46,7 @@ fn calls(log: Log[read]) {
     let f: fn(Log[read]) -> Text = appends                  // <- E0603
     let n = 5.only::[read]()                                // <- E0303
     let q = Log.read(5)                                     // <- E0301
+    let qualified = Log.only::[read](log)                   // <- E0303
 }
 
 fn returned(log: keep Log[read]) -> Log {

@@ -139,6 +139,9 @@ pub struct CapDef {
     /// Which of them are `observes` permissions, which can't change anything outside the
     /// program. The others are `effects` permissions.
     pub observes: Perms,
+    /// Whether it declares more than [`Perms::MAX`], which is reported, so a name it doesn't
+    /// list may be one of those past the limit.
+    pub lost: bool,
 }
 
 impl CapDef {
@@ -647,8 +650,9 @@ impl Default for Decls {
         };
         // The standard library's capability interfaces and their permissions, all `effects`
         // ones (REFERENCE §9.1; OPEN_QUESTIONS Q6).
-        let cap =
-            |perms: &[&str]| Some(CapDef { perms: perms.iter().map(|&p| p.into()).collect(), observes: Perms::NONE });
+        let cap = |perms: &[&str]| {
+            Some(CapDef { perms: perms.iter().map(|&p| p.into()).collect(), observes: Perms::NONE, lost: false })
+        };
         let ifaces = IfaceId::BUILT_IN
             .iter()
             .map(|&name| {
@@ -1305,8 +1309,11 @@ impl Decls {
             return f.write_str("…");
         }
         budget.set(budget.get() - 1);
+        // A built-in type is qualified where a module type or interface has its name.
         let std = |name: &'static str, qualified: &'static str| {
-            if self.adts[AdtId::BUILT_IN..].iter().any(|adt| &*adt.name == name) { qualified } else { name }
+            let shadowed = self.adts[AdtId::BUILT_IN..].iter().any(|adt| &*adt.name == name)
+                || self.ifaces[IfaceId::BUILT_IN.len()..].iter().any(|iface| &*iface.name == name);
+            if shadowed { qualified } else { name }
         };
         let list = |f: &mut fmt::Formatter, args: &[Ty]| -> fmt::Result {
             for (i, arg) in args.iter().enumerate() {
@@ -1375,6 +1382,12 @@ impl Decls {
             f.write_str(match cap.iface {
                 IfaceId::OUT => std("Out", "std.io.Out"),
                 IfaceId::IN => std("In", "std.io.In"),
+                // No module exports these yet, so they are named for where they come from.
+                IfaceId::NET => std("Net", "System.Net"),
+                IfaceId::CLOCK => std("Clock", "System.Clock"),
+                IfaceId::RANDOM => std("Random", "System.Random"),
+                IfaceId::ENV => std("Env", "System.Env"),
+                IfaceId::PROCESS => std("Process", "System.Process"),
                 _ => &def.name,
             })?;
             if cap.perms != def.all_perms() {

@@ -41,3 +41,22 @@ fn closures(full: Log, flag: Bool) -> Text {
     let d = if flag { |l: Log[read, append]| l.read() } else { |l: Log[read]| l.read() }
     return f"{a}{b}{c(full)}{d(full)}"
 }
+
+fn appends(log: Log) -> Int {
+    return 1
+}
+
+fn reads_only(log: Log[read]) -> Int {
+    return 0
+}
+
+fn apply[T](f: fn(T) -> Int, x: T) -> Int {
+    return f(x)
+}
+
+fn functions(full: Log, flag: Bool) -> Int {
+    let a = apply(f: if flag { appends } else { reads_only }, x: full)
+    let b = apply(f: if flag { reads_only } else { appends }, x: full)
+    let c = [apply(f: appends, x: full), apply(f: reads_only, x: full)]
+    return a + b + c[0]
+}

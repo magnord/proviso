@@ -2072,7 +2072,7 @@ impl Checker<'_> {
     /// The permissions a `cap interface` named `name` declares, each once (REFERENCE §9.2). A
     /// wrongly cased one stands for the one it misspells, so it is kept as written.
     fn cap_def(&mut self, name: Ident, perms: &CapPerms) -> CapDef {
-        let mut def = CapDef { perms: Vec::new(), observes: Perms::NONE };
+        let mut def = CapDef { perms: Vec::new(), observes: Perms::NONE, lost: false };
         let declared = perms.observes.iter().map(|p| (p, true)).chain(perms.effects.iter().map(|p| (p, false)));
         for (perm, observes) in declared {
             let text = self.m.text(perm.sym);
@@ -2088,6 +2088,7 @@ impl Checker<'_> {
                     self.m.text(name.sym)
                 );
                 self.not_implemented(perm.span, &what, Planned::Unscheduled);
+                def.lost = true;
                 break;
             }
             if observes {
@@ -2113,6 +2114,8 @@ impl Checker<'_> {
                     ok = false;
                 }
                 Some(i) => perms = perms.union(Perms::one(i)),
+                // It may be one of those past the limit, which was reported (§15.1).
+                None if def.cap.as_ref().is_some_and(|cap| cap.lost) => ok = false,
                 None => {
                     let message = format!("`{}` declares no permission `{text}`", def.name);
                     self.error(codes::UNKNOWN_MEMBER, name.span, message);
@@ -3329,10 +3332,11 @@ impl Checker<'_> {
             TypeExprKind::Applied { name, ref args } => {
                 let text = m.text(name.sym);
                 // A rejected declaration's type arguments mean the same whichever one it was.
-                // A later phase's item, such as a capability, may take arguments that aren't
-                // types, as in `Logger[write]`.
+                // A later phase's item, such as a capability record, or a rejected capability
+                // interface takes permissions, which aren't types, as in `Logger[write]`.
                 if self.poisoned.contains(&name.sym) {
-                    if !m.planned_names.contains(&name.sym) {
+                    let cap = self.ifaces.iter().any(|src| src.decl.name.sym == name.sym && src.decl.cap.is_some());
+                    if !m.planned_names.contains(&name.sym) && !cap {
                         for &arg in args.as_deref().unwrap_or_default() {
                             self.resolve_type(arg);
                         }
@@ -6906,6 +6910,11 @@ impl Checker<'_> {
                 true
             }
             None if def.incomplete => true,
+            None if cap && name == "only" => {
+                let message = "`only` has no qualified form; call it on the capability, as in `x.only::[…]()`";
+                self.error(codes::UNKNOWN_MEMBER, method.span, message);
+                true
+            }
             None => {
                 let message = format!("`{iface_text}` has no method `{name}`");
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);
