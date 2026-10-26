@@ -259,10 +259,6 @@ pub struct Program {
     /// again before they are assigned (REFERENCE §5.1), so the interpreter may take the
     /// value out.
     pub moves_out: SideTable<Expr, ()>,
-    /// The calls of a `cap record`'s methods on a value of it from outside its own `impl`
-    /// blocks, which may not re-enter its object, as a call through a handle may not
-    /// (REFERENCE §9.6; OPEN_QUESTIONS Q30).
-    pub outside_calls: SideTable<Expr, ()>,
     /// The `match` arms whose patterns move the whole local or field their scrutinee names,
     /// which leaves its place when the arm is chosen.
     pub arms_out: SideTable<Pat, ()>,
@@ -4611,25 +4607,21 @@ impl Checker<'_> {
         }
     }
 
-    /// Notes method call `e` if it calls a method of a `cap record` on a value of it from
-    /// outside the record's own `impl` blocks. Only those blocks' direct calls to the
-    /// record's methods are ordinary calls (OPEN_QUESTIONS Q30).
-    fn outside_call(&mut self, e: ExprId) {
-        let ExprKind::MethodCall { receiver, ref args, .. } = self.m.exprs[e].kind else { return };
-        let value = match self.p.res(e) {
-            Some(Res::Dispatch { qualified: true, .. }) => match args.first() {
-                Some(first) => first.value,
-                None => return,
-            },
-            Some(Res::Dispatch { .. }) => receiver,
-            Some(Res::Fn(f)) if self.p.fns[f].receiver.is_some() => receiver,
-            _ => return,
-        };
-        if let Ty::Adt(id, _) = self.p.ty(value)
-            && self.p.decls.adt(*id).cap
-            && !matches!(&self.self_ty, Some(Ty::Adt(owner, _)) if owner == id)
-        {
-            self.p.outside_calls.insert(e, ());
+    /// The operands of `e`, which it uses directly.
+    fn direct_operands(&self, e: ExprId) -> Vec<ExprId> {
+        let args = |args: &[Arg]| args.iter().map(|arg| arg.value).collect::<Vec<_>>();
+        match &self.m.exprs[e].kind {
+            ExprKind::FText(parts) => {
+                (parts.iter()).filter_map(|part| if let FTextPart::Expr(x) = part { Some(*x) } else { None }).collect()
+            }
+            ExprKind::Call { args: a, .. } => args(a),
+            ExprKind::MethodCall { receiver, args: a, .. } => [vec![*receiver], args(a)].concat(),
+            ExprKind::Field { base, .. } => vec![*base],
+            ExprKind::Index { base, index } => vec![*base, *index],
+            ExprKind::Unary { operand, .. } => vec![*operand],
+            ExprKind::Binary { lhs, rhs, .. } | ExprKind::Range { lo: lhs, hi: rhs, .. } => vec![*lhs, *rhs],
+            ExprKind::Try(x) | ExprKind::Attempt(x) | ExprKind::Fail(x) => vec![*x],
+            _ => Vec::new(),
         }
     }
 
@@ -5365,9 +5357,6 @@ impl Checker<'_> {
         let ty = self.vars.resolve(&ty);
         let ty = self.shallow(e, ty, before);
         let ty = if self.f.view.is_some() { self.view_expr(e, ty) } else { ty };
-        if let ExprKind::MethodCall { .. } = self.m.exprs[e].kind {
-            self.outside_call(e);
-        }
         if copying {
             self.copied(e, &ty);
             self.consumed.insert(e);
@@ -5382,13 +5371,10 @@ impl Checker<'_> {
             };
         if self.errors - before > self.inner_errors || unresolved {
             self.rejected.insert(e);
-            // A use of `self` inside a rejected expression isn't reported again (§15.1).
+            // A rejected expression's operand isn't reported again for leaving the view, as
+            // `self` in `f"{self}"` (§15.1). What is nested deeper may leave it on its own.
             if self.f.view.is_some() && !self.f.escapes.is_empty() {
-                let span = self.span(e);
-                let inside: Vec<ExprId> = (self.f.escapes.keys().copied())
-                    .filter(|&x| span.lo <= self.span(x).lo && self.span(x).hi <= span.hi)
-                    .collect();
-                for x in inside {
+                for x in self.direct_operands(e) {
                     self.f.escapes.remove(&x);
                 }
             }

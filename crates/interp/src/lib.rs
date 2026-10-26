@@ -82,6 +82,8 @@ pub struct ClosureValue {
     /// written in.
     locals: usize,
     env: Vec<(LocalId, Value)>,
+    /// The `cap record` whose own `impl` blocks it is written in.
+    owner: Option<AdtId>,
 }
 
 /// A pool's slots, each empty or holding an element with the generation it was inserted
@@ -604,6 +606,7 @@ fn on_interp_thread<'a, R: Send>(
                     frame: 0,
                     frames: 0,
                     handle_call: false,
+                    owner: None,
                 };
                 run(&mut interp)
             })
@@ -687,6 +690,9 @@ struct Interp<'a> {
     /// Whether the next call is of an operation through a capability handle, which may not
     /// re-enter an object whose method is running (REFERENCE §9.6; OPEN_QUESTIONS Q30).
     handle_call: bool,
+    /// The `cap record` whose own `impl` blocks the running code is written in. Only there is
+    /// a call on a value of the record direct, so that it may re-enter the object.
+    owner: Option<AdtId>,
 }
 
 /// What a call runs: a module function, or a closure.
@@ -911,11 +917,20 @@ impl Interp<'_> {
         let outer = std::mem::replace(&mut self.base, mark);
         self.frames += 1;
         let outer_frame = std::mem::replace(&mut self.frame, self.frames);
+        let owner = match callee {
+            Callee::Fn(f) => match &p.fns[f].owner {
+                Some(Ty::Adt(id, _)) => Some(*id),
+                _ => None,
+            },
+            Callee::Closure(c) => c.owner,
+        };
+        let caller = std::mem::replace(&mut self.owner, owner);
         // A call that can't start owns its arguments already, so it abandons them and hands
         // its `inout` ones back as any other failure does.
         let mut snapshot = None;
         let begun = self.check_stack(site, true).and_then(|()| self.step(site)).and_then(|()| {
             if let Some((object, f)) = &object {
+                let handle = handle || caller != Some(object.def);
                 snapshot = Some(self.enter(object, *f, handle, site)?);
             }
             Ok(())
@@ -932,6 +947,7 @@ impl Interp<'_> {
         };
         self.base = outer;
         self.frame = outer_frame;
+        self.owner = caller;
         // A closure's body gives its value, as a block does; a function's ends with `return`.
         let result = match result {
             Ok(value) if params.is_some() => Ok(value),
@@ -1356,6 +1372,7 @@ impl Interp<'_> {
                 frame: self.frame,
                 locals: frame.len(),
                 env,
+                owner: self.owner,
             })));
             match holder {
                 Some(id) => {
@@ -1372,7 +1389,13 @@ impl Interp<'_> {
     fn bound(&self, e: ExprId, frame: &Frame) -> Value {
         let info = self.p.closures.get(e).expect("closures are checked");
         let env = info.captures.iter().map(|&(id, _)| (id, frame[id.index()].clone())).collect();
-        Value::Fn(FnValue::Closure(Arc::new(ClosureValue { expr: e, frame: self.frame, locals: frame.len(), env })))
+        Value::Fn(FnValue::Closure(Arc::new(ClosureValue {
+            expr: e,
+            frame: self.frame,
+            locals: frame.len(),
+            env,
+            owner: self.owner,
+        })))
     }
 
     /// Runs a block and returns the value of its final expression, or `Unit`.
@@ -1849,7 +1872,6 @@ impl Interp<'_> {
                         return self.attempted(e, result);
                     }
                     Res::Fn(f) => {
-                        self.handle_call = self.p.outside_calls.get(e).is_some();
                         let result = self.call_back(Callee::Fn(f), values, places, frame, span);
                         return self.attempted(e, result);
                     }
@@ -1865,11 +1887,9 @@ impl Interp<'_> {
                                 let key = impl_key(&values[0]);
                                 let f = self.p.decls.impl_method(iface, key, method);
                                 let f = f.expect("the checker found an implementation");
-                                // A call through a capability handle, or from outside the `cap
-                                // record`'s own blocks, may not re-enter its object (OPEN_QUESTIONS
-                                // Q30).
-                                self.handle_call = matches!(self.p.ty(self_value), Ty::Cap(_))
-                                    || self.p.outside_calls.get(e).is_some();
+                                // A call through a capability handle, rather than on a value of
+                                // the `cap record`, may not re-enter its object (OPEN_QUESTIONS Q30).
+                                self.handle_call = matches!(self.p.ty(self_value), Ty::Cap(_));
                                 self.call_back(Callee::Fn(f), values, places, frame, span)
                             }
                         };

@@ -1,8 +1,10 @@
 // phase: 3.3
+// expect-error: E0301
 // expect-error: E0305
 // expect-error: E0601
 // expect-error: E0603
 // expect-error: E0605
+// expect-error: E0311
 // An operation that needs no `effects` permission sees `self` through an observes-only view
 // (REFERENCE §9.2; OPEN_QUESTIONS Q39). A path from `self` may be read through, and a
 // capability at its end is narrowed to its `observes` permissions, as is what it uses. Its
@@ -143,6 +145,15 @@ impl Store for Audited {
         let b = takes_sinks(s: self.sinks)                      // <- E0605
         let c = Store.of(self)                                  // <- E0605
         let d = self.helper()                                   // <- E0605
+        // A way out of the view beside another error, or inside a rejected `match`, is
+        // still reported.
+        let e = takes_store(s: self) + "x"                      // <- E0301, E0605
+        let k = match self.reads > 0 {                          // <- E0311
+            true => {
+                let again = self                                // <- E0605
+                1
+            }
+        }
         let f = || self.files.len()
         let g = || self.sinks.label
         let logs = self.sinks.logs                              // <- E0605

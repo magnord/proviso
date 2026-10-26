@@ -1,0 +1,5 @@
+[debug cap_records/outside_reentry_show.proviso:32:17] "tally at 10"
+defect[reentrant_call]: this calls `show` on a `Tally` whose operation is still running, through a capability handle or from outside the record's own `impl` blocks; calls on one capability object run one at a time (§9.6)
+  at cap_records/outside_reentry_show.proviso:33:26 (outside_reentry_show.main+5)
+  called from cap_records/outside_reentry_show.proviso:25:9 (outside_reentry_show.Tally.run+4)
+  called from cap_records/outside_reentry_show.proviso:33:5 (outside_reentry_show.main+5)

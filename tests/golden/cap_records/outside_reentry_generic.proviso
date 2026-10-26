@@ -1,0 +1,41 @@
+// phase: 3.3
+// expect-exit: 70
+// expect-report: defect reentrant_call
+// A generic function is outside every `cap record`'s own `impl` blocks, so its call of a method
+// on a value of type parameter `T` that turns out to be a `cap record` is a re-entry when the
+// object's operation is still running (REFERENCE §9.6; OPEN_QUESTIONS Q30).
+use std.io { IoError, Out }
+
+interface Named {
+    fn name(self) -> Text
+}
+
+cap record Tally {
+    out: Out
+    state total: Int
+}
+
+impl Named for Tally {
+    fn name(self) -> Text {
+        return f"tally {self.total}"
+    }
+}
+
+impl Tally {
+    fn run(self, f: fn() -> Unit uses Out) {
+        self.total += 1
+        let _ = attempt self.out.write_line(self.name())
+        f()
+    }
+}
+
+fn names[T: Named](x: T) -> Text {
+    return x.name()
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let t = Tally(out: sys.stdout, total: 0)
+    let u = Tally(out: sys.stdout, total: 10)
+    t.run(f: || debug(names(x: u)))
+    t.run(f: || debug(names(x: t)))
+}

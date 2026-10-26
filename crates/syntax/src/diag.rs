@@ -235,7 +235,7 @@ pub mod codes {
         SYSTEM_CONSTRUCTED = "E0604", "system_constructed",
             "A `System` is built, copied with `with`, or matched by a pattern. The runtime gives `main` the only one, and a program reads its fields by name (REFERENCE §9.1).";
         VIEW_ESCAPE = "E0605", "view_escape",
-            "In an operation that needs no `effects` permission, which sees `self` through the observes-only view, a value leaves the view: `self`, a `cap record` at the end of a path from it, or another value there that reaches an `effects` permission is bound, passed, returned, stored or captured, or is the receiver of a call other than an operation of a `cap interface` that needs no `effects` permission (REFERENCE §9.6; OPEN_QUESTIONS Q39).";
+            "In an operation that needs no `effects` permission, which sees `self` through the observes-only view, a value leaves the view: `self`, a `cap record` at the end of a path from it, or another value there that reaches an `effects` permission is bound, passed, returned, stored or iterated, or is the receiver of a call other than an operation of a `cap interface` that needs no `effects` permission. A closure may capture `self`, since its body sees the same view (REFERENCE §9.6; OPEN_QUESTIONS Q39).";
         NOT_A_CAP_RECORD = "E0606", "not_a_cap_record",
             "An `impl` of a capability interface for a type that isn't a `cap record`. Only a `cap record` implements one, so its values are handles whose copies share `state` (REFERENCE §9.6; OPEN_QUESTIONS Q30).";
 

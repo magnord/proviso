@@ -457,11 +457,12 @@ impl Parser<'_> {
             // (OPEN_QUESTIONS P5).
             // An `opaque` capability record would declare a `uses` its fields and interfaces
             // already give it, which isn't scheduled. It is kept as a `cap record`.
-            T::Keyword(Kw::Opaque) if self.nth(1) == T::Keyword(Kw::Cap) && self.nth(2) == T::Keyword(Kw::Record) => {
+            T::Keyword(Kw::Opaque)
+                if self.nth(1) == T::Keyword(Kw::Cap) && self.after_newlines(2) == T::Keyword(Kw::Record) =>
+            {
                 let span = self.bump().span;
                 self.diags.not_implemented(span, "`opaque cap record`s", Planned::Unscheduled);
-                self.bump();
-                self.cap_record_item()?
+                self.cap_item(true)?
             }
             T::Keyword(Kw::Opaque) if matches!(self.nth(1), T::Keyword(Kw::Record | Kw::Unique | Kw::Resource)) => {
                 self.bump();
@@ -497,37 +498,7 @@ impl Parser<'_> {
                 ItemKind::Impl(self.impl_decl()?)
             }
             T::Keyword(Kw::Interface) => ItemKind::Interface(self.interface_decl(false)?),
-            T::Keyword(Kw::Cap) if self.nth(1) == T::Keyword(Kw::Interface) => {
-                self.bump();
-                ItemKind::Interface(self.interface_decl(true)?)
-            }
-            T::Keyword(Kw::Cap) if self.nth(1) == T::Keyword(Kw::Record) => {
-                self.bump();
-                self.cap_record_item()?
-            }
-            T::Keyword(Kw::Cap) => {
-                // Only a name on `cap`'s own line is poisoned. An item on the next is kept.
-                self.poison_declared_name();
-                let span = self.bump().span;
-                let message = "`cap` goes right before `interface` or `record`, on the same line, as in `cap interface Log { … }` (§9.2)";
-                self.error(codes::UNEXPECTED_TOKEN, span, message);
-                // A `cap interface` or `cap record` split over two lines is still what it says.
-                let mut n = 0;
-                while self.nth(n) == T::Newline {
-                    n += 1;
-                }
-                let next = self.nth(n);
-                if !matches!(next, T::Keyword(Kw::Interface | Kw::Record)) {
-                    return Err(());
-                }
-                while self.at(T::Newline) {
-                    self.bump();
-                }
-                match next {
-                    T::Keyword(Kw::Interface) => ItemKind::Interface(self.interface_decl(true)?),
-                    _ => self.cap_record_item()?,
-                }
-            }
+            T::Keyword(Kw::Cap) => self.cap_item(false)?,
             T::Keyword(Kw::Example) => {
                 // The example is kept, so it is still checked.
                 if vis != Visibility::Private && written {
@@ -738,10 +709,55 @@ impl Parser<'_> {
     /// and refinements aren't scheduled (OPEN_QUESTIONS P5). Each is reported. The record is
     /// kept without its `derives` and refinements, but not with type parameters, which its
     /// fields may name.
-    /// `record R { … }` after `cap`, as an item. A `cap record` has no `uses` of its own.
-    fn cap_record_item(&mut self) -> PResult<ItemKind> {
+    /// The first token from the `n`th on that isn't a newline.
+    fn after_newlines(&self, mut n: usize) -> T {
+        while self.nth(n) == T::Newline {
+            n += 1;
+        }
+        self.nth(n)
+    }
+
+    /// A `cap interface` or `cap record` item, at `cap`. After `opaque`, which is rejected
+    /// already, it is a `cap record`, whose `uses` the `opaque` would have declared.
+    fn cap_item(&mut self, opaque: bool) -> PResult<ItemKind> {
+        match self.nth(1) {
+            T::Keyword(Kw::Interface) => {
+                self.bump();
+                return Ok(ItemKind::Interface(self.interface_decl(true)?));
+            }
+            T::Keyword(Kw::Record) => {
+                self.bump();
+                return self.cap_record_item(opaque);
+            }
+            _ => {}
+        }
+        // Only a name on `cap`'s own line is poisoned. An item on the next is kept.
+        self.poison_declared_name();
+        let span = self.bump().span;
+        let message =
+            "`cap` goes right before `interface` or `record`, on the same line, as in `cap interface Log { … }` (§9.2)";
+        self.error(codes::UNEXPECTED_TOKEN, span, message);
+        // A `cap interface` or `cap record` split over two lines is still what it says.
+        let next = self.after_newlines(0);
+        if !matches!(next, T::Keyword(Kw::Interface | Kw::Record)) {
+            return Err(());
+        }
+        while self.at(T::Newline) {
+            self.bump();
+        }
+        match next {
+            T::Keyword(Kw::Interface) => Ok(ItemKind::Interface(self.interface_decl(true)?)),
+            _ => self.cap_record_item(opaque),
+        }
+    }
+
+    /// `record R { … }` after `cap`, as an item. A `cap record` has no `uses` of its own,
+    /// unless it is `opaque`, which is rejected already (§15.1).
+    fn cap_record_item(&mut self, opaque: bool) -> PResult<ItemKind> {
         let decl = self.cap_record_decl()?;
-        if let Some(&first) = decl.uses.as_ref().and_then(|uses| uses.first()) {
+        if let Some(&first) = decl.uses.as_ref().and_then(|uses| uses.first())
+            && !opaque
+        {
             let span = self.m.types[first].span;
             let message = "a `cap record` reaches what its fields reach and the capability interfaces it implements; only an `opaque record` declares what it `uses` (§9.2, §9.6)";
             self.error(codes::UNEXPECTED_TOKEN, span, message);

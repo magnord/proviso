@@ -1,0 +1,34 @@
+// phase: 3.3
+// expect-exit: 70
+// expect-report: defect reentrant_call
+// A hand-written `show`, `eq` or `cmp` of a `cap record` is a method of it, so interpolation,
+// `==` and `<` call it as any call does. From outside the record's own `impl` blocks, such a
+// call into an object whose operation is still running is a re-entry (REFERENCE §9.6;
+// OPEN_QUESTIONS Q30). Here interpolation in `main`'s closure calls `show` while `run` runs.
+use std.io { IoError, Out }
+
+cap record Tally {
+    out: Out
+    state total: Int
+}
+
+impl Show for Tally {
+    fn show(self) -> Text {
+        return f"tally at {self.total}"
+    }
+}
+
+impl Tally {
+    fn run(self, f: fn() -> Unit uses Out) {
+        self.total += 1
+        let _ = attempt self.out.write_line(f"running {self}")
+        f()
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let t = Tally(out: sys.stdout, total: 0)
+    let u = Tally(out: sys.stdout, total: 10)
+    t.run(f: || debug(f"{u}"))
+    t.run(f: || debug(f"{t}"))
+}

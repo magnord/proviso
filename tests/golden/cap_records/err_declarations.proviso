@@ -84,8 +84,8 @@ cap record Bounded {
 }
 
 // An `opaque` capability record would declare a `uses` that its fields and interfaces give
-// it already. It is kept as a `cap record`.
-opaque cap record Hidden {                                      // <- E0901
+// it already. It is kept as a `cap record`, and its `uses` goes with the `opaque`.
+opaque cap record Hidden uses Out {                             // <- E0901
     state n: Int
 }
 
@@ -99,9 +99,14 @@ impl Gauge for Hidden {
     }
 }
 
-// A `cap record` split over two lines is still one.
+// A `cap record` split over two lines is still one, also after `opaque`.
 cap                                                             // <- E0101
 record Split {
+    state n: Int
+}
+
+opaque cap                                                      // <- E0901, E0101
+record Lone {
     state n: Int
 }
 

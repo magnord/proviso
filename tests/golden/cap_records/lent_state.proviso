@@ -4,7 +4,8 @@
 // the value in place, so a loop of such calls stays linear. One that fails leaves the field as
 // it was, unless its parameter keeps partial changes (REFERENCE §5.4). Meanwhile the object's
 // other methods may run, and a failure in one rolls back the fields it changed, but not the lent
-// one, whose change is still the outer call's.
+// one, whose change is still the outer call's. A closure written in the record's own block
+// calls its methods directly, wherever it runs.
 use std.io { IoError }
 
 enum Full {
@@ -19,6 +20,11 @@ cap record Bag {
 
 fn add(xs: inout List[Int], x: Int) {
     xs.push(x)
+}
+
+fn twice(f: fn() -> Unit) {
+    f()
+    f()
 }
 
 fn swap(a: inout Int, b: inout Int) {
@@ -69,6 +75,12 @@ impl Bag {
         let _ = attempt self.count_then_fail()
     }
 
+    // A closure written here is in the record's own block, so its calls are direct, even
+    // when a function outside calls it while this method runs.
+    fn count_twice(self) {
+        twice(f: || self.count())
+    }
+
     fn nested(self) fails Full {
         try self.add_counting(xs: &self.items, x: 7)
     }
@@ -85,6 +97,7 @@ pub fn main(sys: keep System) fails IoError {
     try sys.stdout.write_line(bag.report())
     try sys.stdout.write_line(bag.checked(x: 5))
     try sys.stdout.write_line(bag.checked(x: 6))
+    bag.count_twice()
     let nested = attempt bag.nested()
     try sys.stdout.write_line(f"{nested is Ok(_)}")
     try sys.stdout.write_line(bag.report())
