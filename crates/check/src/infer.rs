@@ -11,12 +11,13 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
+use proviso_syntax::ast::ParamMode;
 use proviso_syntax::intern::Symbol;
 use proviso_syntax::source::Span;
 
 use crate::FnId;
-use crate::decls::AdtId;
-use crate::types::{FloatTy, Ty};
+use crate::decls::{AdtId, IfaceId};
+use crate::types::{FloatTy, Perms, Ty};
 
 /// What a variable may become.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -41,6 +42,55 @@ pub enum Origin {
     Defaulted,
 }
 
+/// What a variable that capabilities of one interface met may have as permissions. Values
+/// that flow into it bound it from above, and the places it flows into from below, so it
+/// settles as the same type whichever came first (OPEN_QUESTIONS P3, decided for phase 3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CapBounds {
+    pub iface: IfaceId,
+    /// The permissions every capability that flowed in has, or `None` before one did.
+    pub at_most: Option<Perms>,
+    /// The permissions some place it flowed into needs.
+    pub at_least: Perms,
+}
+
+impl CapBounds {
+    /// The permissions it settles as: all that the values give it, or else what its places need.
+    pub fn solution(self) -> Perms {
+        self.at_most.unwrap_or(self.at_least)
+    }
+
+    fn holds(self) -> bool {
+        self.at_most.is_none_or(|most| self.at_least.is_subset(most))
+    }
+
+    fn meet(self, other: CapBounds) -> Option<CapBounds> {
+        let at_most = match (self.at_most, other.at_most) {
+            (Some(a), Some(b)) => Some(a.intersect(b)),
+            (a, b) => a.or(b),
+        };
+        let bounds = CapBounds { iface: self.iface, at_most, at_least: self.at_least.union(other.at_least) };
+        (self.iface == other.iface && bounds.holds()).then_some(bounds)
+    }
+}
+
+/// Which way a value's type meets a variable: it flows in, so the variable is at least as
+/// general, or the variable flows out to where the type is required.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Flow {
+    In,
+    Out,
+}
+
+impl Flow {
+    fn flip(self) -> Flow {
+        match self {
+            Flow::In => Flow::Out,
+            Flow::Out => Flow::In,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Open {
     pub kind: Kind,
@@ -62,6 +112,8 @@ pub struct Open {
     /// type arguments. It holds how many handlers enclose the outermost one that marks it, so
     /// an inner handler that ends doesn't clear what an outer one still joins.
     pub handled: Option<u32>,
+    /// It is a capability of this interface, whose permissions are still open.
+    pub cap: Option<CapBounds>,
     pub origin: Origin,
 }
 
@@ -99,8 +151,14 @@ pub struct Vars {
     trail: Vec<u32>,
     /// The variables that settled as `Never` after a `todo` hole met them.
     holes: Vec<u32>,
+    /// The type each list of parts that [`Vars::open_caps`] built was opened from, by address.
+    /// Once its variables settle as they were, [`Vars::zonk`] gives back that type, so the
+    /// copies opened from one shared part share it again, and a type that doubles at each
+    /// level with a capability in it stays linear.
+    origins: Origins,
 }
 
+type Origins = HashMap<usize, (Arc<[Ty]>, Ty), BuildHasherDefault<AddressHasher>>;
 type Shapes = HashMap<usize, (Arc<[Ty]>, Shape), BuildHasherDefault<AddressHasher>>;
 type Depths = HashMap<usize, (Arc<[Ty]>, u32, bool), BuildHasherDefault<AddressHasher>>;
 
@@ -163,6 +221,7 @@ impl Vars {
         self.depths.get_mut().clear();
         self.trail.clear();
         self.holes.clear();
+        self.origins.clear();
     }
 
     /// How many variables have been bound so far.
@@ -230,9 +289,24 @@ impl Vars {
             owed: false,
             hole: false,
             handled: None,
+            cap: None,
             origin,
         }));
         Ty::Var(self.count() - 1)
+    }
+
+    /// A variable for a capability of `iface` whose permissions are open, where a value with
+    /// `perms` flows in or out.
+    fn cap_var(&mut self, iface: IfaceId, perms: Perms, flow: Flow) -> Ty {
+        let cap = match flow {
+            Flow::In => CapBounds { iface, at_most: Some(perms), at_least: Perms::NONE },
+            Flow::Out => CapBounds { iface, at_most: None, at_least: perms },
+        };
+        let ty = self.fresh(Kind::Any, Origin::Defaulted);
+        let Ty::Var(v) = ty else { unreachable!("fresh makes a variable") };
+        let State::Open(open) = &mut self.states[v as usize] else { unreachable!("fresh is open") };
+        open.cap = Some(cap);
+        ty
     }
 
     /// A variable that only `Never` has reached, as a `Never` in an expected type is.
@@ -245,6 +319,7 @@ impl Vars {
             owed: false,
             hole: false,
             handled: None,
+            cap: None,
             origin: Origin::Defaulted,
         }));
         Ty::Var(self.count() - 1)
@@ -350,9 +425,12 @@ impl Vars {
                 let done = if parts.iter().all(Option::is_none) {
                     None
                 } else {
-                    let args =
-                        parts.into_iter().zip(args.iter()).map(|(part, arg)| part.unwrap_or_else(|| arg.clone()));
-                    Some(ty.with_parts(args.collect()))
+                    let args: Vec<Ty> = parts
+                        .into_iter()
+                        .zip(args.iter())
+                        .map(|(part, arg)| part.unwrap_or_else(|| arg.clone()))
+                        .collect();
+                    Some(self.origin_of(key, &args).unwrap_or_else(|| ty.with_parts(args)))
                 };
                 seen.insert(key, done.clone());
                 done
@@ -371,9 +449,10 @@ impl Vars {
     /// [`Vars::as_never`], which reads each shared type argument list once, by address.
     fn as_never_part(&self, ty: &Ty, seen: &mut HashMap<usize, Ty>) -> Ty {
         match self.resolve(ty) {
-            Ty::Var(v) => match self.open(v).map(|open| open.kind) {
-                Some(Kind::Int) => Ty::INT,
-                Some(Kind::Float) => Ty::Float(FloatTy::F64),
+            Ty::Var(v) => match self.open(v).map(|open| (open.kind, open.cap)) {
+                Some((Kind::Int, _)) => Ty::INT,
+                Some((Kind::Float, _)) => Ty::Float(FloatTy::F64),
+                Some((_, Some(cap))) => Ty::cap(cap.iface, cap.solution()),
                 _ => Ty::Never,
             },
             ty if !self.has_var(&ty) => ty,
@@ -400,11 +479,12 @@ impl Vars {
     /// [`Vars::defaulted`], where `memo` holds what each shared part gave.
     fn defaulted_part(&self, ty: &Ty, memo: &mut HashMap<usize, Ty>) -> Ty {
         match self.resolve(ty) {
-            Ty::Var(v) => match self.open(v).map(|open| (open.kind, open.never)) {
-                Some((Kind::Int, _)) => Ty::INT,
-                Some((Kind::Float, _)) => Ty::Float(FloatTy::F64),
+            Ty::Var(v) => match self.open(v).map(|open| (open.kind, open.never, open.cap)) {
+                Some((Kind::Int, ..)) => Ty::INT,
+                Some((Kind::Float, ..)) => Ty::Float(FloatTy::F64),
+                Some((_, _, Some(cap))) => Ty::cap(cap.iface, cap.solution()),
                 // Only `Never` has reached it, as a closure's error type when nothing fails.
-                Some((_, true)) => Ty::Never,
+                Some((_, true, _)) => Ty::Never,
                 _ => Ty::Var(self.root(v)),
             },
             ty if self.has_var(&ty) && ty.parts().is_some() => {
@@ -618,6 +698,83 @@ impl Vars {
         }
     }
 
+    /// `ty` with each capability in it a variable whose permissions stay open, where a value of
+    /// type `ty` flows `flow` (OPEN_QUESTIONS P3, decided for phase 3). A function type's
+    /// parameters flow the other way, and an `inout` one keeps its permissions, since what is
+    /// passed must have exactly those. Parts without a capability are shared.
+    fn open_caps(&mut self, ty: &Ty, flow: Flow) -> Ty {
+        self.open_caps_part(ty, flow, &mut HashMap::new()).unwrap_or_else(|| ty.clone())
+    }
+
+    /// [`Vars::open_caps`], or `None` where nothing changes. A list of parts in `seen`, by
+    /// address and flow, was opened already, so a type that shares its parts costs each part
+    /// once (issue #55), and a shared part's capabilities share their variables.
+    fn open_caps_part(&mut self, ty: &Ty, flow: Flow, seen: &mut HashMap<(usize, Flow), Option<Ty>>) -> Option<Ty> {
+        if let Ty::Cap(cap) = ty {
+            return Some(self.cap_var(cap.iface, cap.perms, flow));
+        }
+        let parts = ty.parts()?;
+        let key = (Arc::as_ptr(parts) as *const Ty as usize, flow);
+        if let Some(done) = seen.get(&key) {
+            return done.clone();
+        }
+        let new: Vec<Option<Ty>> = match ty {
+            Ty::Fn(modes, _) => (parts.iter().enumerate())
+                .map(|(i, part)| match i.checked_sub(2).map(|p| modes[p]) {
+                    None => self.open_caps_part(part, flow, seen),
+                    Some(ParamMode::Inout | ParamMode::InoutPartial) => None,
+                    Some(_) => self.open_caps_part(part, flow.flip(), seen),
+                })
+                .collect(),
+            _ => parts.iter().map(|arg| self.open_caps_part(arg, flow, seen)).collect(),
+        };
+        let done = self.rebuilt(ty, parts, new);
+        seen.insert(key, done.clone());
+        done
+    }
+
+    /// `ty` built from its `parts` with those in `new` replaced, or `None` when none is. The
+    /// new type's parts remember `ty` as their origin.
+    fn rebuilt(&mut self, ty: &Ty, parts: &Arc<[Ty]>, new: Vec<Option<Ty>>) -> Option<Ty> {
+        if new.iter().all(Option::is_none) {
+            return None;
+        }
+        let built = ty
+            .with_parts(new.into_iter().zip(parts.iter()).map(|(n, part)| n.unwrap_or_else(|| part.clone())).collect());
+        if let Some(list) = built.parts() {
+            self.origins.insert(Arc::as_ptr(list) as *const Ty as usize, (list.clone(), ty.clone()));
+        }
+        Some(built)
+    }
+
+    /// The type that the list of parts at `key` was opened from, when `parts`, what that list
+    /// zonks to, are that type's own parts again. A part is compared by the address of its
+    /// own parts, so this costs the length of the list.
+    fn origin_of(&self, key: usize, parts: &[Ty]) -> Option<Ty> {
+        let (_, origin) = self.origins.get(&key)?;
+        let own = origin.parts()?;
+        let same = |a: &Ty, b: &Ty| match (a.parts(), b.parts()) {
+            (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+            (None, None) => a == b,
+            _ => false,
+        };
+        (own.len() == parts.len() && own.iter().zip(parts).all(|(a, b)| same(a, b))).then(|| origin.clone())
+    }
+
+    /// Whether a capability of type `ty` may flow `flow` through open variable `v`, a capability
+    /// whose permissions are open, which narrows its bounds.
+    fn cap_meets(&mut self, v: u32, cap: CapBounds, ty: &Ty, flow: Flow) -> bool {
+        let Ty::Cap(given) = ty else { return false };
+        let other = match flow {
+            Flow::In => CapBounds { iface: given.iface, at_most: Some(given.perms), at_least: Perms::NONE },
+            Flow::Out => CapBounds { iface: given.iface, at_most: None, at_least: given.perms },
+        };
+        let Some(met) = cap.meet(other) else { return false };
+        let State::Open(open) = &mut self.states[v as usize] else { unreachable!("roots are open") };
+        open.cap = Some(met);
+        true
+    }
+
     /// Whether variable `v` occurs in `ty`, which would make it part of itself.
     fn occurs(&self, v: u32, ty: &Ty) -> bool {
         self.occurs_in(v, ty, &mut HashSet::new())
@@ -671,6 +828,15 @@ impl Vars {
             (x, y) if x == y => x,
             _ => return false,
         };
+        let cap = match (kept.cap, other.cap) {
+            (Some(a), Some(b)) => match a.meet(b) {
+                Some(met) => Some(met),
+                None => return false,
+            },
+            (Some(cap), None) | (None, Some(cap)) if kind == Kind::Any => Some(cap),
+            (Some(_), None) | (None, Some(_)) => return false,
+            (None, None) => None,
+        };
         let never = kept.never || other.never;
         let quiet = kept.quiet || other.quiet;
         let unmarked = kept.unmarked || other.unmarked;
@@ -679,7 +845,8 @@ impl Vars {
         let handled = kept.handled.into_iter().chain(other.handled).min();
         // An error about the class names the value that first left it open.
         let origin = if matches!(kept.origin, Origin::Defaulted) { other.origin } else { kept.origin };
-        self.states[keep as usize] = State::Open(Open { kind, never, quiet, unmarked, owed, hole, handled, origin });
+        self.states[keep as usize] =
+            State::Open(Open { kind, never, quiet, unmarked, owed, hole, handled, cap, origin });
         self.states[gone as usize] = State::Bound(Ty::Var(keep));
         self.trail.push(gone);
         true
@@ -694,11 +861,15 @@ impl Vars {
             open.never = true;
             return true;
         }
+        if let Some(cap) = open.cap {
+            return self.cap_meets(v, cap, ty, Flow::In);
+        }
         let (kind, marks) = (open.kind, (open.quiet, open.hole, open.handled));
         if !Self::fits(kind, ty) || self.occurs(v, ty) {
             return false;
         }
         let ty = self.open_nevers(ty);
+        let ty = self.open_caps(&ty, Flow::In);
         self.bind_marks(marks, &ty);
         self.settle(v, ty);
         true
@@ -722,12 +893,16 @@ impl Vars {
     fn exact(&mut self, v: u32, ty: &Ty) -> bool {
         let v = self.root(v);
         let State::Open(open) = &self.states[v as usize] else { unreachable!("roots are open") };
+        if let Some(cap) = open.cap {
+            return self.cap_meets(v, cap, ty, Flow::Out);
+        }
         let marks = (open.quiet, open.hole, open.handled);
         if !Self::fits(open.kind, ty) || self.occurs(v, ty) {
             return false;
         }
-        self.bind_marks(marks, ty);
-        self.settle(v, ty.clone());
+        let ty = self.open_caps(ty, Flow::Out);
+        self.bind_marks(marks, &ty);
+        self.settle(v, ty);
         true
     }
 
@@ -773,14 +948,22 @@ impl Vars {
                 if Arc::ptr_eq(parts, actual_parts) || pairs.get(parts, actual_parts).is_some() {
                     return true;
                 }
+                // An `inout` parameter's value goes in and comes back, so its type must be the
+                // same both ways.
                 let fits = self.subsume_in(&parts[0], &actual_parts[0], pairs)
                     && self.subsume_in(&parts[1], &actual_parts[1], pairs)
-                    && (parts[2..].iter().zip(&actual_parts[2..]))
-                        .all(|(param, actual)| self.subsume_in(actual, param, pairs));
+                    && (parts[2..].iter().zip(&actual_parts[2..]).zip(modes.iter())).all(|((param, actual), mode)| {
+                        self.subsume_in(actual, param, pairs)
+                            && (!mode.is_inout() || self.subsume_in(param, actual, pairs))
+                    });
                 if fits {
                     pairs.insert(parts, actual_parts, None);
                 }
                 fits
+            }
+            // A capability fits where fewer permissions are expected (REFERENCE §9.2).
+            (Ty::Cap(expected), Ty::Cap(actual)) => {
+                expected.iface == actual.iface && expected.perms.is_subset(actual.perms)
             }
             (expected, actual) => expected == actual,
         }
@@ -830,21 +1013,45 @@ impl Vars {
                 if let Some(Some(joined)) = pairs.get(parts, other_parts) {
                     return Some(joined.clone());
                 }
-                for (x, y) in parts[2..].iter().zip(&other_parts[2..]) {
-                    if !(self.subsume(x, y) && self.subsume(y, x)) {
-                        return None;
-                    }
+                // A parameter takes what either function needs, so neither is passed less than
+                // it declares, and an `inout` one must be the same (OPEN_QUESTIONS P3).
+                let mut params = Vec::new();
+                for ((x, y), mode) in parts[2..].iter().zip(&other_parts[2..]).zip(modes.iter()) {
+                    params.push(if mode.is_inout() { self.same(x, y)? } else { self.meet(x, y)? });
                 }
                 let mut joined = vec![
                     self.join_in(&parts[0], &other_parts[0], pairs)?,
                     self.join_in(&parts[1], &other_parts[1], pairs)?,
                 ];
-                joined.extend(parts[2..].iter().cloned());
+                joined.extend(params);
                 let joined = a.with_parts(joined);
                 pairs.insert(parts, other_parts, Some(joined.clone()));
                 Some(joined)
             }
+            // A value that is either capability has the permissions both have.
+            (Ty::Cap(x), Ty::Cap(y)) if x.iface == y.iface => Some(Ty::cap(x.iface, x.perms.intersect(y.perms))),
             (x, y) => (x == y).then(|| a.clone()),
         }
+    }
+
+    /// The type of a parameter that takes either an `a` or a `b`: a capability with every
+    /// permission either needs, as in a record or variant's fields. Any other pair must be the
+    /// same type. `None` when there is none.
+    fn meet(&mut self, a: &Ty, b: &Ty) -> Option<Ty> {
+        let (a, b) = (self.resolve(a), self.resolve(b));
+        match (&a, &b) {
+            (Ty::Cap(x), Ty::Cap(y)) if x.iface == y.iface => Some(Ty::cap(x.iface, x.perms.union(y.perms))),
+            (Ty::Adt(id, args), Ty::Adt(other, other_args)) if id == other && args.len() == other_args.len() => {
+                let met =
+                    args.iter().zip(other_args.iter()).map(|(x, y)| self.meet(x, y)).collect::<Option<Vec<_>>>()?;
+                Some(Ty::applied(*id, met))
+            }
+            _ => self.same(&a, &b),
+        }
+    }
+
+    /// `a`, binding variables so that `b` is the same type, or `None` when it can't be.
+    fn same(&mut self, a: &Ty, b: &Ty) -> Option<Ty> {
+        (self.subsume(a, b) && self.subsume(b, a)).then(|| a.clone())
     }
 }

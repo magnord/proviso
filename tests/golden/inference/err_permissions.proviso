@@ -1,0 +1,46 @@
+// phase: 3.1
+// expect-error: E0603
+// A join of capabilities has only the permissions every value has, and a join of closures
+// takes a capability with every permission any of them needs, so what each settles as is
+// checked as that type, in either order (OPEN_QUESTIONS P3, decided for phase 3). An
+// `inout` capability must have exactly the parameter's permissions, since the callee may
+// store a narrower one in it.
+cap interface Log observes(read) effects(append) {
+    fn read(self) -> Text                       needs read
+    fn append(self, line: Text)                 needs append
+}
+
+fn pick[T](a: take T, b: take T) -> T {
+    return a
+}
+
+fn narrow(log: inout Log[read], other: Log[read]) {
+    log = other
+}
+
+fn narrow_all(logs: inout List[Log[read]], other: Log[read]) {
+    logs.push(other)
+}
+
+fn values(full: Log, reader: Log[read], flag: Bool) {
+    pick(a: full, b: reader).append("x")                    // <- E0603
+    pick(a: reader, b: full).append("x")                    // <- E0603
+    let c = if flag { full } else { reader }
+    c.append("x")                                           // <- E0603
+    let d = if flag { reader } else { full }
+    d.append("x")                                           // <- E0603
+}
+
+fn closures(reader: Log[read], flag: Bool) {
+    let c = if flag { |l: Log[read]| l.read() } else { |l: Log| l.read() }
+    let d = if flag { |l: Log| l.read() } else { |l: Log[read]| l.read() }
+    let x = c(reader)                                       // <- E0603
+    let y = d(reader)                                       // <- E0603
+}
+
+fn inouts(full: Log, reader: Log[read]) {
+    var log = full
+    narrow(log: &log, other: reader)                        // <- E0603
+    var logs = [full]
+    narrow_all(logs: &logs, other: reader)                  // <- E0603
+}

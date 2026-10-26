@@ -1,0 +1,100 @@
+// phase: 3.1
+// expect-error: E0101
+// expect-error: E0204
+// expect-error: E0210
+// expect-error: E0303
+// expect-error: E0307
+// expect-error: E0901
+// Only a `cap interface` declares permissions, and only its operations have `needs`
+// clauses, which name permissions it declares, once each (REFERENCE §9.2). A capability type
+// names its interface's permissions, once each. A capability interface is a type, so it
+// can't be a constraint (OPEN_QUESTIONS Q31). `cap record`, `uses` and `with` come in later
+// slices, and implementations for a capability type are not yet scheduled. A rejected
+// declaration's uses aren't reported again (REFERENCE §15.1).
+use std.io { Out }
+
+cap interface Log observes(read) effects(append) {
+    fn read(self) -> Text                       needs read
+    fn append(self, line: Text)                 needs append
+    fn twice(self) -> Text                      needs read, read        // <- E0210
+    fn lost(self) -> Text                       needs nosuch            // <- E0303
+    fn later(self) -> Text                      needs read uses Log     // <- E0901
+}
+
+cap interface Twice observes(read) effects(read) {                      // <- E0210
+    fn read(self) -> Text                       needs read
+}
+
+cap interface Cased observes(Read) {                                    // <- E0204
+    fn read(self) -> Text
+}
+
+interface Plain observes(read) {                                        // <- E0101
+    fn read(self) -> Text
+}
+
+interface Needy {
+    fn read(self) -> Text                       needs read              // <- E0101
+}
+
+fn helper(x: Int) -> Int needs read {                                   // <- E0101
+    return x
+}
+
+fn kept(x: Int) -> Int observes(read) {                                 // <- E0101
+    return x
+}
+
+fn now(x: Int) observes Clock {                                         // <- E0101
+    return
+}
+
+fn tick(x: Int) -> Int effects Clock {                                  // <- E0101
+    return x
+}
+
+fn clocked() -> Int {
+    now(x: 1)
+    return tick(x: helper(x: kept(x: 2)))
+}
+
+cap record Counter {                                                    // <- E0901
+    n: Int
+}
+
+record Data {
+    n: Int
+}
+
+fn types(a: Log[nosuch], b: Log[read, read], c: Log[read]) -> Text {    // <- E0303, E0210
+    return c.read()
+}
+
+fn rejected_types(a: Log[nosuch]) -> Text {                             // <- E0303
+    a.append("x")
+    return a.read()
+}
+
+fn constrained[T: Log](x: T) -> Int {                                   // <- E0307
+    return 0
+}
+
+fn logged[T: Out](x: T) -> Int {                                        // <- E0307
+    return 0
+}
+
+impl Show for Log {                                                     // <- E0901
+    fn show(self) -> Text {
+        return "log"
+    }
+}
+
+impl Log for Data {                                                     // <- E0901
+    fn read(self) -> Text {
+        return ""
+    }
+}
+
+fn shown(log: Log, c: Counter, p: Data) -> Text {
+    return f"{log.show()} {c.read()} {p.read()}"
+}

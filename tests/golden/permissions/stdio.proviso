@@ -1,0 +1,29 @@
+// phase: 3.1
+// `stdin` is an `In`, whose `read_line` gives each line of the run's standard input without
+// its `\n` or `\r\n`, and then `None` (OPEN_QUESTIONS Q6). `stdout` and `stderr` are `Out`s.
+// The runner feeds the `.in` file to stdin. A capability may be passed where fewer
+// permissions are expected, narrowed with `only`, and called as `Out.write_line(o, …)`.
+use std.io { In, IoError, Out }
+
+fn echo(input: In[read], out: Out[write]) -> Int fails IoError {
+    var n = 0
+    loop {
+        match try input.read_line() {
+            Some(line) => {
+                n += 1
+                try out.write_line(f"{n}: [{line}]")
+            }
+            None => break
+        }
+    }
+    return n
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let n = try echo(input: sys.stdin, out: sys.stdout)
+    try Out.write_line(sys.stderr, f"read {n} lines")
+    let err = sys.stderr.only::[write]()
+    try err.write_line("done")
+    let after = try sys.stdin.read_line()
+    try sys.stdout.write_line(f"after the end: {after is None}")
+}

@@ -1,0 +1,9 @@
+// phase: 3.1
+// Without an `.in` file, the run's standard input is empty, so the first `read_line` gives
+// `None`.
+use std.io { IoError }
+
+pub fn main(sys: keep System) fails IoError {
+    let first = try sys.stdin.read_line()
+    try sys.stdout.write_line(f"{first is None}")
+}

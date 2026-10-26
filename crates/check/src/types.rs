@@ -120,9 +120,56 @@ pub enum Ty {
     Error,
 }
 
+/// A capability type: its interface and the permissions it has (REFERENCE §9.2). Slice 3.2
+/// adds the capabilities it `uses`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct CapTy {
     pub iface: IfaceId,
+    pub perms: Perms,
+}
+
+/// A set of the permissions one capability interface declares, as bits in the order it
+/// declares them, so a set has one spelling. An interface declares at most 64.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct Perms(pub u64);
+
+impl Perms {
+    pub const NONE: Perms = Perms(0);
+    pub const MAX: usize = 64;
+
+    /// The first `n` permissions: every one an interface that declares `n` has.
+    pub fn all(n: usize) -> Perms {
+        Perms(if n >= Self::MAX { u64::MAX } else { (1 << n) - 1 })
+    }
+
+    pub fn one(i: usize) -> Perms {
+        Perms(1 << i)
+    }
+
+    pub fn contains(self, i: usize) -> bool {
+        self.0 & (1 << i) != 0
+    }
+
+    pub fn is_subset(self, other: Perms) -> bool {
+        self.0 & !other.0 == 0
+    }
+
+    pub fn union(self, other: Perms) -> Perms {
+        Perms(self.0 | other.0)
+    }
+
+    pub fn intersect(self, other: Perms) -> Perms {
+        Perms(self.0 & other.0)
+    }
+
+    pub fn minus(self, other: Perms) -> Perms {
+        Perms(self.0 & !other.0)
+    }
+
+    /// The indices of the permissions in it, in declaration order.
+    pub fn iter(self) -> impl Iterator<Item = usize> {
+        (0..Self::MAX).filter(move |&i| self.contains(i))
+    }
 }
 
 impl Ty {
@@ -223,8 +270,14 @@ impl Ty {
         Ty::adt(AdtId::SYSTEM)
     }
 
+    /// `iface` with the permissions `perms`.
+    pub fn cap(iface: IfaceId, perms: Perms) -> Ty {
+        Ty::Cap(Arc::new(CapTy { iface, perms }))
+    }
+
+    /// `std.io`'s `Out`, with its one permission, `write` (OPEN_QUESTIONS Q6).
     pub fn out() -> Ty {
-        Ty::Cap(Arc::new(CapTy { iface: IfaceId::OUT }))
+        Ty::cap(IfaceId::OUT, Perms::all(1))
     }
 
     /// A function type's result, error and parameters.

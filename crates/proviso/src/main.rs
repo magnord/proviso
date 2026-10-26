@@ -132,7 +132,10 @@ fn check_or_run(command: Command, args: &[String]) -> i32 {
     match command {
         Command::Check if examples => test(&compiled, false, &mut std::io::stdout(), &mut std::io::stderr()),
         Command::Check => exit::OK,
-        Command::Run => run(&compiled, &mut std::io::stdout(), &mut std::io::stderr()),
+        Command::Run => {
+            let mut stdin = std::io::BufReader::new(std::io::stdin());
+            run(&compiled, &mut stdin, &mut std::io::stdout(), &mut std::io::stderr())
+        }
         Command::Test => test(&compiled, true, &mut std::io::stdout(), &mut std::io::stderr()),
     }
 }

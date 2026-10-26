@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::sync::Arc;
 
 use proviso_check::decls::{AdtId, Decls, FieldIdx, IfaceId, ImplKey, VariantIdx};
@@ -359,7 +359,12 @@ fn take_parts(fields: &mut [Value], owned: &mut Vec<Value>) {
 /// (REFERENCE §9.6).
 #[derive(Clone, Debug)]
 pub enum Cap {
+    Stdin,
     Stdout,
+    Stderr,
+    /// One of `System`'s capabilities that has no operations yet, such as its `Clock`
+    /// (OPEN_QUESTIONS Q6).
+    Inert(IfaceId),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -452,16 +457,23 @@ pub enum ExampleOutcome {
     Defect(Defect),
 }
 
-/// Runs `main` on a thread of its own. Program output goes to `stdout`; `debug` output goes
-/// to `stderr`. An `Err` is a panic in the interpreter, which is a bug.
-pub fn run_main(
-    file: &SourceFile,
-    m: &Module,
-    p: &Program,
-    stdout: &mut (dyn Write + Send),
-    stderr: &mut (dyn Write + Send),
+/// The standard streams a run reads and writes: `System`'s `stdin`, `stdout` and `stderr`.
+/// `debug` output goes to `stderr` too.
+pub struct Streams<'a> {
+    pub stdin: &'a mut (dyn BufRead + Send),
+    pub stdout: &'a mut (dyn Write + Send),
+    pub stderr: &'a mut (dyn Write + Send),
+}
+
+/// Runs `main` on a thread of its own, with `streams` as its standard streams. An `Err` is a
+/// panic in the interpreter, which is a bug.
+pub fn run_main<'a>(
+    file: &'a SourceFile,
+    m: &'a Module,
+    p: &'a Program,
+    streams: Streams<'a>,
 ) -> std::thread::Result<Outcome> {
-    on_interp_thread(file, m, p, stdout, stderr, |interp| interp.main())
+    on_interp_thread(file, m, p, streams, |interp| interp.main())
 }
 
 /// Runs each example, and each test when `tests` is set, in declaration order, each with
@@ -477,7 +489,9 @@ pub fn run_examples(
     stderr: &mut (dyn Write + Send),
     mut report: impl FnMut(&ExampleInfo, ExampleOutcome, &mut dyn Write, &mut dyn Write) + Send,
 ) -> std::thread::Result<()> {
-    on_interp_thread(file, m, p, stdout, stderr, |interp| {
+    // An example or a test gets no `System`, so it reads no input (REFERENCE §14).
+    let streams = Streams { stdin: &mut std::io::empty(), stdout, stderr };
+    on_interp_thread(file, m, p, streams, |interp| {
         let run = |info: &&ExampleInfo| tests || matches!(m.items[info.item].kind, ItemKind::Example(_));
         for info in p.examples.iter().filter(run) {
             let outcome = interp.example(info);
@@ -490,8 +504,7 @@ fn on_interp_thread<'a, R: Send>(
     file: &'a SourceFile,
     m: &'a Module,
     p: &'a Program,
-    stdout: &'a mut (dyn Write + Send),
-    stderr: &'a mut (dyn Write + Send),
+    Streams { stdin, stdout, stderr }: Streams<'a>,
     run: impl FnOnce(&mut Interp<'a>) -> R + Send,
 ) -> std::thread::Result<R> {
     std::thread::scope(|scope| {
@@ -505,6 +518,7 @@ fn on_interp_thread<'a, R: Send>(
                     file,
                     m,
                     p,
+                    stdin,
                     stdout,
                     stderr,
                     depth: 0,
@@ -568,6 +582,7 @@ struct Interp<'a> {
     file: &'a SourceFile,
     m: &'a Module,
     p: &'a Program,
+    stdin: &'a mut (dyn BufRead + Send),
     stdout: &'a mut (dyn Write + Send),
     stderr: &'a mut (dyn Write + Send),
     /// The number of calls in progress.
@@ -622,7 +637,18 @@ impl Interp<'_> {
     fn main(&mut self) -> Outcome {
         let main = self.p.main.expect("the driver checks that `main` exists");
         let site = self.p.decl(self.m, main).name.span;
-        let fields = Arc::from([Value::Cap(Cap::Stdout)]);
+        // In the order of `System`'s fields, `net`, `clock`, `random`, `env`, `stdin`,
+        // `stdout`, `stderr` and `process` (REFERENCE §9.1).
+        let fields = Arc::from([
+            Value::Cap(Cap::Inert(IfaceId::NET)),
+            Value::Cap(Cap::Inert(IfaceId::CLOCK)),
+            Value::Cap(Cap::Inert(IfaceId::RANDOM)),
+            Value::Cap(Cap::Inert(IfaceId::ENV)),
+            Value::Cap(Cap::Stdin),
+            Value::Cap(Cap::Stdout),
+            Value::Cap(Cap::Stderr),
+            Value::Cap(Cap::Inert(IfaceId::PROCESS)),
+        ]);
         let sys = Value::Adt(Adt { def: AdtId::SYSTEM, variant: VariantIdx::RECORD, fields });
         match self.call(main, vec![sys], site) {
             Ok(_) => Outcome::Done,
@@ -1574,6 +1600,7 @@ impl Interp<'_> {
                     }
                     Res::Dispatch { iface, method, .. } => {
                         let result = match iface {
+                            _ if let Value::Cap(cap) = &values[0] => self.operation(cap, iface, method, &values[1..]),
                             IfaceId::SHOW | IfaceId::EQ | IfaceId::ORD => self.dispatch(iface, method, values, span),
                             IfaceId::ABANDON if !matches!(&values[0], Value::Adt(adt) if self.p.decls.adt(adt.def).resource_base) => {
                                 self.dispatch(iface, method, values, span)
@@ -2117,6 +2144,41 @@ impl Interp<'_> {
 
     /// Runs a built-in method. `values` holds the receiver, then the arguments. A defect in a
     /// hand-written `eq` it runs is traced to `site`.
+    /// Runs operation `method` of `iface` on native capability `cap`, which the runtime
+    /// implements (REFERENCE §9.1). Its static type permitted the call (§9.2).
+    fn operation(&mut self, cap: &Cap, iface: IfaceId, method: usize, args: &[Value]) -> Flow<Value> {
+        let name = &*self.p.decls.iface(iface).methods[method].name;
+        let fail = |stream: &str, err: std::io::Error| {
+            Err(Unwind::Fail(Value::IoError(format!("cannot {stream}: {err}").into())))
+        };
+        match (cap, name, args) {
+            (Cap::Stdout | Cap::Stderr, "write_line", [Value::Text(text)]) => {
+                let (stream, out): (&str, &mut dyn Write) = match cap {
+                    Cap::Stdout => ("write to stdout", &mut *self.stdout),
+                    _ => ("write to stderr", &mut *self.stderr),
+                };
+                match writeln!(out, "{text}") {
+                    Ok(()) => Ok(Value::Unit),
+                    Err(err) => fail(stream, err),
+                }
+            }
+            // A line without its `\n` or `\r\n`, as `Text.lines` gives it, and then `None`
+            // (OPEN_QUESTIONS Q6).
+            (Cap::Stdin, "read_line", []) => {
+                let mut line = String::new();
+                match self.stdin.read_line(&mut line) {
+                    Ok(0) => Ok(option(None)),
+                    Ok(_) => {
+                        let line = line.strip_suffix('\n').map_or(&*line, |l| l.strip_suffix('\r').unwrap_or(l));
+                        Ok(option(Some(Value::Text(line.into()))))
+                    }
+                    Err(err) => fail("read from stdin", err),
+                }
+            }
+            _ => unreachable!("the checker resolves only the runtime's operations, not {name}"),
+        }
+    }
+
     fn builtin(&mut self, builtin: Builtin, values: Vec<Value>, site: Span) -> Flow<Value> {
         Ok(match (builtin, values.as_slice()) {
             (Builtin::Len, [Value::List(list)]) => Value::Int(list.items.len() as i128, IntTy::I64),
@@ -2156,13 +2218,8 @@ impl Interp<'_> {
                 let items = lines(text).into_iter().map(|line| Value::Text(line.into())).collect();
                 Value::List(Arc::new(ListValue { items }))
             }
-            (Builtin::WriteLine, [Value::Cap(Cap::Stdout), Value::Text(text)]) => {
-                if let Err(err) = writeln!(self.stdout, "{text}") {
-                    let message = format!("cannot write to stdout: {err}");
-                    return Err(Unwind::Fail(Value::IoError(message.into())));
-                }
-                Value::Unit
-            }
+            // A narrowed capability is the same object, with the same state (REFERENCE §9.2).
+            (Builtin::Only, [cap @ Value::Cap(_)]) => cap.clone(),
             (Builtin::ByteLen, [Value::Text(text)]) => Value::Int(text.len() as i128, IntTy::I64),
             (Builtin::IsEmpty, [Value::Text(text)]) => Value::Bool(text.is_empty()),
             // Rust's `char::is_whitespace` is Unicode's `White_Space` (STD.md).
@@ -2994,7 +3051,11 @@ fn write_value<E>(
                 out.push_str(&format!("Handle(slot: {}, generation: {})", handle.slot, handle.generation));
             }
             Value::IoError(message) => out.push_str(message),
-            Value::Cap(Cap::Stdout) => out.push_str("Out"),
+            Value::Cap(cap) => out.push_str(match cap {
+                Cap::Stdin => "In",
+                Cap::Stdout | Cap::Stderr => "Out",
+                Cap::Inert(iface) => &decls.iface(*iface).name,
+            }),
             // `debug` writes a function value's type, which only the checker knows.
             Value::Fn(_) => out.push_str("fn"),
         }

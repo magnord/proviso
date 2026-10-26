@@ -1,0 +1,43 @@
+// phase: 3.1
+// Permissions join by variance, so neither the order of a call's arguments nor that of an
+// `if`'s branches or a list's elements decides a type (OPEN_QUESTIONS P3, decided for phase
+// 3). Where values meet, their join has the permissions all of them have. Where closures'
+// parameters meet, the join takes the permissions any of them needs, so no closure is handed
+// less than it declares. Each group writes one meeting in both orders, and the uses after it
+// pin the type it settles as.
+cap interface Log observes(read) effects(append) {
+    fn read(self) -> Text                       needs read
+    fn append(self, line: Text)                 needs append
+}
+
+fn pick[T](a: take T, b: take T) -> T {
+    return a
+}
+
+fn reads(log: Log[read]) -> Text {
+    return log.read()
+}
+
+fn values(full: Log, reader: Log[read], flag: Bool) -> Text {
+    let a = pick(a: full, b: reader)
+    let b = pick(a: reader, b: full)
+    let c = if flag { full } else { reader }
+    let d = if flag { reader } else { full }
+    let e = [full, reader]
+    let f = [reader, full]
+    let g = pick(a: Some(full), b: Some(reader))
+    let h = pick(a: Some(reader), b: None)
+    return f"{a.read()}{b.read()}{c.read()}{d.read()}{e[0].read()}{f[0].read()}{reads(log: g else reader)}{reads(log: h else reader)}"
+}
+
+fn both[T](x: T, f: fn(T) -> Text, g: fn(T) -> Text) -> Text {
+    return f"{f(x)}{g(x)}"
+}
+
+fn closures(full: Log, flag: Bool) -> Text {
+    let a = both(x: full, f: |l: Log[read]| l.read(), g: |l: Log| l.read())
+    let b = both(x: full, f: |l: Log| l.read(), g: |l: Log[read]| l.read())
+    let c = if flag { |l: Log[read]| l.read() } else { |l: Log[read, append]| l.read() }
+    let d = if flag { |l: Log[read, append]| l.read() } else { |l: Log[read]| l.read() }
+    return f"{a}{b}{c(full)}{d(full)}"
+}
