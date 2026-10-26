@@ -1,4 +1,5 @@
 // phase: 3.3
+// expect-error: E0101
 // expect-error: E0301
 // expect-error: E0309
 // expect-error: E0316
@@ -64,12 +65,53 @@ cap record Boxed[T] {                                           // <- E0901
     state value: T
 }
 
-cap record Shown derives(Show) {                                // <- E0901
+cap record Shown derives(Show, Eq) {                            // <- E0901
     n: Int
+}
+
+// The record may have meant to implement anything, so its uses aren't reported, but a value
+// of the wrong type for its field still is (§15.1).
+fn shown(a: Shown, b: Shown) -> Text {
+    let c = Shown(n: "three")                                   // <- E0301
+    let same = a == b or a != c
+    return a.show()
 }
 
 cap record Bounded {
     state n: Int where n >= 0                                   // <- E0901
+    state m: Int where m >= "zero"
+}
+
+// An `opaque` capability record would declare a `uses` that its fields and interfaces give
+// it already. It is kept as a `cap record`.
+opaque cap record Hidden {                                      // <- E0901
+    state n: Int
+}
+
+impl Gauge for Hidden {
+    fn read(self) -> Int {
+        return self.n
+    }
+
+    fn copy(self) -> Self {
+        return Hidden(n: self.n)
+    }
+}
+
+// A `cap record` split over two lines is still one.
+cap                                                             // <- E0101
+record Split {
+    state n: Int
+}
+
+impl Gauge for Split {
+    fn read(self) -> Int {
+        return self.n
+    }
+
+    fn copy(self) -> Self {
+        return Split(n: self.n)
+    }
 }
 
 unique record Token {
@@ -86,6 +128,7 @@ fn matched(d: Dial) -> Int {
 }
 
 fn gauges() -> Int {
+    let hidden = Gauge.of(Hidden(n: 4)).read() + Gauge.of(Split(n: 5)).read()
     let a = Gauge.of(Dial(n: 1))
     let b = Gauge.of(Unread(n: 2))                              // <- E0309
     let c = Gauge.of(3)                                         // <- E0301

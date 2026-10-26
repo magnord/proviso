@@ -455,6 +455,14 @@ impl Parser<'_> {
             // An `opaque` record hides its fields from other modules (REFERENCE §9.2), and a
             // program is one module in phase 2, so it is a record like any other there
             // (OPEN_QUESTIONS P5).
+            // An `opaque` capability record would declare a `uses` its fields and interfaces
+            // already give it, which isn't scheduled. It is kept as a `cap record`.
+            T::Keyword(Kw::Opaque) if self.nth(1) == T::Keyword(Kw::Cap) && self.nth(2) == T::Keyword(Kw::Record) => {
+                let span = self.bump().span;
+                self.diags.not_implemented(span, "`opaque cap record`s", Planned::Unscheduled);
+                self.bump();
+                self.cap_record_item()?
+            }
             T::Keyword(Kw::Opaque) if matches!(self.nth(1), T::Keyword(Kw::Record | Kw::Unique | Kw::Resource)) => {
                 self.bump();
                 ItemKind::Record(RecordDecl { opaque: true, ..self.kinded_record_decl()? })
@@ -495,13 +503,7 @@ impl Parser<'_> {
             }
             T::Keyword(Kw::Cap) if self.nth(1) == T::Keyword(Kw::Record) => {
                 self.bump();
-                let decl = self.cap_record_decl()?;
-                if let Some(&first) = decl.uses.as_ref().and_then(|uses| uses.first()) {
-                    let span = self.m.types[first].span;
-                    let message = "a `cap record` reaches what its fields reach and the capability interfaces it implements; only an `opaque record` declares what it `uses` (§9.2, §9.6)";
-                    self.error(codes::UNEXPECTED_TOKEN, span, message);
-                }
-                ItemKind::Record(decl)
+                self.cap_record_item()?
             }
             T::Keyword(Kw::Cap) => {
                 // Only a name on `cap`'s own line is poisoned. An item on the next is kept.
@@ -509,18 +511,22 @@ impl Parser<'_> {
                 let span = self.bump().span;
                 let message = "`cap` goes right before `interface` or `record`, on the same line, as in `cap interface Log { … }` (§9.2)";
                 self.error(codes::UNEXPECTED_TOKEN, span, message);
-                // A `cap interface` split over two lines is still the capability interface.
+                // A `cap interface` or `cap record` split over two lines is still what it says.
                 let mut n = 0;
                 while self.nth(n) == T::Newline {
                     n += 1;
                 }
-                if self.nth(n) != T::Keyword(Kw::Interface) {
+                let next = self.nth(n);
+                if !matches!(next, T::Keyword(Kw::Interface | Kw::Record)) {
                     return Err(());
                 }
                 while self.at(T::Newline) {
                     self.bump();
                 }
-                ItemKind::Interface(self.interface_decl(true)?)
+                match next {
+                    T::Keyword(Kw::Interface) => ItemKind::Interface(self.interface_decl(true)?),
+                    _ => self.cap_record_item()?,
+                }
             }
             T::Keyword(Kw::Example) => {
                 // The example is kept, so it is still checked.
@@ -732,14 +738,27 @@ impl Parser<'_> {
     /// and refinements aren't scheduled (OPEN_QUESTIONS P5). Each is reported. The record is
     /// kept without its `derives` and refinements, but not with type parameters, which its
     /// fields may name.
+    /// `record R { … }` after `cap`, as an item. A `cap record` has no `uses` of its own.
+    fn cap_record_item(&mut self) -> PResult<ItemKind> {
+        let decl = self.cap_record_decl()?;
+        if let Some(&first) = decl.uses.as_ref().and_then(|uses| uses.first()) {
+            let span = self.m.types[first].span;
+            let message = "a `cap record` reaches what its fields reach and the capability interfaces it implements; only an `opaque record` declares what it `uses` (§9.2, §9.6)";
+            self.error(codes::UNEXPECTED_TOKEN, span, message);
+        }
+        Ok(ItemKind::Record(decl))
+    }
+
     fn cap_record_decl(&mut self) -> PResult<RecordDecl> {
         let mut decl = self.record_decl(false, true)?;
+        // The `derives` list is kept, so the checker knows the record was meant to implement
+        // what it names (§15.1).
         if let Some(derived) = decl.derives.first() {
             self.diags.not_implemented(derived.span, "`derives` lists on `cap record`s", Planned::Unscheduled);
-            decl.derives.clear();
         }
-        let refinements = decl.fields.iter_mut().filter_map(|field| field.refinement.take());
-        if let Some(refinement) = refinements.chain(decl.refinement.take()).next() {
+        let mut refinements: Vec<ExprId> = decl.fields.iter_mut().filter_map(|field| field.refinement.take()).collect();
+        refinements.extend(decl.refinement.take());
+        if let Some(&refinement) = refinements.first() {
             let span = self.m.exprs[refinement].span;
             self.diags.not_implemented(span, "refinements of `cap record`s", Planned::Unscheduled);
         }

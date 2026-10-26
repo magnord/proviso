@@ -2496,6 +2496,12 @@ impl Checker<'_> {
         let mut operators = Vec::new();
         for k in 0..self.adts.len() {
             let (id, derives_of) = (self.adts[k].id, self.adts[k].derives);
+            // A `cap record`'s `derives` is reported by the parser. It may have named any
+            // interface, so the record is taken to have each, and any method (§15.1).
+            if self.p.decls.adt(id).cap && !derives_of.is_empty() {
+                self.p.decls.mark_unknown(ImplKey::Adt(id));
+                continue;
+            }
             let mut seen: Vec<&str> = Vec::new();
             let mut derives = Vec::new();
             // A rejected entry may have named any interface, so it is taken to name each.
