@@ -3,7 +3,7 @@
 //! declares, such as its name or the interfaces it implements, are answered here.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -309,6 +309,13 @@ pub struct AdtDef {
     /// Declared `type Name = distinct T`: a record whose one field, `value`, holds a `T`,
     /// written `Name(v)` (REFERENCE §4.6). It may derive the operators of `T`.
     pub distinct: bool,
+    /// Declared `cap record`: a capability implemented in Proviso. Its values are handles to
+    /// one object, whose `state` fields every copy shares (REFERENCE §9.6).
+    pub cap: bool,
+    /// A field holds a capability handle whatever its type arguments are: a `cap record` or
+    /// a capability, at any depth (see [`Decls::holds_handle`]). A `cap record`'s own values
+    /// are handles too, which [`AdtDef::cap`] says.
+    pub handle: bool,
 }
 
 impl AdtDef {
@@ -342,13 +349,16 @@ impl AdtDef {
             resource_base: false,
             resource: false,
             distinct: false,
+            cap: false,
+            handle: false,
         }
     }
 
     /// The tuple of `n` elements, a record whose type parameters are its elements' types.
     fn tuple(n: usize) -> AdtDef {
         let name = format!("({})", vec!["_"; n].join(", "));
-        let fields = (0..n).map(|i| FieldDef { name: i.to_string().into(), ty: Ty::Param(i as u32) }).collect();
+        let fields =
+            (0..n).map(|i| FieldDef { name: i.to_string().into(), ty: Ty::Param(i as u32), state: false }).collect();
         let mut def = AdtDef::record(&name, fields);
         def.params = n;
         def.held = vec![true; n];
@@ -444,6 +454,9 @@ impl VariantDef {
 pub struct FieldDef {
     pub name: Box<str>,
     pub ty: Ty,
+    /// A `state` field of a `cap record`, which every copy of the capability shares and only
+    /// the record's own `impl` blocks name (REFERENCE §9.6; OPEN_QUESTIONS Q40).
+    pub state: bool,
 }
 
 /// A refinement, which the v1 profile checks at run time (OPEN_QUESTIONS P3).
@@ -467,6 +480,7 @@ struct Kinds {
     unique: bool,
     resource: bool,
     reach: Reach,
+    handle: bool,
 }
 
 impl Kinds {
@@ -474,6 +488,7 @@ impl Kinds {
         self.unique |= other.unique;
         self.resource |= other.resource;
         self.reach.extend(&other.reach);
+        self.handle |= other.handle;
         self
     }
 }
@@ -593,6 +608,7 @@ impl Default for Decls {
         let field = |name: &str, iface: IfaceId, perms: usize| FieldDef {
             name: name.into(),
             ty: Ty::cap(iface, Perms::all(perms)),
+            state: false,
         };
         let mut system = AdtDef::record(
             "System",
@@ -611,6 +627,7 @@ impl Default for Decls {
             let Ty::Cap(cap) = &field.ty else { unreachable!("`System`'s fields are capabilities") };
             system.reach.extend(&Reach::of_cap(cap));
         }
+        system.handle = true;
         // As STD.md declares them, so `Some` comes before `None`.
         let generic = |name: &str, params: usize, variants: [(&str, Option<(&str, u32)>); 2]| {
             let mut def = AdtDef::enumeration(name);
@@ -619,7 +636,8 @@ impl Default for Decls {
             def.bare_variants = true;
             def.derives = vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW, IfaceId::HASH];
             for (variant, field) in variants {
-                let fields = field.map(|(name, param)| FieldDef { name: name.into(), ty: Ty::Param(param) });
+                let fields =
+                    field.map(|(name, param)| FieldDef { name: name.into(), ty: Ty::Param(param), state: false });
                 def.variants.push(VariantDef::new(variant, fields.into_iter().collect()));
             }
             def
@@ -935,6 +953,36 @@ impl Decls {
         Inhabited { graph: RefCell::new((graph, instances)), applied: RefCell::default() }
     }
 
+    /// Whether a value of `ty` is or may hold a capability handle, which is a value of a `cap
+    /// record` or a capability. A `state` field that holds one could let an object refer to itself, which
+    /// reference counting never frees (OPEN_QUESTIONS P5). A function value can't be held,
+    /// which is E0509, and a type parameter holds none, since a generic `cap record` isn't
+    /// scheduled. A record or enum holds one if [`settle_kinds`](Decls::settle_kinds) found
+    /// that it does whatever its type arguments are, or if a type argument it holds does.
+    pub fn holds_handle(&self, ty: &Ty) -> bool {
+        self.holds_handle_memo(ty, &mut HashMap::new())
+    }
+
+    /// [`Decls::holds_handle`], where `memo` holds what each type argument list gave, by its
+    /// type's id and its address, so a type that shares its parts costs each part once. The
+    /// types must outlive `memo`.
+    pub fn holds_handle_memo(&self, ty: &Ty, memo: &mut HashMap<(u32, usize), bool>) -> bool {
+        match ty {
+            Ty::Cap(_) => true,
+            Ty::Adt(id, _) if self.adt(*id).cap || self.adt(*id).handle => true,
+            Ty::Adt(id, args) if !args.is_empty() => {
+                let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
+                if let Some(&held) = memo.get(&key) {
+                    return held;
+                }
+                let held = self.held_args(*id, args).any(|arg| self.holds_handle_memo(arg, memo));
+                memo.insert(key, held);
+                held
+            }
+            _ => false,
+        }
+    }
+
     /// The type arguments of a value of `id` that it holds (see [`AdtDef::held`]).
     fn held_args<'t>(&'t self, id: AdtId, args: &'t [Ty]) -> impl Iterator<Item = &'t Ty> + 't {
         let held = &self.adt(id).held;
@@ -1151,23 +1199,25 @@ impl Decls {
     }
 
     /// Settles which type parameters each record and enum holds, and which are unique,
-    /// resources or have reach whatever their type arguments are (REFERENCE §5.1), once every
-    /// field's type is known. A field's type may hold a type declared later, so each type is
-    /// settled again whenever one it mentions changes, until nothing does.
+    /// resources, have reach or hold a handle whatever their type arguments are (REFERENCE
+    /// §5.1), once every field's type is known. A type depends on the types its fields
+    /// mention, which may be declared later, so the types are settled a strongly connected
+    /// component at a time, after the components they mention. Only the types of a component
+    /// that mention each other are settled again when one of them changes, until none does,
+    /// so each type is walked a bounded number of times unless its component is large.
     pub fn settle_kinds(&mut self) {
         let module = AdtId::BUILT_IN..self.adts.len();
-        // Which records and enums mention each one in a field.
-        let mut held_by: HashMap<usize, Vec<usize>> = HashMap::new();
+        // The records and enums of the module that each one mentions in a field.
+        let mut parts: Vec<Vec<usize>> = vec![Vec::new(); self.adts.len()];
         for a in module.clone() {
-            let (mut parts, mut seen) = (Vec::new(), HashSet::new());
+            let (mut found, mut seen) = (Vec::new(), HashSet::new());
             for field in self.adts[a].variants.iter().flat_map(|v| &v.fields) {
-                mentioned(&field.ty, &mut parts, &mut seen);
+                mentioned(&field.ty, &mut found, &mut seen);
             }
-            parts.sort_unstable();
-            parts.dedup();
-            for part in parts {
-                held_by.entry(part).or_default().push(a);
-            }
+            found.retain(|part| module.contains(part));
+            found.sort_unstable();
+            found.dedup();
+            parts[a] = found;
             let def = &mut self.adts[a];
             if def.held.len() != def.params {
                 def.held = vec![false; def.params];
@@ -1175,39 +1225,69 @@ impl Decls {
             def.resource |= def.resource_base;
         }
         self.any_resource = module.clone().any(|a| self.adts[a].resource_base);
-        let mut queue: Vec<usize> = module.clone().rev().collect();
+        let mut component = vec![usize::MAX; self.adts.len()];
+        // The types of the same component that mention each one in a field.
+        let mut held_by: Vec<Vec<usize>> = vec![Vec::new(); self.adts.len()];
         let mut queued = vec![false; self.adts.len()];
-        for &a in &queue {
-            queued[a] = true;
-        }
-        while let Some(a) = queue.pop() {
-            queued[a] = false;
-            let def = &self.adts[a];
-            let mut held = def.held.clone();
-            let mut kind = Kinds { unique: def.unique, resource: def.resource, reach: def.reach.clone() };
-            for field in def.variants.iter().flat_map(|v| &v.fields) {
-                kind = kind.or(&self.base_kind(&field.ty, &mut held));
+        for (c, members) in components(module.clone(), &parts).into_iter().enumerate() {
+            for &a in &members {
+                (component[a], queued[a]) = (c, true);
             }
-            // An opaque record reaches what it declares, which its fields' reach is checked
-            // against (REFERENCE §9.2).
-            if let Some(uses) = &def.uses {
-                kind.reach = uses.clone();
+            for &a in &members {
+                for &part in parts[a].iter().filter(|&&part| component[part] == c) {
+                    held_by[part].push(a);
+                }
             }
-            let def = &mut self.adts[a];
-            if held == def.held && kind.unique == def.unique && kind.resource == def.resource && kind.reach == def.reach
-            {
-                continue;
-            }
-            def.held = held;
-            (def.unique, def.resource, def.reach) = (kind.unique || kind.resource, kind.resource, kind.reach);
-            for &holder in held_by.get(&a).map_or(&[][..], Vec::as_slice) {
-                if !queued[holder] {
-                    queued[holder] = true;
-                    queue.push(holder);
+            let mut queue: VecDeque<usize> = members.into();
+            while let Some(a) = queue.pop_front() {
+                queued[a] = false;
+                if !self.settle_kind(a) {
+                    continue;
+                }
+                for &holder in &held_by[a] {
+                    if !queued[holder] {
+                        queued[holder] = true;
+                        queue.push_back(holder);
+                    }
                 }
             }
         }
         self.resource_args.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    /// Settles record or enum `a` from what its fields' types are so far, and returns
+    /// whether that changed it (see [`Decls::settle_kinds`]).
+    fn settle_kind(&mut self, a: usize) -> bool {
+        let def = &self.adts[a];
+        let mut held = def.held.clone();
+        let mut kind =
+            Kinds { unique: def.unique, resource: def.resource, reach: def.reach.clone(), handle: def.handle };
+        for field in def.variants.iter().flat_map(|v| &v.fields) {
+            kind = kind.or(&self.base_kind(&field.ty, &mut held));
+        }
+        // An opaque record reaches what it declares, which its fields' reach is checked
+        // against (REFERENCE §9.2).
+        if let Some(uses) = &def.uses {
+            kind.reach = uses.clone();
+        }
+        // A `cap record` is copyable whatever its fields are, since its values are handles to
+        // one object (REFERENCE §9.6).
+        if def.cap {
+            (kind.unique, kind.resource) = (false, false);
+        }
+        let def = &mut self.adts[a];
+        if held == def.held
+            && kind.unique == def.unique
+            && kind.resource == def.resource
+            && kind.reach == def.reach
+            && kind.handle == def.handle
+        {
+            return false;
+        }
+        def.held = held;
+        (def.unique, def.resource, def.reach) = (kind.unique || kind.resource, kind.resource, kind.reach);
+        def.handle = kind.handle;
+        true
     }
 
     /// What a value of `ty`, written in a field, is whatever the type parameters are, from
@@ -1227,7 +1307,7 @@ impl Decls {
     fn base_kind_in(&self, ty: &Ty, memo: &mut KindMemo) -> (Kinds, Vec<u32>) {
         match ty {
             Ty::Param(i) => (Kinds::default(), vec![*i]),
-            Ty::Cap(cap) => (Kinds { reach: Reach::of_cap(cap), ..Kinds::default() }, Vec::new()),
+            Ty::Cap(cap) => (Kinds { reach: Reach::of_cap(cap), handle: true, ..Kinds::default() }, Vec::new()),
             Ty::Fn(..) => (Kinds { reach: self.reach(ty, &[]), ..Kinds::default() }, Vec::new()),
             Ty::Adt(id, args) => {
                 let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
@@ -1235,7 +1315,12 @@ impl Decls {
                     return known.clone();
                 }
                 let def = self.adt(*id);
-                let mut kind = Kinds { unique: def.unique, resource: def.resource, reach: def.reach.clone() };
+                let mut kind = Kinds {
+                    unique: def.unique,
+                    resource: def.resource,
+                    reach: def.reach.clone(),
+                    handle: def.cap || def.handle,
+                };
                 let mut params = Vec::new();
                 for (i, arg) in args.iter().enumerate() {
                     let (part, held) = self.base_kind_in(arg, memo);
@@ -1474,6 +1559,58 @@ impl Decls {
 
 /// How many parts of a type a diagnostic writes before it writes `…` for the rest.
 pub const DISPLAY_BUDGET: usize = 64;
+
+/// The strongly connected components of the graph from each node in `nodes` to the nodes
+/// `edges` lists for it, each after every component it has an edge into (Tarjan's
+/// algorithm). It keeps its own stack, so a long chain doesn't recurse once per node.
+fn components(nodes: std::ops::Range<usize>, edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    const UNSEEN: usize = usize::MAX;
+    let (mut index, mut low, mut on_stack) =
+        (vec![UNSEEN; edges.len()], vec![0; edges.len()], vec![false; edges.len()]);
+    let (mut stack, mut found, mut next) = (Vec::new(), Vec::new(), 0);
+    for root in nodes {
+        if index[root] != UNSEEN {
+            continue;
+        }
+        // Each frame is a node and how many of its edges are walked.
+        let mut frames = vec![(root, 0)];
+        (index[root], low[root], on_stack[root]) = (next, next, true);
+        next += 1;
+        stack.push(root);
+        while let Some(frame) = frames.last_mut() {
+            let v = frame.0;
+            if let Some(&w) = edges[v].get(frame.1) {
+                frame.1 += 1;
+                if index[w] == UNSEEN {
+                    (index[w], low[w], on_stack[w]) = (next, next, true);
+                    next += 1;
+                    stack.push(w);
+                    frames.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[v]);
+            }
+            if low[v] == index[v] {
+                let mut component = Vec::new();
+                loop {
+                    let w = stack.pop().expect("a node is on the stack until its component is found");
+                    on_stack[w] = false;
+                    component.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                found.push(component);
+            }
+        }
+    }
+    found
+}
 
 /// Pushes the index of each record and enum that a value of `ty` holds, at any depth, to
 /// `found`. A handle holds no element (STD.md). Types share their parts, so a list of type
@@ -1780,6 +1917,23 @@ mod tests {
         assert_eq!(decls.display(&parse_error).to_string(), "ParseError");
         decls.push(AdtDef::record("ParseError", Vec::new()));
         assert_eq!(decls.display(&parse_error).to_string(), "std.text.ParseError");
+    }
+
+    #[test]
+    fn components_come_after_the_components_they_reach() {
+        // 0 -> 1 -> 2 <-> 3, 4 -> 0, and 5 alone.
+        let edges = vec![vec![1], vec![2], vec![3], vec![2], vec![0], vec![]];
+        let found = components(0..6, &edges);
+        let at = |n: usize| found.iter().position(|c| c.contains(&n)).unwrap();
+        assert_eq!(found.len(), 5);
+        assert_eq!(at(2), at(3));
+        assert!(at(3) < at(1) && at(1) < at(0) && at(0) < at(4));
+        // A chain far longer than the stack would allow one frame per node.
+        let n = 1_000_000;
+        let chain: Vec<Vec<usize>> = (0..n).map(|i| if i + 1 < n { vec![i + 1] } else { vec![] }).collect();
+        let found = components(0..n, &chain);
+        assert_eq!(found.len(), n);
+        assert_eq!(found[0], vec![n - 1]);
     }
 
     #[test]

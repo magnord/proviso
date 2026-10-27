@@ -1,0 +1,3 @@
+defect[reentrant_call]: this calls `count` on a `Tally` whose operation is still running, through a capability handle or from outside the record's own `impl` blocks; calls on one capability object run one at a time (§9.6)
+  at cap_records/reentry.proviso:42:16 (reentry.Tally.Counter.recount+4)
+  called from cap_records/reentry.proviso:50:59 (reentry.main+5)

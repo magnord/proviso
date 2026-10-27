@@ -1,0 +1,237 @@
+// phase: 3.3
+// expect-error: E0101
+// expect-error: E0301
+// expect-error: E0309
+// expect-error: E0606
+// expect-error: E0901
+// expect-error: E0904
+// Only a `cap record` implements a capability interface (OPEN_QUESTIONS Q30, P5), and `X.of(r)`
+// takes one that implements `X` (REFERENCE §9.6). A `cap record` is a handle that copies share,
+// and unique or resource fields on one aren't scheduled, nor are type parameters, `derives`
+// and refinements, nor are `state` fields that can hold a handle. In a
+// `cap interface`, `Self` may be an operation's result but not a parameter's type, since a
+// handle's argument may come from another implementation, and `Self` with `uses` isn't
+// scheduled either, nor are patterns that match a `cap record` (OPEN_QUESTIONS P5; issue
+// #64).
+use std.io { Out }
+
+cap interface Gauge observes(read) {
+    fn read(self) -> Int                                        needs read
+    fn copy(self) -> Self                                       needs read
+}
+
+cap interface Merge effects(merge) {
+    fn merge(self, other: Self)                                 needs merge  // <- E0901
+    fn merge_all(self, others: List[Self])                      needs merge  // <- E0901
+}
+
+cap interface Wide effects(go) {
+    fn wider(self) -> Option[Self uses Out]                     needs go  // <- E0901
+    fn each(self, f: fn() uses Self)                            needs go  // <- E0901
+    fn logs(self) -> Option[Out uses Self]                      needs go  // <- E0901
+}
+
+record Fixed {
+    n: Int
+}
+
+impl Gauge for Fixed {                                          // <- E0606
+    fn read(self) -> Int {
+        return self.n
+    }
+
+    fn copy(self) -> Self {
+        return self
+    }
+}
+
+cap record Dial {
+    state n: Int
+}
+
+impl Gauge for Dial {
+    fn read(self) -> Int {
+        return self.n
+    }
+
+    fn copy(self) -> Self {
+        return Dial(n: self.n)
+    }
+}
+
+cap record Unread {
+    n: Int
+}
+
+cap record Boxed[T] {                                           // <- E0901
+    state value: T
+}
+
+cap record Shown derives(Show, Eq) {                            // <- E0901
+    n: Int
+}
+
+// The record may have meant to implement anything, so its uses aren't reported, but a value
+// of the wrong type for its field still is (§15.1).
+fn shown(a: Shown, b: Shown) -> Text {
+    let c = Shown(n: "three")                                   // <- E0301
+    let same = a == b or a != c
+    return a.show()
+}
+
+cap record Bounded {
+    state n: Int where n >= 0                                   // <- E0901
+    state m: Int where m >= "zero"
+}
+
+// An `opaque` capability record would declare a `uses` that its fields and interfaces give
+// it already. It is kept as a `cap record`, and its `uses` goes with the `opaque`.
+opaque cap record Hidden uses Out {                             // <- E0901
+    state n: Int
+}
+
+impl Gauge for Hidden {
+    fn read(self) -> Int {
+        return self.n
+    }
+
+    fn copy(self) -> Self {
+        return Hidden(n: self.n)
+    }
+}
+
+// A `cap record` split over two lines is still one, also after `opaque`.
+cap                                                             // <- E0101
+record Split {
+    state n: Int
+}
+
+opaque cap                                                      // <- E0901, E0101
+record Lone {
+    state n: Int
+}
+
+impl Gauge for Split {
+    fn read(self) -> Int {
+        return self.n
+    }
+
+    fn copy(self) -> Self {
+        return Split(n: self.n)
+    }
+}
+
+unique record Token {
+    id: Int
+}
+
+cap record Holder {
+    state token: Token                                          // <- E0901
+}
+
+resource record Lock {
+    id: Int
+}
+
+impl Abandon for Lock {
+    fn abandon(take self) {}
+}
+
+cap record Locker {
+    lock: Lock                                                  // <- E0901
+}
+
+// A `state` field that can hold a capability handle could let an object refer to itself,
+// which reference counting never frees. A plain field can't, since it is set before the
+// object exists.
+record Wrapped {
+    dial: Dial
+}
+
+enum Choice {
+    Off
+    On(dial: Dial)
+}
+
+enum Chain {
+    End
+    Link(n: Int, rest: Chain)
+}
+
+enum Tree[T] {
+    Leaf
+    Fork(value: T, left: Tree[T], right: Tree[T])
+}
+
+enum Ring {
+    Rest(next: Loop)
+}
+
+enum Loop {
+    Back(ring: Ring)
+    Hold(dial: Dial)
+}
+
+enum Twin {
+    Stop
+    Next(mirror: Mirror)
+    Held(dial: Dial)
+}
+
+enum Mirror {
+    Stop
+    Next(twin: Twin)
+}
+
+enum Grows[T] {
+    Stop
+    More(value: T, next: Grows[List[T]])                        // <- E0904
+}
+
+cap record Ringed {
+    state ring: Ring                                            // <- E0901
+    state twin: Twin                                            // <- E0901
+    state mirror: Mirror                                        // <- E0901
+    state grows: Grows[Int]
+}
+
+type Link = Option[Linked]
+
+cap record Linked {
+    next: Option[Linked]
+    state after: Option[Linked]                                 // <- E0901
+    state via: Link                                             // <- E0901
+    state outs: List[Out]                                       // <- E0901
+    state wrapped: Wrapped                                      // <- E0901
+    state choice: Choice                                        // <- E0901
+    state keyed: Map[Text, Dial]                                // <- E0901
+    state pair: (Int, Dial)                                     // <- E0901
+    state system: Option[System]                                // <- E0901
+    state chain: Chain
+    state tree: Tree[Int]
+    state names: Map[Text, List[Text]]
+}
+
+impl Linked {
+    fn relink(self) {
+        self.after = Some(self)
+        self.chain = Chain.Link(n: 1, rest: self.chain)
+    }
+}
+
+fn matched(d: Dial) -> Int {
+    let Dial(n) = d                                             // <- E0901
+    let is_dial = d is Dial(_)                                  // <- E0901
+    let m = match d {
+        Dial(n: k) => k,                                        // <- E0901
+    }
+    return n + m
+}
+
+fn gauges() -> Int {
+    let hidden = Gauge.of(Hidden(n: 4)).read() + Gauge.of(Split(n: 5)).read()
+    let a = Gauge.of(Dial(n: 1))
+    let b = Gauge.of(Unread(n: 2))                              // <- E0309
+    let c = Gauge.of(3)                                         // <- E0301
+    return a.read() + a.copy().read()
+}

@@ -594,6 +594,58 @@ fn long_alias_chains_check_once() {
     }
 }
 
+/// Whether a `state` field can hold a capability handle is settled once per declaration, so
+/// a `cap record` with thousands of `state` fields of a type thousands of records deep checks
+/// in linear time, whichever order the records are declared in, and a chain that ends in a
+/// `cap record` is still found. So does a record that holds thousands of records, also when
+/// they are the links of one chain (OPEN_QUESTIONS P5).
+#[test]
+fn state_fields_find_handles_in_linear_time() {
+    let n = 4_000;
+    let program = |reversed: bool| {
+        let chain = |name: &str| {
+            let mut records: Vec<String> =
+                (1..=n).map(|i| format!("record {name}{i} {{\n    a: {name}{}\n}}\n\n", i - 1)).collect();
+            if reversed {
+                records.reverse();
+            }
+            records.concat()
+        };
+        let plain: String = (0..n).map(|i| format!("    state p{i}: P{n}\n")).collect();
+        let held: String = (0..3).map(|i| format!("    state h{i}: H{n}\n")).collect();
+        "cap record Dial {\n    state n: Int\n}\n\nrecord P0 {\n    a: Int\n}\n\nrecord H0 {\n    a: Dial\n}\n\n"
+            .to_string()
+            + &chain("P")
+            + &chain("H")
+            + &format!("cap record Big {{\n{plain}{held}}}\n")
+    };
+    // A record that holds thousands of records, each of which holds a `cap record`, is
+    // settled once they all are.
+    let k = 8_000;
+    let fan = format!("record A {{\n{}}}\n\n", (0..k).map(|i| format!("    b{i}: B{i}\n")).collect::<String>())
+        + &(0..k).map(|i| format!("record B{i} {{\n    d: Dial\n}}\n\n")).collect::<String>()
+        + "cap record Dial {\n    state n: Int\n}\n\ncap record Big {\n    state a: A\n    state b: A\n    state c: A\n}\n";
+    // A record that holds every link of a chain declared from its far end.
+    let links = format!("record A {{\n{}}}\n\n", (0..k).map(|i| format!("    c{i}: C{i}\n")).collect::<String>())
+        + &(1..k).rev().map(|i| format!("record C{i} {{\n    c: C{}\n}}\n\n", i - 1)).collect::<String>()
+        + "record C0 {\n    d: Dial\n}\n\n"
+        + "cap record Dial {\n    state n: Int\n}\n\ncap record Big {\n    state a: A\n    state b: A\n    state c: A\n}\n";
+    let cases = [
+        ("state_chain", program(false)),
+        ("state_chain_reversed", program(true)),
+        ("state_fan", fan),
+        ("state_links", links),
+    ];
+    for (name, text) in cases {
+        let file = source(&format!("{name}.proviso"), &text);
+        let output = check_within(&file, 20);
+        let shown = stderr(&output);
+        assert_eq!(output.status.code(), Some(65), "{name}: {shown}");
+        assert_eq!(shown.matches("error[E0901]").count(), 3, "{name}: {shown}");
+        assert_eq!(shown.matches("error[").count(), 3, "{name}: {shown}");
+    }
+}
+
 /// A `pub` alias whose type repeats a part, as `Pair[P1, P1]` does, is checked for what it
 /// exposes once per part, though the tree it stands for doubles with each alias (REFERENCE §3).
 #[test]

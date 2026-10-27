@@ -1,0 +1,4 @@
+defect[reentrant_call]: this calls `bump` on a `Tally` whose operation is still running, through a capability handle or from outside the record's own `impl` blocks; calls on one capability object run one at a time (§9.6)
+  at cap_records/outside_reentry.proviso:33:17 (outside_reentry.main+7)
+  called from cap_records/outside_reentry.proviso:23:9 (outside_reentry.Tally.run+4)
+  called from cap_records/outside_reentry.proviso:33:5 (outside_reentry.main+7)

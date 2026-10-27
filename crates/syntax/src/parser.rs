@@ -455,6 +455,15 @@ impl Parser<'_> {
             // An `opaque` record hides its fields from other modules (REFERENCE §9.2), and a
             // program is one module in phase 2, so it is a record like any other there
             // (OPEN_QUESTIONS P5).
+            // An `opaque` capability record would declare a `uses` its fields and interfaces
+            // already give it, which isn't scheduled. It is kept as a `cap record`.
+            T::Keyword(Kw::Opaque)
+                if self.nth(1) == T::Keyword(Kw::Cap) && self.after_newlines(2) == T::Keyword(Kw::Record) =>
+            {
+                let span = self.bump().span;
+                self.diags.not_implemented(span, "`opaque cap record`s", Planned::Unscheduled);
+                self.cap_item(true)?
+            }
             T::Keyword(Kw::Opaque) if matches!(self.nth(1), T::Keyword(Kw::Record | Kw::Unique | Kw::Resource)) => {
                 self.bump();
                 ItemKind::Record(RecordDecl { opaque: true, ..self.kinded_record_decl()? })
@@ -489,29 +498,7 @@ impl Parser<'_> {
                 ItemKind::Impl(self.impl_decl()?)
             }
             T::Keyword(Kw::Interface) => ItemKind::Interface(self.interface_decl(false)?),
-            T::Keyword(Kw::Cap) if self.nth(1) == T::Keyword(Kw::Interface) => {
-                self.bump();
-                ItemKind::Interface(self.interface_decl(true)?)
-            }
-            T::Keyword(Kw::Cap) if self.nth(1) != T::Keyword(Kw::Record) => {
-                // Only a name on `cap`'s own line is poisoned. An item on the next is kept.
-                self.poison_declared_name();
-                let span = self.bump().span;
-                let message = "`cap` goes right before `interface` or `record`, on the same line, as in `cap interface Log { … }` (§9.2)";
-                self.error(codes::UNEXPECTED_TOKEN, span, message);
-                // A `cap interface` split over two lines is still the capability interface.
-                let mut n = 0;
-                while self.nth(n) == T::Newline {
-                    n += 1;
-                }
-                if self.nth(n) != T::Keyword(Kw::Interface) {
-                    return Err(());
-                }
-                while self.at(T::Newline) {
-                    self.bump();
-                }
-                ItemKind::Interface(self.interface_decl(true)?)
-            }
+            T::Keyword(Kw::Cap) => self.cap_item(false)?,
             T::Keyword(Kw::Example) => {
                 // The example is kept, so it is still checked.
                 if vis != Visibility::Private && written {
@@ -714,26 +701,106 @@ impl Parser<'_> {
             }
             self.bump();
         }
-        let decl = self.record_decl(kind == T::Keyword(Kw::Resource))?;
+        let decl = self.record_decl(kind == T::Keyword(Kw::Resource), false)?;
         Ok(RecordDecl { unique: kind == T::Keyword(Kw::Unique), resource: kind == T::Keyword(Kw::Resource), ..decl })
     }
 
-    fn record_decl(&mut self, resource: bool) -> PResult<RecordDecl> {
+    /// `cap record Store { state files: Map[Text, Text] }`, whose type parameters, `derives`
+    /// and refinements aren't scheduled (OPEN_QUESTIONS P5). Each is reported. The record is
+    /// kept without its `derives` and refinements, but not with type parameters, which its
+    /// fields may name.
+    /// The first token from the `n`th on that isn't a newline.
+    fn after_newlines(&self, mut n: usize) -> T {
+        while self.nth(n) == T::Newline {
+            n += 1;
+        }
+        self.nth(n)
+    }
+
+    /// A `cap interface` or `cap record` item, at `cap`. After `opaque`, which is rejected
+    /// already, it is a `cap record`, whose `uses` the `opaque` would have declared.
+    fn cap_item(&mut self, opaque: bool) -> PResult<ItemKind> {
+        match self.nth(1) {
+            T::Keyword(Kw::Interface) => {
+                self.bump();
+                return Ok(ItemKind::Interface(self.interface_decl(true)?));
+            }
+            T::Keyword(Kw::Record) => {
+                self.bump();
+                return self.cap_record_item(opaque);
+            }
+            _ => {}
+        }
+        // Only a name on `cap`'s own line is poisoned. An item on the next is kept.
+        self.poison_declared_name();
+        let span = self.bump().span;
+        let message =
+            "`cap` goes right before `interface` or `record`, on the same line, as in `cap interface Log { … }` (§9.2)";
+        self.error(codes::UNEXPECTED_TOKEN, span, message);
+        // A `cap interface` or `cap record` split over two lines is still what it says.
+        let next = self.after_newlines(0);
+        if !matches!(next, T::Keyword(Kw::Interface | Kw::Record)) {
+            return Err(());
+        }
+        while self.at(T::Newline) {
+            self.bump();
+        }
+        match next {
+            T::Keyword(Kw::Interface) => Ok(ItemKind::Interface(self.interface_decl(true)?)),
+            _ => self.cap_record_item(opaque),
+        }
+    }
+
+    /// `record R { … }` after `cap`, as an item. A `cap record` has no `uses` of its own,
+    /// unless it is `opaque`, which is rejected already (§15.1).
+    fn cap_record_item(&mut self, opaque: bool) -> PResult<ItemKind> {
+        let decl = self.cap_record_decl()?;
+        if let Some(&first) = decl.uses.as_ref().and_then(|uses| uses.first())
+            && !opaque
+        {
+            let span = self.m.types[first].span;
+            let message = "a `cap record` reaches what its fields reach and the capability interfaces it implements; only an `opaque record` declares what it `uses` (§9.2, §9.6)";
+            self.error(codes::UNEXPECTED_TOKEN, span, message);
+        }
+        Ok(ItemKind::Record(decl))
+    }
+
+    fn cap_record_decl(&mut self) -> PResult<RecordDecl> {
+        let mut decl = self.record_decl(false, true)?;
+        // The `derives` list is kept, so the checker knows the record was meant to implement
+        // what it names (§15.1).
+        if let Some(derived) = decl.derives.first() {
+            self.diags.not_implemented(derived.span, "`derives` lists on `cap record`s", Planned::Unscheduled);
+        }
+        let mut refinements: Vec<ExprId> = decl.fields.iter_mut().filter_map(|field| field.refinement.take()).collect();
+        refinements.extend(decl.refinement.take());
+        if let Some(&refinement) = refinements.first() {
+            let span = self.m.exprs[refinement].span;
+            self.diags.not_implemented(span, "refinements of `cap record`s", Planned::Unscheduled);
+        }
+        Ok(RecordDecl { cap: true, ..decl })
+    }
+
+    fn record_decl(&mut self, resource: bool, cap: bool) -> PResult<RecordDecl> {
         self.bump();
         let name = self.ident("a record name")?;
-        let decl = self.record_rest(name, resource);
+        let decl = self.record_rest(name, resource, cap);
         if decl.is_err() {
             self.m.poisoned.insert(name.sym);
         }
         decl
     }
 
-    fn record_rest(&mut self, name: Ident, resource: bool) -> PResult<RecordDecl> {
+    fn record_rest(&mut self, name: Ident, resource: bool, cap: bool) -> PResult<RecordDecl> {
         let generics = self.type_generics()?;
         // A generic resource's `impl Abandon` would be generic code that may drop a value of
         // a type parameter, which waits for the answer generic functions do (OPEN_QUESTIONS §G).
         if resource && !generics.is_empty() {
             self.diags.not_implemented(name.span, "generic resource records", Planned::Unscheduled);
+            return Err(());
+        }
+        if cap && !generics.is_empty() {
+            self.diags.not_implemented(name.span, "generic `cap record`s", Planned::Unscheduled);
             return Err(());
         }
         let uses = if self.eat(T::Keyword(Kw::Uses)) { Some(self.uses_list()?) } else { None };
@@ -753,7 +820,7 @@ impl Parser<'_> {
             let indent = self.indent(self.peek().span);
             let saved = (self.stmt_indent, self.field_indent);
             (self.stmt_indent, self.field_indent) = (indent, Some(indent));
-            let field = self.field_decl();
+            let field = self.field_decl(cap);
             (self.stmt_indent, self.field_indent) = saved;
             fields.push(field?);
             // A field's `where` block that was never closed ends before the next field's line.
@@ -781,6 +848,7 @@ impl Parser<'_> {
             distinct: false,
             opaque: false,
             uses,
+            cap: false,
         })
     }
 
@@ -866,7 +934,7 @@ impl Parser<'_> {
                 let indent = self.indent(self.peek().span);
                 let saved = (self.stmt_indent, self.field_indent);
                 (self.stmt_indent, self.field_indent) = (indent, Some(indent));
-                let field = self.field_decl();
+                let field = self.field_decl(false);
                 (self.stmt_indent, self.field_indent) = saved;
                 fields.push(field?);
                 if !self.eat(T::Comma) || self.at(T::RParen) {
@@ -882,12 +950,23 @@ impl Parser<'_> {
         Ok(VariantDecl { name, fields })
     }
 
-    fn field_decl(&mut self) -> PResult<FieldDecl> {
+    /// `name: Text`, or `state count: Int` in a `cap record`, where `state_ok`. A `state`
+    /// field elsewhere is reported, and kept as a plain one (§15.1).
+    fn field_decl(&mut self, state_ok: bool) -> PResult<FieldDecl> {
+        let state = self.at(T::Keyword(Kw::State));
+        if state {
+            let span = self.bump().span;
+            if !state_ok {
+                let message =
+                    "only a `cap record` has `state` fields, which every copy of the capability shares (§9.6)";
+                self.error(codes::UNEXPECTED_TOKEN, span, message);
+            }
+        }
         let name = self.ident("a field name")?;
         self.expect(T::Colon, "`:` and the field's type")?;
         let ty = self.type_expr()?;
         let refinement = if self.eat(T::Keyword(Kw::Where)) { Some(self.expr()?) } else { None };
-        Ok(FieldDecl { name, ty, refinement })
+        Ok(FieldDecl { name, ty, refinement, state: state && state_ok })
     }
 
     fn fn_decl(&mut self) -> PResult<FnDecl> {
@@ -1115,11 +1194,12 @@ impl Parser<'_> {
             unique: false,
             resource: false,
             derives,
-            fields: vec![FieldDecl { name: value, ty: target, refinement: None }],
+            fields: vec![FieldDecl { name: value, ty: target, refinement: None, state: false }],
             refinement,
             distinct: true,
             opaque: false,
             uses: None,
+            cap: false,
         }))
     }
 
@@ -2888,14 +2968,13 @@ fn item_keyword(kw: Kw) -> bool {
             | Kw::Type
             | Kw::Distinct
             | Kw::Test
+            | Kw::Cap
     ) || (kw != Kw::Let && planned_item(kw).is_some())
 }
 
 /// Item keywords that belong to later phases, with what to call them.
 fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
     Some(match kw {
-        // `cap interface` is parsed, and `cap record` comes in slice 3.3.
-        Kw::Cap => ("capability records", Planned::Phase(3)),
         Kw::Effect => ("effect parameters", Planned::Phase(3)),
         Kw::Pred => ("`pred` functions", Planned::Phase(5)),
         Kw::Unit | Kw::Tag => ("units and tags", Planned::PastV1),

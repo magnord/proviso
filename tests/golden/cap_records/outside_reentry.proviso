@@ -1,0 +1,34 @@
+// phase: 3.3
+// expect-exit: 70
+// expect-report: defect reentrant_call
+// Only a `cap record`'s own `impl` blocks call its methods directly. A call on a value of the
+// record from anywhere else may not re-enter its object, as a call through a handle may not
+// (REFERENCE §9.6; OPEN_QUESTIONS Q30). Here `main` calls `bump` from a closure that `run`
+// calls while it is still running on the same object.
+use std.io { IoError, Out }
+
+cap record Tally {
+    out: Out
+    state total: Int
+}
+
+impl Tally {
+    fn bump(self) {
+        self.total += 1
+    }
+
+    fn run(self, f: fn() -> Unit uses Out) {
+        self.total += 1
+        let _ = attempt self.out.write_line(f"running at {self.total}")
+        f()
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let t = Tally(out: sys.stdout, total: 0)
+    let u = Tally(out: sys.stdout, total: 10)
+    t.bump()
+    t.run(f: || u.bump())
+    try sys.stdout.write_line("another object is not a re-entry")
+    t.run(f: || t.bump())
+}

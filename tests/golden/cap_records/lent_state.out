@@ -1,0 +1,5 @@
+100000 items, first 1, last 99999, 0 calls
+true false 100002
+false false 100003
+true
+100004 items, first 1, last 7, 3 calls

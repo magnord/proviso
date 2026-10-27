@@ -167,6 +167,12 @@ impl Reach {
         Reach { caps: Vec::new(), params: vec![i] }
     }
 
+    /// What it reaches apart from capabilities of `iface`.
+    pub fn without(mut self, iface: IfaceId) -> Reach {
+        self.caps.retain(|&(i, _)| i != iface);
+        self
+    }
+
     /// What it reaches apart from type parameters.
     pub fn without_params(mut self) -> Reach {
         self.params.clear();

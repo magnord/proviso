@@ -1,0 +1,55 @@
+// phase: 3.3
+// expect-exit: 70
+// expect-report: defect assertion_failed
+// A defect in an operation leaves `state` as it was too (REFERENCE §9.6). The defect ends the
+// run, but first `main` abandons the resource it owns, whose `abandon` reads the state through
+// a handle of its own (§10 rule 3). The operation that hit the defect is no longer running
+// then, so that handle call is not a re-entry (OPEN_QUESTIONS Q30).
+use std.io { Out }
+
+cap interface Jar observes(read) effects(fill) {
+    fn level(self) -> Int                                       needs read
+    fn fill(self, by: Int)                                      needs fill
+}
+
+cap record Glass {
+    limit: Int
+    state level: Int
+}
+
+impl Jar for Glass {
+    fn level(self) -> Int {
+        return self.level
+    }
+
+    fn fill(self, by: Int) {
+        self.level += by
+        assert self.level <= self.limit
+    }
+}
+
+resource record Watch {
+    jar: Jar[read]
+    out: Out
+}
+
+impl Abandon for Watch {
+    fn abandon(take self) {
+        let _ = attempt self.out.write_line(f"abandoned at level {self.jar.level()}")
+    }
+}
+
+impl Watch {
+    fn close(take self) {
+        let _ = attempt self.out.write_line("closed")
+    }
+}
+
+pub fn main(sys: keep System) {
+    let jar = Jar.of(Glass(limit: 5, level: 0))
+    let watch = Watch(jar: jar, out: sys.stdout)
+    jar.fill(by: 3)
+    let _ = attempt sys.stdout.write_line(f"level {jar.level()}")
+    jar.fill(by: 4)
+    watch.close()
+}

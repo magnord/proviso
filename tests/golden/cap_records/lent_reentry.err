@@ -1,0 +1,5 @@
+defect[reentrant_call]: this uses `state` field `items` of a `Bag` while a change to it is in progress; calls on one capability object run one at a time (§9.6)
+  at cap_records/lent_reentry.proviso:29:16 (lent_reentry.Bag.size+2)
+  called from cap_records/lent_reentry.proviso:21:48 (lent_reentry.Bag.push_and_report+5)
+  called from cap_records/lent_reentry.proviso:33:9 (lent_reentry.Bag.add+2)
+  called from cap_records/lent_reentry.proviso:40:5 (lent_reentry.main+4)

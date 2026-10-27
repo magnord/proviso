@@ -1,10 +1,11 @@
 // phase: 2.4
+// expect-error: E0606
 // expect-error: E0901
 // A hand-written `Hash`, interface functions without `self`, generic
 // interface methods, generic interfaces such as `Index[Int]`, tag parameters, and `Self` in
 // expressions and patterns come later. So do implementations for `Never` and for capability
-// types such as `Out`, implementations of capability interfaces, and calls of the methods of
-// `Index` and the operator interfaces. Uses of what they declare aren't
+// types such as `Out`, and calls of the methods of `Index` and the operator interfaces. Only
+// a `cap record` implements a capability interface (REFERENCE §9.6). Uses of what they declare aren't
 // reported again (REFERENCE §15.1), and an `impl` may declare the methods its interface
 // couldn't.
 use std.io { IoError, Out }
@@ -78,7 +79,7 @@ impl Greet for Out {                                // <- E0901
     }
 }
 
-impl Out for Counter {                              // <- E0901
+impl Out for Counter {                              // <- E0606
     fn write_line(self, text: Text) fails IoError {
     }
 }

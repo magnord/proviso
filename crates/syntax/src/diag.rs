@@ -110,7 +110,7 @@ pub mod codes {
             "An f-string interpolation `{}` with no expression inside.";
 
         UNEXPECTED_TOKEN = "E0101", "unexpected_token",
-            "The parser expected something else here, or a permission or `needs` clause is declared outside a `cap interface`, also on a function. So is `uses` on a function or on a record that isn't `opaque`, or an empty `uses` list (REFERENCE §9.2).";
+            "The parser expected something else here, or a permission or `needs` clause is declared outside a `cap interface`, also on a function. So is `uses` on a function or on a record that isn't `opaque`, or an empty `uses` list (REFERENCE §9.2). So are `state` fields outside a `cap record`, and `uses` on one (REFERENCE §9.6).";
         BARE_VALUE_STATEMENT = "E0102", "bare_value_statement",
             "An expression statement must be a call, an assignment or a control expression (REFERENCE §2).";
         CHAINED_COMPARISON = "E0103", "chained_comparison",
@@ -158,11 +158,11 @@ pub mod codes {
         LITERAL_OUT_OF_RANGE = "E0302", "literal_out_of_range",
             "A literal that does not fit the type it meets (REFERENCE §2).";
         UNKNOWN_MEMBER = "E0303", "unknown_member",
-            "A field, method, variant, permission or capability operation the type does not have.";
+            "A field, method, variant, permission or capability operation the type does not have. A `state` field is visible only in its record's own `impl` blocks, and `with` replaces plain fields only (REFERENCE §9.6; OPEN_QUESTIONS Q40).";
         MISSING_RETURN = "E0304", "missing_return",
             "Every path of a non-Unit function ends with an explicit `return` (REFERENCE §2).";
         IMMUTABLE_ASSIGNMENT = "E0305", "immutable_assignment",
-            "An assignment to a `let` binding, a parameter or a loop variable, or to a part of one, or a method that changes its receiver, such as `push`, or an `&` argument, on one (REFERENCE §5.2).";
+            "An assignment to a `let` binding, a parameter or a loop variable, or to a part of one, or a method that changes its receiver, such as `push`, or an `&` argument, on one (REFERENCE §5.2). A `state` field is the exception, which a method of its `cap record` changes through a plain `self`, even a borrowed one, outside the observes-only view (REFERENCE §9.6; OPEN_QUESTIONS P5).";
         UNSUPPORTED_OPERATOR = "E0306", "unsupported_operator",
             "An operator or interpolation that the operand's type doesn't support, a literal or range pattern that the matched type doesn't support, such as a `Float` literal (REFERENCE §12.2), an index on anything but a list or a pool, or a change to a pool's element through `pool[h]` (STD.md).";
         UNKNOWN_TYPE = "E0307", "unknown_type",
@@ -198,8 +198,8 @@ pub mod codes {
         ALIAS_CYCLE = "E0322", "alias_cycle",
             "An alias that names itself, directly or through other aliases, as `type Loop = List[Loop]`. An alias is the type it names, so a cycle names no type. A recursive type is a record or enum (REFERENCE §4.6; OPEN_QUESTIONS P5).";
 
-        // E0412, E0414, E0601 and E0602 are reserved for later phases: the §F
-        // goldens already expect them.
+        // E0412 and E0414 are reserved for later phases: the §F goldens already
+        // expect them.
         REFINEMENT_REFUTED = "E0412", "refinement_refuted",
             "A refinement obligation is refuted: values consistent with every admissible fact violate it (REFERENCE §8.3, §8.5).";
         PARTIAL_INOUT_OF_REFINED_PART = "E0413", "partial_inout_of_refined_part",
@@ -227,13 +227,17 @@ pub mod codes {
         FUNCTION_VALUE_ESCAPES = "E0509", "function_value_escapes",
             "A function value is put where it could outlive what it captures, such as a field, a result, an error, an element, a type argument, an assignment to a `var`, or the value of a block, branch or arm that declares a local it captures (REFERENCE §6.7; OPEN_QUESTIONS P5).";
         EFFECTS_CALL_IN_OBSERVES = "E0601", "effects_call_in_observes",
-            "An operation that needs only `observes` permissions calls an `effects` operation (REFERENCE §9.2).";
+            "An operation that needs only `observes` permissions calls an `effects` operation (REFERENCE §9.2). It sees `self` through the observes-only view, where a capability on a path from `self` has its `observes` permissions only, so a call of an operation it then lacks, an `only` that keeps one, or passing it where the full type is expected, is reported here (REFERENCE §9.6; OPEN_QUESTIONS Q39).";
         REACH_NOT_ADMITTED = "E0602", "reach_not_admitted",
             "A value's reach is not admitted by the expected type's `uses` or `with E` (REFERENCE §9.4), or a field of an `opaque record` reaches more than the record's `uses` declares (REFERENCE §9.2).";
         PERMISSION_NOT_GRANTED = "E0603", "permission_not_granted",
             "A capability's static type lacks a permission: an operation the type doesn't permit is called, the capability is used where a type with more permissions is expected, or `only` names a permission it doesn't have (REFERENCE §9.2). A call through the observes-only view of `self` is E0601 instead.";
         SYSTEM_CONSTRUCTED = "E0604", "system_constructed",
             "A `System` is built, copied with `with`, or matched by a pattern. The runtime gives `main` the only one, and a program reads its fields by name (REFERENCE §9.1).";
+        VIEW_ESCAPE = "E0605", "view_escape",
+            "In an operation that needs no `effects` permission, which sees `self` through the observes-only view, a value leaves the view: `self`, a `cap record` at the end of a path from it, or another value there that reaches an `effects` permission is bound, passed, returned, stored or iterated, or is the receiver of a call other than an operation of a `cap interface` that needs no `effects` permission. A closure may capture `self`, since its body sees the same view (REFERENCE §9.6; OPEN_QUESTIONS Q39).";
+        NOT_A_CAP_RECORD = "E0606", "not_a_cap_record",
+            "An `impl` of a capability interface for a type that isn't a `cap record`. Only a `cap record` implements one, so its values are handles whose copies share `state` (REFERENCE §9.6; OPEN_QUESTIONS Q30).";
 
         UNMARKED_FALLIBLE_CALL = "E0701", "unmarked_fallible_call",
             "A call that can fail must be marked with `try`, `else` or `attempt` (REFERENCE §7.2).";

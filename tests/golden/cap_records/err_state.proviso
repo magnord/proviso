@@ -1,0 +1,60 @@
+// phase: 3.3
+// expect-error: E0101
+// expect-error: E0303
+// expect-error: E0305
+// `state` fields are allowed only in a `cap record` (REFERENCE §9.6), and are visible only
+// in the record's own `impl` blocks. There a state field changes only through a plain `self`,
+// even when `self` is borrowed (§5.2), so the change commits with the method that made it
+// (OPEN_QUESTIONS P5). Changing another value's state is E0305. Elsewhere a construction sets
+// them, and nothing else names them. `with` replaces plain fields only, also inside the
+// record's own blocks (OPEN_QUESTIONS Q40). Plain fields are ordinary values, which a `let`
+// can't change.
+record Point {
+    x: Int
+    state y: Int                                                // <- E0101
+}
+
+enum Shape {
+    Dot(state at: Int)                                          // <- E0101
+}
+
+cap interface Meter observes(read) effects(tick) {
+    fn read(self) -> Int                                        needs read
+    fn tick(self)                                               needs tick
+}
+
+cap record Clock {
+    label: Text
+    state ticks: Int
+}
+
+impl Meter for Clock {
+    fn read(self) -> Int {
+        return self.ticks
+    }
+
+    fn tick(self) {
+        self.ticks += 1
+        let other = Clock(label: "other", ticks: 0)
+        other.ticks = 5                                         // <- E0305
+        self.label = "x"                                        // <- E0305
+        let copy = self.with(ticks: 2)                          // <- E0303
+        let renamed = self.with(label: "y")
+    }
+}
+
+impl Clock {
+    fn bump_other(self, other: Clock) {
+        other.ticks += self.ticks                               // <- E0305
+    }
+}
+
+fn outside(c: Clock) -> Int {
+    let p = Point(x: 1, y: 2)
+    let s = Shape.Dot(at: 3)
+    let n = c.ticks                                             // <- E0303
+    c.ticks = 3                                                 // <- E0303
+    let d = c.with(ticks: 3)                                    // <- E0303
+    let e = c.with(label: "e")
+    return n + p.y + c.read()
+}

@@ -31,7 +31,7 @@ use crate::decls::{
 };
 use crate::exhaust::{Ctor, Space};
 use crate::infer::{Kind, Origin, Vars};
-use crate::types::{FN_PARAMS, FloatTy, IntTy, Perms, Reach, Ty};
+use crate::types::{CapTy, FN_PARAMS, FloatTy, IntTy, Perms, Reach, Ty};
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Options {
@@ -58,6 +58,9 @@ pub type FnId = usize;
 pub enum Builtin {
     /// `x.only::[p, …]()` on a capability, which narrows its type (REFERENCE §9.2).
     Only,
+    /// `X.of(r)`, which makes a capability of interface `X` of a `cap record` that implements
+    /// it (REFERENCE §9.6). It is called on the interface, so it has no receiver.
+    Of,
     /// `Text.byte_len() -> Int`
     ByteLen,
     /// `Text.is_empty() -> Bool`, and the same for `List` and `Map`.
@@ -334,6 +337,7 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         adt_vis: HashMap::new(),
         cap_vis: HashMap::new(),
         only_declared: HashSet::new(),
+        of_declared: HashSet::new(),
         iface_names: HashMap::new(),
         ifaces: Vec::new(),
         cap_decls: HashSet::new(),
@@ -384,9 +388,11 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     checker.adt_generics();
     checker.resolve_aliases();
     checker.adt_fields();
+    checker.cap_record_reach();
     checker.expanding_types();
     checker.p.decls.settle_kinds();
     checker.opaque_reach();
+    checker.cap_record_fields();
     checker.inhabited = Some(checker.p.decls.inhabited());
     checker.iface_methods();
     checker.adt_derives();
@@ -568,6 +574,31 @@ struct FnState {
     /// depth. A block can't yield a function value that needs one it declares.
     needs: HashMap<ExprId, u32>,
     local_needs: HashMap<LocalId, u32>,
+    /// For an operation of a `cap record` that needs no `effects` permission, its interface
+    /// and name. Its body sees `self` through the observes-only view (OPEN_QUESTIONS Q39).
+    view: Option<(IfaceId, Box<str>)>,
+    /// Whether local 0 is `self`, the receiver of a method.
+    has_self: bool,
+    /// In such an operation, the expressions that are `self` or a path from it.
+    view_paths: HashSet<ExprId>,
+    /// The ones that may leave the view, until a parent uses them in a way it allows.
+    escapes: HashMap<ExprId, Escape>,
+    /// The capabilities the view narrowed, and locals bound to one, with their types outside
+    /// the view, so a permission only the view took away is E0601 rather than E0603.
+    unnarrowed: HashMap<ExprId, Ty>,
+    unnarrowed_locals: HashMap<LocalId, Ty>,
+}
+
+/// A value in an operation with the observes-only view that could change what `self` reaches
+/// if it left the view (OPEN_QUESTIONS Q39).
+#[derive(Clone, Copy)]
+enum Escape {
+    /// `self`.
+    SelfValue,
+    /// A `cap record` at the end of a path from `self`.
+    Record,
+    /// Another value at the end of such a path, with `effects` reach.
+    Reaches,
 }
 
 impl FnState {
@@ -591,6 +622,12 @@ impl FnState {
             late_captures: Vec::new(),
             needs: HashMap::new(),
             local_needs: HashMap::new(),
+            view: None,
+            has_self: false,
+            view_paths: HashSet::new(),
+            escapes: HashMap::new(),
+            unnarrowed: HashMap::new(),
+            unnarrowed_locals: HashMap::new(),
         }
     }
 }
@@ -675,6 +712,8 @@ struct Checker<'a> {
     cap_vis: HashMap<IfaceId, Visibility>,
     /// The capability interfaces that declare an operation named `only`, which is rejected.
     only_declared: HashSet<IfaceId>,
+    /// The capability interfaces that declare an operation named `of`, which is reported.
+    of_declared: HashSet<IfaceId>,
     /// The function being checked, or the record whose refinements are.
     f: FnState,
     /// Set while checking the postfix chain a `try` or `attempt` covers (REFERENCE §6.1).
@@ -1638,6 +1677,7 @@ impl Checker<'_> {
             def.resource_base = matches!(&item.kind, ItemKind::Record(decl) if decl.resource);
             def.unique = def.resource_base || matches!(&item.kind, ItemKind::Record(decl) if decl.unique);
             def.distinct = matches!(&item.kind, ItemKind::Record(decl) if decl.distinct);
+            def.cap = matches!(&item.kind, ItemKind::Record(decl) if decl.cap);
             def.params = generics.len();
             let id = self.p.decls.push(def);
             let uses = match &item.kind {
@@ -1936,7 +1976,7 @@ impl Checker<'_> {
                     }
                     self.exposes(name, vis, &ty, field.ty);
                     index.insert(field.name.sym, fields.len());
-                    fields.push(FieldDef { name: text.into(), ty });
+                    fields.push(FieldDef { name: text.into(), ty, state: field.state });
                 }
                 let variant = &mut self.p.decls.adt_mut(id).variants[v];
                 variant.locals = fields.len();
@@ -1954,6 +1994,60 @@ impl Checker<'_> {
         }
         self.generic_scope.clear();
         self.param_names.clear();
+    }
+
+    /// Gives each `cap record` the reach of every capability interface its `impl` blocks name,
+    /// with every permission, since a direct call on it may run any of their operations
+    /// (OPEN_QUESTIONS P5). It is read from the blocks as written, before they are checked, so
+    /// that a type holding the record reaches them too once kinds settle.
+    fn cap_record_reach(&mut self) {
+        let m = self.m;
+        for item in &m.items {
+            let ItemKind::Impl(decl) = &item.kind else { continue };
+            let (Some(iface), TypeExprKind::Named(target)) = (decl.iface, &m.types[decl.target].kind) else {
+                continue;
+            };
+            // An alias names the record it stands for, as the block's own type does.
+            let id = match self.aliases.get(&target.sym) {
+                Some(Alias::Done(Ty::Adt(id, _))) => Some(*id),
+                _ => self.adt_names.get(&target.sym).copied(),
+            };
+            let (Some(id), Some(iface)) = (id, self.cap_named(iface.sym)) else {
+                continue;
+            };
+            if self.p.decls.adt(id).cap {
+                let perms = self.p.decls.iface(iface).all_perms();
+                self.p.decls.adt_mut(id).reach.add_cap(iface, perms);
+            }
+        }
+    }
+
+    /// Reports each field of a `cap record` whose type is unique or a resource. Copies of the
+    /// record share one object, so they would share the value (REFERENCE §5.1, §9.6), which
+    /// isn't scheduled (OPEN_QUESTIONS P5). Also reports each `state` field that may hold a
+    /// capability handle, which could make a cycle that reference counting never frees.
+    fn cap_record_fields(&mut self) {
+        let m = self.m;
+        // Fields share the parts of their types, so each part is asked about once.
+        let (mut moves, mut handles) = (HashMap::new(), HashMap::new());
+        for k in 0..self.adts.len() {
+            let id = self.adts[k].id;
+            if !self.p.decls.adt(id).cap {
+                continue;
+            }
+            let Some((_, decls)) = self.adts[k].variants.first().copied() else { continue };
+            for decl in decls {
+                let text = m.text(decl.name.sym);
+                let Some((_, field)) = self.p.decls.adt(id).field(text) else { continue };
+                if self.p.decls.moves_memo(&field.ty, &[], &mut moves) {
+                    let what = "unique or resource fields of `cap record`s";
+                    self.not_implemented(m.types[decl.ty].span, what, Planned::Unscheduled);
+                } else if field.state && self.p.decls.holds_handle_memo(&field.ty, &mut handles) {
+                    let what = "`state` fields that can hold a `cap record` or a capability";
+                    self.not_implemented(m.types[decl.ty].span, what, Planned::Unscheduled);
+                }
+            }
+        }
     }
 
     /// Reports each field of an opaque record whose reach the record's `uses` doesn't cover
@@ -2330,6 +2424,15 @@ impl Checker<'_> {
                     }
                     self.only_declared.insert(id);
                 }
+                // So does every capability interface have `X.of`, which makes a capability of
+                // a `cap record` (REFERENCE §9.6).
+                if cased && decl.cap.is_some() && text == "of" {
+                    if !m.poisoned.contains(&decl.name.sym) {
+                        let message = "every capability interface has `of`, as in `Log.of(r)`, which makes a capability of a `cap record`, so an operation can't be named `of`";
+                        self.error(codes::DUPLICATE_NAME, method.name.span, message);
+                    }
+                    self.of_declared.insert(id);
+                }
                 let receiver = method.receiver.expect("the parser keeps only interface methods with `self`");
                 let later = match receiver.mode {
                     ParamMode::Borrow | ParamMode::Take => None,
@@ -2360,6 +2463,18 @@ impl Checker<'_> {
                         continue 'methods;
                     }
                     let ty = self.resolve_type(param.ty);
+                    // Through a handle, an argument of type `Self` may be another implementation,
+                    // which the operation's own can't read (OPEN_QUESTIONS P5).
+                    if decl.cap.is_some() && mentions_param(&ty, 0) {
+                        let span = m.types[param.ty].span;
+                        self.not_implemented(
+                            span,
+                            "parameters of type `Self` in a `cap interface`'s operations",
+                            Planned::Unscheduled,
+                        );
+                        incomplete = true;
+                        continue 'methods;
+                    }
                     self.exposes(decl.name, vis, &ty, param.ty);
                     params.push((name.into(), ty));
                     modes.push(param.mode);
@@ -2404,6 +2519,12 @@ impl Checker<'_> {
         let mut operators = Vec::new();
         for k in 0..self.adts.len() {
             let (id, derives_of) = (self.adts[k].id, self.adts[k].derives);
+            // A `cap record`'s `derives` is reported by the parser. It may have named any
+            // interface, so the record is taken to have each, and any method (§15.1).
+            if self.p.decls.adt(id).cap && !derives_of.is_empty() {
+                self.p.decls.mark_unknown(ImplKey::Adt(id));
+                continue;
+            }
             let mut seen: Vec<&str> = Vec::new();
             let mut derives = Vec::new();
             // A rejected entry may have named any interface, so it is taken to name each.
@@ -3077,6 +3198,16 @@ impl Checker<'_> {
             self.reject_impl(item, decl, &target, rejected);
             return;
         }
+        // A capability interface is implemented in Proviso by a `cap record`, whose values are
+        // handles that copies share (REFERENCE §9.6).
+        if self.p.decls.iface(iface).cap.is_some() && !matches!(&target, Ty::Adt(id, _) if self.p.decls.adt(*id).cap) {
+            let message = format!(
+                "only a `cap record` implements a capability interface such as `{iface_text}`, and `{target_text}` isn't one (§9.6)"
+            );
+            self.error(codes::NOT_A_CAP_RECORD, iface_name.span, message);
+            self.reject_impl(item, decl, &target, Rejected { unknown: true, bodies: true });
+            return;
+        }
         // Dispatch reads the type of the receiver's value, which `Never` has none of.
         let Some(key) = key else {
             self.not_implemented(target_span, "implementations for `Never`", Planned::Unscheduled);
@@ -3238,11 +3369,9 @@ impl Checker<'_> {
         if self.poisoned.contains(&name.sym) {
             return Err(Rejected { unknown: true, bodies: true });
         }
-        // `cap record`s implement capability interfaces, in slice 3.3.
-        if self.names_cap(name.sym) {
-            let what = format!("implementations of capability interfaces such as `{text}`");
-            self.not_implemented(name.span, &what, Planned::Phase(3));
-            return Err(Rejected { unknown: true, bodies: false });
+        // A capability interface of the standard library, such as `Out`, is imported.
+        if let Some(iface) = self.cap_named(name.sym) {
+            return Ok(iface);
         }
         if let Some(&id) = self.iface_names.get(&name.sym) {
             return Ok(id);
@@ -3262,7 +3391,7 @@ impl Checker<'_> {
     /// Whether this slice lets a module implement `iface` by hand, reported when it doesn't.
     /// The bodies of a later phase's implementation wait for it.
     fn implementable(&mut self, iface: IfaceId, name: Ident) -> Result<(), Rejected> {
-        if self.ifaces.iter().any(|src| src.id == iface) {
+        if self.ifaces.iter().any(|src| src.id == iface) || self.p.decls.iface(iface).cap.is_some() {
             return Ok(());
         }
         let later = Rejected { unknown: true, bodies: false };
@@ -3458,11 +3587,12 @@ impl Checker<'_> {
         match te.kind {
             TypeExprKind::Named(name) => self.type_name(name),
             TypeExprKind::Fn { ref params, ret, fails, ref uses } => self.fn_type(params, ret, fails, uses),
-            // Slice 3.3 decides whether the `cap record` that implements it may use more.
+            // Whether the `cap record` that implements it may use more isn't scheduled
+            // (OPEN_QUESTIONS P5; issue #64).
             TypeExprKind::Uses { base, .. }
                 if self.cap_self && matches!(m.types[base].kind, TypeExprKind::SelfType) =>
             {
-                self.not_implemented(te.span, "`uses` clauses after a `cap interface`'s `Self`", Planned::Phase(3));
+                self.self_uses(te.span);
                 Ty::Error
             }
             TypeExprKind::Uses { base, ref uses } => {
@@ -3643,6 +3773,12 @@ impl Checker<'_> {
         let mut reach = Reach::default();
         let mut known = true;
         for &t in uses {
+            // A capability that uses its own implementation isn't scheduled (OPEN_QUESTIONS P5).
+            if self.cap_self && matches!(self.m.types[t].kind, TypeExprKind::SelfType) {
+                self.self_uses(self.m.types[t].span);
+                known = false;
+                continue;
+            }
             match self.resolve_type(t) {
                 Ty::Cap(cap) => {
                     reach.extend(&Reach::of_cap(&cap));
@@ -3662,6 +3798,11 @@ impl Checker<'_> {
             }
         }
         known.then_some(reach)
+    }
+
+    /// Reports `Self` before `uses` or in a `uses` list of a `cap interface`.
+    fn self_uses(&mut self, span: Span) {
+        self.not_implemented(span, "`uses` clauses with a `cap interface`'s `Self`", Planned::Unscheduled);
     }
 
     fn type_name(&mut self, name: Ident) -> Ty {
@@ -3816,6 +3957,8 @@ impl Checker<'_> {
         }
         state.params = state.locals.len();
         state.scopes.push(scope);
+        state.view = self.view_op(id);
+        state.has_self = info.receiver.is_some();
         self.f = state;
         for param in &decl.params {
             self.shadows_item(param.name);
@@ -3823,6 +3966,9 @@ impl Checker<'_> {
         let start = self.diags.iter().count();
         self.fn_body(decl, body);
         self.settle();
+        if self.f.view.is_some() {
+            self.view_escapes();
+        }
         let found = self.found(start);
         // The resources it owns from the start: its `take` parameters and a `take self`.
         let info = &self.p.fns[id];
@@ -4149,6 +4295,7 @@ impl Checker<'_> {
         match &stmt.kind {
             StmtKind::Let { mutable, pat, ty, init } => {
                 let declared = ty.map(|t| self.resolve_type(t));
+                let typed = declared.is_some();
                 // Binding a value to a new name copies it (REFERENCE §4.8). Taking it apart
                 // matches it, which borrows its parts when it is borrowed, as in a `match` (§6.4).
                 let destructures = !matches!(self.m.pats[*pat].kind, PatKind::Bind(_) | PatKind::Wild);
@@ -4169,6 +4316,13 @@ impl Checker<'_> {
                 self.pattern_borrowed = destructures && self.borrowed_value(*init);
                 self.let_pattern(*pat, &ty, *mutable, false);
                 self.pattern_borrowed = false;
+                // A local bound to a capability the view narrowed is narrowed too.
+                if let Some(orig) = self.f.unnarrowed.get(init).cloned()
+                    && !typed
+                    && let Some(&id) = self.p.pat_local.get(*pat)
+                {
+                    self.f.unnarrowed_locals.insert(id, orig);
+                }
                 // The local holds what its function value captures alive (see `FnState::needs`).
                 let needs = self.value_needs(*init);
                 if needs > 0
@@ -4347,8 +4501,10 @@ impl Checker<'_> {
     /// Checks an assignment and returns the type of the assigned value.
     fn assign(&mut self, target: ExprId, op: AssignOp, value: ExprId) -> Ty {
         let span = self.span(target);
-        let Some((root, id, ty)) = self.place(target) else { return self.infer(value) };
-        if !self.f.locals[id.index()].mutable {
+        let Some((root, id, ty, state)) = self.place(target) else { return self.infer(value) };
+        if let Some(of_self) = state {
+            self.changes_state(of_self, span);
+        } else if !self.f.locals[id.index()].mutable {
             let message = self.immutable(root, id, "assign to it");
             self.error(codes::IMMUTABLE_ASSIGNMENT, span, message);
         } else if self.changes_capture(id, span) {
@@ -4380,10 +4536,11 @@ impl Checker<'_> {
 
     /// Resolves an assignment target, which is a variable or a chain of fields and elements
     /// rooted at one.
-    /// Returns the variable and the type of the place, or `None` once it is reported.
-    fn place(&mut self, target: ExprId) -> Option<(Ident, LocalId, Ty)> {
+    /// Returns the variable, the type of the place and, if the chain goes through a `state`
+    /// field, whether the last one is `self`'s, or `None` once it is reported.
+    fn place(&mut self, target: ExprId) -> Option<(Ident, LocalId, Ty, Option<bool>)> {
         let m = self.m;
-        let (root, id, ty) = match m.exprs[target].kind {
+        let (root, id, ty, state) = match m.exprs[target].kind {
             ExprKind::Name(name) => {
                 let Some(id) = self.lookup_local(name.sym) else {
                     if !self.poisoned.contains(&name.sym) {
@@ -4395,21 +4552,28 @@ impl Checker<'_> {
                 };
                 self.p.res.insert(target, Res::Local(id));
                 self.capture(id, m.text(name.sym), name.span);
-                (name, id, self.f.locals[id.index()].ty.clone())
+                (name, id, self.f.locals[id.index()].ty.clone(), None)
             }
             ExprKind::Field { base, name } => {
-                let (root, id, base_ty) = self.place(base)?;
-                (root, id, self.field(target, &base_ty, name))
+                let (root, id, base_ty, state) = self.place(base)?;
+                let ty = self.field(target, &base_ty, name);
+                // A field that isn't there, or that this code can't name, is reported, and so
+                // is not what it would change (§15.1).
+                if ty == Ty::Error && !self.p.res(target).is_some_and(|res| matches!(res, Res::Field(_))) {
+                    return None;
+                }
+                let state = if self.is_state(&base_ty, target) { Some(self.is_self(base)) } else { state };
+                (root, id, ty, state)
             }
             ExprKind::Index { base, index } => {
-                let (root, id, base_ty) = self.place(base)?;
+                let (root, id, base_ty, state) = self.place(base)?;
                 let span = self.span(target);
                 if let Ty::Adt(AdtId::POOL, _) = base_ty {
                     self.rejected_value(index);
                     self.pool_element(span);
                     return None;
                 }
-                (root, id, self.indexed(&base_ty, index, span)?)
+                (root, id, self.indexed(&base_ty, index, span)?, state)
             }
             _ => {
                 let span = self.span(target);
@@ -4419,7 +4583,252 @@ impl Checker<'_> {
             }
         };
         self.record(target, ty.clone());
-        Some((root, id, ty))
+        Some((root, id, ty, state))
+    }
+
+    /// Whether field `e` of a value of `base_ty`, which resolved, is a `state` field of a `cap
+    /// record`, which every copy of the record shares (REFERENCE §9.6).
+    fn is_state(&self, base_ty: &Ty, e: ExprId) -> bool {
+        match (base_ty, self.p.res(e)) {
+            (Ty::Adt(id, _), Some(Res::Field(i))) => {
+                let def = self.p.decls.adt(*id);
+                def.cap && def.variant().fields[i.index()].state
+            }
+            _ => false,
+        }
+    }
+
+    /// Notes a change to a `state` field of a `cap record`, which is `self`'s if `of_self`.
+    /// A method of the record changes its own object's `state` through `self`, even when
+    /// `self` is borrowed, and commits the change only if it succeeds (REFERENCE §9.6). So
+    /// another object's `state` can't be changed directly, and an operation with the
+    /// observes-only view can't change its own (OPEN_QUESTIONS Q39, P5).
+    fn changes_state(&mut self, of_self: bool, span: Span) {
+        if !of_self {
+            let message = "a `state` field changes only through `self`, in a method of its `cap record`, which commits the change only if it succeeds; call one of this object's methods instead (§9.6)";
+            self.error(codes::IMMUTABLE_ASSIGNMENT, span, message);
+        } else if self.f.view.is_some() {
+            let message = self.view_message("its `state` is read-only");
+            self.error(codes::IMMUTABLE_ASSIGNMENT, span, message);
+        }
+    }
+
+    /// The operands of `e`, which it uses directly.
+    fn direct_operands(&self, e: ExprId) -> Vec<ExprId> {
+        let args = |args: &[Arg]| args.iter().map(|arg| arg.value).collect::<Vec<_>>();
+        match &self.m.exprs[e].kind {
+            ExprKind::FText(parts) => {
+                (parts.iter()).filter_map(|part| if let FTextPart::Expr(x) = part { Some(*x) } else { None }).collect()
+            }
+            ExprKind::Call { args: a, .. } => args(a),
+            ExprKind::MethodCall { receiver, args: a, .. } => [vec![*receiver], args(a)].concat(),
+            ExprKind::Field { base, .. } => vec![*base],
+            ExprKind::Index { base, index } => vec![*base, *index],
+            ExprKind::Unary { operand, .. } => vec![*operand],
+            ExprKind::Binary { lhs, rhs, .. } | ExprKind::Range { lo: lhs, hi: rhs, .. } => vec![*lhs, *rhs],
+            ExprKind::Try(x) | ExprKind::Attempt(x) | ExprKind::Fail(x) => vec![*x],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether `e` is the receiver of the method being checked.
+    fn is_self(&self, e: ExprId) -> bool {
+        self.f.has_self
+            && matches!(self.m.exprs[e].kind, ExprKind::Name(_))
+            && self.p.res(e) == Some(Res::Local(LocalId(0)))
+    }
+
+    /// A message about operation `f.view`, which sees `self` through the observes-only view,
+    /// where `what` is the problem (OPEN_QUESTIONS Q39).
+    fn view_message(&self, what: &str) -> String {
+        let (iface, op) = self.f.view.as_ref().expect("an operation with the view");
+        format!(
+            "`{op}` needs no `effects` permission of `{}`, so it sees `self` through the observes-only view, where {what} (§9.6)",
+            self.iface_name(*iface)
+        )
+    }
+
+    /// In an operation with the observes-only view, notes how `e`, of type `ty`, uses `self`
+    /// (OPEN_QUESTIONS Q39). A path from `self` is read through, and a capability at its end
+    /// is narrowed to its `observes` permissions, as is what it uses. `self`, a `cap record`
+    /// at a path's end, and any other end with `effects` reach may be the base of a longer
+    /// path, or the receiver of an operation that needs no `effects` permission, which their
+    /// parents note. The rest leave the view, and are reported once the body is checked.
+    fn view_expr(&mut self, e: ExprId, ty: Ty) -> Ty {
+        match self.m.exprs[e].kind {
+            ExprKind::Name(_) => match self.p.res(e) {
+                Some(Res::Local(LocalId(0))) if ty != Ty::Error => {
+                    self.f.view_paths.insert(e);
+                    self.f.escapes.insert(e, Escape::SelfValue);
+                }
+                Some(Res::Local(id)) => {
+                    if let Some(orig) = self.f.unnarrowed_locals.get(&id).cloned() {
+                        self.f.unnarrowed.insert(e, orig);
+                    }
+                }
+                _ => {}
+            },
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } if self.f.view_paths.contains(&base) => {
+                self.f.escapes.remove(&base);
+                if ty == Ty::Error {
+                    return ty;
+                }
+                self.f.view_paths.insert(e);
+                match &ty {
+                    Ty::Cap(cap) => {
+                        let narrowed = Ty::Cap(std::sync::Arc::new(self.observes_only(cap)));
+                        if narrowed != ty {
+                            self.f.unnarrowed.insert(e, ty);
+                            return narrowed;
+                        }
+                    }
+                    Ty::Adt(id, _) if self.p.decls.adt(*id).cap => {
+                        self.f.escapes.insert(e, Escape::Record);
+                    }
+                    _ if self.effects_reach(&ty) => {
+                        self.f.escapes.insert(e, Escape::Reaches);
+                    }
+                    _ => {}
+                }
+            }
+            // The receiver of `I.f(x)` is its first argument.
+            ExprKind::MethodCall { receiver, ref args, .. } => match self.p.res(e) {
+                res @ Some(Res::Dispatch { qualified: true, .. }) => {
+                    if let Some(first) = args.first() {
+                        self.view_receiver(e, first.value, res);
+                    }
+                }
+                res => self.view_receiver(e, receiver, res),
+            },
+            _ => {}
+        }
+        ty
+    }
+
+    /// Call `call` on `receiver`, which resolved to `res`, in an operation with the
+    /// observes-only view. `self`, or a value at the end of a path from it that may leave
+    /// the view, may be the receiver of an operation that needs no `effects` permission
+    /// only (OPEN_QUESTIONS Q39).
+    fn view_receiver(&mut self, call: ExprId, receiver: ExprId, res: Option<Res>) {
+        let Some(escape) = self.f.escapes.remove(&receiver) else { return };
+        let what = match escape {
+            Escape::SelfValue => "`self`".to_string(),
+            Escape::Record | Escape::Reaches => format!("this `{}`", self.show(self.p.ty(receiver))),
+        };
+        let span = self.span(call);
+        match res {
+            // A call that resolved to nothing is reported already (§15.1).
+            None => {}
+            // An operation of the object's own capability interface may be called if it needs
+            // no `effects` permission, and calling one that does is the mistake Q39 names.
+            Some(Res::Dispatch { iface, method, .. })
+                if matches!(escape, Escape::SelfValue | Escape::Record) && self.p.decls.iface(iface).cap.is_some() =>
+            {
+                let decls = &self.p.decls;
+                let observes = decls.iface(iface).cap.as_ref().map_or(Perms::NONE, |c| c.observes);
+                let op = &decls.iface(iface).methods[method];
+                let effects = op.needs.minus(observes);
+                if effects != Perms::NONE {
+                    let message = self.view_message(&format!(
+                        "{what} can't call `{}`, which needs `{}`",
+                        op.name,
+                        decls.perm_names(iface, effects)
+                    ));
+                    self.error(codes::EFFECTS_CALL_IN_OBSERVES, span, message);
+                }
+            }
+            _ => {
+                let message = self.view_message(&format!(
+                    "a call on {what} may change what `self` reaches; only operations of a `cap interface` that need no `effects` permission are called on it"
+                ));
+                self.error(codes::VIEW_ESCAPE, span, message);
+            }
+        }
+    }
+
+    /// Reports each value that leaves the observes-only view, once the body is checked.
+    fn view_escapes(&mut self) {
+        let mut escapes: Vec<(ExprId, Escape)> = self.f.escapes.drain().collect();
+        // A value an error is about isn't reported again for leaving the view, as `self` in
+        // `if self {}` or `for x in self {}` (§15.1).
+        escapes.retain(|(e, _)| !self.rejected.contains(e));
+        escapes.sort_by_key(|(e, _)| self.span(*e).lo);
+        for (e, escape) in escapes {
+            let what = match escape {
+                Escape::SelfValue => {
+                    "`self` may only be read through, or be the receiver of an operation that needs no `effects` permission".to_string()
+                }
+                Escape::Record => format!(
+                    "this `{}` may only be read through, or be the receiver of an operation that needs no `effects` permission",
+                    self.show(self.p.ty(e))
+                ),
+                Escape::Reaches => format!(
+                    "this `{}` reaches `effects` permissions, so it may only be read through",
+                    self.show(self.p.ty(e))
+                ),
+            };
+            let message = self.view_message(&what);
+            let span = self.span(e);
+            self.error(codes::VIEW_ESCAPE, span, message);
+        }
+    }
+
+    /// `cap` narrowed to its interface's `observes` permissions, and using only theirs.
+    fn observes_only(&self, cap: &CapTy) -> CapTy {
+        let observes = |iface: IfaceId| self.p.decls.iface(iface).cap.as_ref().map_or(Perms::NONE, |c| c.observes);
+        let mut uses = Reach::default();
+        for &(iface, perms) in cap.uses.caps() {
+            let kept = perms.intersect(observes(iface));
+            if kept != Perms::NONE {
+                uses.add_cap(iface, kept);
+            }
+        }
+        for &i in cap.uses.params() {
+            uses.extend(&Reach::param(i));
+        }
+        CapTy { iface: cap.iface, perms: cap.perms.intersect(observes(cap.iface)), uses }
+    }
+
+    /// Whether a value of type `ty` reaches an `effects` permission, or a type parameter.
+    fn effects_reach(&self, ty: &Ty) -> bool {
+        let reach = self.reach(ty);
+        !reach.params().is_empty()
+            || reach.caps().iter().any(|&(iface, perms)| {
+                let observes = self.p.decls.iface(iface).cap.as_ref().map_or(Perms::NONE, |c| c.observes);
+                perms.minus(observes) != Perms::NONE
+            })
+    }
+
+    /// Reports a call of operation `j` on `receiver`, a capability of `iface` with `perms`
+    /// that the observes-only view narrowed, which it would permit outside the view.
+    fn view_permits(&mut self, receiver: ExprId, iface: IfaceId, perms: Perms, j: usize, span: Span) -> bool {
+        let Some(Ty::Cap(orig)) = self.f.unnarrowed.get(&receiver) else { return false };
+        let method = &self.p.decls.iface(iface).methods[j];
+        if method.needs.is_subset(perms) || !method.needs.is_subset(orig.perms) {
+            return false;
+        }
+        let missing = self.p.decls.perm_names(iface, method.needs.minus(perms));
+        let name = method.name.clone();
+        let message = self.view_message(&format!(
+            "this capability has its `observes` permissions only, so it can't call `{name}`, which needs `{missing}`"
+        ));
+        self.error(codes::EFFECTS_CALL_IN_OBSERVES, span, message);
+        true
+    }
+
+    /// For function `f`, an operation of a capability interface that a `cap record` implements
+    /// and that needs no `effects` permission, the interface and the operation's name
+    /// (OPEN_QUESTIONS Q39).
+    fn view_op(&self, f: usize) -> Option<(IfaceId, Box<str>)> {
+        let decls = &self.p.decls;
+        let key = ImplKey::of(self.p.fns[f].owner.as_ref()?)?;
+        decls.impls_for(key).find_map(|iface| {
+            let def = decls.iface(iface);
+            let cap = def.cap.as_ref()?;
+            let j = (0..def.methods.len()).find(|&j| decls.impl_method(iface, key, j) == Some(f))?;
+            let method = &def.methods[j];
+            method.needs.minus(cap.observes).is_subset(Perms::NONE).then(|| (iface, method.name.clone()))
+        })
     }
 
     /// Reports a change to a pool's element through `pool[h]` (OPEN_QUESTIONS P5).
@@ -4838,16 +5247,26 @@ impl Checker<'_> {
     fn changes(&mut self, receiver: ExprId, method: &str) {
         let m = self.m;
         let mut e = receiver;
+        // Whether the change is to a `state` field, and of `self`'s object, which the last
+        // one on the path decides.
+        let mut state = None;
         loop {
             match m.exprs[e].kind {
-                ExprKind::Field { base, .. } if matches!(self.p.res(e), Some(Res::Field(_))) => e = base,
+                ExprKind::Field { base, .. } if matches!(self.p.res(e), Some(Res::Field(_))) => {
+                    if state.is_none() && self.is_state(self.p.ty(base), e) {
+                        state = Some(self.is_self(base));
+                    }
+                    e = base;
+                }
                 ExprKind::Index { base, .. } if matches!(self.p.ty(base), Ty::Adt(AdtId::POOL, _)) => {
                     self.pool_element(self.span(e));
                     return;
                 }
                 ExprKind::Index { base, .. } => e = base,
                 ExprKind::Name(name) if let Some(Res::Local(id)) = self.p.res(e) => {
-                    if !self.f.locals[id.index()].mutable {
+                    if let Some(of_self) = state {
+                        self.changes_state(of_self, self.span(receiver));
+                    } else if !self.f.locals[id.index()].mutable {
                         let message = self.immutable(name, id, &format!("call `{method}`, which changes it"));
                         self.error(codes::IMMUTABLE_ASSIGNMENT, self.span(receiver), message);
                     } else {
@@ -4909,8 +5328,20 @@ impl Checker<'_> {
         let actual = self.expr(e, Some(expected));
         if !self.vars.subsume(expected, &actual) {
             let span = self.span(e);
-            let message = format!("expected `{}`, found `{}`", self.show(expected), self.show(&actual));
-            let code = self.mismatch_code(expected, &actual);
+            let mut message = format!("expected `{}`, found `{}`", self.show(expected), self.show(&actual));
+            let mut code = self.mismatch_code(expected, &actual);
+            // A capability the observes-only view narrowed fits where it would have outside it.
+            if let Some(orig) = self.f.unnarrowed.get(&e)
+                && [codes::PERMISSION_NOT_GRANTED, codes::REACH_NOT_ADMITTED].contains(&code)
+                && reach_mismatch(&self.vars.defaulted(expected), &self.vars.defaulted(orig), false).is_none()
+            {
+                code = codes::EFFECTS_CALL_IN_OBSERVES;
+                message = self.view_message(&format!(
+                    "this capability is `{}`, and `{}` is expected",
+                    self.show(&actual),
+                    self.show(expected)
+                ));
+            }
             self.mismatch(e, code, span, message);
             // What the value leaves open has no other way to be given, and what the expected
             // type leaves open may have been the value's to give (§15.1).
@@ -4934,6 +5365,7 @@ impl Checker<'_> {
         let ty = self.expr_kind(e, expected.as_ref(), chain, copying);
         let ty = self.vars.resolve(&ty);
         let ty = self.shallow(e, ty, before);
+        let ty = if self.f.view.is_some() { self.view_expr(e, ty) } else { ty };
         if copying {
             self.copied(e, &ty);
             self.consumed.insert(e);
@@ -4948,6 +5380,13 @@ impl Checker<'_> {
             };
         if self.errors - before > self.inner_errors || unresolved {
             self.rejected.insert(e);
+            // A rejected expression's operand isn't reported again for leaving the view, as
+            // `self` in `f"{self}"` (§15.1). What is nested deeper may leave it on its own.
+            if self.f.view.is_some() && !self.f.escapes.is_empty() {
+                for x in self.direct_operands(e) {
+                    self.f.escapes.remove(&x);
+                }
+            }
         }
         self.inner_errors = outer + (self.errors - before);
         self.record(e, ty.clone());
@@ -6147,6 +6586,7 @@ impl Checker<'_> {
             if !ty.is_unknown() {
                 let message = format!("`{name}` is a `{}`, not a function, so it can't be called", self.show(&ty));
                 self.error(codes::TYPE_MISMATCH, self.span(callee), message);
+                self.rejected.insert(callee);
             }
             self.rejected_args(args);
             return Ty::Error;
@@ -6634,7 +7074,7 @@ impl Checker<'_> {
                 self.rejected_args(args);
                 return Ty::Error;
             }
-            return self.only_call(e, iface, perms, receiver_ty, method, targs, args, span);
+            return self.only_call(e, iface, perms, (receiver, receiver_ty), method, targs, args, span);
         }
         let def = self.p.decls.iface(iface);
         let Some(j) = def.method(name) else {
@@ -6651,7 +7091,9 @@ impl Checker<'_> {
             self.rejected_args(args);
             return Ty::Error;
         };
-        self.permits(iface, perms, j, receiver_ty, method.span);
+        if !self.view_permits(receiver, iface, perms, j, method.span) {
+            self.permits(iface, perms, j, receiver_ty, method.span);
+        }
         self.dispatch_call(e, iface, j, (receiver, receiver_ty), method, targs, args, span, chain, false)
     }
 
@@ -6679,7 +7121,7 @@ impl Checker<'_> {
         e: ExprId,
         iface: IfaceId,
         perms: Perms,
-        receiver_ty: &Ty,
+        (receiver, receiver_ty): (ExprId, &Ty),
         method: Ident,
         targs: Option<&[TypeId]>,
         args: &[Arg],
@@ -6711,7 +7153,14 @@ impl Checker<'_> {
             return Ty::Error;
         }
         let missing = kept.minus(perms);
-        if missing != Perms::NONE {
+        let viewed = matches!(self.f.unnarrowed.get(&receiver), Some(Ty::Cap(orig)) if kept.is_subset(orig.perms));
+        if missing != Perms::NONE && viewed {
+            let message = self.view_message(&format!(
+                "this capability has its `observes` permissions only, so `only` can't keep `{}`",
+                self.p.decls.perm_names(iface, missing)
+            ));
+            self.error(codes::EFFECTS_CALL_IN_OBSERVES, method.span, message);
+        } else if missing != Perms::NONE {
             let message = format!(
                 "`{}` lacks `{}`, so `only` can't keep it; `only` narrows a capability and never widens one",
                 self.show(receiver_ty),
@@ -7150,16 +7599,11 @@ impl Checker<'_> {
                 self.not_implemented(method.span, &format!("calls of `{iface_text}`'s methods"), Planned::Unscheduled);
                 true
             }
+            // `Dir.of(x)` makes a capability of a `cap record` (REFERENCE §9.6). An operation
+            // named `of` is reported, and the call may mean either (§15.1).
+            _ if cap && name == "of" && self.of_declared.contains(&iface) => true,
+            None if cap && name == "of" => return self.of_call(e, iface, targs, args, span),
             None if def.incomplete => true,
-            // `Dir.of(x)` makes a capability of a `cap record` (REFERENCE §9.3), in slice 3.3.
-            None if cap && name == "of" => {
-                self.not_implemented(
-                    method.span,
-                    &format!("capabilities made with `{iface_text}.of`"),
-                    Planned::Phase(3),
-                );
-                true
-            }
             None if cap && name == "only" && self.only_declared.contains(&iface) => true,
             None if cap && name == "only" => {
                 let message = "`only` has no qualified form; call it on the capability, as in `x.only::[…]()`";
@@ -7207,10 +7651,54 @@ impl Checker<'_> {
             self.rejected_args(rest);
             return Ty::Error;
         }
-        if let Ty::Cap(cap) = &receiver_ty {
+        if let Ty::Cap(cap) = &receiver_ty
+            && !self.view_permits(first.value, iface, cap.perms, j, method.span)
+        {
             self.permits(iface, cap.perms, j, &receiver_ty, method.span);
         }
         self.dispatch_call(e, iface, j, (first.value, &receiver_ty), method, targs, rest, span, chain, true)
+    }
+
+    /// `X.of(r)`: a capability of `iface` with every permission it declares, which runs the
+    /// operations of `r`, a `cap record` that implements it, and uses what `r` reaches besides
+    /// `iface` (REFERENCE §9.6; OPEN_QUESTIONS P5).
+    fn of_call(&mut self, e: ExprId, iface: IfaceId, targs: Option<&[TypeId]>, args: &[Arg], span: Span) -> Ty {
+        let iface_text = self.iface_name(iface).to_string();
+        self.no_targs(targs, "of", span);
+        let [arg] = args else {
+            let message = format!("`{iface_text}.of` takes one `cap record` that implements `{iface_text}`");
+            self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
+            self.rejected_args(args);
+            return Ty::Error;
+        };
+        if let Some(label) = arg.label {
+            let message = format!("the argument of `{iface_text}.of` takes no label (H3)");
+            self.error(codes::WRONG_LABEL, label.span, message);
+        }
+        let ty = self.infer(arg.value);
+        let ty = self.force(&ty);
+        let at = self.span(arg.value);
+        match &ty {
+            ty if ty.is_unknown() => return Ty::Error,
+            Ty::Adt(id, _) if self.p.decls.adt(*id).cap => {
+                if !self.implements(&ty, iface) {
+                    let message = format!("`{}` does not implement `{iface_text}`", self.show(&ty));
+                    self.error(codes::MISSING_IMPLEMENTATION, at, message);
+                    return Ty::Error;
+                }
+            }
+            ty => {
+                let message = format!(
+                    "`{iface_text}.of` makes a capability of a `cap record` that implements `{iface_text}`, and `{}` isn't one (§9.6)",
+                    self.show(ty)
+                );
+                self.error(codes::TYPE_MISMATCH, at, message);
+                return Ty::Error;
+            }
+        }
+        self.p.res.insert(e, Res::Method(Builtin::Of));
+        let uses = self.p.decls.reach(&ty, &[]).without(iface).without_params();
+        Ty::cap_uses(iface, self.p.decls.iface(iface).all_perms(), uses)
     }
 
     /// A call of method `j` of `iface` on a receiver of type `receiver_ty`, with `Self` read
@@ -7283,6 +7771,15 @@ impl Checker<'_> {
         if let Ty::Adt(id, args) = base_ty
             && let Some((i, field)) = self.p.decls.adt(*id).field(text)
         {
+            // Only the record's own `impl` blocks see its state (OPEN_QUESTIONS Q40).
+            if field.state && !matches!(&self.self_ty, Some(Ty::Adt(owner, _)) if owner == id) {
+                let record = self.p.decls.name(*id);
+                let message = format!(
+                    "`{text}` is a `state` field of `{record}`, which only `{record}`'s own `impl` blocks see (§9.6)"
+                );
+                self.error(codes::UNKNOWN_MEMBER, name.span, message);
+                return Ty::Error;
+            }
             let ty = field.ty.subst(&self.known_args(args));
             self.p.res.insert(e, Res::Field(i));
             return ty;
@@ -7331,6 +7828,7 @@ impl Checker<'_> {
         let record = def.name.clone();
         let fields: Vec<(Box<str>, Ty)> =
             def.variant().fields.iter().map(|f| (f.name.clone(), f.ty.subst(&targs))).collect();
+        let state: Vec<bool> = def.variant().fields.iter().map(|f| f.state).collect();
         if args.is_empty() {
             let message = format!("`with` names at least one field of `{record}` to replace");
             self.error(codes::WRONG_ARGUMENT_COUNT, span, message);
@@ -7357,6 +7855,15 @@ impl Checker<'_> {
                 (Some((label, text)), None) => {
                     Some((codes::UNKNOWN_MEMBER, label.span, format!("`{record}` has no field `{text}`")))
                 }
+                // A copy made by `with` shares the state, so it has nothing of it to replace
+                // (OPEN_QUESTIONS Q40).
+                (Some((label, text)), Some(i)) if state[i] => Some((
+                    codes::UNKNOWN_MEMBER,
+                    label.span,
+                    format!(
+                        "`with` replaces plain fields, and `{text}` is a `state` field of `{record}`, which the copy shares (§9.6)"
+                    ),
+                )),
                 (Some((label, text)), Some(i)) if replaced.iter().any(|r| r.index() == i) => {
                     Some((codes::DUPLICATE_NAME, label.span, format!("`with` replaces `{text}` twice")))
                 }
@@ -7620,8 +8127,10 @@ impl Checker<'_> {
             self.rejected_value(value);
             return;
         }
-        let Some((root, id, actual)) = self.place(value) else { return };
-        if !self.f.locals[id.index()].mutable {
+        let Some((root, id, actual, state)) = self.place(value) else { return };
+        if let Some(of_self) = state {
+            self.changes_state(of_self, span);
+        } else if !self.f.locals[id.index()].mutable {
             let message = self.immutable(root, id, "pass it with `&`");
             self.error(codes::IMMUTABLE_ASSIGNMENT, span, message);
         } else if self.changes_capture(id, span) {
@@ -8035,8 +8544,14 @@ impl Checker<'_> {
         let ty = self.infer(value);
         let ty = self.force(&ty);
         self.pattern_borrowed = self.borrowed_value(value);
+        let errors = self.errors;
         self.pattern(pat, &ty);
         self.pattern_borrowed = false;
+        // A rejected pattern rejects the value it tests too, as `self is P` when `P` is a
+        // `cap record` (§15.1).
+        if self.errors > errors {
+            self.rejected.insert(value);
+        }
     }
 
     /// The record or enum named `sym`: the module's, or `Option` or `Result` from the prelude.
@@ -8422,6 +8937,13 @@ impl Checker<'_> {
             self.system_constructed(span, "matched by a pattern");
             return self.unknown_parts(fields);
         }
+        // A pattern would read the `state` of an object that may change while the match runs.
+        if let Ty::Adt(id, _) = ty
+            && self.p.decls.adt(*id).cap
+        {
+            self.not_implemented(span, "patterns that match a `cap record`", Planned::Unscheduled);
+            return self.unknown_parts(fields);
+        }
         // A collection has no constructor to match, as a scalar has none (REFERENCE §6.4).
         let adt = match ty {
             Ty::Adt(id, targs) if !self.p.decls.adt(*id).is_native() => Some((id, targs)),
@@ -8702,6 +9224,7 @@ impl Checker<'_> {
                         let message =
                             format!("expected a range, a list or a map to go over, found `{}`", self.show(&ty));
                         self.error(codes::TYPE_MISMATCH, span, message);
+                        self.rejected.insert(iter);
                         Ty::Error
                     }
                 };
@@ -8790,6 +9313,13 @@ fn label_order<S: AsRef<str>>(m: &Module, args: &[Arg], params: &[(S, Ty)]) -> V
         }
     }
     to
+}
+
+/// Whether `ty` mentions type parameter `i`.
+fn mentions_param(ty: &Ty, i: u32) -> bool {
+    let mut found = Vec::new();
+    params_in(ty, &mut found);
+    found.contains(&i)
 }
 
 /// Whether `ty` mentions one of the type parameters `targs` stands for. Each shared part is

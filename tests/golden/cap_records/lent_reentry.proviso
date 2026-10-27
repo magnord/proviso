@@ -1,0 +1,41 @@
+// phase: 3.3
+// expect-exit: 70
+// expect-report: defect reentrant_call
+// A `state` field lent to an `&` argument can't be read or changed until the call returns,
+// since calls on one capability object run one at a time (REFERENCE §9.6; OPEN_QUESTIONS P5).
+// The object's other methods may still run, and may use its other fields. Reading the lent one
+// meanwhile, here from a method the callee calls, is a defect.
+use std.io { IoError, Out }
+
+cap record Bag {
+    out: Out
+    state items: List[Int]
+    state calls: Int
+}
+
+impl Bag {
+    fn push_and_report(self, xs: inout List[Int], x: Int) {
+        xs.push(x)
+        self.count()
+        let _ = attempt self.out.write_line(f"{self.calls} calls")
+        let _ = attempt self.out.write_line(f"{self.size()} items")
+    }
+
+    fn count(self) {
+        self.calls += 1
+    }
+
+    fn size(self) -> Int {
+        return self.items.len()
+    }
+
+    fn add(self, x: Int) {
+        self.push_and_report(xs: &self.items, x: x)
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let bag = Bag(out: sys.stdout, items: [], calls: 0)
+    try sys.stdout.write_line(f"{bag.size()} items")
+    bag.add(x: 1)
+}
