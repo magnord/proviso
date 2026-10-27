@@ -1,0 +1,26 @@
+// phase: 3.4
+// Each module has its own names (REFERENCE §3). This one declares a `ParseError` and an
+// `Out` of its own. `std.text`'s `ParseError` doesn't clash with the first until it is
+// imported, and then it comes in under another name (Q24). `System`'s `stdout` is still
+// `std.io`'s `Out`, which this module never imports.
+use std.text { ParseError as TextError }
+
+enum ParseError derives(Show) {
+    Mine(line: Int)
+}
+
+record Out derives(Show) {
+    lines: Int
+}
+
+fn parse(text: Text) -> Int fails TextError {
+    return try Int.parse(text)
+}
+
+pub fn main(sys: keep System) {
+    let mine = ParseError.Mine(line: 3)
+    let theirs = attempt parse("x")
+    let out = Out(lines: 2)
+    debug(mine, theirs, out)
+    sys.stdout.write_line("done") else {}
+}
