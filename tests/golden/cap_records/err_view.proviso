@@ -126,6 +126,13 @@ impl Store for Audited {
         let out = self.sinks.out
         out.write_line("x") else {}                             // <- E0601
         let later = || self.write_text(key: "k", text: "v")     // <- E0601
+        // A local the view narrowed stays narrowed only while it holds a narrowed value.
+        var y = self.log
+        y = self.reader
+        y.append("y")                                           // <- E0603
+        var z = self.reader
+        z = self.log
+        z.append("z")                                           // <- E0601
         return self.files.len()
     }
 
