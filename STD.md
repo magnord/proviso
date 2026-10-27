@@ -2,6 +2,7 @@
 
 This file lists the standard library items that phases 1 and 2 implement (OPEN_QUESTIONS Q36, P3). Each item is written as its declaration without a body. From phase 4, `proviso sig std` serves the same information from the installed toolchain (REFERENCE §16), and this file goes away.
 
+- **Source.** From slice 3.4, the toolchain reads these declarations from Proviso source in `crates/check/std/`, one file per module. It binds each declaration without a body to an operation it implements (OPEN_QUESTIONS P5). The sources hold the items here that the toolchain implements. `Set` stays E0901, and the checker still implements `parse` and the conversions itself.
 - **Phase 1** already has `System.stdout`, `Out.write_line` and `IoError`. Slice 3.1 adds `In.read_line` and the permissions of `Out` and `In`. Everything else here is phase 2.
 - **Contracts.** An `ensures` clause is listed where the verifier will need it (phase 5). The other items get theirs when `sig` exists (phase 4, T11). The toolchain implements these items natively and trusts them to meet their contracts, so the v1 profile doesn't check std contracts at runtime.
 - **Later phases.** `map`, `filter` and the other operations that take a closure that may fail need effect variables (§9.5), which arrive in phase 3. `Dir` also arrives in phase 3 (Q6). `File` and `Dir.sub` are not yet scheduled (Q6, Q36).
