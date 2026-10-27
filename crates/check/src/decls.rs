@@ -312,8 +312,9 @@ pub struct AdtDef {
     /// Declared `cap record`: a capability implemented in Proviso. Its values are handles to
     /// one object, whose `state` fields every copy shares (REFERENCE §9.6).
     pub cap: bool,
-    /// It holds a capability handle whatever its type arguments are: a `cap record` or a
-    /// capability, at any depth (see [`Decls::holds_handle`]).
+    /// A field holds a capability handle whatever its type arguments are: a `cap record` or
+    /// a capability, at any depth (see [`Decls::holds_handle`]). A `cap record`'s own values
+    /// are handles too, which [`AdtDef::cap`] says.
     pub handle: bool,
 }
 
@@ -952,8 +953,8 @@ impl Decls {
         Inhabited { graph: RefCell::new((graph, instances)), applied: RefCell::default() }
     }
 
-    /// Whether a value of `ty` may hold a capability handle, which is a `cap record` or a
-    /// capability. A `state` field that holds one could let an object refer to itself, which
+    /// Whether a value of `ty` is or may hold a capability handle, which is a value of a `cap
+    /// record` or a capability. A `state` field that holds one could let an object refer to itself, which
     /// reference counting never frees (OPEN_QUESTIONS P5). A function value can't be held,
     /// which is E0509, and a type parameter holds none, since a generic `cap record` isn't
     /// scheduled. A record or enum holds one if [`settle_kinds`](Decls::settle_kinds) found
