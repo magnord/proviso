@@ -4743,6 +4743,9 @@ impl Checker<'_> {
     /// Reports each value that leaves the observes-only view, once the body is checked.
     fn view_escapes(&mut self) {
         let mut escapes: Vec<(ExprId, Escape)> = self.f.escapes.drain().collect();
+        // A value an error is about isn't reported again for leaving the view, as `self` in
+        // `if self {}` or `for x in self {}` (§15.1).
+        escapes.retain(|(e, _)| !self.rejected.contains(e));
         escapes.sort_by_key(|(e, _)| self.span(*e).lo);
         for (e, escape) in escapes {
             let what = match escape {
@@ -6577,6 +6580,7 @@ impl Checker<'_> {
             if !ty.is_unknown() {
                 let message = format!("`{name}` is a `{}`, not a function, so it can't be called", self.show(&ty));
                 self.error(codes::TYPE_MISMATCH, self.span(callee), message);
+                self.rejected.insert(callee);
             }
             self.rejected_args(args);
             return Ty::Error;
@@ -8534,8 +8538,14 @@ impl Checker<'_> {
         let ty = self.infer(value);
         let ty = self.force(&ty);
         self.pattern_borrowed = self.borrowed_value(value);
+        let errors = self.errors;
         self.pattern(pat, &ty);
         self.pattern_borrowed = false;
+        // A rejected pattern rejects the value it tests too, as `self is P` when `P` is a
+        // `cap record` (§15.1).
+        if self.errors > errors {
+            self.rejected.insert(value);
+        }
     }
 
     /// The record or enum named `sym`: the module's, or `Option` or `Result` from the prelude.
@@ -8712,8 +8722,13 @@ impl Checker<'_> {
             let base = self.f.locals.len() as u32;
             self.f.scopes.push(Vec::new());
             self.pattern_borrowed = borrowed;
+            let errors = self.errors;
             let space = self.pattern(arm.pat, &scrutinee_ty);
             self.pattern_borrowed = false;
+            // A rejected pattern rejects the value it tests too (§15.1).
+            if self.errors > errors {
+                self.rejected.insert(*scrutinee);
+            }
             match arm.guard {
                 Some(guard) => {
                     self.check(guard, &Ty::Bool);
@@ -9208,6 +9223,7 @@ impl Checker<'_> {
                         let message =
                             format!("expected a range, a list or a map to go over, found `{}`", self.show(&ty));
                         self.error(codes::TYPE_MISMATCH, span, message);
+                        self.rejected.insert(iter);
                         Ty::Error
                     }
                 };

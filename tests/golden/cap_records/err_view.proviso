@@ -5,6 +5,7 @@
 // expect-error: E0603
 // expect-error: E0605
 // expect-error: E0311
+// expect-error: E0901
 // An operation that needs no `effects` permission sees `self` through an observes-only view
 // (REFERENCE §9.2; OPEN_QUESTIONS Q39). A path from `self` may be read through, and a
 // capability at its end is narrowed to its `observes` permissions, as is what it uses. Its
@@ -153,6 +154,25 @@ impl Store for Audited {
                 let again = self                                // <- E0605
                 1
             }
+        }
+        // An error about `self` itself isn't reported again as a way out of the view, but a
+        // way out beside an error in a body is.
+        if self {                                               // <- E0301
+        }
+        while self {                                            // <- E0301
+        }
+        for x in self {                                         // <- E0301
+        }
+        let h = self(1)                                         // <- E0301
+        let i = self is Audited                                 // <- E0901
+        let j = match self {
+            Audited => 1,                                       // <- E0901
+        }
+        while takes_store(s: self) > 0 {                        // <- E0605
+            let bad: Int = "x"                                  // <- E0301
+        }
+        for log in self.sinks.logs {                            // <- E0605
+            let bad: Int = "x"                                  // <- E0301
         }
         let f = || self.files.len()
         let g = || self.sinks.label
