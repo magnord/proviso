@@ -15,9 +15,6 @@ pub const STD: [(&str, &str); 5] = [
     ("std.pool", include_str!("../std/pool.proviso")),
 ];
 
-/// The module whose `pub` items every module sees without a `use` (REFERENCE §3).
-pub const PRELUDE: &str = "std.prelude";
-
 /// The standard library's modules that later phases bring, which a `use` may name already.
 pub fn later_module(name: &str) -> Option<proviso_syntax::diag::Planned> {
     use proviso_syntax::diag::Planned;
