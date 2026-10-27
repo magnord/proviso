@@ -193,6 +193,7 @@ cap record Linked {
     state choice: Choice                                        // <- E0901
     state keyed: Map[Text, Dial]                                // <- E0901
     state pair: (Int, Dial)                                     // <- E0901
+    state system: Option[System]                                // <- E0901
     state chain: Chain
     state tree: Tree[Int]
     state names: Map[Text, List[Text]]

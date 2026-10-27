@@ -312,6 +312,9 @@ pub struct AdtDef {
     /// Declared `cap record`: a capability implemented in Proviso. Its values are handles to
     /// one object, whose `state` fields every copy shares (REFERENCE §9.6).
     pub cap: bool,
+    /// It holds a capability handle whatever its type arguments are: a `cap record` or a
+    /// capability, at any depth (see [`Decls::holds_handle`]).
+    pub handle: bool,
 }
 
 impl AdtDef {
@@ -346,6 +349,7 @@ impl AdtDef {
             resource: false,
             distinct: false,
             cap: false,
+            handle: false,
         }
     }
 
@@ -475,6 +479,7 @@ struct Kinds {
     unique: bool,
     resource: bool,
     reach: Reach,
+    handle: bool,
 }
 
 impl Kinds {
@@ -482,6 +487,7 @@ impl Kinds {
         self.unique |= other.unique;
         self.resource |= other.resource;
         self.reach.extend(&other.reach);
+        self.handle |= other.handle;
         self
     }
 }
@@ -620,6 +626,7 @@ impl Default for Decls {
             let Ty::Cap(cap) = &field.ty else { unreachable!("`System`'s fields are capabilities") };
             system.reach.extend(&Reach::of_cap(cap));
         }
+        system.handle = true;
         // As STD.md declares them, so `Some` comes before `None`.
         let generic = |name: &str, params: usize, variants: [(&str, Option<(&str, u32)>); 2]| {
             let mut def = AdtDef::enumeration(name);
@@ -949,39 +956,24 @@ impl Decls {
     /// capability. A `state` field that holds one could let an object refer to itself, which
     /// reference counting never frees (OPEN_QUESTIONS P5). A function value can't be held,
     /// which is E0509, and a type parameter holds none, since a generic `cap record` isn't
-    /// scheduled.
+    /// scheduled. A record or enum holds one if [`settle_kinds`](Decls::settle_kinds) found
+    /// that it does whatever its type arguments are, or if a type argument it holds does.
     pub fn holds_handle(&self, ty: &Ty) -> bool {
-        self.holds_handle_in(ty, &mut Vec::new(), &mut HashMap::new())
+        self.holds_handle_in(ty, &mut HashMap::new())
     }
 
-    /// [`Decls::holds_handle`]. A record or enum holds one if its declaration does, whatever
-    /// its type arguments are, or if a type argument it holds does. Each declaration is walked
-    /// once, by its id, so a type whose arguments grow as it holds itself still ends. `memo`
-    /// holds what each type argument list gave, by its type's id and its address, so a type
-    /// that shares its parts, as an alias does, costs each part once.
-    fn holds_handle_in(&self, ty: &Ty, seen: &mut Vec<AdtId>, memo: &mut HashMap<(u32, usize), bool>) -> bool {
+    /// [`Decls::holds_handle`], where `memo` holds what each type argument list gave, by its
+    /// type's id and its address, so a type that shares its parts costs each part once.
+    fn holds_handle_in(&self, ty: &Ty, memo: &mut HashMap<(u32, usize), bool>) -> bool {
         match ty {
             Ty::Cap(_) => true,
-            // A pool handle refers to its pool's element without holding it.
-            Ty::Adt(AdtId::HANDLE, _) => false,
-            Ty::Adt(id, args) => {
-                let def = self.adt(*id);
-                if def.cap {
-                    return true;
-                }
-                let declared = !seen.contains(id) && {
-                    seen.push(*id);
-                    (def.variants.iter())
-                        .any(|v| v.fields.iter().any(|field| self.holds_handle_in(&field.ty, seen, memo)))
-                };
-                if declared || args.is_empty() {
-                    return declared;
-                }
+            Ty::Adt(id, _) if self.adt(*id).cap || self.adt(*id).handle => true,
+            Ty::Adt(id, args) if !args.is_empty() => {
                 let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
                 if let Some(&held) = memo.get(&key) {
                     return held;
                 }
-                let held = self.held_args(*id, args).any(|arg| self.holds_handle_in(arg, seen, memo));
+                let held = self.held_args(*id, args).any(|arg| self.holds_handle_in(arg, memo));
                 memo.insert(key, held);
                 held
             }
@@ -1205,7 +1197,8 @@ impl Decls {
     }
 
     /// Settles which type parameters each record and enum holds, and which are unique,
-    /// resources or have reach whatever their type arguments are (REFERENCE §5.1), once every
+    /// resources, have reach or hold a handle whatever their type arguments are (REFERENCE
+    /// §5.1), once every
     /// field's type is known. A field's type may hold a type declared later, so each type is
     /// settled again whenever one it mentions changes, until nothing does.
     pub fn settle_kinds(&mut self) {
@@ -1238,7 +1231,8 @@ impl Decls {
             queued[a] = false;
             let def = &self.adts[a];
             let mut held = def.held.clone();
-            let mut kind = Kinds { unique: def.unique, resource: def.resource, reach: def.reach.clone() };
+            let mut kind =
+                Kinds { unique: def.unique, resource: def.resource, reach: def.reach.clone(), handle: def.handle };
             for field in def.variants.iter().flat_map(|v| &v.fields) {
                 kind = kind.or(&self.base_kind(&field.ty, &mut held));
             }
@@ -1253,12 +1247,17 @@ impl Decls {
                 (kind.unique, kind.resource) = (false, false);
             }
             let def = &mut self.adts[a];
-            if held == def.held && kind.unique == def.unique && kind.resource == def.resource && kind.reach == def.reach
+            if held == def.held
+                && kind.unique == def.unique
+                && kind.resource == def.resource
+                && kind.reach == def.reach
+                && kind.handle == def.handle
             {
                 continue;
             }
             def.held = held;
             (def.unique, def.resource, def.reach) = (kind.unique || kind.resource, kind.resource, kind.reach);
+            def.handle = kind.handle;
             for &holder in held_by.get(&a).map_or(&[][..], Vec::as_slice) {
                 if !queued[holder] {
                     queued[holder] = true;
@@ -1286,7 +1285,7 @@ impl Decls {
     fn base_kind_in(&self, ty: &Ty, memo: &mut KindMemo) -> (Kinds, Vec<u32>) {
         match ty {
             Ty::Param(i) => (Kinds::default(), vec![*i]),
-            Ty::Cap(cap) => (Kinds { reach: Reach::of_cap(cap), ..Kinds::default() }, Vec::new()),
+            Ty::Cap(cap) => (Kinds { reach: Reach::of_cap(cap), handle: true, ..Kinds::default() }, Vec::new()),
             Ty::Fn(..) => (Kinds { reach: self.reach(ty, &[]), ..Kinds::default() }, Vec::new()),
             Ty::Adt(id, args) => {
                 let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
@@ -1294,7 +1293,12 @@ impl Decls {
                     return known.clone();
                 }
                 let def = self.adt(*id);
-                let mut kind = Kinds { unique: def.unique, resource: def.resource, reach: def.reach.clone() };
+                let mut kind = Kinds {
+                    unique: def.unique,
+                    resource: def.resource,
+                    reach: def.reach.clone(),
+                    handle: def.cap || def.handle,
+                };
                 let mut params = Vec::new();
                 for (i, arg) in args.iter().enumerate() {
                     let (part, held) = self.base_kind_in(arg, memo);
