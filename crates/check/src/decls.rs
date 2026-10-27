@@ -951,13 +951,15 @@ impl Decls {
     /// which is E0509, and a type parameter holds none, since a generic `cap record` isn't
     /// scheduled.
     pub fn holds_handle(&self, ty: &Ty) -> bool {
-        self.holds_handle_in(ty, &mut Vec::new())
+        self.holds_handle_in(ty, &mut Vec::new(), &mut HashMap::new())
     }
 
     /// [`Decls::holds_handle`]. A record or enum holds one if its declaration does, whatever
     /// its type arguments are, or if a type argument it holds does. Each declaration is walked
-    /// once, by its id, so a type whose arguments grow as it holds itself still ends.
-    fn holds_handle_in(&self, ty: &Ty, seen: &mut Vec<AdtId>) -> bool {
+    /// once, by its id, so a type whose arguments grow as it holds itself still ends. `memo`
+    /// holds what each type argument list gave, by its type's id and its address, so a type
+    /// that shares its parts, as an alias does, costs each part once.
+    fn holds_handle_in(&self, ty: &Ty, seen: &mut Vec<AdtId>, memo: &mut HashMap<(u32, usize), bool>) -> bool {
         match ty {
             Ty::Cap(_) => true,
             // A pool handle refers to its pool's element without holding it.
@@ -969,9 +971,19 @@ impl Decls {
                 }
                 let declared = !seen.contains(id) && {
                     seen.push(*id);
-                    (def.variants.iter()).any(|v| v.fields.iter().any(|field| self.holds_handle_in(&field.ty, seen)))
+                    (def.variants.iter())
+                        .any(|v| v.fields.iter().any(|field| self.holds_handle_in(&field.ty, seen, memo)))
                 };
-                declared || self.held_args(*id, args).any(|arg| self.holds_handle_in(arg, seen))
+                if declared || args.is_empty() {
+                    return declared;
+                }
+                let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
+                if let Some(&held) = memo.get(&key) {
+                    return held;
+                }
+                let held = self.held_args(*id, args).any(|arg| self.holds_handle_in(arg, seen, memo));
+                memo.insert(key, held);
+                held
             }
             _ => false,
         }
