@@ -597,7 +597,8 @@ fn long_alias_chains_check_once() {
 /// Whether a `state` field can hold a capability handle is settled once per declaration, so
 /// a `cap record` with thousands of `state` fields of a type thousands of records deep checks
 /// in linear time, whichever order the records are declared in, and a chain that ends in a
-/// `cap record` is still found (OPEN_QUESTIONS P5).
+/// `cap record` is still found. So does a record that holds thousands of records (OPEN_QUESTIONS
+/// P5).
 #[test]
 fn state_fields_find_handles_in_linear_time() {
     let n = 4_000;
@@ -618,8 +619,14 @@ fn state_fields_find_handles_in_linear_time() {
             + &chain("H")
             + &format!("cap record Big {{\n{plain}{held}}}\n")
     };
-    for (name, reversed) in [("state_chain", false), ("state_chain_reversed", true)] {
-        let file = source(&format!("{name}.proviso"), &program(reversed));
+    // A record that holds thousands of records, each of which holds a `cap record`, is
+    // settled once they all are.
+    let k = 8_000;
+    let fan = format!("record A {{\n{}}}\n\n", (0..k).map(|i| format!("    b{i}: B{i}\n")).collect::<String>())
+        + &(0..k).map(|i| format!("record B{i} {{\n    d: Dial\n}}\n\n")).collect::<String>()
+        + "cap record Dial {\n    state n: Int\n}\n\ncap record Big {\n    state a: A\n    state b: A\n    state c: A\n}\n";
+    for (name, text) in [("state_chain", program(false)), ("state_chain_reversed", program(true)), ("state_fan", fan)] {
+        let file = source(&format!("{name}.proviso"), &text);
         let output = check_within(&file, 20);
         let shown = stderr(&output);
         assert_eq!(output.status.code(), Some(65), "{name}: {shown}");

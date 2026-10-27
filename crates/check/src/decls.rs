@@ -3,7 +3,7 @@
 //! declares, such as its name or the interfaces it implements, are answered here.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -959,12 +959,13 @@ impl Decls {
     /// scheduled. A record or enum holds one if [`settle_kinds`](Decls::settle_kinds) found
     /// that it does whatever its type arguments are, or if a type argument it holds does.
     pub fn holds_handle(&self, ty: &Ty) -> bool {
-        self.holds_handle_in(ty, &mut HashMap::new())
+        self.holds_handle_memo(ty, &mut HashMap::new())
     }
 
     /// [`Decls::holds_handle`], where `memo` holds what each type argument list gave, by its
-    /// type's id and its address, so a type that shares its parts costs each part once.
-    fn holds_handle_in(&self, ty: &Ty, memo: &mut HashMap<(u32, usize), bool>) -> bool {
+    /// type's id and its address, so a type that shares its parts costs each part once. The
+    /// types must outlive `memo`.
+    pub fn holds_handle_memo(&self, ty: &Ty, memo: &mut HashMap<(u32, usize), bool>) -> bool {
         match ty {
             Ty::Cap(_) => true,
             Ty::Adt(id, _) if self.adt(*id).cap || self.adt(*id).handle => true,
@@ -973,7 +974,7 @@ impl Decls {
                 if let Some(&held) = memo.get(&key) {
                     return held;
                 }
-                let held = self.held_args(*id, args).any(|arg| self.holds_handle_in(arg, memo));
+                let held = self.held_args(*id, args).any(|arg| self.holds_handle_memo(arg, memo));
                 memo.insert(key, held);
                 held
             }
@@ -1222,12 +1223,14 @@ impl Decls {
             def.resource |= def.resource_base;
         }
         self.any_resource = module.clone().any(|a| self.adts[a].resource_base);
-        let mut queue: Vec<usize> = module.clone().rev().collect();
+        // First in, first out, so a type that holds many others is walked again once they
+        // have all changed, not once for each.
+        let mut queue: VecDeque<usize> = module.clone().collect();
         let mut queued = vec![false; self.adts.len()];
         for &a in &queue {
             queued[a] = true;
         }
-        while let Some(a) = queue.pop() {
+        while let Some(a) = queue.pop_front() {
             queued[a] = false;
             let def = &self.adts[a];
             let mut held = def.held.clone();
@@ -1261,7 +1264,7 @@ impl Decls {
             for &holder in held_by.get(&a).map_or(&[][..], Vec::as_slice) {
                 if !queued[holder] {
                     queued[holder] = true;
-                    queue.push(holder);
+                    queue.push_back(holder);
                 }
             }
         }

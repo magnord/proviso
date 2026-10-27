@@ -2028,6 +2028,8 @@ impl Checker<'_> {
     /// capability handle, which could make a cycle that reference counting never frees.
     fn cap_record_fields(&mut self) {
         let m = self.m;
+        // Fields share the parts of their types, so each part is asked about once.
+        let (mut moves, mut handles) = (HashMap::new(), HashMap::new());
         for k in 0..self.adts.len() {
             let id = self.adts[k].id;
             if !self.p.decls.adt(id).cap {
@@ -2037,10 +2039,10 @@ impl Checker<'_> {
             for decl in decls {
                 let text = m.text(decl.name.sym);
                 let Some((_, field)) = self.p.decls.adt(id).field(text) else { continue };
-                if self.p.decls.moves(&field.ty, &[]) {
+                if self.p.decls.moves_memo(&field.ty, &[], &mut moves) {
                     let what = "unique or resource fields of `cap record`s";
                     self.not_implemented(m.types[decl.ty].span, what, Planned::Unscheduled);
-                } else if field.state && self.p.decls.holds_handle(&field.ty) {
+                } else if field.state && self.p.decls.holds_handle_memo(&field.ty, &mut handles) {
                     let what = "`state` fields that can hold a `cap record` or a capability";
                     self.not_implemented(m.types[decl.ty].span, what, Planned::Unscheduled);
                 }
