@@ -1,12 +1,13 @@
 // phase: 3.3
-// A chain of a million capability objects, each holding the next in a `state` field or in a
-// plain one, goes away without recursion, as a long enum does (OPEN_QUESTIONS P5).
+// A chain of a million capability objects, each holding the next in a plain field and some
+// `state` of its own, goes away without recursion, as a long enum does (OPEN_QUESTIONS P5).
+// A `state` field can't hold the next object, which could make a cycle.
 use std.io { IoError }
 
 cap record Node {
     next: Option[Node]
-    state later: Option[Node]
     state depth: Int
+    state seen: List[Int]
 }
 
 impl Node {
@@ -16,18 +17,15 @@ impl Node {
 }
 
 pub fn main(sys: keep System) fails IoError {
-    var plain: Option[Node] = None
-    var held: Option[Node] = None
+    var chain: Option[Node] = None
     for i in 0..1000000 {
-        plain = Some(Node(next: plain, later: None, depth: i))
-        held = Some(Node(next: None, later: held, depth: i))
+        chain = Some(Node(next: chain, depth: i, seen: [i]))
     }
-    let depth = match plain {
+    let depth = match chain {
         Some(node) => node.depth(),
         None => 0,
     }
     try sys.stdout.write_line(f"built {depth}")
-    plain = None
-    held = None
+    chain = None
     try sys.stdout.write_line("dropped")
 }

@@ -2024,7 +2024,8 @@ impl Checker<'_> {
 
     /// Reports each field of a `cap record` whose type is unique or a resource. Copies of the
     /// record share one object, so they would share the value (REFERENCE §5.1, §9.6), which
-    /// isn't scheduled (OPEN_QUESTIONS P5).
+    /// isn't scheduled (OPEN_QUESTIONS P5). Also reports each `state` field that may hold a
+    /// capability handle, which could make a cycle that reference counting never frees.
     fn cap_record_fields(&mut self) {
         let m = self.m;
         for k in 0..self.adts.len() {
@@ -2038,6 +2039,9 @@ impl Checker<'_> {
                 let Some((_, field)) = self.p.decls.adt(id).field(text) else { continue };
                 if self.p.decls.moves(&field.ty, &[]) {
                     let what = "unique or resource fields of `cap record`s";
+                    self.not_implemented(m.types[decl.ty].span, what, Planned::Unscheduled);
+                } else if field.state && self.p.decls.holds_handle(&field.ty) {
+                    let what = "`state` fields that can hold a `cap record` or a capability";
                     self.not_implemented(m.types[decl.ty].span, what, Planned::Unscheduled);
                 }
             }

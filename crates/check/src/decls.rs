@@ -945,6 +945,40 @@ impl Decls {
         Inhabited { graph: RefCell::new((graph, instances)), applied: RefCell::default() }
     }
 
+    /// Whether a value of `ty` may hold a capability handle, which is a `cap record` or a
+    /// capability. A `state` field that holds one could let an object refer to itself, which
+    /// reference counting never frees (OPEN_QUESTIONS P5). A function value can't be held,
+    /// which is E0509, and a type parameter holds none, since a generic `cap record` isn't
+    /// scheduled.
+    pub fn holds_handle(&self, ty: &Ty) -> bool {
+        self.holds_handle_in(ty, &mut Vec::new())
+    }
+
+    fn holds_handle_in(&self, ty: &Ty, seen: &mut Vec<(AdtId, Arc<[Ty]>)>) -> bool {
+        match ty {
+            Ty::Cap(_) => true,
+            // A pool handle refers to its pool's element without holding it.
+            Ty::Adt(AdtId::HANDLE, _) => false,
+            Ty::Adt(id, args) => {
+                let def = self.adt(*id);
+                if def.cap {
+                    return true;
+                }
+                if seen.iter().any(|(i, a)| i == id && a == args) {
+                    return false;
+                }
+                seen.push((*id, args.clone()));
+                if def.is_native() {
+                    return self.held_args(*id, args).any(|arg| self.holds_handle_in(arg, seen));
+                }
+                (0..def.variants.len()).any(|v| {
+                    def.field_types(VariantIdx::new(v), args).iter().any(|field| self.holds_handle_in(field, seen))
+                })
+            }
+            _ => false,
+        }
+    }
+
     /// The type arguments of a value of `id` that it holds (see [`AdtDef::held`]).
     fn held_args<'t>(&'t self, id: AdtId, args: &'t [Ty]) -> impl Iterator<Item = &'t Ty> + 't {
         let held = &self.adt(id).held;

@@ -7,7 +7,7 @@
 // Only a `cap record` implements a capability interface (OPEN_QUESTIONS Q30, P5), and `X.of(r)`
 // takes one that implements `X` (REFERENCE §9.6). A `cap record` is a handle that copies share,
 // and unique or resource fields on one aren't scheduled, nor are type parameters, `derives`
-// and refinements. In a
+// and refinements, nor are `state` fields that can hold a handle. In a
 // `cap interface`, `Self` may be an operation's result but not a parameter's type, since a
 // handle's argument may come from another implementation, and `Self` with `uses` isn't
 // scheduled either, nor are patterns that match a `cap record` (OPEN_QUESTIONS P5; issue
@@ -138,6 +138,51 @@ impl Abandon for Lock {
 
 cap record Locker {
     lock: Lock                                                  // <- E0901
+}
+
+// A `state` field that can hold a capability handle could let an object refer to itself,
+// which reference counting never frees. A plain field can't, since it is set before the
+// object exists.
+record Wrapped {
+    dial: Dial
+}
+
+enum Choice {
+    Off
+    On(dial: Dial)
+}
+
+enum Chain {
+    End
+    Link(n: Int, rest: Chain)
+}
+
+enum Tree[T] {
+    Leaf
+    Fork(value: T, left: Tree[T], right: Tree[T])
+}
+
+type Link = Option[Linked]
+
+cap record Linked {
+    next: Option[Linked]
+    state after: Option[Linked]                                 // <- E0901
+    state via: Link                                             // <- E0901
+    state outs: List[Out]                                       // <- E0901
+    state wrapped: Wrapped                                      // <- E0901
+    state choice: Choice                                        // <- E0901
+    state keyed: Map[Text, Dial]                                // <- E0901
+    state pair: (Int, Dial)                                     // <- E0901
+    state chain: Chain
+    state tree: Tree[Int]
+    state names: Map[Text, List[Text]]
+}
+
+impl Linked {
+    fn relink(self) {
+        self.after = Some(self)
+        self.chain = Chain.Link(n: 1, rest: self.chain)
+    }
 }
 
 fn matched(d: Dial) -> Int {
