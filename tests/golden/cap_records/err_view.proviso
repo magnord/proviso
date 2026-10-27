@@ -156,7 +156,7 @@ impl Store for Audited {
             }
         }
         // An error about `self` itself isn't reported again as a way out of the view, but a
-        // way out beside an error in a body is.
+        // way out beside an error in another arm or in a body is.
         if self {                                               // <- E0301
         }
         while self {                                            // <- E0301
@@ -165,8 +165,9 @@ impl Store for Audited {
         }
         let h = self(1)                                         // <- E0301
         let i = self is Audited                                 // <- E0901
-        let j = match self {
-            Audited => 1,                                       // <- E0901
+        let j = match self.sinks {                              // <- E0605
+            Bogus => 0,                                         // <- E0301
+            s => takes_sinks(s: s),
         }
         while takes_store(s: self) > 0 {                        // <- E0605
             let bad: Int = "x"                                  // <- E0301

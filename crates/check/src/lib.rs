@@ -8722,13 +8722,8 @@ impl Checker<'_> {
             let base = self.f.locals.len() as u32;
             self.f.scopes.push(Vec::new());
             self.pattern_borrowed = borrowed;
-            let errors = self.errors;
             let space = self.pattern(arm.pat, &scrutinee_ty);
             self.pattern_borrowed = false;
-            // A rejected pattern rejects the value it tests too (§15.1).
-            if self.errors > errors {
-                self.rejected.insert(*scrutinee);
-            }
             match arm.guard {
                 Some(guard) => {
                     self.check(guard, &Ty::Bool);
