@@ -9,7 +9,7 @@ Proviso is a draft programming language designed for coding agents. The reposito
 - `REFERENCE.md` is the language spec. It is meant to stay small enough (about 15K tokens) for an agent to keep in context, so keep additions tight.
 - `RATIONALE.md` explains why the design is the way it is.
 - `OPEN_QUESTIONS.md` holds unresolved design questions (§A–§D), the experiment plan (§E), the acceptance counterexamples (§F), and spec gaps found while writing tests (§G). Its **P3** table defines the six v1 delivery phases.
-- `crates/` is the v1 toolchain: a checker plus a tree-walking interpreter. Phase 1 (the pipeline, scalar types and functions) and phase 2 (data and ownership) are done. Phase 3 lands in slices, and slices 3.1 (permissions) and 3.2 (reach) are done. `System` provides native `stdin`, `stdout` and `stderr`. Its `Net`, `Process`, `Clock`, `Random` and `Env` fields have no operations yet, and `fs` is E0901 until slice 3.5.
+- `crates/` is the v1 toolchain: a checker plus a tree-walking interpreter. Phase 1 (the pipeline, scalar types and functions) and phase 2 (data and ownership) are done. Phase 3 lands in slices, and slices 3.1 (permissions), 3.2 (reach) and 3.3 (cap records) are done. `System` provides native `stdin`, `stdout` and `stderr`. Its `Net`, `Process`, `Clock`, `Random` and `Env` fields have no operations yet, and `fs` is E0901 until slice 3.5.
 
 Code and test comments cite these documents by section and ID, such as `REFERENCE §7.3`, `OPEN_QUESTIONS P5`, `Q25`, `T10` or `H2`. Follow that convention when a rule comes from the spec.
 
@@ -44,7 +44,7 @@ The pipeline is split into one crate per stage, and each crate depends only on t
 
 1. **`syntax`** (`proviso-syntax`): lexer, parser, AST, source spans, interning, and the diagnostic code catalog (`diag.rs`). AST nodes live in append-only arenas addressed by typed `Id<T>`s (`arena.rs`).
 2. **`check`** (`proviso-check`): name resolution and type checking. It **never rewrites the tree**. What it learns goes into `SideTable`s on `Program`, keyed by AST ids. A `Ty` owns its parts and names a record by `AdtId`. A function type's parts are its result, `fails` and `uses`, then its parameters from `FN_PARAMS`. The record's declaration lives in `Program::decls` (`decls.rs`), which also answers `implements`, what a type reaches and how a type is displayed.
-3. **`interp`** (`proviso-interp`): tree-walking interpreter over the AST plus the checker's `Program`. It trusts the checker, so a missing side-table entry is an interpreter bug, not a user error. Values describe themselves (an integer carries its type, a record its `AdtId`), so the interpreter reads static types only for literals. Copy values are shared behind `Arc` so later phases can hand them to task threads.
+3. **`interp`** (`proviso-interp`): tree-walking interpreter over the AST plus the checker's `Program`. It trusts the checker, so a missing side-table entry is an interpreter bug, not a user error. Values describe themselves (an integer carries its type, a record its `AdtId`), so the interpreter reads static types only for literals. Copy values are shared behind `Arc` so later phases can hand them to task threads. A `cap record` value is a handle to one `CapObject`, whose `state` sits behind a `Mutex`. Each method call snapshots that `state` and restores it on a failure or a defect.
 4. **`proviso`**: the CLI (`main.rs`), the `compile`/`run` driver (`lib.rs`), and the golden test runner (`golden.rs`).
 
 Points that span several files:
