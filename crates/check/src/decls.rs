@@ -954,7 +954,10 @@ impl Decls {
         self.holds_handle_in(ty, &mut Vec::new())
     }
 
-    fn holds_handle_in(&self, ty: &Ty, seen: &mut Vec<(AdtId, Arc<[Ty]>)>) -> bool {
+    /// [`Decls::holds_handle`]. A record or enum holds one if its declaration does, whatever
+    /// its type arguments are, or if a type argument it holds does. Each declaration is walked
+    /// once, by its id, so a type whose arguments grow as it holds itself still ends.
+    fn holds_handle_in(&self, ty: &Ty, seen: &mut Vec<AdtId>) -> bool {
         match ty {
             Ty::Cap(_) => true,
             // A pool handle refers to its pool's element without holding it.
@@ -964,16 +967,11 @@ impl Decls {
                 if def.cap {
                     return true;
                 }
-                if seen.iter().any(|(i, a)| i == id && a == args) {
-                    return false;
-                }
-                seen.push((*id, args.clone()));
-                if def.is_native() {
-                    return self.held_args(*id, args).any(|arg| self.holds_handle_in(arg, seen));
-                }
-                (0..def.variants.len()).any(|v| {
-                    def.field_types(VariantIdx::new(v), args).iter().any(|field| self.holds_handle_in(field, seen))
-                })
+                let declared = !seen.contains(id) && {
+                    seen.push(*id);
+                    (def.variants.iter()).any(|v| v.fields.iter().any(|field| self.holds_handle_in(&field.ty, seen)))
+                };
+                declared || self.held_args(*id, args).any(|arg| self.holds_handle_in(arg, seen))
             }
             _ => false,
         }

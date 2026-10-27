@@ -4,6 +4,7 @@
 // expect-error: E0309
 // expect-error: E0606
 // expect-error: E0901
+// expect-error: E0904
 // Only a `cap record` implements a capability interface (OPEN_QUESTIONS Q30, P5), and `X.of(r)`
 // takes one that implements `X` (REFERENCE §9.6). A `cap record` is a handle that copies share,
 // and unique or resource fields on one aren't scheduled, nor are type parameters, `derives`
@@ -160,6 +161,25 @@ enum Chain {
 enum Tree[T] {
     Leaf
     Fork(value: T, left: Tree[T], right: Tree[T])
+}
+
+enum Ring {
+    Rest(next: Loop)
+}
+
+enum Loop {
+    Back(ring: Ring)
+    Hold(dial: Dial)
+}
+
+enum Grows[T] {
+    Stop
+    More(value: T, next: Grows[List[T]])                        // <- E0904
+}
+
+cap record Ringed {
+    state ring: Ring                                            // <- E0901
+    state grows: Grows[Int]
 }
 
 type Link = Option[Linked]
