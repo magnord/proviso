@@ -4519,13 +4519,6 @@ impl Checker<'_> {
         }
         self.copying = true;
         let value_ty = self.check(value, &ty);
-        // A local given a new value is narrowed by the view only if that value is.
-        if matches!(self.m.exprs[target].kind, ExprKind::Name(_)) {
-            match self.f.unnarrowed.get(&value).cloned() {
-                Some(orig) => self.f.unnarrowed_locals.insert(id, orig),
-                None => self.f.unnarrowed_locals.remove(&id),
-            };
-        }
         if let Some(bin) = op.bin_op()
             && !self.has_arithmetic(bin, &ty)
         {
