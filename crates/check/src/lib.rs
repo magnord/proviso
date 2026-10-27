@@ -1645,6 +1645,8 @@ impl Checker<'_> {
             self.bind_import(last, Import::Module);
             return;
         }
+        let prelude =
+            decl.path.len() == 2 && m.text(decl.path[0].sym) == "std" && m.text(decl.path[1].sym) == "prelude";
         for name in &decl.names {
             let text = m.text(name.name.sym);
             let bound = name.alias.unwrap_or(name.name);
@@ -1655,6 +1657,14 @@ impl Checker<'_> {
                     bound.span,
                     format!("this import would shadow the prelude name `{bound_text}` (H4)"),
                 );
+                continue;
+            }
+            // A second name for a prelude item would stand beside the prelude's own (H4).
+            if prelude && prelude_type(text) {
+                let message = format!("`{text}` is in the prelude, which every module sees without a `use` (H4)");
+                self.error(codes::SHADOWING, name.name.span, message);
+                self.bind_import(bound, Import::Type(Ty::Error));
+                self.poisoned.insert(bound.sym);
                 continue;
             }
             if let Some(alias) = name.alias {
@@ -1706,8 +1716,12 @@ impl Checker<'_> {
         if from.is_none() {
             match native::later_module(&joined) {
                 Some(planned) => self.not_implemented(span, &format!("the `{joined}` module and its items"), planned),
+                None if joined == m.modules[self.module].name => {
+                    let message = format!("`{joined}` is this module, whose items are in scope without a `use`");
+                    self.error(codes::UNKNOWN_IMPORT, span, message);
+                }
                 None => {
-                    let std: Vec<String> = native::STD.iter().skip(1).map(|(name, _)| format!("`{name}`")).collect();
+                    let std: Vec<String> = native::STD.iter().map(|(name, _)| format!("`{name}`")).collect();
                     let message = format!(
                         "unknown module `{joined}`; a program is one file, and the standard library provides only {}",
                         and_list(&std)
@@ -2069,6 +2083,8 @@ impl Checker<'_> {
         // by none (REFERENCE §4.8).
         let write = match &ty {
             _ if self.p.decls.is_tuple(&ty) => None,
+            // Another module's opaque record has no constructor to write here (§3).
+            Ty::Adt(id, _) if self.sealed_home(*id).is_some() => None,
             Ty::Adt(id, args) if !args.is_empty() => Some(self.p.decls.adt(*id).name.to_string()),
             // A number has its own functions and conversions, as `Int.parse(…)` and `Int64(x)`.
             Ty::Adt(..) | Ty::Int(_) | Ty::Float(_) => Some(shown.clone()),
@@ -3520,7 +3536,7 @@ impl Checker<'_> {
                 }
                 Some(j) => {
                     named[j] = true;
-                    if self.native_fn(&target, name.sym).is_some() {
+                    if self.std_method(&target, name.sym).is_some() {
                         let message = format!(
                             "`{text}` is also a built-in method of `{target_text}`, so calls of it would be ambiguous (§3)"
                         );
@@ -3731,7 +3747,8 @@ impl Checker<'_> {
             for k in 0..self.inherent[&key].len() {
                 let entry = &self.inherent[&key][k];
                 let text = m.text(entry.name);
-                if entry.rejected || self.natives.contains_key(&entry.f) {
+                // An `impl` that collides with a std method is reported there.
+                if entry.rejected || m.modules[m.items[self.p.fns[entry.f].item].module].std {
                     continue;
                 }
                 let Some(&iface) = ifaces.iter().find(|&&iface| self.p.decls.iface(iface).method(text).is_some())
@@ -4689,7 +4706,8 @@ impl Checker<'_> {
             return;
         }
         let inhabited = self.inhabited.as_ref().expect("bodies are checked after the declarations");
-        let missing = match exhaust::uncovered(&self.p.decls, inhabited, ty, &[space]) {
+        let sealed = |id| self.sealed_home(id).is_some();
+        let missing = match exhaust::uncovered(&self.p.decls, inhabited, &sealed, ty, &[space]) {
             Ok(None) => return,
             Ok(Some(missing)) => format!("this pattern does not match `{missing}`"),
             Err(exhaust::TooComplex) => "this pattern is too complex to check".to_string(),
@@ -6332,6 +6350,10 @@ impl Checker<'_> {
         } else if self.unqualified_variant(name) || self.poisoned.contains(&name.sym) {
         } else if self.aliases.contains_key(&name.sym) {
             self.alias_value(name);
+        } else if let Some(Import::Module) = self.imports.get(&name.sym) {
+            // `use std.io` makes `io` a qualifier, as in `io.f()` (REFERENCE §3).
+            let what = format!("names qualified by a module, as `{text}` qualifies them,");
+            self.not_implemented(name.span, &what, Planned::Unscheduled);
         } else if self.imports.contains_key(&name.sym)
             || self.adt_named(name.sym).is_some()
             || self.iface_names.contains_key(&name.sym)
@@ -6781,7 +6803,7 @@ impl Checker<'_> {
     fn has_method(&self, ty: &Ty, name: Symbol) -> bool {
         let text = self.m.text(name);
         if let Some(key) = ImplKey::of(ty)
-            && self.inherent.get(&key).is_some_and(|entries| entries.iter().any(|entry| entry.name == name))
+            && self.inherent.get(&key).is_some_and(|entries| entries.iter().any(|e| e.name == name && self.sees(e)))
         {
             return true;
         }
@@ -7606,7 +7628,9 @@ impl Checker<'_> {
             && let Some(entries) = self.inherent.get(&key)
         {
             // An operation the toolchain implements is called through `native_method`.
-            let mut named = entries.iter().filter(|e| e.name == method.sym && !self.natives.contains_key(&e.f));
+            // Another module's private method is no candidate.
+            let mut named =
+                entries.iter().filter(|e| e.name == method.sym && !self.natives.contains_key(&e.f) && self.sees(e));
             // A rejected declaration of the name, a duplicate or one named like an interface's
             // method, may be the one the call means, and it has been reported (§15.1).
             if named.clone().any(|e| e.rejected) {
@@ -7664,6 +7688,7 @@ impl Checker<'_> {
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);
                 None
             }
+            [] if self.private_method(ty, method) => None,
             [] => {
                 if !unknown {
                     let message = format!("`{}` has no method `{name}`", self.show(shown));
@@ -7679,7 +7704,6 @@ impl Checker<'_> {
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);
                 None
             }
-            [Callee::Fn(_)] if self.private_method(ty, method) => None,
             [callee] => Some(*callee),
             _ if unknown => None,
             _ => {
@@ -7826,6 +7850,21 @@ impl Checker<'_> {
             }
             _ => panic!("`{ty}.{name}` of `{module}` has no body, but the native table has no operation for it"),
         }
+    }
+
+    /// Whether the module being checked sees the method `entry`, which another module's
+    /// private one it doesn't (REFERENCE §3).
+    fn sees(&self, entry: &Inherent) -> bool {
+        self.visible(self.m.items[self.p.fns[entry.f].item].module, entry.vis)
+    }
+
+    /// The method `name` of `ty` that the standard library declares and the module being
+    /// checked sees, whether the toolchain implements it or it has a body.
+    fn std_method(&self, ty: &Ty, name: Symbol) -> Option<FnId> {
+        let entries = self.inherent.get(&ImplKey::of(ty)?)?;
+        let entry = entries.iter().find(|entry| entry.name == name && !entry.rejected)?;
+        let module = self.m.items[self.p.fns[entry.f].item].module;
+        (self.m.modules[module].std && self.sees(entry)).then_some(entry.f)
     }
 
     /// Whether `ty`'s own method or associated function `method` is private to another module,
@@ -8078,14 +8117,19 @@ impl Checker<'_> {
 
     fn field(&mut self, e: ExprId, base_ty: &Ty, name: Ident) -> Ty {
         let text = self.m.text(name.sym);
-        // Whether or not it has a field of that name, as either would tell (§3).
+        // Another module's opaque record has no fields this module sees, whether or not it
+        // has one of that name, as either would tell (§3). A method of that name is still
+        // reported as one.
+        let sealed = matches!(base_ty, Ty::Adt(id, _) if self.sealed_home(*id).is_some());
         if let Ty::Adt(id, _) = base_ty
+            && sealed
             && !self.has_method(base_ty, name.sym)
-            && self.sealed(*id, name.span, "read its fields")
         {
+            self.sealed(*id, name.span, "use its fields");
             return Ty::Error;
         }
         if let Ty::Adt(id, args) = base_ty
+            && !sealed
             && let Some((i, field)) = self.p.decls.adt(*id).field(text)
         {
             // Only the record's own `impl` blocks see its state (OPEN_QUESTIONS Q40).
@@ -8123,22 +8167,26 @@ impl Checker<'_> {
         }
     }
 
-    /// Reports a `System` that is `how`: built, copied with `with` or matched by a pattern.
-    /// The runtime gives `main` the only one (REFERENCE §9.1).
-    /// Whether `id` is another module's opaque record, which only its own module builds and
-    /// reads (REFERENCE §3). If it is, reports the use at `span`, which would `what`.
+    /// The module of `id` when it is another module's opaque record, which only its own module
+    /// builds and reads (REFERENCE §3). A native record such as `Pool` has no fields or
+    /// constructor to hide.
+    fn sealed_home(&self, id: AdtId) -> Option<ModId> {
+        let &(home, opaque) = self.adt_home.get(&id)?;
+        (opaque && home != self.module && !self.p.decls.adt(id).is_native()).then_some(home)
+    }
+
+    /// Whether `id` is another module's opaque record. If it is, reports the use at `span`,
+    /// which would `what`.
     fn sealed(&mut self, id: AdtId, span: Span, what: &str) -> bool {
-        let Some(&(home, true)) = self.adt_home.get(&id) else { return false };
-        // A native record such as `Pool` has no fields or constructor to hide.
-        if home == self.module || self.p.decls.adt(id).is_native() {
-            return false;
-        }
+        let Some(home) = self.sealed_home(id) else { return false };
         let (name, module) = (self.p.decls.name(id), &self.m.modules[home].name);
         let message = format!("`{name}` is an opaque record of `{module}`, so another module can't {what} (§3)");
         self.error(codes::PRIVATE_ITEM, span, message);
         true
     }
 
+    /// Reports a `System` that is `how`: built, copied with `with` or matched by a pattern.
+    /// The runtime gives `main` the only one (REFERENCE §9.1).
     fn system_constructed(&mut self, span: Span, how: &str) {
         let message = format!(
             "a `System` can't be {how}; the runtime gives `main` the only one, and its fields are read by name, as in `sys.stdout` (§9.1)"
@@ -9104,7 +9152,8 @@ impl Checker<'_> {
         if *complete && !scrutinee_ty.is_unknown() {
             let span = m.exprs[e].span;
             let inhabited = self.inhabited.as_ref().expect("match is checked after the declarations");
-            match exhaust::uncovered(&self.p.decls, inhabited, &scrutinee_ty, &rows) {
+            let sealed = |id| self.sealed_home(id).is_some();
+            match exhaust::uncovered(&self.p.decls, inhabited, &sealed, &scrutinee_ty, &rows) {
                 Ok(None) => {}
                 Ok(Some(missing)) => {
                     let message = format!("this `match` does not cover `{missing}`; add an arm for it, or `_`");
@@ -9920,8 +9969,6 @@ fn type_args(n: usize) -> String {
     }
 }
 
-/// A type, interface or variant name the prelude declares (REFERENCE §3). A module item or
-/// import may not reuse one (H4).
 /// `a`, `a and b`, or `a, b and c`.
 fn and_list(items: &[String]) -> String {
     match items {
@@ -9931,6 +9978,8 @@ fn and_list(items: &[String]) -> String {
     }
 }
 
+/// A type, interface or variant name the prelude declares (REFERENCE §3). A module item or
+/// import may not reuse one (H4).
 fn prelude_type(name: &str) -> bool {
     builtin_type(name).is_some()
         || prelude_adt(name).is_some()
@@ -10109,5 +10158,56 @@ pub(crate) mod tests {
         let (_, diags) = check(&[("std.extra", extra)], text);
         let found: Vec<(&str, &str)> = diags.iter().map(|d| (d.code.id, d.message.as_str())).collect();
         assert_eq!(found, [("E0213", "`List[Int].hidden` is private to `std.extra`, which doesn't export it (§3)")]);
+    }
+
+    /// The codes a program of `text` gets, with an `std.extra` module of `extra`, and their
+    /// lines in the program's file, which is the first, so its lines are counted from 1.
+    fn codes(extra: &str, text: &str) -> Vec<(&'static str, usize)> {
+        let (_, diags) = check(&[("std.extra", extra)], text);
+        let line = |offset: u32| text.get(..offset as usize).map(|before| before.lines().count().max(1));
+        diags.iter().map(|d| (d.code.id, line(d.span.lo).expect("reported in the program's file"))).collect()
+    }
+
+    /// A program's `impl` whose method a std method also declares is reported in the
+    /// program, whether the std one has a body or not, and a private std method is no
+    /// collision (REFERENCE §3).
+    #[test]
+    fn std_method_collisions_are_reported_in_the_program() {
+        let extra = "impl[T] List[T] {\n    pub fn size(self) -> Int {\n        return self.len()\n    }\n\n    fn hidden(self) -> Int {\n        return 0\n    }\n}\n";
+        let text = "interface Sized {\n    fn size(self) -> Int\n    fn hidden(self) -> Int\n}\n\nimpl Sized for List[Int] {\n    fn size(self) -> Int {\n        return 1\n    }\n\n    fn hidden(self) -> Int {\n        return 2\n    }\n}\n";
+        assert_eq!(codes(extra, text), [("E0212", 7)]);
+    }
+
+    /// The messages a program of `text` gets.
+    fn messages(text: &str) -> Vec<String> {
+        check(&[], text).1.into_iter().map(|d| format!("{} {}", d.code.id, d.message)).collect()
+    }
+
+    /// Another module's opaque record has no fields here, even when an interface of the
+    /// program gives it a method of a field's name, and no pattern or constructor to suggest
+    /// (REFERENCE §3).
+    #[test]
+    fn another_modules_opaque_record_shows_nothing_of_its_own() {
+        let peek = "use std.io { IoError }\n\ninterface Peek {\n    fn message(self) -> Text\n}\n\nimpl Peek for IoError {\n    fn message(self) -> Text {\n        return \"\"\n    }\n}\n\nfn f(e: IoError) -> Text {\n    var x = e\n    x.message = \"forged\"\n    return e.message\n}\n";
+        let method = "E0320 `message` is a method, which is called with its arguments; it isn't a function value, but a closure can wrap a call of it, as in `|| x.message()`";
+        assert_eq!(messages(peek), [method, method]);
+        let all = "use std.io { IoError }\n\nfn f(e: Option[IoError]) -> Int {\n    return match e {\n        None => 0\n    }\n}\n";
+        assert_eq!(messages(all), ["E0311 this `match` does not cover `Some(_)`; add an arm for it, or `_`"]);
+        let alias = "use std.io { IoError }\n\ntype Io = IoError\n\nfn f() -> Int {\n    let e = Io\n    return 0\n}\n";
+        assert_eq!(messages(alias), ["E0201 `Io` is an alias of the type `IoError`, and an alias names a type only"]);
+    }
+
+    /// Another module's private method is no candidate, so an interface's method of the same
+    /// name is called, and the name is no method of the type here (REFERENCE §3).
+    #[test]
+    fn private_std_methods_are_no_candidates() {
+        let extra = "impl Text {\n    fn secret(self) -> Int {\n        return 1\n    }\n}\n";
+        let iface = "interface Q {\n    fn secret(self) -> Int\n}\n\nimpl Q for Text {\n    fn secret(self) -> Int {\n        return 2\n    }\n}\n\n";
+        let calls = format!("{iface}fn f(t: Text) -> Int {{\n    return t.secret()\n}}\n");
+        assert_eq!(codes(extra, &calls), []);
+        let field = format!("{iface}fn f(t: Text) -> Int {{\n    let s = t.secret\n    return 0\n}}\n");
+        assert_eq!(codes(extra, &field), [("E0320", 12)]);
+        let alone = "fn f(t: Text) -> Int {\n    return t.secret()\n}\n";
+        assert_eq!(codes(extra, alone), [("E0213", 2)]);
     }
 }

@@ -1670,7 +1670,21 @@ impl Parser<'_> {
         let kind = match self.kind() {
             T::Ident => {
                 let name = self.ident("a type")?;
-                if self.at(T::LBracket) {
+                // `use std.io` makes `io` a qualifier, as in `io.Out` (REFERENCE §3).
+                if self.at(T::Dot) && self.nth(1) == T::Ident {
+                    self.bump();
+                    let last = self.ident("a type")?;
+                    let what = format!(
+                        "names qualified by a module, as in `{}.{}`,",
+                        self.m.text(name.sym),
+                        self.m.text(last.sym)
+                    );
+                    self.diags.not_implemented(name.span.to(last.span), &what, Planned::Unscheduled);
+                    if self.at(T::LBracket) {
+                        self.skip_group()?;
+                    }
+                    TypeExprKind::Rejected
+                } else if self.at(T::LBracket) {
                     // A numeric type takes a unit, and `Array[T, N]` a length, which are not
                     // types (REFERENCE §4.2, §4.7).
                     let args = if takes_non_type_args(self.m.text(name.sym)) {

@@ -3347,6 +3347,12 @@ fn write_value<E>(
                     out.push_str(&text);
                     continue;
                 }
+                // `std.io`'s `IoError` is opaque to the modules that `debug` one, so `debug` writes it
+                // as its `show` does, without its field's name (OPEN_QUESTIONS P5).
+                if let (AdtId::IO_ERROR, [Value::Text(message)]) = (adt.def, &adt.fields[..]) {
+                    out.push_str(message);
+                    continue;
+                }
                 let def = decls.adt(adt.def);
                 let variant = &def.variants[adt.variant.index()];
                 // A tuple is written `(1, "a")`, as its literal is (OPEN_QUESTIONS P5).
