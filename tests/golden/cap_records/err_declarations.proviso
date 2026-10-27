@@ -172,6 +172,17 @@ enum Loop {
     Hold(dial: Dial)
 }
 
+enum Twin {
+    Stop
+    Next(mirror: Mirror)
+    Held(dial: Dial)
+}
+
+enum Mirror {
+    Stop
+    Next(twin: Twin)
+}
+
 enum Grows[T] {
     Stop
     More(value: T, next: Grows[List[T]])                        // <- E0904
@@ -179,6 +190,8 @@ enum Grows[T] {
 
 cap record Ringed {
     state ring: Ring                                            // <- E0901
+    state twin: Twin                                            // <- E0901
+    state mirror: Mirror                                        // <- E0901
     state grows: Grows[Int]
 }
 

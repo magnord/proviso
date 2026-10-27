@@ -597,8 +597,8 @@ fn long_alias_chains_check_once() {
 /// Whether a `state` field can hold a capability handle is settled once per declaration, so
 /// a `cap record` with thousands of `state` fields of a type thousands of records deep checks
 /// in linear time, whichever order the records are declared in, and a chain that ends in a
-/// `cap record` is still found. So does a record that holds thousands of records (OPEN_QUESTIONS
-/// P5).
+/// `cap record` is still found. So does a record that holds thousands of records, also when
+/// they are the links of one chain (OPEN_QUESTIONS P5).
 #[test]
 fn state_fields_find_handles_in_linear_time() {
     let n = 4_000;
@@ -625,7 +625,18 @@ fn state_fields_find_handles_in_linear_time() {
     let fan = format!("record A {{\n{}}}\n\n", (0..k).map(|i| format!("    b{i}: B{i}\n")).collect::<String>())
         + &(0..k).map(|i| format!("record B{i} {{\n    d: Dial\n}}\n\n")).collect::<String>()
         + "cap record Dial {\n    state n: Int\n}\n\ncap record Big {\n    state a: A\n    state b: A\n    state c: A\n}\n";
-    for (name, text) in [("state_chain", program(false)), ("state_chain_reversed", program(true)), ("state_fan", fan)] {
+    // A record that holds every link of a chain declared from its far end.
+    let links = format!("record A {{\n{}}}\n\n", (0..k).map(|i| format!("    c{i}: C{i}\n")).collect::<String>())
+        + &(1..k).rev().map(|i| format!("record C{i} {{\n    c: C{}\n}}\n\n", i - 1)).collect::<String>()
+        + "record C0 {\n    d: Dial\n}\n\n"
+        + "cap record Dial {\n    state n: Int\n}\n\ncap record Big {\n    state a: A\n    state b: A\n    state c: A\n}\n";
+    let cases = [
+        ("state_chain", program(false)),
+        ("state_chain_reversed", program(true)),
+        ("state_fan", fan),
+        ("state_links", links),
+    ];
+    for (name, text) in cases {
         let file = source(&format!("{name}.proviso"), &text);
         let output = check_within(&file, 20);
         let shown = stderr(&output);
