@@ -15,6 +15,7 @@ use std.io { Out, Writer }                                  // <- E0205
 use std.prelude { Net }                                     // <- E0213
 use std.prelude { Option }                                  // <- E0203
 use std.prelude { Ordering as Order, Eq as Equal }          // <- E0203, E0203
+use std.io { Rounding }                                     // <- E0203, E0205
 use std.nowhere { Thing }                                   // <- E0205
 use mylib.things                                            // <- E0205
 use std.text { ParseError }

@@ -588,6 +588,9 @@ pub struct Decls {
     adts: Vec<AdtDef>,
     ifaces: Vec<IfaceDef>,
     impls: HashMap<(IfaceId, ImplKey), ImplDef>,
+    /// Whether each record or enum has an `impl` in `impls`. Most have none, and the
+    /// interpreter asks on each `==`, `show` and hash, so they skip hashing the key.
+    adt_impls: Vec<bool>,
     /// The tuple of each length, by its length.
     tuples: HashMap<usize, AdtId>,
     /// Whether a rejected `impl` block was for a tuple type.
@@ -657,6 +660,7 @@ impl Default for Decls {
             adts,
             ifaces: Vec::new(),
             impls: HashMap::new(),
+            adt_impls: Vec::new(),
             tuples,
             unknown_tuples: false,
             unknown: HashSet::new(),
@@ -767,6 +771,12 @@ impl Decls {
 
     /// Records the `impl` of `iface` for `key`, unless there is one; returns whether it was new.
     pub fn add_impl(&mut self, iface: IfaceId, key: ImplKey, def: ImplDef) -> bool {
+        if let ImplKey::Adt(id) = key {
+            if self.adt_impls.len() <= id.index() {
+                self.adt_impls.resize(id.index() + 1, false);
+            }
+            self.adt_impls[id.index()] = true;
+        }
         match self.impls.entry((iface, key)) {
             std::collections::hash_map::Entry::Occupied(_) => false,
             std::collections::hash_map::Entry::Vacant(slot) => {
@@ -777,13 +787,18 @@ impl Decls {
     }
 
     pub fn impl_of(&self, iface: IfaceId, key: ImplKey) -> Option<&ImplDef> {
+        if let ImplKey::Adt(id) = key
+            && !self.adt_impls.get(id.index()).is_some_and(|&any| any)
+        {
+            return None;
+        }
         self.impls.get(&(iface, key))
     }
 
     /// The function that runs method `method` of `iface` for values of `key`, when an `impl`
     /// declares one rather than `derives` or the prelude.
     pub fn impl_method(&self, iface: IfaceId, key: ImplKey, method: usize) -> Option<usize> {
-        self.impls.get(&(iface, key))?.methods.get(method).copied().flatten()
+        self.impl_of(iface, key)?.methods.get(method).copied().flatten()
     }
 
     /// The interfaces implemented for `key` by an `impl`.
@@ -984,7 +999,7 @@ impl Decls {
         {
             return true;
         }
-        let Some(def) = self.impls.get(&(iface, key)) else { return false };
+        let Some(def) = self.impl_of(iface, key) else { return false };
         let mut binds = vec![None; def.bounds.len()];
         matches_target(&def.target, ty, &mut binds)
             && binds.iter().zip(&def.bounds).all(|(bind, bounds)| match bind {
@@ -998,11 +1013,11 @@ impl Decls {
     /// Whether `iface` has an `impl` for some instance of `ty`'s type head, as
     /// `impl Show for Box[Int]` is for `Box`.
     pub fn has_impl_head(&self, iface: IfaceId, ty: &Ty) -> bool {
-        ImplKey::of(ty).is_some_and(|key| self.impls.contains_key(&(iface, key)))
+        ImplKey::of(ty).is_some_and(|key| self.impl_of(iface, key).is_some())
     }
 
     pub fn impl_for(&self, iface: IfaceId, ty: &Ty) -> Option<(&ImplDef, Vec<Option<Ty>>)> {
-        let def = self.impls.get(&(iface, ImplKey::of(ty)?))?;
+        let def = self.impl_of(iface, ImplKey::of(ty)?)?;
         let mut binds = vec![None; def.bounds.len()];
         matches_target(&def.target, ty, &mut binds).then_some((def, binds))
     }

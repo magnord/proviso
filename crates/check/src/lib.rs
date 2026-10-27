@@ -1732,6 +1732,14 @@ impl Checker<'_> {
         }
         for name in &decl.names {
             let bound = name.alias.unwrap_or(name.name);
+            // An import that would shadow a prelude name binds nothing, but whether its module
+            // has the item is a mistake of its own.
+            if prelude_type(m.text(bound.sym)) {
+                if let Some(from) = from {
+                    self.export(from, name.name);
+                }
+                continue;
+            }
             if !matches!(self.imports.get(&bound.sym), Some(Import::Pending)) {
                 continue;
             }
