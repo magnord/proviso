@@ -13,6 +13,7 @@ pub mod decls;
 pub mod exhaust;
 pub mod infer;
 mod moves;
+pub mod native;
 pub mod types;
 
 use std::collections::hash_map::Entry;
@@ -31,6 +32,7 @@ use crate::decls::{
 };
 use crate::exhaust::{Ctor, Space};
 use crate::infer::{Kind, Origin, Vars};
+use crate::native::Native;
 use crate::types::{CapTy, FN_PARAMS, FloatTy, IntTy, Perms, Reach, Ty};
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -161,7 +163,7 @@ pub enum Res {
 }
 
 pub struct FnInfo {
-    /// Index of the declaring item in `Module::items`.
+    /// Index of the declaring item in `Ast::items`.
     pub item: usize,
     /// The method's index in the `impl` block at `item`, or `None` for a module's function.
     pub method: Option<usize>,
@@ -232,7 +234,7 @@ pub struct CtorPat {
     pub fields: Box<[FieldIdx]>,
 }
 
-/// What the checker learned about a module.
+/// What the checker learned about a program.
 #[derive(Default)]
 pub struct Program {
     pub decls: Decls,
@@ -293,7 +295,7 @@ pub struct ClosureInfo {
 
 /// An `example` declaration (REFERENCE §14).
 pub struct ExampleInfo {
-    /// Index of the declaring item in `Module::items`.
+    /// Index of the declaring item in `Ast::items`.
     pub item: usize,
     /// Number of local slots its expressions need.
     pub locals: usize,
@@ -311,7 +313,7 @@ impl Program {
     }
 
     /// The declaration of function `f`: an item, or a method of an `impl` block.
-    pub fn decl<'m>(&self, m: &'m Module, f: FnId) -> &'m FnDecl {
+    pub fn decl<'m>(&self, m: &'m Ast, f: FnId) -> &'m FnDecl {
         let info = &self.fns[f];
         let decl = match info.method {
             Some(method) => m.method_decl(info.item, method),
@@ -321,9 +323,17 @@ impl Program {
     }
 }
 
-pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Program {
+/// Checks a program: the standard library's modules, declared first in the order of
+/// [`native::STD`], and then its own module, which has `main`, its examples and its tests. Each
+/// module resolves names in its own scope (REFERENCE §3).
+pub fn check_program(m: &Ast, opts: Options, diags: &mut Diagnostics) -> Program {
+    let scopes =
+        m.modules.iter().map(|module| Scope { poisoned: module.poisoned.clone(), ..Scope::default() }).collect();
+    let user = m.modules.iter().rposition(|module| !module.std).unwrap_or(0);
     let mut checker = Checker {
         m,
+        module: 0,
+        scopes,
         opts,
         diags,
         p: Program::default(),
@@ -331,8 +341,8 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         imports: HashMap::new(),
         adt_names: HashMap::new(),
         aliases: HashMap::new(),
-        poisoned: m.poisoned.clone(),
-        main_lost: m.lost_fns.iter().any(|&sym| m.text(sym) == "main"),
+        poisoned: m.modules[0].poisoned.clone(),
+        main_lost: m.modules[user].lost_fns.iter().any(|&sym| m.text(sym) == "main"),
         adts: Vec::new(),
         adt_vis: HashMap::new(),
         cap_vis: HashMap::new(),
@@ -341,7 +351,9 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
         iface_names: HashMap::new(),
         ifaces: Vec::new(),
         cap_decls: HashSet::new(),
+        adt_home: HashMap::new(),
         inherent: HashMap::new(),
+        natives: HashMap::new(),
         rejected_abandon: HashSet::new(),
         rejected_abandon_for: Vec::new(),
         unknown_tys: Vec::new(),
@@ -384,6 +396,8 @@ pub fn check_module(m: &Module, opts: Options, diags: &mut Diagnostics) -> Progr
     checker.imports();
     checker.adt_names();
     checker.iface_names();
+    checker.pinned();
+    checker.resolve_imports();
     checker.unknown_impl_targets();
     checker.adt_generics();
     checker.resolve_aliases();
@@ -437,6 +451,9 @@ enum Import {
     Type(Ty),
     /// `use a.b` makes `b` usable as a qualifier.
     Module,
+    /// A name bound before the module it comes from has declared its items, which
+    /// [`Checker::resolve_imports`] replaces.
+    Pending,
 }
 
 /// An alias, by how far it is resolved.
@@ -453,6 +470,7 @@ struct AdtSrc<'a> {
     id: AdtId,
     name: Ident,
     vis: Visibility,
+    module: ModId,
     /// Its type parameters, as declared (REFERENCE §4.8).
     generics: &'a [GenericParam],
     derives: &'a [Ident],
@@ -482,12 +500,15 @@ struct IfaceSrc<'a> {
     id: IfaceId,
     decl: &'a InterfaceDecl,
     vis: Visibility,
+    module: ModId,
 }
 
 /// A method or associated function of a record or enum, from an `impl` block of its own.
 struct Inherent {
     name: Symbol,
     f: FnId,
+    /// How far it is visible, which is no further than its type.
+    vis: Visibility,
     /// Declared twice, or named like a method of an interface the type implements. Calls of
     /// the name don't resolve to it (REFERENCE §3).
     rejected: bool,
@@ -688,8 +709,26 @@ enum Flow {
 /// The fields of `System` that come with `std.fs` in slice 3.5 (REFERENCE §9.1).
 const LATER_SYSTEM_FIELDS: &[&str] = &["fs"];
 
+/// The names a module declares and imports (REFERENCE §3). The checker keeps the scope of
+/// the module it is in in its own fields, and the others here (see [`Checker::enter`]).
+#[derive(Default)]
+struct Scope {
+    fn_names: HashMap<Symbol, FnId>,
+    imports: HashMap<Symbol, Import>,
+    adt_names: HashMap<Symbol, AdtId>,
+    aliases: HashMap<Symbol, Alias>,
+    poisoned: HashSet<Symbol>,
+    iface_names: HashMap<Symbol, IfaceId>,
+    cap_decls: HashSet<Symbol>,
+}
+
 struct Checker<'a> {
-    m: &'a Module,
+    m: &'a Ast,
+    /// The module whose code is being checked, whose names are in the fields from
+    /// `fn_names` to `cap_decls`.
+    module: ModId,
+    /// Each module's scope, but the one being checked's, which is in the checker's fields.
+    scopes: Vec<Scope>,
     opts: Options,
     diags: &'a mut Diagnostics,
     p: Program,
@@ -735,8 +774,14 @@ struct Checker<'a> {
     /// The names the module declares capability interfaces with, including those that are
     /// rejected after they parse, such as a wrongly cased one.
     cap_decls: HashSet<Symbol>,
-    /// The methods and associated functions of each record and enum, in declaration order.
-    inherent: HashMap<AdtId, Vec<Inherent>>,
+    /// The module that declares each record and enum, and whether it is `opaque`, so other
+    /// modules don't see its fields or constructor (REFERENCE §3).
+    adt_home: HashMap<AdtId, (ModId, bool)>,
+    /// The methods and associated functions of each type, in declaration order: a record's or
+    /// enum's own, and those the standard library gives the types the toolchain provides.
+    inherent: HashMap<ImplKey, Vec<Inherent>>,
+    /// The standard library's functions without a body, and the operation each binds to.
+    natives: HashMap<FnId, Builtin>,
     /// The methods of a rejected `impl Abandon`, whose `self` isn't reported as left over,
     /// since its `abandon` was never going to be called (REFERENCE §15.1).
     rejected_abandon: HashSet<FnId>,
@@ -1508,11 +1553,63 @@ impl Checker<'_> {
 
     // ---- module level ----
 
+    /// Makes `module` the one being checked, whose names the checker's fields then hold.
+    fn enter(&mut self, module: ModId) {
+        if module == self.module {
+            return;
+        }
+        let left = Scope {
+            fn_names: std::mem::take(&mut self.fn_names),
+            imports: std::mem::take(&mut self.imports),
+            adt_names: std::mem::take(&mut self.adt_names),
+            aliases: std::mem::take(&mut self.aliases),
+            poisoned: std::mem::take(&mut self.poisoned),
+            iface_names: std::mem::take(&mut self.iface_names),
+            cap_decls: std::mem::take(&mut self.cap_decls),
+        };
+        let entered = std::mem::take(&mut self.scopes[module]);
+        self.scopes[self.module] = left;
+        self.module = module;
+        let Scope { fn_names, imports, adt_names, aliases, poisoned, iface_names, cap_decls } = entered;
+        (self.fn_names, self.imports, self.adt_names, self.aliases) = (fn_names, imports, adt_names, aliases);
+        (self.poisoned, self.iface_names, self.cap_decls) = (poisoned, iface_names, cap_decls);
+    }
+
+    /// Whether the module being checked is part of the standard library, which may declare
+    /// what the prelude names and what the toolchain implements (OPEN_QUESTIONS P5).
+    fn in_std(&self) -> bool {
+        self.m.modules[self.module].std
+    }
+
+    /// Whether a module may see an item of `module` declared with `vis`: its own, a `pub` one,
+    /// or a `pub(pkg)` one of its package. The standard library is one package, and a program
+    /// is another (REFERENCE §3; OPEN_QUESTIONS P5).
+    fn visible(&self, module: ModId, vis: Visibility) -> bool {
+        module == self.module
+            || vis == Visibility::Pub
+            || (vis == Visibility::PubPkg && self.m.modules[module].std == self.in_std())
+    }
+
+    /// Confirms that the standard library declares its types and interfaces at the ids their
+    /// constants name, which the toolchain relies on.
+    fn pinned(&self) {
+        for (id, name) in AdtId::PINNED {
+            assert_eq!(&*self.p.decls.adt(id).name, name, "the standard library declares its types out of order");
+        }
+        let declared = self.p.decls.ifaces().map(|(_, iface)| &*iface.name);
+        let pinned = declared.take(IfaceId::PINNED.len()).collect::<Vec<_>>();
+        assert_eq!(pinned, IfaceId::PINNED, "the standard library declares its interfaces out of order");
+    }
+
+    /// Binds the names each `use` brings in before anything is declared, so a declaration
+    /// that reuses one is reported. What they name is resolved once every module has declared
+    /// its items (see [`Checker::resolve_imports`]).
     fn imports(&mut self) {
         let m = self.m;
         for item in &m.items {
             if let ItemKind::Use(decl) = &item.kind {
-                self.use_decl(decl);
+                self.enter(item.module);
+                self.use_names(decl);
             }
         }
     }
@@ -1522,7 +1619,8 @@ impl Checker<'_> {
     fn collides(&self, name: &UseName) -> bool {
         let m = self.m;
         let text = m.text(name.name.sym);
-        let mut others = m.items.iter().flat_map(|item| match &item.kind {
+        let items = &m.items[m.modules[self.module].items.clone()];
+        let mut others = items.iter().flat_map(|item| match &item.kind {
             ItemKind::Fn(decl) => vec![decl.name],
             ItemKind::Record(decl) => vec![decl.name],
             ItemKind::Enum(decl) => vec![decl.name],
@@ -1540,39 +1638,8 @@ impl Checker<'_> {
         prelude_type(text) || others.any(|other| m.text(other.sym) == text)
     }
 
-    fn use_decl(&mut self, decl: &UseDecl) {
+    fn use_names(&mut self, decl: &UseDecl) {
         let m = self.m;
-        let path: Vec<&str> = decl.path.iter().map(|i| m.text(i.sym)).collect();
-        let joined = path.join(".");
-        let span = decl.path[0].span.to(decl.path[decl.path.len() - 1].span);
-        let available: Option<Vec<(&str, Ty)>> = match path.as_slice() {
-            ["std", "io"] => {
-                Some(vec![("In", Ty::cap(IfaceId::IN, Perms::all(1))), ("IoError", Ty::IoError), ("Out", Ty::out())])
-            }
-            // `ParseError` is the only item `std.text` declares (STD.md).
-            ["std", "text"] => Some(vec![("ParseError", Ty::adt(AdtId::PARSE_ERROR))]),
-            // A generic import names its type without type arguments, which each use gives.
-            ["std", "pool"] => Some(vec![("Pool", Ty::adt(AdtId::POOL)), ("Handle", Ty::adt(AdtId::HANDLE))]),
-            // `ConversionError` is the only item `std.num` declares (STD.md).
-            ["std", "num"] => Some(vec![("ConversionError", Ty::adt(AdtId::CONVERSION_ERROR))]),
-            ["std", module] => {
-                let planned = match *module {
-                    "fs" | "test" => Planned::Phase(3),
-                    "task" => Planned::Phase(6),
-                    _ => Planned::Unscheduled,
-                };
-                self.not_implemented(span, &format!("the `{joined}` module and its items"), planned);
-                None
-            }
-            _ => {
-                self.error(
-                    codes::UNKNOWN_IMPORT,
-                    span,
-                    format!("unknown module `{joined}`; phase 1 checks one file at a time, and the standard library provides only `std.io`, `std.num`, `std.pool` and `std.text`"),
-                );
-                None
-            }
-        };
         if decl.names.is_empty() {
             let last = decl.path[decl.path.len() - 1];
             self.bind_import(last, Import::Module);
@@ -1580,16 +1647,6 @@ impl Checker<'_> {
         }
         for name in &decl.names {
             let text = m.text(name.name.sym);
-            let ty = match &available {
-                Some(items) => match items.iter().find(|(n, _)| *n == text) {
-                    Some((_, ty)) => ty.clone(),
-                    None => {
-                        self.error(codes::UNKNOWN_IMPORT, name.name.span, format!("`{joined}` has no item `{text}`"));
-                        Ty::Error
-                    }
-                },
-                None => Ty::Error,
-            };
             let bound = name.alias.unwrap_or(name.name);
             let bound_text = m.text(bound.sym);
             if prelude_type(bound_text) {
@@ -1611,7 +1668,7 @@ impl Checker<'_> {
                     self.pascal_case(bound, "type");
                 }
             }
-            self.bind_import(bound, Import::Type(ty));
+            self.bind_import(bound, Import::Pending);
         }
     }
 
@@ -1627,11 +1684,101 @@ impl Checker<'_> {
         }
     }
 
+    /// Resolves what each module's imports name, once every module has declared its items.
+    fn resolve_imports(&mut self) {
+        let m = self.m;
+        for item in &m.items {
+            if let ItemKind::Use(decl) = &item.kind {
+                self.enter(item.module);
+                self.use_decl(decl);
+            }
+        }
+    }
+
+    /// Resolves the names `decl` imports from the module it names. A name it can't import is
+    /// poisoned, so its uses aren't reported again (REFERENCE §15.1).
+    fn use_decl(&mut self, decl: &UseDecl) {
+        let m = self.m;
+        let path: Vec<&str> = decl.path.iter().map(|i| m.text(i.sym)).collect();
+        let joined = path.join(".");
+        let span = decl.path[0].span.to(decl.path[decl.path.len() - 1].span);
+        let from = m.modules.iter().position(|module| module.name == joined).filter(|&from| from != self.module);
+        if from.is_none() {
+            match native::later_module(&joined) {
+                Some(planned) => self.not_implemented(span, &format!("the `{joined}` module and its items"), planned),
+                None => {
+                    let std: Vec<String> = native::STD.iter().skip(1).map(|(name, _)| format!("`{name}`")).collect();
+                    let message = format!(
+                        "unknown module `{joined}`; a program is one file, and the standard library provides only {}",
+                        and_list(&std)
+                    );
+                    self.error(codes::UNKNOWN_IMPORT, span, message);
+                }
+            }
+        }
+        for name in &decl.names {
+            let bound = name.alias.unwrap_or(name.name);
+            if !matches!(self.imports.get(&bound.sym), Some(Import::Pending)) {
+                continue;
+            }
+            match from.and_then(|from| self.export(from, name.name)) {
+                Some(ty) => {
+                    self.imports.insert(bound.sym, Import::Type(ty));
+                }
+                None => {
+                    self.imports.insert(bound.sym, Import::Type(Ty::Error));
+                    self.poisoned.insert(bound.sym);
+                }
+            }
+        }
+    }
+
+    /// The type that `name` names in module `from`, which must export it to the module being
+    /// checked (REFERENCE §3). `None` once that is reported.
+    fn export(&mut self, from: ModId, name: Ident) -> Option<Ty> {
+        let m = self.m;
+        let (text, module) = (m.text(name.sym), &m.modules[from].name);
+        let scope = &self.scopes[from];
+        if scope.poisoned.contains(&name.sym) {
+            return None;
+        }
+        let (ty, vis) = if let Some(&id) = scope.adt_names.get(&name.sym) {
+            (Ty::adt(id), self.adt_vis[&id])
+        } else if let Some(&id) = scope.iface_names.get(&name.sym)
+            && self.p.decls.iface(id).cap.is_some()
+        {
+            (Ty::cap(id, self.p.decls.iface(id).all_perms()), self.cap_vis[&id])
+        } else if scope.fn_names.contains_key(&name.sym)
+            || scope.aliases.contains_key(&name.sym)
+            || scope.iface_names.contains_key(&name.sym)
+        {
+            let what = "imports of functions, aliases and interfaces other than capability interfaces";
+            self.not_implemented(name.span, what, Planned::Unscheduled);
+            return None;
+        } else {
+            self.error(codes::UNKNOWN_IMPORT, name.span, format!("`{module}` has no item `{text}`"));
+            return None;
+        };
+        if !self.visible(from, vis) {
+            let message = format!("`{text}` is private to `{module}`, which doesn't export it (§3)");
+            self.error(codes::PRIVATE_ITEM, name.span, message);
+            return None;
+        }
+        Some(ty)
+    }
+
     fn adt_names(&mut self) {
         let m = self.m;
         for item in &m.items {
+            self.enter(item.module);
             if let ItemKind::Alias(decl) = &item.kind {
                 self.alias_name(decl);
+                continue;
+            }
+            if let ItemKind::Record(decl) = &item.kind
+                && decl.native
+            {
+                self.native_type(decl, item.vis);
                 continue;
             }
             let (name, generics, derives, refinement, kind) = match &item.kind {
@@ -1680,15 +1827,21 @@ impl Checker<'_> {
             def.cap = matches!(&item.kind, ItemKind::Record(decl) if decl.cap);
             def.params = generics.len();
             let id = self.p.decls.push(def);
+            // `Some(3)` and `Err(e)` are written without their enum (REFERENCE §3).
+            if matches!(id, AdtId::OPTION | AdtId::RESULT) && self.in_std() {
+                self.p.decls.adt_mut(id).bare_variants = true;
+            }
             let uses = match &item.kind {
                 ItemKind::Record(decl) if decl.opaque => Some(decl.uses.as_deref().unwrap_or_default()),
                 _ => None,
             };
-            self.adts.push(AdtSrc { id, name, vis: item.vis, generics, derives, variants, refinement, uses });
+            let module = self.module;
+            self.adts.push(AdtSrc { id, name, vis: item.vis, module, generics, derives, variants, refinement, uses });
             self.adt_vis.insert(id, item.vis);
+            self.adt_home.insert(id, (module, uses.is_some()));
             // A rejected name is reported once. Its uses, and what it collides with, are not.
             let cased = self.pascal_case(name, "type");
-            if !cased || prelude_type(text) {
+            if !cased || (prelude_type(text) && !self.in_std()) {
                 if cased {
                     let message = format!("this {what} would shadow the prelude name `{text}` (H4)");
                     self.error(codes::SHADOWING, name.span, message);
@@ -1704,12 +1857,28 @@ impl Checker<'_> {
             } else {
                 self.adt_names.insert(name.sym, id);
             }
-            if m.impls.contains(&name.sym) {
+            if m.modules[self.module].impls.contains(&name.sym) {
                 let def = self.p.decls.adt_mut(id);
                 def.unknown_interfaces = true;
                 def.unknown_methods = true;
             }
         }
+    }
+
+    /// Declares a record of the standard library that has no braces, whose values the
+    /// toolchain builds, as the type the native table binds it to (OPEN_QUESTIONS P5).
+    fn native_type(&mut self, decl: &RecordDecl, vis: Visibility) {
+        let m = self.m;
+        let (module, text) = (&m.modules[self.module].name, m.text(decl.name.sym));
+        let Some(Native::Type(id)) = native::native(module, text, "") else {
+            panic!("`{module}.{text}` is declared without braces, but the native table has no type for it");
+        };
+        let def = self.p.decls.adt(id);
+        assert_eq!(def.unique, decl.unique, "`{text}` is declared unlike the type the toolchain builds");
+        assert_eq!(def.params, decl.generics.len(), "`{text}` is declared unlike the type the toolchain builds");
+        self.adt_names.insert(decl.name.sym, id);
+        self.adt_vis.insert(id, vis);
+        self.adt_home.insert(id, (self.module, decl.opaque));
     }
 
     /// Declares an alias, whose type is resolved once every type has a name. A rejected name
@@ -1743,13 +1912,14 @@ impl Checker<'_> {
         let m = self.m;
         for item in &m.items {
             let ItemKind::Alias(decl) = &item.kind else { continue };
+            self.enter(item.module);
             if self.poisoned.contains(&decl.name.sym) {
                 continue;
             }
             let ty = self.alias_type(decl.name.sym);
             self.exposes(decl.name, item.vis, &ty, decl.target);
             // A rejected `impl` block for the alias was for the type it names.
-            if m.impls.contains(&decl.name.sym)
+            if m.modules[self.module].impls.contains(&decl.name.sym)
                 && let Some(key) = ImplKey::of(&ty)
             {
                 self.p.decls.mark_unknown(key);
@@ -1918,6 +2088,7 @@ impl Checker<'_> {
     fn adt_generics(&mut self) {
         let m = self.m;
         for k in 0..self.adts.len() {
+            self.enter(self.adts[k].module);
             let (name, generics) = (self.adts[k].name, self.adts[k].generics);
             let mut seen: Vec<Symbol> = Vec::new();
             let mut rejected = false;
@@ -1952,6 +2123,7 @@ impl Checker<'_> {
     fn adt_fields(&mut self) {
         let m = self.m;
         for k in 0..self.adts.len() {
+            self.enter(self.adts[k].module);
             let (id, name, vis) = (self.adts[k].id, self.adts[k].name, self.adts[k].vis);
             let generics = self.adts[k].generics;
             self.generic_scope = generics.iter().enumerate().map(|(i, g)| (g.name.sym, Some(i as u32))).collect();
@@ -2004,6 +2176,7 @@ impl Checker<'_> {
         let m = self.m;
         for item in &m.items {
             let ItemKind::Impl(decl) = &item.kind else { continue };
+            self.enter(item.module);
             let (Some(iface), TypeExprKind::Named(target)) = (decl.iface, &m.types[decl.target].kind) else {
                 continue;
             };
@@ -2035,6 +2208,7 @@ impl Checker<'_> {
             if !self.p.decls.adt(id).cap {
                 continue;
             }
+            self.enter(self.adts[k].module);
             let Some((_, decls)) = self.adts[k].variants.first().copied() else { continue };
             for decl in decls {
                 let text = m.text(decl.name.sym);
@@ -2058,6 +2232,7 @@ impl Checker<'_> {
         for k in 0..self.adts.len() {
             let (id, name) = (self.adts[k].id, self.adts[k].name);
             let Some(declared) = self.p.decls.adt(id).uses.clone() else { continue };
+            self.enter(self.adts[k].module);
             let Some((_, decls)) = self.adts[k].variants.first().copied() else { continue };
             let fields: Vec<(Box<str>, Ty)> =
                 self.p.decls.adt(id).variant().fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
@@ -2261,17 +2436,18 @@ impl Checker<'_> {
         let m = self.m;
         for item in &m.items {
             let ItemKind::Interface(decl) = &item.kind else { continue };
+            self.enter(item.module);
             let text = m.text(decl.name.sym);
             let cap = decl.cap.as_ref().map(|perms| self.cap_def(decl.name, perms));
             let def = IfaceDef { name: text.into(), cap, methods: Vec::new(), incomplete: decl.recovered };
             let id = self.p.decls.push_iface(def);
-            self.ifaces.push(IfaceSrc { id, decl, vis: item.vis });
+            self.ifaces.push(IfaceSrc { id, decl, vis: item.vis, module: self.module });
             if decl.cap.is_some() {
                 self.cap_decls.insert(decl.name.sym);
                 self.cap_vis.insert(id, item.vis);
             }
             let cased = self.pascal_case(decl.name, "interface");
-            if !cased || prelude_type(text) {
+            if !cased || (prelude_type(text) && !self.in_std()) {
                 if cased {
                     let message = format!("this interface would shadow the prelude name `{text}` (H4)");
                     self.error(codes::SHADOWING, decl.name.span, message);
@@ -2352,18 +2528,21 @@ impl Checker<'_> {
     /// names, as `adt_names` marks the module's.
     fn unknown_impl_targets(&mut self) {
         let m = self.m;
-        if m.tuple_impls {
-            self.p.decls.poison_tuples();
-        }
-        for &sym in &m.impls {
-            if !self.adt_names.contains_key(&sym) {
-                self.unknown_target(sym);
+        for (id, module) in m.modules.iter().enumerate() {
+            self.enter(id);
+            if module.tuple_impls {
+                self.p.decls.poison_tuples();
             }
-        }
-        for &sym in &m.everywhere {
-            let iface = self.iface_names.get(&sym).copied().or_else(|| IfaceId::prelude(m.text(sym)));
-            if let Some(iface) = iface {
-                self.p.decls.mark_everywhere(iface);
+            for &sym in &module.impls {
+                if !self.adt_names.contains_key(&sym) {
+                    self.unknown_target(sym);
+                }
+            }
+            for &sym in &module.everywhere {
+                let iface = self.iface_names.get(&sym).copied().or_else(|| IfaceId::prelude(m.text(sym)));
+                if let Some(iface) = iface {
+                    self.p.decls.mark_everywhere(iface);
+                }
             }
         }
     }
@@ -2397,7 +2576,8 @@ impl Checker<'_> {
         self.self_ty = Some(Ty::Param(0));
         self.param_names = vec!["Self".into()];
         for k in 0..self.ifaces.len() {
-            let IfaceSrc { id, decl, vis } = self.ifaces[k];
+            let IfaceSrc { id, decl, vis, module } = self.ifaces[k];
+            self.enter(module);
             self.cap_self = decl.cap.is_some();
             let mut methods: Vec<IfaceMethod> = Vec::new();
             let mut incomplete = decl.recovered;
@@ -2418,7 +2598,7 @@ impl Checker<'_> {
                 // interface the parser rejected may not have been meant as a capability.
                 let only = cased && decl.cap.is_some() && text == "only";
                 if only {
-                    if !m.poisoned.contains(&decl.name.sym) {
+                    if !m.modules[self.module].poisoned.contains(&decl.name.sym) {
                         let message = "every capability has a method `only`, which narrows its permissions, so an operation can't be named `only`";
                         self.error(codes::DUPLICATE_NAME, method.name.span, message);
                     }
@@ -2427,7 +2607,7 @@ impl Checker<'_> {
                 // So does every capability interface have `X.of`, which makes a capability of
                 // a `cap record` (REFERENCE §9.6).
                 if cased && decl.cap.is_some() && text == "of" {
-                    if !m.poisoned.contains(&decl.name.sym) {
+                    if !m.modules[self.module].poisoned.contains(&decl.name.sym) {
                         let message = "every capability interface has `of`, as in `Log.of(r)`, which makes a capability of a `cap record`, so an operation can't be named `of`";
                         self.error(codes::DUPLICATE_NAME, method.name.span, message);
                     }
@@ -2518,6 +2698,7 @@ impl Checker<'_> {
         // the wrapped type may be declared later.
         let mut operators = Vec::new();
         for k in 0..self.adts.len() {
+            self.enter(self.adts[k].module);
             let (id, derives_of) = (self.adts[k].id, self.adts[k].derives);
             // A `cap record`'s `derives` is reported by the parser. It may have named any
             // interface, so the record is taken to have each, and any method (§15.1).
@@ -2635,6 +2816,7 @@ impl Checker<'_> {
     fn derived_fields(&mut self) {
         let m = self.m;
         for k in 0..self.adts.len() {
+            self.enter(self.adts[k].module);
             let adt = &self.adts[k];
             let def = self.p.decls.adt(adt.id);
             let mut missing = Vec::new();
@@ -2670,6 +2852,7 @@ impl Checker<'_> {
     fn adt_predicates(&mut self) {
         let m = self.m;
         for k in 0..self.adts.len() {
+            self.enter(self.adts[k].module);
             let id = self.adts[k].id;
             // A generic type's refinements see its type parameters, which implement nothing.
             let generics = self.adts[k].generics;
@@ -2748,6 +2931,7 @@ impl Checker<'_> {
         let m = self.m;
         for (index, item) in m.items.iter().enumerate() {
             let ItemKind::Fn(decl) = &item.kind else { continue };
+            self.enter(item.module);
             let name = m.text(decl.name.sym);
             // A wrongly cased name is reported once, not again for what it collides with.
             let cased = self.snake_case(decl.name, "function");
@@ -2769,7 +2953,7 @@ impl Checker<'_> {
                 self.main_lost |= name == "main";
             } else {
                 self.fn_names.insert(decl.name.sym, id);
-                if name == "main" {
+                if name == "main" && !self.in_std() {
                     self.p.main = Some(id);
                 }
             }
@@ -3033,6 +3217,7 @@ impl Checker<'_> {
         let m = self.m;
         for (index, item) in m.items.iter().enumerate() {
             if let ItemKind::Impl(decl) = &item.kind {
+                self.enter(item.module);
                 self.impl_block(index, item.span, decl);
             }
         }
@@ -3042,6 +3227,7 @@ impl Checker<'_> {
     /// implements it (REFERENCE §10).
     fn abandon_impls(&mut self) {
         for k in 0..self.adts.len() {
+            self.enter(self.adts[k].module);
             let (id, name) = (self.adts[k].id, self.adts[k].name);
             let def = self.p.decls.adt(id);
             if !def.resource_base || def.unknown_interfaces || self.poisoned.contains(&name.sym) {
@@ -3138,11 +3324,14 @@ impl Checker<'_> {
             self.unknown_ty(&target);
             return;
         }
-        let own = matches!(&target, Ty::Adt(id, _) if self.adts.iter().any(|adt| adt.id == *id));
+        // The standard library also gives methods to the types the toolchain provides, such as
+        // `Text` and `List` (OPEN_QUESTIONS P5).
+        let own = self.in_std()
+            || matches!(&target, Ty::Adt(id, _) if self.adt_home.get(id).is_some_and(|&(home, _)| home == self.module));
         let target_text = self.show(&target).to_string();
         let key = ImplKey::of(&target);
         let Some(iface_name) = decl.iface else {
-            let (Some(ImplKey::Adt(adt)), true) = (key, own) else {
+            let (Some(key), true) = (key, own) else {
                 let message = format!(
                     "`{target_text}` isn't declared in this module, so its methods can't be declared here; declare an interface for them instead (§4.9)"
                 );
@@ -3151,25 +3340,36 @@ impl Checker<'_> {
                 self.unknown_ty(&target);
                 return;
             };
+            let adt = match key {
+                ImplKey::Adt(adt) => Some(adt),
+                _ => None,
+            };
             // A method that didn't parse may have any name, so calls of unknown methods on the
             // type aren't reported (REFERENCE §15.1).
-            if decl.recovered {
+            if decl.recovered
+                && let Some(adt) = adt
+            {
                 self.p.decls.adt_mut(adt).unknown_methods = true;
             }
-            let adt_vis = self.adts.iter().find(|src| src.id == adt).map_or(Visibility::Pub, |src| src.vis);
+            let adt_vis = adt.and_then(|adt| self.adt_vis.get(&adt).copied()).unwrap_or(Visibility::Pub);
             for (i, method) in decl.methods.iter().enumerate() {
                 // A method is visible no further than its type (§3).
                 let vis = if reach(method.vis) > reach(adt_vis) { adt_vis } else { method.vis };
                 let f = self.method_fn(item, i, method, &target, vis);
                 let name = method.decl.name;
                 let text = m.text(name.sym);
+                if method.decl.body.is_none() {
+                    self.native_fn_decl(f, decl.target, text);
+                }
                 // A wrongly cased name stands for the one it misspells, which calls may use.
-                if !is_snake(text) {
+                if !is_snake(text)
+                    && let Some(adt) = adt
+                {
                     self.p.decls.adt_mut(adt).unknown_methods = true;
                 }
-                let entries = self.inherent.entry(adt).or_default();
+                let entries = self.inherent.entry(key).or_default();
                 let duplicate = entries.iter().any(|entry| entry.name == name.sym);
-                entries.push(Inherent { name: name.sym, f, rejected: duplicate });
+                entries.push(Inherent { name: name.sym, f, vis, rejected: duplicate });
                 if duplicate && is_snake(text) {
                     let message = format!("`{target_text}` already has a method `{text}`");
                     self.error(codes::DUPLICATE_NAME, name.span, message);
@@ -3185,7 +3385,7 @@ impl Checker<'_> {
             }
         };
         let iface_text = self.iface_name(iface).to_string();
-        if !own && !self.ifaces.iter().any(|src| src.id == iface) {
+        if !own && !self.ifaces.iter().any(|src| src.id == iface && src.module == self.module) {
             let message = format!(
                 "this module declares neither `{iface_text}` nor `{target_text}`, so it can't implement one for the other (§4.9)"
             );
@@ -3247,9 +3447,14 @@ impl Checker<'_> {
                 && !self.p.decls.is_resource(&target)
             {
                 self.rejected_abandon_for.push((target.clone(), self.impl_generics.len()));
-                let entries = self.inherent.entry(adt).or_default();
+                let entries = self.inherent.entry(ImplKey::Adt(adt)).or_default();
                 for (i, method) in decl.methods.iter().enumerate() {
-                    entries.push(Inherent { name: method.decl.name.sym, f: first + i, rejected: true });
+                    entries.push(Inherent {
+                        name: method.decl.name.sym,
+                        f: first + i,
+                        vis: Visibility::Pub,
+                        rejected: true,
+                    });
                 }
             }
             return;
@@ -3315,7 +3520,7 @@ impl Checker<'_> {
                 }
                 Some(j) => {
                     named[j] = true;
-                    if builtin_method(&target, text).is_some() {
+                    if self.native_fn(&target, name.sym).is_some() {
                         let message = format!(
                             "`{text}` is also a built-in method of `{target_text}`, so calls of it would be ambiguous (§3)"
                         );
@@ -3391,7 +3596,9 @@ impl Checker<'_> {
     /// Whether this slice lets a module implement `iface` by hand, reported when it doesn't.
     /// The bodies of a later phase's implementation wait for it.
     fn implementable(&mut self, iface: IfaceId, name: Ident) -> Result<(), Rejected> {
-        if self.ifaces.iter().any(|src| src.id == iface) || self.p.decls.iface(iface).cap.is_some() {
+        // The standard library implements its own interfaces as it likes.
+        let declared = self.ifaces.iter().any(|src| src.id == iface && src.module == self.module);
+        if declared || self.in_std() || self.p.decls.iface(iface).cap.is_some() {
             return Ok(());
         }
         let later = Rejected { unknown: true, bodies: false };
@@ -3507,16 +3714,24 @@ impl Checker<'_> {
     /// may mean either, so they aren't reported (§15.1).
     fn collisions(&mut self) {
         let m = self.m;
-        let mut adts: Vec<AdtId> = self.inherent.keys().copied().collect();
+        // The standard library's methods of the toolchain's types are checked against an
+        // interface where a program implements it for one (see `impl_members`).
+        let mut adts: Vec<AdtId> = (self.inherent.keys())
+            .filter_map(|key| match key {
+                ImplKey::Adt(adt) => Some(*adt),
+                _ => None,
+            })
+            .collect();
         adts.sort_by_key(|id| id.index());
         for adt in adts {
+            let key = ImplKey::Adt(adt);
             let mut ifaces: Vec<IfaceId> = self.p.decls.adt(adt).derives.clone();
-            ifaces.extend(self.p.decls.impls_for(ImplKey::Adt(adt)));
+            ifaces.extend(self.p.decls.impls_for(key));
             ifaces.sort_by_key(|iface| iface.index());
-            for k in 0..self.inherent[&adt].len() {
-                let entry = &self.inherent[&adt][k];
+            for k in 0..self.inherent[&key].len() {
+                let entry = &self.inherent[&key][k];
                 let text = m.text(entry.name);
-                if entry.rejected {
+                if entry.rejected || self.natives.contains_key(&entry.f) {
                     continue;
                 }
                 let Some(&iface) = ifaces.iter().find(|&&iface| self.p.decls.iface(iface).method(text).is_some())
@@ -3530,7 +3745,7 @@ impl Checker<'_> {
                     self.p.decls.adt(adt).name
                 );
                 self.error(codes::AMBIGUOUS_METHOD, span, message);
-                if let Some(entries) = self.inherent.get_mut(&adt) {
+                if let Some(entries) = self.inherent.get_mut(&key) {
                     entries[k].rejected = true;
                 }
             }
@@ -3549,8 +3764,9 @@ impl Checker<'_> {
             }
             return;
         };
+        let item = &self.m.items[self.p.fns[id].item];
+        self.enter(item.module);
         let info = &self.p.fns[id];
-        let item = &self.m.items[info.item];
         let span = item.name().map_or(item.span, |n| n.span);
         // The runtime gives `main` no type arguments.
         let generic = !info.generics.is_empty();
@@ -3628,9 +3844,13 @@ impl Checker<'_> {
                 let text = m.text(name.sym);
                 // A rejected declaration's type arguments mean the same whichever one it was.
                 // A later phase's item, such as a capability record, or a rejected capability
-                // interface takes permissions, which aren't types, as in `Logger[write]`.
+                // interface takes permissions, which aren't types, as in `Logger[write]`, and so
+                // may a rejected import, as in `Dir[read]`.
                 if self.poisoned.contains(&name.sym) {
-                    if !m.planned_names.contains(&name.sym) && !self.cap_decls.contains(&name.sym) {
+                    let perms = m.modules[self.module].planned_names.contains(&name.sym)
+                        || self.cap_decls.contains(&name.sym)
+                        || self.imports.contains_key(&name.sym);
+                    if !perms {
                         for &arg in args.as_deref().unwrap_or_default() {
                             self.resolve_type(arg);
                         }
@@ -3838,6 +4058,7 @@ impl Checker<'_> {
                 self.error(codes::UNKNOWN_TYPE, name.span, format!("`{text}` is a module, not a type"));
                 return Ty::Error;
             }
+            Some(Import::Pending) => unreachable!("imports are resolved before any type"),
             None => {}
         }
         // A bare capability interface has every permission it declares (OPEN_QUESTIONS Q6).
@@ -3915,6 +4136,7 @@ impl Checker<'_> {
 
     fn body(&mut self, id: FnId) {
         let m = self.m;
+        self.enter(m.items[self.p.fns[id].item].module);
         let info = &self.p.fns[id];
         let decl = self.p.decl(m, id);
         let Some(body) = &decl.body else { return };
@@ -4021,6 +4243,10 @@ impl Checker<'_> {
         let m = self.m;
         let mut names: HashSet<&str> = HashSet::new();
         for (index, item) in m.items.iter().enumerate() {
+            if m.modules[item.module].std {
+                continue;
+            }
+            self.enter(item.module);
             if let ItemKind::Test(decl) = &item.kind {
                 // A second test of a name is checked, but its output would be ambiguous.
                 if !names.insert(&decl.name) {
@@ -6179,6 +6405,10 @@ impl Checker<'_> {
                 self.rejected_args(args);
                 return Ty::Error;
             }
+            if self.sealed(id, name.span, "build one") {
+                self.rejected_args(args);
+                return Ty::Error;
+            }
             return self.construct(callee, id, args, span, expected);
         }
         let callee_span = self.span(callee);
@@ -6530,7 +6760,8 @@ impl Checker<'_> {
             return None;
         }
         let id = self.adt_named(type_name.sym)?;
-        if let Some(entry) = self.inherent.get(&id).and_then(|entries| entries.iter().find(|entry| entry.name == name))
+        if let Some(entry) =
+            self.inherent.get(&ImplKey::Adt(id)).and_then(|entries| entries.iter().find(|entry| entry.name == name))
         {
             return Some((id, self.p.fns[entry.f].receiver.is_some()));
         }
@@ -6549,13 +6780,12 @@ impl Checker<'_> {
     /// interface it implements. Nothing is reported.
     fn has_method(&self, ty: &Ty, name: Symbol) -> bool {
         let text = self.m.text(name);
-        if let Ty::Adt(id, _) = ty
-            && self.inherent.get(id).is_some_and(|entries| entries.iter().any(|entry| entry.name == name))
+        if let Some(key) = ImplKey::of(ty)
+            && self.inherent.get(&key).is_some_and(|entries| entries.iter().any(|entry| entry.name == name))
         {
             return true;
         }
-        builtin_method(ty, text).is_some()
-            || self.p.decls.ifaces().any(|(iface, def)| def.method(text).is_some() && self.implements(ty, iface))
+        self.p.decls.ifaces().any(|(iface, def)| def.method(text).is_some() && self.implements(ty, iface))
     }
 
     /// A call of a function value, which takes no labels and no type arguments, and takes
@@ -6947,7 +7177,7 @@ impl Checker<'_> {
         let receiver_ty = self.infer(receiver);
         let open = self.vars.resolve(&receiver_ty);
         let receiver_ty = match open {
-            Ty::Adt(AdtId::LIST | AdtId::MAP | AdtId::POOL, _) if builtin_method(&open, name).is_some() => open,
+            Ty::Adt(AdtId::LIST | AdtId::MAP | AdtId::POOL, _) if self.native_fn(&open, method.sym).is_some() => open,
             _ => self.force_receiver(&receiver_ty),
         };
         if let Ty::Cap(cap) = &receiver_ty {
@@ -6963,6 +7193,10 @@ impl Checker<'_> {
             && !self.p.decls.adt(*id).tuple
             && !self.p.decls.adt(*id).distinct
         {
+            if self.sealed(*id, method.span, "replace its fields with `with`") {
+                self.rejected_args(args);
+                return Ty::Error;
+            }
             self.no_targs(targs, name, span);
             self.p.res.insert(e, Res::With);
             // The new record takes the fields it doesn't replace, so a unique one is consumed
@@ -6989,17 +7223,20 @@ impl Checker<'_> {
             self.rejected_args(args);
             return Ty::Error;
         }
-        if let Some(sig) = builtin_method(&receiver_ty, name) {
+        if let Some(sig) = self.native_method(&receiver_ty, method.sym) {
+            if self.private_method(&receiver_ty, method) {
+                self.rejected_args(args);
+                return Ty::Error;
+            }
             self.no_targs(targs, name, span);
             self.p.res.insert(e, Res::Method(sig.builtin));
             if sig.builtin.changes_receiver() {
                 self.changes(receiver, name);
             }
-            if let Some((ty, iface, param)) = sig.needs {
-                self.needs(ty, iface, name, param, span);
+            for (ty, iface, param) in sig.needs {
+                self.needs(ty, iface, name, &param, span);
             }
-            let modes = if sig.takes { Modes::Take } else { Modes::Borrow };
-            self.generic_args(name, &sig.params, &[], args, span, modes);
+            self.generic_args(name, &sig.params, &[], args, span, Modes::Each(&sig.modes));
             if let Some(err) = sig.fails {
                 self.fallible_call(e, name, &err, span, chain);
             }
@@ -7365,10 +7602,11 @@ impl Checker<'_> {
         let mut found: Vec<Callee> = Vec::new();
         // A method of the type's whose `impl` target the type doesn't match.
         let mut elsewhere: Option<FnId> = None;
-        if let Ty::Adt(id, _) = ty
-            && let Some(entries) = self.inherent.get(id)
+        if let Some(key) = ImplKey::of(ty)
+            && let Some(entries) = self.inherent.get(&key)
         {
-            let mut named = entries.iter().filter(|e| e.name == method.sym);
+            // An operation the toolchain implements is called through `native_method`.
+            let mut named = entries.iter().filter(|e| e.name == method.sym && !self.natives.contains_key(&e.f));
             // A rejected declaration of the name, a duplicate or one named like an interface's
             // method, may be the one the call means, and it has been reported (§15.1).
             if named.clone().any(|e| e.rejected) {
@@ -7441,6 +7679,7 @@ impl Checker<'_> {
                 self.error(codes::UNKNOWN_MEMBER, method.span, message);
                 None
             }
+            [Callee::Fn(_)] if self.private_method(ty, method) => None,
             [callee] => Some(*callee),
             _ if unknown => None,
             _ => {
@@ -7500,8 +7739,12 @@ impl Checker<'_> {
         if self.p.decls.adt(adt).is_native() {
             return self.native_call(e, adt, method, targs, args, span, expected);
         }
+        if self.private_method(&Ty::adt(adt), method) {
+            self.rejected_args(args);
+            return Ty::Error;
+        }
         let def = self.p.decls.adt(adt);
-        let entries = self.inherent.get(&adt).map_or(&[][..], Vec::as_slice);
+        let entries = self.inherent.get(&ImplKey::Adt(adt)).map_or(&[][..], Vec::as_slice);
         // A rejected declaration of the name may be the one the call means, and it has been
         // reported (§15.1).
         let rejected = entries.iter().any(|entry| entry.name == method.sym && entry.rejected);
@@ -7547,7 +7790,8 @@ impl Checker<'_> {
     ) -> Ty {
         let name = self.m.text(method.sym);
         let ty = self.p.decls.adt(adt).name.clone();
-        if (adt, name) != (AdtId::POOL, "new") {
+        let declared = self.native_fn(&Ty::adt(adt), method.sym).map(|f| self.natives[&f]);
+        if declared != Some(Builtin::PoolNew) {
             let message = match adt {
                 AdtId::POOL => format!("`{ty}` has no associated function `{name}`; `{ty}.new()` builds an empty pool"),
                 _ => format!("`{ty}` has no associated function `{name}`; a pool's `insert` makes handles"),
@@ -7565,6 +7809,72 @@ impl Checker<'_> {
             _ => self.vars.fresh(Kind::Any, Origin::Variant { adt: AdtId::POOL, span }),
         };
         Ty::applied(AdtId::POOL, vec![element])
+    }
+
+    /// Binds `f`, a method of the standard library declared without a body in an `impl` block
+    /// for `target`, to the operation the native table names (OPEN_QUESTIONS P5).
+    fn native_fn_decl(&mut self, f: FnId, target: TypeId, name: &str) {
+        let m = self.m;
+        let module = &m.modules[self.module].name;
+        let ty = match &m.types[target].kind {
+            TypeExprKind::Named(ty) | TypeExprKind::Applied { name: ty, .. } => m.text(ty.sym),
+            _ => "",
+        };
+        match native::native(module, ty, name) {
+            Some(Native::Op(builtin)) => {
+                self.natives.insert(f, builtin);
+            }
+            _ => panic!("`{ty}.{name}` of `{module}` has no body, but the native table has no operation for it"),
+        }
+    }
+
+    /// Whether `ty`'s own method or associated function `method` is private to another module,
+    /// which is reported (REFERENCE §3).
+    fn private_method(&mut self, ty: &Ty, method: Ident) -> bool {
+        let Some(entries) = ImplKey::of(ty).and_then(|key| self.inherent.get(&key)) else { return false };
+        let Some(entry) = entries.iter().find(|entry| entry.name == method.sym) else { return false };
+        let home = self.m.items[self.p.fns[entry.f].item].module;
+        if self.visible(home, entry.vis) {
+            return false;
+        }
+        let (name, module) = (self.m.text(method.sym), &self.m.modules[home].name);
+        let message = format!("`{}.{name}` is private to `{module}`, which doesn't export it (§3)", self.show(ty));
+        self.error(codes::PRIVATE_ITEM, method.span, message);
+        true
+    }
+
+    /// The method `name` of `ty` that the standard library declares and the toolchain
+    /// implements, if `ty` has one.
+    fn native_fn(&self, ty: &Ty, name: Symbol) -> Option<FnId> {
+        let entries = self.inherent.get(&ImplKey::of(ty)?)?;
+        let f = entries.iter().find(|entry| entry.name == name && !entry.rejected)?.f;
+        self.natives.contains_key(&f).then_some(f)
+    }
+
+    /// A call of the method `name` that the toolchain implements on a receiver of type `ty`,
+    /// with the signature the standard library declares, for `ty`'s type arguments.
+    fn native_method(&self, ty: &Ty, name: Symbol) -> Option<BuiltinSig> {
+        let f = self.native_fn(ty, name)?;
+        let info = &self.p.fns[f];
+        info.receiver.as_ref()?;
+        let args = ty.parts().map_or(&[][..], |args| &args[..]);
+        let subst = |t: &Ty| if args.is_empty() { t.clone() } else { t.subst(args) };
+        let mut needs = Vec::new();
+        for (i, generic) in info.generics[..info.impl_params].iter().enumerate() {
+            // A map's key type implements `Eq` and `Hash` already, which its type requires.
+            if matches!(ty, Ty::Adt(AdtId::MAP, _)) && i == 0 {
+                continue;
+            }
+            needs.extend(generic.bounds.iter().map(|&iface| (args[i].clone(), iface, generic.name.clone())));
+        }
+        Some(BuiltinSig {
+            builtin: self.natives[&f],
+            params: info.params.iter().map(|p| (self.m.text(p.name).into(), subst(&p.ty))).collect(),
+            modes: info.params.iter().map(|p| p.mode).collect(),
+            ret: subst(&info.ret),
+            fails: info.fails.as_ref().map(subst),
+            needs,
+        })
     }
 
     /// The interface that `sym` names: the module's, the prelude's, or a capability interface
@@ -7768,6 +8078,13 @@ impl Checker<'_> {
 
     fn field(&mut self, e: ExprId, base_ty: &Ty, name: Ident) -> Ty {
         let text = self.m.text(name.sym);
+        // Whether or not it has a field of that name, as either would tell (§3).
+        if let Ty::Adt(id, _) = base_ty
+            && !self.has_method(base_ty, name.sym)
+            && self.sealed(*id, name.span, "read its fields")
+        {
+            return Ty::Error;
+        }
         if let Ty::Adt(id, args) = base_ty
             && let Some((i, field)) = self.p.decls.adt(*id).field(text)
         {
@@ -7808,6 +8125,20 @@ impl Checker<'_> {
 
     /// Reports a `System` that is `how`: built, copied with `with` or matched by a pattern.
     /// The runtime gives `main` the only one (REFERENCE §9.1).
+    /// Whether `id` is another module's opaque record, which only its own module builds and
+    /// reads (REFERENCE §3). If it is, reports the use at `span`, which would `what`.
+    fn sealed(&mut self, id: AdtId, span: Span, what: &str) -> bool {
+        let Some(&(home, true)) = self.adt_home.get(&id) else { return false };
+        // A native record such as `Pool` has no fields or constructor to hide.
+        if home == self.module || self.p.decls.adt(id).is_native() {
+            return false;
+        }
+        let (name, module) = (self.p.decls.name(id), &self.m.modules[home].name);
+        let message = format!("`{name}` is an opaque record of `{module}`, so another module can't {what} (§3)");
+        self.error(codes::PRIVATE_ITEM, span, message);
+        true
+    }
+
     fn system_constructed(&mut self, span: Span, how: &str) {
         let message = format!(
             "a `System` can't be {how}; the runtime gives `main` the only one, and its fields are read by name, as in `sys.stdout` (§9.1)"
@@ -9002,6 +9333,9 @@ impl Checker<'_> {
                 return self.unknown_parts(fields);
             }
         }
+        if self.sealed(id, span, "match its fields in a pattern") {
+            return self.unknown_parts(fields);
+        }
         let def = self.p.decls.adt(id);
         let found = match def.kind {
             AdtKind::Enum => def.variant_named(text).map(|(v, _)| v),
@@ -9292,7 +9626,7 @@ fn without_bad_keys_in(
 /// The parameter each argument of a call whose labels are wrong is checked against: the one
 /// its label names, or its own or the first that no argument names when its label names
 /// none. An argument whose label names a parameter an earlier one has gets none.
-fn label_order<S: AsRef<str>>(m: &Module, args: &[Arg], params: &[(S, Ty)]) -> Vec<Option<usize>> {
+fn label_order<S: AsRef<str>>(m: &Ast, args: &[Arg], params: &[(S, Ty)]) -> Vec<Option<usize>> {
     let named: Vec<Option<usize>> = args
         .iter()
         .map(|arg| arg.label.and_then(|label| params.iter().position(|(param, _)| param.as_ref() == m.text(label.sym))))
@@ -9451,104 +9785,17 @@ fn arithmetic_defined(op: BinOp, ty: &Ty) -> bool {
     }
 }
 
-/// A built-in method's signature (STD.md).
+/// A call of an operation the toolchain implements, as the standard library declares it,
+/// for a receiver of a given type (see [`Checker::native_method`]).
 struct BuiltinSig {
     builtin: Builtin,
-    params: Vec<(&'static str, Ty)>,
+    params: Vec<(Box<str>, Ty)>,
+    modes: Vec<ParamMode>,
     ret: Ty,
     fails: Option<Ty>,
-    /// It takes its arguments (`take`), so passing a borrowed one copies it (REFERENCE §4.8).
-    takes: bool,
-    /// A type argument of the receiver's type that its `impl` block constrains, the
-    /// interface it must implement, and the type parameter's name in STD.md.
-    needs: Option<(Ty, IfaceId, &'static str)>,
-}
-
-/// The method `name` that values of `ty` have built in (STD.md).
-fn builtin_method(ty: &Ty, name: &str) -> Option<BuiltinSig> {
-    let sig = |builtin, params, ret| BuiltinSig { builtin, params, ret, fails: None, takes: false, needs: None };
-    Some(match (ty, name) {
-        (Ty::Text, "byte_len") => sig(Builtin::ByteLen, vec![], Ty::INT),
-        (Ty::Text, "is_empty") => sig(Builtin::IsEmpty, vec![], Ty::Bool),
-        (Ty::Text, "trim") => sig(Builtin::Trim, vec![], Ty::Text),
-        (Ty::Text, "split_once") => {
-            let pair = Ty::applied(AdtId::PAIR, vec![Ty::Text, Ty::Text]);
-            sig(Builtin::SplitOnce, vec![("sep", Ty::Text)], Ty::option(pair))
-        }
-        (Ty::Text, "starts_with") => sig(Builtin::StartsWith, vec![("prefix", Ty::Text)], Ty::Bool),
-        (Ty::Text, "strip_prefix") => sig(Builtin::StripPrefix, vec![("prefix", Ty::Text)], Ty::option(Ty::Text)),
-        (Ty::Text, "lines") => sig(Builtin::Lines, vec![], Ty::list(Ty::Text)),
-        (Ty::Float(_), "to_int") => BuiltinSig {
-            fails: Some(Ty::adt(AdtId::CONVERSION_ERROR)),
-            ..sig(Builtin::ToInt, vec![("rounding", Ty::adt(AdtId::ROUNDING))], Ty::INT)
-        },
-        (Ty::Adt(AdtId::LIST, args), _) => {
-            let t = args[0].clone();
-            match name {
-                "len" => sig(Builtin::Len, vec![], Ty::INT),
-                "is_empty" => sig(Builtin::IsEmpty, vec![], Ty::Bool),
-                "push" => BuiltinSig { takes: true, ..sig(Builtin::Push, vec![("value", t)], Ty::Unit) },
-                "pop" => sig(Builtin::Pop, vec![], Ty::option(t)),
-                "get" => BuiltinSig {
-                    needs: Some((t.clone(), IfaceId::COPY, "T")),
-                    ..sig(Builtin::Get, vec![("index", Ty::INT)], Ty::option(t))
-                },
-                "enumerate" => {
-                    let pair = Ty::applied(AdtId::PAIR, vec![Ty::INT, t.clone()]);
-                    BuiltinSig {
-                        needs: Some((t, IfaceId::COPY, "T")),
-                        ..sig(Builtin::Enumerate, vec![], Ty::list(pair))
-                    }
-                }
-                "contains" => BuiltinSig {
-                    needs: Some((t.clone(), IfaceId::EQ, "T")),
-                    ..sig(Builtin::Contains, vec![("value", t)], Ty::Bool)
-                },
-                _ => return None,
-            }
-        }
-        (Ty::Adt(AdtId::MAP, args), _) => {
-            let (k, v) = (args[0].clone(), args[1].clone());
-            match name {
-                "len" => sig(Builtin::Len, vec![], Ty::INT),
-                "is_empty" => sig(Builtin::IsEmpty, vec![], Ty::Bool),
-                "contains_key" => sig(Builtin::ContainsKey, vec![("key", k)], Ty::Bool),
-                "set" => BuiltinSig {
-                    takes: true,
-                    ..sig(Builtin::Set, vec![("key", k), ("value", v.clone())], Ty::option(v))
-                },
-                "remove" => sig(Builtin::Remove, vec![("key", k)], Ty::option(v)),
-                "get" => BuiltinSig {
-                    needs: Some((v.clone(), IfaceId::COPY, "V")),
-                    ..sig(Builtin::Get, vec![("key", k)], Ty::option(v))
-                },
-                _ => return None,
-            }
-        }
-        (Ty::Adt(AdtId::POOL, args), _) => {
-            let t = args[0].clone();
-            let handle = Ty::applied(AdtId::HANDLE, vec![t.clone()]);
-            match name {
-                "len" => sig(Builtin::Len, vec![], Ty::INT),
-                "insert" => BuiltinSig { takes: true, ..sig(Builtin::Insert, vec![("value", t)], handle) },
-                "remove" => sig(Builtin::Remove, vec![("handle", handle)], Ty::option(t)),
-                "get" => BuiltinSig {
-                    needs: Some((t.clone(), IfaceId::COPY, "T")),
-                    ..sig(Builtin::Get, vec![("handle", handle)], Ty::option(t))
-                },
-                "duplicate" => BuiltinSig {
-                    needs: Some((t.clone(), IfaceId::COPY, "T")),
-                    ..sig(Builtin::Duplicate, vec![], Ty::applied(AdtId::POOL, vec![t]))
-                },
-                "update" => {
-                    let change = Ty::func(vec![ParamMode::Take], vec![t.clone()], t, Ty::Never);
-                    sig(Builtin::Update, vec![("handle", handle), ("change", change)], Ty::Bool)
-                }
-                _ => return None,
-            }
-        }
-        _ => return None,
-    })
+    /// The type arguments of the receiver's type that its `impl` block constrains, each with
+    /// an interface it must implement and the type parameter's name.
+    needs: Vec<(Ty, IfaceId, Box<str>)>,
 }
 
 /// The methods of a list or map that later phases bring, with what to call them and when.
@@ -9675,6 +9922,15 @@ fn type_args(n: usize) -> String {
 
 /// A type, interface or variant name the prelude declares (REFERENCE §3). A module item or
 /// import may not reuse one (H4).
+/// `a`, `a and b`, or `a, b and c`.
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 fn prelude_type(name: &str) -> bool {
     builtin_type(name).is_some()
         || prelude_adt(name).is_some()
@@ -9809,4 +10065,49 @@ fn same_target(a: &Ty, b: &Ty) -> bool {
         }
     }
     walk(a, b, &mut Vec::new())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::sync::OnceLock;
+
+    use proviso_syntax::parse_module;
+    use proviso_syntax::source::SourceMap;
+
+    use super::*;
+
+    /// Checks the standard library's modules, then `extra` ones, then a program of `text`.
+    pub fn check(extra: &[(&str, &str)], text: &str) -> (Program, Vec<proviso_syntax::diag::Diagnostic>) {
+        let (mut sources, mut ast, mut diags) = (SourceMap::default(), Ast::default(), Diagnostics::default());
+        let user = sources.add("t.proviso", text);
+        for &(name, text) in native::STD.iter().chain(extra) {
+            let file = sources.add(name, text);
+            parse_module(&mut ast, sources.file(file), name, true, &mut diags);
+        }
+        parse_module(&mut ast, sources.file(user), "t", false, &mut diags);
+        let program = check_program(&ast, Options::default(), &mut diags);
+        (program, diags.into_vec())
+    }
+
+    /// The standard library's declarations.
+    pub fn std_decls() -> &'static Decls {
+        static DECLS: OnceLock<Decls> = OnceLock::new();
+        DECLS.get_or_init(|| check(&[], "").0.decls)
+    }
+
+    #[test]
+    fn the_standard_library_checks_cleanly() {
+        let (_, diags) = check(&[], "");
+        let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(messages.is_empty(), "{messages:#?}");
+    }
+
+    #[test]
+    fn std_methods_may_have_bodies_and_may_be_private() {
+        let extra = "impl[T] List[T] {\n    pub fn size(self) -> Int {\n        return self.len()\n    }\n\n    fn hidden(self) -> Int {\n        return 0\n    }\n}\n";
+        let text = "fn f(xs: List[Int]) -> Int {\n    return xs.size() + xs.hidden()\n}\n";
+        let (_, diags) = check(&[("std.extra", extra)], text);
+        let found: Vec<(&str, &str)> = diags.iter().map(|d| (d.code.id, d.message.as_str())).collect();
+        assert_eq!(found, [("E0213", "`List[Int].hidden` is private to `std.extra`, which doesn't export it (§3)")]);
+    }
 }

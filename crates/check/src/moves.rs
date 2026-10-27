@@ -85,7 +85,7 @@ pub(crate) struct FnBody<'a> {
 /// arm whose pattern does in [`Program::arms_out`], and what the interpreter needs to
 /// abandon resources. Returns the locals the body uses.
 pub(crate) fn check(
-    m: &Module,
+    m: &Ast,
     p: &mut Program,
     locals: &[Local],
     bounds: &[Vec<IfaceId>],
@@ -422,7 +422,7 @@ struct Held {
 }
 
 struct Walk<'a> {
-    m: &'a Module,
+    m: &'a Ast,
     p: &'a Program,
     locals: &'a [Local],
     bounds: &'a [Vec<IfaceId>],

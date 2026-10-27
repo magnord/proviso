@@ -4,11 +4,12 @@ use crate::diag::{Code, Diagnostics, codes};
 use crate::source::Span;
 use crate::token::{FPart, Keyword, Token, TokenKind, TokenValue, track};
 
-/// Lexes `src`, whose first byte is at offset `base` in its file. The result ends with
+/// Lexes `src`, whose first byte is at offset `base` in the source map. `src` is a whole
+/// file when `file` is set, rather than an f-string's interpolation. The result ends with
 /// `Eof`, and its `Newline` tokens are only the ones that end statements.
-pub fn tokenize(src: &str, base: u32, diags: &mut Diagnostics) -> Vec<Token> {
+pub fn tokenize(src: &str, base: u32, file: bool, diags: &mut Diagnostics) -> Vec<Token> {
     // A file may start with a byte order mark, which is not part of the program.
-    let pos = if base == 0 && src.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
+    let pos = if file && src.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
     let raw = Lexer { src, pos, base, tokens: Vec::new(), diags }.run();
     apply_continuations(raw)
 }
@@ -700,14 +701,14 @@ mod tests {
 
     fn kinds(src: &str) -> Vec<TokenKind> {
         let mut diags = Diagnostics::default();
-        let tokens = tokenize(src, 0, &mut diags);
+        let tokens = tokenize(src, 0, true, &mut diags);
         assert!(!diags.has_errors(), "unexpected diagnostics: {:?}", diags.into_vec());
         tokens.into_iter().map(|t| t.kind).collect()
     }
 
     fn values(src: &str) -> Vec<TokenValue> {
         let mut diags = Diagnostics::default();
-        tokenize(src, 0, &mut diags).into_iter().map(|t| t.value).collect()
+        tokenize(src, 0, true, &mut diags).into_iter().map(|t| t.value).collect()
     }
 
     #[test]
@@ -800,7 +801,7 @@ mod tests {
     #[test]
     fn backslash_at_line_end_leaves_the_text_unterminated() {
         let mut diags = Diagnostics::default();
-        let tokens = tokenize("\"abc\\\nx", 0, &mut diags);
+        let tokens = tokenize("\"abc\\\nx", 0, true, &mut diags);
         let list = diags.into_vec();
         assert_eq!(list.iter().map(|d| d.code).collect::<Vec<_>>(), [codes::UNTERMINATED_TEXT]);
         assert!(!list[0].message.contains('\n'));
@@ -815,7 +816,7 @@ mod tests {
     #[test]
     fn invalid_characters_are_reported() {
         let mut diags = Diagnostics::default();
-        tokenize("a ; b", 0, &mut diags);
+        tokenize("a ; b", 0, true, &mut diags);
         let list = diags.into_vec();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].code, codes::INVALID_CHARACTER);

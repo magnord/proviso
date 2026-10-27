@@ -152,6 +152,8 @@ pub mod codes {
             "A `pub` item mentions a less visible type in its signature or, for a `pub` record or enum, its fields, or a less visible interface in its constraints (REFERENCE §3).";
         AMBIGUOUS_METHOD = "E0212", "ambiguous_method",
             "A method call that the methods of two interfaces match, or a type's own method, declared or built in, named like a method of an interface it implements. Call it as `I.f(x)` (REFERENCE §3).";
+        PRIVATE_ITEM = "E0213", "private_item",
+            "A use of what another module doesn't export: an item or method that isn't `pub`, or the constructor or fields of an `opaque` record (REFERENCE §3).";
 
         TYPE_MISMATCH = "E0301", "type_mismatch",
             "A value of one type where another is expected. Proviso has no implicit conversions (REFERENCE §9.2).";

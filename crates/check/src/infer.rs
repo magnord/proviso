@@ -1181,7 +1181,6 @@ impl Vars {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decls::Decls;
 
     /// Types to bound in pairs: scalars, `Never` and capabilities with several permission
     /// sets, and each of them as a type argument, a result and a parameter of each mode.
@@ -1215,7 +1214,7 @@ mod tests {
     }
 
     fn show(ty: &Ty) -> String {
-        Decls::default().display(ty).to_string()
+        crate::tests::std_decls().display(ty).to_string()
     }
 
     fn bound(a: &Ty, b: &Ty, v: Variance) -> Option<Ty> {

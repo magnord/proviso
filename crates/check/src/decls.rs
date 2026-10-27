@@ -11,43 +11,58 @@ use proviso_syntax::ast::{ExprId, ParamMode};
 
 use crate::types::{FloatTy, IntTy, Perms, Reach, Ty};
 
-/// A record or enum declared in Proviso. The prelude's come first, at fixed ids.
+/// A record or enum. The toolchain's own types come first, then the standard library's
+/// (see [`crate::STD`]), whose order of declaration pins each at the id its constant names.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct AdtId(u32);
 
 impl AdtId {
     pub const SYSTEM: AdtId = AdtId(0);
-    pub const OPTION: AdtId = AdtId(1);
-    pub const RESULT: AdtId = AdtId(2);
-    /// `std.text`'s `ParseError` (STD.md).
-    pub const PARSE_ERROR: AdtId = AdtId(3);
     /// The 2-tuple `(A, B)`. Tuples of other lengths are declared when first used.
-    pub const PAIR: AdtId = AdtId(4);
+    pub const PAIR: AdtId = AdtId(1);
     /// `List[T]` (STD.md).
-    pub const LIST: AdtId = AdtId(5);
+    pub const LIST: AdtId = AdtId(2);
     /// `Map[K, V]` (STD.md).
-    pub const MAP: AdtId = AdtId(6);
-    /// `std.pool`'s `Pool[T]` (STD.md).
-    pub const POOL: AdtId = AdtId(7);
+    pub const MAP: AdtId = AdtId(3);
+    /// `std.pool`'s `Pool[T]`, which its declaration binds to (STD.md).
+    pub const POOL: AdtId = AdtId(4);
     /// `std.pool`'s `Handle[T]` (STD.md).
-    pub const HANDLE: AdtId = AdtId(8);
-    /// The prelude's `Ordering`, which `cmp` returns (STD.md).
-    pub const ORDERING: AdtId = AdtId(9);
-    /// The prelude's `Rounding`, which `to_int` takes (STD.md).
-    pub const ROUNDING: AdtId = AdtId(10);
-    /// `std.num`'s `ConversionError` (STD.md).
+    pub const HANDLE: AdtId = AdtId(5);
+    /// The prelude's.
+    pub const OPTION: AdtId = AdtId(6);
+    pub const RESULT: AdtId = AdtId(7);
+    /// What `cmp` returns (STD.md).
+    pub const ORDERING: AdtId = AdtId(8);
+    /// What `to_int` takes (STD.md).
+    pub const ROUNDING: AdtId = AdtId(9);
+    /// `std.io`'s, which the runtime builds when an operation fails.
+    pub const IO_ERROR: AdtId = AdtId(10);
+    /// `std.num`'s (STD.md).
     pub const CONVERSION_ERROR: AdtId = AdtId(11);
+    /// `std.text`'s (STD.md).
+    pub const PARSE_ERROR: AdtId = AdtId(12);
 
-    /// How many records and enums are declared before the module's own.
-    const BUILT_IN: usize = 12;
+    /// How many records and enums the toolchain declares, before the standard library's.
+    const BUILT_IN: usize = 6;
+
+    /// The standard library's at fixed ids, by name, which the checker confirms.
+    pub const PINNED: [(AdtId, &str); 7] = [
+        (AdtId::OPTION, "Option"),
+        (AdtId::RESULT, "Result"),
+        (AdtId::ORDERING, "Ordering"),
+        (AdtId::ROUNDING, "Rounding"),
+        (AdtId::IO_ERROR, "IoError"),
+        (AdtId::CONVERSION_ERROR, "ConversionError"),
+        (AdtId::PARSE_ERROR, "ParseError"),
+    ];
 
     pub fn index(self) -> usize {
         self.0 as usize
     }
 }
 
-/// An interface: one of the prelude's, a capability interface of the standard library, or
-/// one the module declares. The built-in ones come first, at fixed ids.
+/// An interface. The standard library declares the prelude's first, then those of its other
+/// modules (see [`crate::STD`]), so each is at the id its constant names.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct IfaceId(u32);
 
@@ -55,41 +70,39 @@ impl IfaceId {
     pub const EQ: IfaceId = IfaceId(0);
     pub const ORD: IfaceId = IfaceId(1);
     pub const SHOW: IfaceId = IfaceId(2);
-    /// The capability interface of `std.io`.
-    pub const OUT: IfaceId = IfaceId(3);
-    pub const HASH: IfaceId = IfaceId(4);
-    pub const COPY: IfaceId = IfaceId(5);
+    pub const HASH: IfaceId = IfaceId(3);
+    pub const COPY: IfaceId = IfaceId(4);
     /// Ends a resource on a failure exit (REFERENCE §10, STD.md).
-    pub const ABANDON: IfaceId = IfaceId(6);
+    pub const ABANDON: IfaceId = IfaceId(5);
     /// The operator interfaces, which only a distinct type derives (REFERENCE §4.6).
-    pub const ADD: IfaceId = IfaceId(8);
-    pub const SUB: IfaceId = IfaceId(9);
-    pub const MUL: IfaceId = IfaceId(10);
-    pub const DIV: IfaceId = IfaceId(11);
-    pub const NEG: IfaceId = IfaceId(12);
-    /// `std.io`'s input stream.
-    pub const IN: IfaceId = IfaceId(13);
+    pub const ADD: IfaceId = IfaceId(7);
+    pub const SUB: IfaceId = IfaceId(8);
+    pub const MUL: IfaceId = IfaceId(9);
+    pub const DIV: IfaceId = IfaceId(10);
+    pub const NEG: IfaceId = IfaceId(11);
     /// The capabilities of `System` that have no operations yet (REFERENCE §9.1; OPEN_QUESTIONS
-    /// Q6). No module declares them yet, so only `System`'s fields name them.
-    pub const NET: IfaceId = IfaceId(14);
-    pub const PROCESS: IfaceId = IfaceId(15);
-    pub const CLOCK: IfaceId = IfaceId(16);
-    pub const RANDOM: IfaceId = IfaceId(17);
-    pub const ENV: IfaceId = IfaceId(18);
+    /// Q6). The prelude declares them, and no module exports them yet.
+    pub const NET: IfaceId = IfaceId(12);
+    pub const PROCESS: IfaceId = IfaceId(13);
+    pub const CLOCK: IfaceId = IfaceId(14);
+    pub const RANDOM: IfaceId = IfaceId(15);
+    pub const ENV: IfaceId = IfaceId(16);
+    /// `std.io`'s output and input streams.
+    pub const OUT: IfaceId = IfaceId(17);
+    pub const IN: IfaceId = IfaceId(18);
 
-    /// The interfaces declared before the module's, in id order: the prelude's (REFERENCE §3),
-    /// and the standard library's capability interfaces.
-    const BUILT_IN: [&str; 19] = [
-        "Eq", "Ord", "Show", "Out", "Hash", "Copy", "Abandon", "Index", "Add", "Sub", "Mul", "Div", "Neg", "In", "Net",
-        "Process", "Clock", "Random", "Env",
+    /// The interfaces at fixed ids, in id order: the prelude's (REFERENCE §3), `System`'s
+    /// capabilities, and `std.io`'s. The checker confirms that the standard library declares
+    /// them so.
+    pub const PINNED: [&str; 19] = [
+        "Eq", "Ord", "Show", "Hash", "Copy", "Abandon", "Index", "Add", "Sub", "Mul", "Div", "Neg", "Net", "Process",
+        "Clock", "Random", "Env", "Out", "In",
     ];
 
-    /// The prelude interface named `name`. The capability interfaces come from the standard
-    /// library's modules, so they aren't.
+    /// The prelude interface named `name`, which every module sees (REFERENCE §3).
     pub fn prelude(name: &str) -> Option<IfaceId> {
-        let i = Self::BUILT_IN.iter().position(|n| *n == name)?;
-        let id = IfaceId(i as u32);
-        (id != IfaceId::OUT && i < IfaceId::IN.index()).then_some(id)
+        let i = Self::PINNED.iter().position(|n| *n == name)?;
+        (i < IfaceId::NET.index()).then_some(IfaceId(i as u32))
     }
 
     pub fn index(self) -> usize {
@@ -104,7 +117,7 @@ impl IfaceId {
     /// Whether it is a prelude interface whose methods come later: `Index` and the operator
     /// interfaces, whose methods STD.md doesn't declare yet.
     pub fn methods_later(self) -> bool {
-        (7..13).contains(&self.0)
+        (6..12).contains(&self.0)
     }
 }
 
@@ -177,7 +190,6 @@ pub enum ImplKey {
     Char,
     Text,
     Unit,
-    IoError,
     Adt(AdtId),
 }
 
@@ -190,7 +202,6 @@ impl ImplKey {
             Ty::Char => ImplKey::Char,
             Ty::Text => ImplKey::Text,
             Ty::Unit => ImplKey::Unit,
-            Ty::IoError => ImplKey::IoError,
             Ty::Adt(id, _) => ImplKey::Adt(*id),
             _ => return None,
         })
@@ -602,9 +613,11 @@ pub struct Decls {
 }
 
 impl Default for Decls {
-    /// The prelude, with each declaration at the id its constant names.
+    /// The types the toolchain declares, each at the id its constant names. The standard
+    /// library's declarations follow, from Proviso source.
     fn default() -> Decls {
-        // REFERENCE §9.1's fields, but `fs`, which comes with `std.fs` in slice 3.5.
+        // REFERENCE §9.1's fields, but `fs`, which comes with `std.fs` in slice 3.5. Their
+        // interfaces are the standard library's, at their pinned ids.
         let field = |name: &str, iface: IfaceId, perms: usize| FieldDef {
             name: name.into(),
             ty: Ty::cap(iface, Perms::all(perms)),
@@ -628,92 +641,6 @@ impl Default for Decls {
             system.reach.extend(&Reach::of_cap(cap));
         }
         system.handle = true;
-        // As STD.md declares them, so `Some` comes before `None`.
-        let generic = |name: &str, params: usize, variants: [(&str, Option<(&str, u32)>); 2]| {
-            let mut def = AdtDef::enumeration(name);
-            def.params = params;
-            def.held = vec![true; params];
-            def.bare_variants = true;
-            def.derives = vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW, IfaceId::HASH];
-            for (variant, field) in variants {
-                let fields =
-                    field.map(|(name, param)| FieldDef { name: name.into(), ty: Ty::Param(param), state: false });
-                def.variants.push(VariantDef::new(variant, fields.into_iter().collect()));
-            }
-            def
-        };
-        let option = generic("Option", 1, [("Some", Some(("value", 0))), ("None", None)]);
-        let result = generic("Result", 2, [("Ok", Some(("value", 0))), ("Err", Some(("error", 1)))]);
-        // An enum whose variants have no fields, which derives `derives`.
-        let plain = |name: &str, variants: &[&str], derives: Vec<IfaceId>| {
-            let mut def = AdtDef::enumeration(name);
-            def.derives = derives;
-            def.variants.extend(variants.iter().map(|variant| VariantDef::new(variant, Vec::new())));
-            def
-        };
-        let parse_error = plain("ParseError", &["Empty", "Invalid", "OutOfRange"], vec![IfaceId::EQ, IfaceId::SHOW]);
-        // Ordered as declared, so `Less < Equal < Greater` (STD.md).
-        let ordering = plain(
-            "Ordering",
-            &["Less", "Equal", "Greater"],
-            vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW, IfaceId::HASH],
-        );
-        let rounding = plain(
-            "Rounding",
-            &["TowardZero", "TowardNegative", "TowardPositive", "NearestEven", "NearestAway"],
-            vec![IfaceId::EQ, IfaceId::SHOW, IfaceId::HASH],
-        );
-        let conversion_error =
-            plain("ConversionError", &["OutOfRange", "NotANumber"], vec![IfaceId::EQ, IfaceId::SHOW]);
-        let method = |name: &str, params: Vec<(&str, Ty)>, ret: Ty| IfaceMethod {
-            name: name.into(),
-            self_mode: ParamMode::Borrow,
-            modes: vec![ParamMode::Borrow; params.len()],
-            params: params.into_iter().map(|(n, t)| (n.into(), t)).collect(),
-            ret,
-            fails: None,
-            needs: Perms::NONE,
-        };
-        // The standard library's capability interfaces and their permissions, all `effects`
-        // ones (REFERENCE §9.1; OPEN_QUESTIONS Q6).
-        let cap = |perms: &[&str]| {
-            Some(CapDef { perms: perms.iter().map(|&p| p.into()).collect(), observes: Perms::NONE, lost: false })
-        };
-        let ifaces = IfaceId::BUILT_IN
-            .iter()
-            .map(|&name| {
-                let methods = match name {
-                    "Eq" => vec![method("eq", vec![("other", Ty::Param(0))], Ty::Bool)],
-                    "Ord" => vec![method("cmp", vec![("other", Ty::Param(0))], Ty::adt(AdtId::ORDERING))],
-                    "Show" => vec![method("show", vec![], Ty::Text)],
-                    // `abandon` takes `take self` and can't fail (STD.md).
-                    "Abandon" => {
-                        vec![IfaceMethod { self_mode: ParamMode::Take, ..method("abandon", vec![], Ty::Unit) }]
-                    }
-                    // `std.io`'s operations (STD.md; OPEN_QUESTIONS Q6).
-                    "Out" => vec![IfaceMethod {
-                        fails: Some(Ty::IoError),
-                        needs: Perms::one(0),
-                        ..method("write_line", vec![("text", Ty::Text)], Ty::Unit)
-                    }],
-                    "In" => vec![IfaceMethod {
-                        fails: Some(Ty::IoError),
-                        needs: Perms::one(0),
-                        ..method("read_line", vec![], Ty::option(Ty::Text))
-                    }],
-                    _ => Vec::new(),
-                };
-                let cap = match name {
-                    "Out" => cap(&["write"]),
-                    "In" => cap(&["read"]),
-                    "Net" => cap(&["connect", "listen"]),
-                    "Process" => cap(&["spawn"]),
-                    "Clock" | "Random" | "Env" => cap(&[]),
-                    _ => None,
-                };
-                IfaceDef { name: name.into(), cap, methods, incomplete: false }
-            })
-            .collect();
         // A list and a map implement what their type arguments do (STD.md).
         let all = || vec![IfaceId::EQ, IfaceId::ORD, IfaceId::SHOW, IfaceId::HASH];
         let (list, map) = (AdtDef::native("List", 1, all()), AdtDef::native("Map", 2, all()));
@@ -723,25 +650,12 @@ impl Default for Decls {
         pool.unique = true;
         let mut handle = AdtDef::native("Handle", 1, vec![IfaceId::EQ, IfaceId::HASH]);
         handle.held = vec![false];
-        let adts = vec![
-            system,
-            option,
-            result,
-            parse_error,
-            AdtDef::tuple(2),
-            list,
-            map,
-            pool,
-            handle,
-            ordering,
-            rounding,
-            conversion_error,
-        ];
+        let adts = vec![system, AdtDef::tuple(2), list, map, pool, handle];
         debug_assert_eq!(adts.len(), AdtId::BUILT_IN);
         let tuples = HashMap::from([(2, AdtId::PAIR)]);
         Decls {
             adts,
-            ifaces,
+            ifaces: Vec::new(),
             impls: HashMap::new(),
             tuples,
             unknown_tuples: false,
@@ -1051,7 +965,6 @@ impl Decls {
                 matches!(iface, IfaceId::EQ | IfaceId::SHOW | IfaceId::HASH) || self.by_impl(ty, iface, params, memo)
             }
             Ty::Unit => matches!(iface, IfaceId::EQ | IfaceId::HASH) || self.by_impl(ty, iface, params, memo),
-            Ty::IoError => iface == IfaceId::SHOW || self.by_impl(ty, iface, params, memo),
             // A capability implements its own interface, which its value dispatches to
             // (REFERENCE §9.2).
             Ty::Cap(cap) => cap.iface == iface,
@@ -1405,11 +1318,11 @@ impl Decls {
             return f.write_str("…");
         }
         budget.set(budget.get() - 1);
-        // A built-in type is qualified where a module type or interface has its name.
+        // A standard library type is qualified where another type or interface has its name.
         let std = |name: &'static str, qualified: &'static str| {
-            let shadowed = self.adts[AdtId::BUILT_IN..].iter().any(|adt| &*adt.name == name)
-                || self.ifaces[IfaceId::BUILT_IN.len()..].iter().any(|iface| &*iface.name == name)
-                || names.iter().any(|param| &**param == name);
+            let declared = self.adts.iter().filter(|adt| &*adt.name == name).count()
+                + self.ifaces.iter().filter(|iface| &*iface.name == name).count();
+            let shadowed = declared > 1 || names.iter().any(|param| &**param == name);
             if shadowed { qualified } else { name }
         };
         let list = |f: &mut fmt::Formatter, args: &[Ty]| -> fmt::Result {
@@ -1508,8 +1421,8 @@ impl Decls {
             Ty::Never => "Never",
             Ty::Adt(AdtId::PARSE_ERROR, _) => std("ParseError", "std.text.ParseError"),
             Ty::Adt(AdtId::CONVERSION_ERROR, _) => std("ConversionError", "std.num.ConversionError"),
+            Ty::Adt(AdtId::IO_ERROR, _) => std("IoError", "std.io.IoError"),
             Ty::Adt(id, _) => &self.adt(*id).name,
-            Ty::IoError => std("IoError", "std.io.IoError"),
             Ty::Cap(_) => unreachable!("written above"),
             Ty::Param(_) | Ty::Var(_) => "_",
             Ty::Error => "{unknown}",
@@ -1905,21 +1818,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn std_types_are_qualified_when_a_record_shares_their_name() {
-        let mut decls = Decls::default();
-        assert_eq!(decls.display(&Ty::IoError).to_string(), "IoError");
-        assert_eq!(decls.display(&Ty::out()).to_string(), "Out");
-        let own = decls.push(AdtDef::record("IoError", Vec::new()));
-        assert_eq!(decls.display(&Ty::IoError).to_string(), "std.io.IoError");
-        assert_eq!(decls.display(&Ty::adt(own)).to_string(), "IoError");
-        assert_eq!(decls.display(&Ty::out()).to_string(), "Out");
-        let parse_error = Ty::adt(AdtId::PARSE_ERROR);
-        assert_eq!(decls.display(&parse_error).to_string(), "ParseError");
-        decls.push(AdtDef::record("ParseError", Vec::new()));
-        assert_eq!(decls.display(&parse_error).to_string(), "std.text.ParseError");
-    }
-
-    #[test]
     fn components_come_after_the_components_they_reach() {
         // 0 -> 1 -> 2 <-> 3, 4 -> 0, and 5 alone.
         let edges = vec![vec![1], vec![2], vec![3], vec![2], vec![0], vec![]];
@@ -1938,7 +1836,7 @@ mod tests {
 
     #[test]
     fn tuples_are_written_as_their_literals() {
-        let mut decls = Decls::default();
+        let mut decls = crate::tests::check(&[], "").0.decls;
         let triple = decls.tuple_ty(vec![Ty::INT, Ty::Text, Ty::option(Ty::Bool)]);
         assert_eq!(decls.display(&triple).to_string(), "(Int, Text, Option[Bool])");
         assert_eq!(decls.tuple(2), AdtId::PAIR);

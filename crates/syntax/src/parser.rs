@@ -1,12 +1,8 @@
 //! A recursive-descent parser for the phase-1 subset. Constructs from later phases are
 //! recognized and reported as not implemented (E0901), so a program never fails silently.
 
-use std::collections::HashSet;
-
-use crate::arena::Arena;
 use crate::ast::*;
 use crate::diag::{Code, Diagnostics, Planned, codes};
-use crate::intern::Interner;
 use crate::lexer::tokenize;
 use crate::source::{SourceFile, Span};
 use crate::token::{FPart, Keyword as Kw, Token, TokenKind as T, TokenValue, opener, track};
@@ -38,29 +34,20 @@ enum FnKind {
     Signature,
 }
 
-pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> Module {
-    let tokens = tokenize(&file.text, 0, diags);
-    let module = Module {
-        name: name.to_string(),
-        items: Vec::new(),
-        exprs: Arena::new(),
-        stmts: Arena::new(),
-        types: Arena::new(),
-        pats: Arena::new(),
-        interner: Interner::default(),
-        poisoned: HashSet::new(),
-        impls: HashSet::new(),
-        lost_fns: HashSet::new(),
-        planned_names: HashSet::new(),
-        tuple_impls: false,
-        everywhere: HashSet::new(),
-    };
+/// Parses `file` as module `name` into `ast`, after the modules already there. A module of the
+/// standard library (`std`) may declare a record without braces or a function without a body,
+/// which the toolchain implements (OPEN_QUESTIONS P5).
+pub fn parse_module(ast: &mut Ast, file: &SourceFile, name: &str, std: bool, diags: &mut Diagnostics) -> ModId {
+    let tokens = tokenize(&file.text, file.base, true, diags);
+    let module = ast.modules.len();
+    ast.modules.push(Module::new(name, std, Span { lo: file.base, hi: file.end() }, ast.items.len()));
     let mut parser = Parser {
         file,
         tokens,
         pos: 0,
         diags,
-        m: module,
+        m: ast,
+        module,
         depth: 0,
         stmt_indent: 0,
         item_indent: 0,
@@ -74,7 +61,8 @@ pub fn parse_module(file: &SourceFile, name: &str, diags: &mut Diagnostics) -> M
         before_clause: false,
     };
     parser.items();
-    parser.m
+    ast.modules[module].items.end = ast.items.len();
+    module
 }
 
 struct Parser<'a> {
@@ -82,7 +70,9 @@ struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
     diags: &'a mut Diagnostics,
-    m: Module,
+    m: &'a mut Ast,
+    /// The module being parsed.
+    module: ModId,
     /// The nesting level being parsed, limited by [`MAX_NESTING`].
     depth: u32,
     /// The indentation of the line where the current statement or item starts. A block
@@ -221,7 +211,8 @@ impl Parser<'_> {
     /// The indentation of the line holding `span`, with tabs at every fourth column.
     fn indent(&self, span: Span) -> usize {
         let text = self.file.text.as_bytes();
-        let line_start = text[..span.lo as usize].iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+        let line_start =
+            text[..(span.lo - self.file.base) as usize].iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
         let mut width = 0;
         for &b in &text[line_start..] {
             match b {
@@ -262,7 +253,7 @@ impl Parser<'_> {
 
     /// Whether `span` is the first token on its line.
     fn starts_line(&self, span: Span) -> bool {
-        let text = &self.file.text.as_bytes()[..span.lo as usize];
+        let text = &self.file.text.as_bytes()[..(span.lo - self.file.base) as usize];
         text.iter().rev().take_while(|&&b| b != b'\n').all(|&b| b == b' ' || b == b'\t')
     }
 
@@ -531,7 +522,7 @@ impl Parser<'_> {
             },
             _ => return self.unexpected("an item such as `fn` or `use`"),
         };
-        Ok(Some(Item { kind, vis, doc, span: start.to(self.prev_span()) }))
+        Ok(Some(Item { kind, vis, module: self.module, doc, span: start.to(self.prev_span()) }))
     }
 
     /// `pub`, `pub(pkg)` or nothing, and whether it was written without a mistake.
@@ -609,7 +600,7 @@ impl Parser<'_> {
             && let Some(token) = self.tokens.get(i).filter(|t| t.kind == T::Ident)
         {
             let name = self.intern(token.span);
-            self.m.poisoned.insert(name.sym);
+            self.m.modules[self.module].poisoned.insert(name.sym);
         }
     }
 
@@ -623,8 +614,8 @@ impl Parser<'_> {
         }
         if let Some(token) = self.tokens.get(i).filter(|t| t.kind == T::Ident) {
             let name = self.intern(token.span);
-            self.m.poisoned.insert(name.sym);
-            self.m.planned_names.insert(name.sym);
+            self.m.modules[self.module].poisoned.insert(name.sym);
+            self.m.modules[self.module].planned_names.insert(name.sym);
         }
     }
 
@@ -640,7 +631,7 @@ impl Parser<'_> {
                 // A function type has no methods to note.
                 T::Keyword(Kw::Fn) if depth == 0 => return,
                 T::LParen if depth == 0 => {
-                    self.m.tuple_impls = true;
+                    self.m.modules[self.module].tuple_impls = true;
                     return;
                 }
                 T::LBracket => depth += 1,
@@ -653,7 +644,7 @@ impl Parser<'_> {
         }
         if let Some(span) = target.or(if depth > 0 { last } else { None }) {
             let name = self.intern(span);
-            self.m.impls.insert(name.sym);
+            self.m.modules[self.module].impls.insert(name.sym);
         }
     }
 
@@ -786,7 +777,7 @@ impl Parser<'_> {
         let name = self.ident("a record name")?;
         let decl = self.record_rest(name, resource, cap);
         if decl.is_err() {
-            self.m.poisoned.insert(name.sym);
+            self.m.modules[self.module].poisoned.insert(name.sym);
         }
         decl
     }
@@ -805,6 +796,23 @@ impl Parser<'_> {
         }
         let uses = if self.eat(T::Keyword(Kw::Uses)) { Some(self.uses_list()?) } else { None };
         let derives = self.derives()?;
+        if self.m.modules[self.module].std && !self.at(T::LBrace) {
+            let (fields, refinement, distinct, opaque, unique) = (Vec::new(), None, false, false, false);
+            return Ok(RecordDecl {
+                name,
+                generics,
+                unique,
+                resource,
+                derives,
+                fields,
+                refinement,
+                distinct,
+                opaque,
+                uses,
+                cap,
+                native: true,
+            });
+        }
         let open = self.expect(T::LBrace, "`{` and the record's fields")?;
         let mut fields = Vec::new();
         loop {
@@ -849,6 +857,7 @@ impl Parser<'_> {
             opaque: false,
             uses,
             cap: false,
+            native: false,
         })
     }
 
@@ -884,7 +893,7 @@ impl Parser<'_> {
         let name = self.ident("an enum name")?;
         let decl = self.enum_rest(name);
         if decl.is_err() {
-            self.m.poisoned.insert(name.sym);
+            self.m.modules[self.module].poisoned.insert(name.sym);
         }
         decl
     }
@@ -974,8 +983,8 @@ impl Parser<'_> {
         let name = self.ident("a function name")?;
         let decl = self.fn_rest(name, FnKind::Free);
         if decl.is_err() {
-            self.m.poisoned.insert(name.sym);
-            self.m.lost_fns.insert(name.sym);
+            self.m.modules[self.module].poisoned.insert(name.sym);
+            self.m.modules[self.module].lost_fns.insert(name.sym);
         }
         decl
     }
@@ -1021,7 +1030,7 @@ impl Parser<'_> {
             && generics.iter().any(|g| g.name.sym == name.sym)
         {
             if let Some(iface) = iface {
-                self.m.everywhere.insert(iface.sym);
+                self.m.modules[self.module].everywhere.insert(iface.sym);
             }
             let span = self.m.types[target].span;
             self.diags.not_implemented(
@@ -1162,7 +1171,7 @@ impl Parser<'_> {
         let name = self.ident("a type name")?;
         let decl = self.type_rest(name);
         if decl.is_err() {
-            self.m.poisoned.insert(name.sym);
+            self.m.modules[self.module].poisoned.insert(name.sym);
         }
         decl
     }
@@ -1200,6 +1209,7 @@ impl Parser<'_> {
             opaque: false,
             uses: None,
             cap: false,
+            native: false,
         }))
     }
 
@@ -1232,10 +1242,10 @@ impl Parser<'_> {
         // A plain interface that declared permissions is read as a capability interface.
         let cap = std::mem::take(&mut self.cap_ops);
         if decl.is_err() {
-            self.m.poisoned.insert(name.sym);
+            self.m.modules[self.module].poisoned.insert(name.sym);
             // A capability interface's arguments are permissions, not types.
             if cap {
-                self.m.planned_names.insert(name.sym);
+                self.m.modules[self.module].planned_names.insert(name.sym);
             }
         }
         decl
@@ -1263,7 +1273,7 @@ impl Parser<'_> {
                 // aren't checked (§15.1).
                 cap = true;
                 self.cap_ops = true;
-                self.m.poisoned.insert(name.sym);
+                self.m.modules[self.module].poisoned.insert(name.sym);
             }
             let names = self.perm_list()?;
             let twice = if effects { &mut seen.1 } else { &mut seen.0 };
@@ -1510,8 +1520,13 @@ impl Parser<'_> {
             }
         }
         if kind != FnKind::Signature {
-            self.recovered = false;
-            let body = self.block()?;
+            // A standard library function without a body is implemented by the toolchain.
+            let body = if self.m.modules[self.module].std && !self.at(T::LBrace) {
+                None
+            } else {
+                self.recovered = false;
+                Some(self.block()?)
+            };
             return Ok(FnDecl {
                 name,
                 generics,
@@ -1520,7 +1535,7 @@ impl Parser<'_> {
                 ret,
                 fails,
                 needs: Vec::new(),
-                body: Some(body),
+                body,
                 recovered: self.recovered,
             });
         }
@@ -2658,7 +2673,7 @@ impl Parser<'_> {
             match part {
                 FPart::Lit(text) => out.push(FTextPart::Lit(text)),
                 FPart::Expr(inner) => {
-                    let tokens = tokenize(file.slice(inner), inner.lo, self.diags);
+                    let tokens = tokenize(file.slice(inner), inner.lo, false, self.diags);
                     let saved_tokens = std::mem::replace(&mut self.tokens, tokens);
                     let saved_pos = std::mem::replace(&mut self.pos, 0);
                     let result = self.interpolation();

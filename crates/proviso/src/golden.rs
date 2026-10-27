@@ -257,7 +257,7 @@ fn run_file(path: &Path, name: &str, phase: Phase, bless: bool) -> Result<Verdic
         }
         let mut got: BTreeMap<(usize, String), usize> = BTreeMap::new();
         for d in compiled.diagnostics.iter().filter(|d| d.severity == Severity::Error) {
-            let (line, _) = compiled.file.line_col(d.span.lo);
+            let (line, _) = compiled.sources.file_at(d.span.lo).line_col(d.span.lo);
             *got.entry((line as usize, d.code.id.to_string())).or_insert(0) += 1;
         }
         if got != marked {
