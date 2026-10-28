@@ -10,9 +10,9 @@ FsError.NotFound(path: Path("nope"))
 FsError.Other(message: "`a` already exists")
 FsError.Other(message: "`c` already exists")
 ok
-FsError.NotFound(path: Path("empty"))
+ok
 FsError.Other(message: "`a/y` is not empty")
 FsError.PermissionDenied(path: Path(""))
 FsError.NotFound(path: Path("nope"))
-FsError.NotFound(path: Path("a/y"))
+ok
 v

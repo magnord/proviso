@@ -1,10 +1,10 @@
 // phase: 3.5
 // `MemDir` reads a path as the runtime's `Dir` does, so a test that passes against it
 // behaves the same against `sys.fs` (REFERENCE §9.6, OPEN_QUESTIONS P5). The same calls run
-// against both, and only the outcomes that differ are printed. A path that goes through a
-// file, ends in `/` or `/.`, climbs with `..` or is absolute fails the same way in both. The
-// one difference is a directory with no files, which a `MemDir` can't hold, since its files
-// are its one `state` field (§9.6).
+// against both, and only the outcomes that differ are printed, so none are. A path that goes
+// through a file, ends in `/` or `/.`, climbs with `..`, is absolute or is in a missing
+// directory fails the same way in both, and an empty directory, or one whose last file is
+// removed, stays until it is removed.
 use std.fs { Dir, Path, FsError }
 use std.test { MemDir }
 use std.io { Out }
@@ -49,7 +49,7 @@ pub fn main(sys: keep System) fails FsError {
         try dir.write_text(path: Path("./d//b"), text: "bb")
     }
     let paths = ["", ".", "f", "f/", "f/.", "f/x", "f/x/y", "./f", "d", "d/", "d/.", "d/a", "d//a", "d/../f",
-        "d/a/..", "nope", "d/nope", "nope/x", "/f", "../f", "d/../../f", "/"]
+        "d/a/..", "gone/x", "gone/x/y", "nope", "d/nope", "nope/x", "/f", "../f", "d/../../f", "/"]
     for p in paths {
         differ += compare(what: f"read {p}", real: reads(dir: real, path: Path(p)), fake: reads(dir: fake, path: Path(p)), out: sys.stdout)
     }
@@ -57,11 +57,12 @@ pub fn main(sys: keep System) fails FsError {
         let w = [done(attempt real.write_text(path: Path(p), text: "w")), done(attempt fake.write_text(path: Path(p), text: "w"))]
         differ += compare(what: f"write {p}", real: [w[0]], fake: [w[1]], out: sys.stdout)
     }
-    for p in ["f", "f/x", "d", "d/new", "d/new/", "f/new", "/x", "../x", "d/a"] {
+    for p in ["f", "f/x", "d", "d/new", "d/new/", "f/new", "/x", "../x", "d/a", "lost/x", "f/"] {
         let c = [done(attempt real.create_dir(Path(p))), done(attempt fake.create_dir(Path(p)))]
         differ += compare(what: f"create {p}", real: [c[0]], fake: [c[1]], out: sys.stdout)
     }
-    for p in ["f/x", "d", "d/", "nope", "", ".", "d/..", "/f", "../f", "d/new", "d/a", "d/b", "nope/", "d", "f/"] {
+    for p in ["f/x", "d", "d/", "nope", "", ".", "d/..", "/f", "../f", "d/new", "d/a", "d/b", "nope/", "f/", "f/.",
+        "d/a/", "lost/x", "d", "f"] {
         let r = [done(attempt real.remove(Path(p))), done(attempt fake.remove(Path(p)))]
         differ += compare(what: f"remove {p}", real: [r[0]], fake: [r[1]], out: sys.stdout)
     }

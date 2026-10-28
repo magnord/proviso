@@ -1,9 +1,10 @@
 // phase: 3.5
 // `std.test`'s `MemDir` is a `Dir` written in Proviso (REFERENCE §9.6). `with_files` returns
 // the capability, and copies of it share its files, as copies of any capability share its
-// state. Its files are a flat map from path to text, so a directory is any path that a file's
-// path continues with `/`, and the root is always one (OPEN_QUESTIONS P5). Its failures read
-// as the runtime's `Dir`'s do. `Dir.of(MemDir(…))` builds one from a map of paths.
+// state. Its files are a flat map from path to text, where a directory is any path that a
+// key continues with `/`. An empty directory is held by its path and a `/`, and the root is
+// always one (OPEN_QUESTIONS P5). Its failures read as the runtime's `Dir`'s do.
+// `Dir.of(MemDir(…))` builds one from a map of paths.
 use std.fs { Dir, Path, FsError }
 use std.test { MemDir }
 

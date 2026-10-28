@@ -285,7 +285,7 @@ impl MemDir {
 }
 ```
 
-`MemDir` is written in Proviso (§9.6). It reads a path as the runtime's `Dir` does, and keys each file by its path in that form. A directory is any path that a file's path continues with `/`, and the root, `""`, is always one. Its failures read as the runtime's `Dir`'s do, except that it can't hold a directory with no files (OPEN_QUESTIONS P5).
+`MemDir` is written in Proviso (§9.6). It reads a path as the runtime's `Dir` does, and keys each file by its path in that form. A directory is any path that a key continues with `/`, and the root, `""`, is always one. An empty directory is held by a key that is its path and a `/`. Its failures read as the runtime's `Dir`'s do (OPEN_QUESTIONS P5).
 
 ## std.pool
 

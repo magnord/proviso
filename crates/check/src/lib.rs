@@ -7747,6 +7747,12 @@ impl Checker<'_> {
                 found.push(Callee::Iface(iface, j));
             }
         }
+        // A `cap record` that implements `Dir` would have `sub`, which waits for value-level
+        // narrowing (OPEN_QUESTIONS Q6), so its own `sub` would be ambiguous with it.
+        if cap_record && name == "sub" && interfaces_known && self.implements(ty, IfaceId::DIR) {
+            self.not_implemented(method.span, "calls of `Dir.sub`", Planned::Unscheduled);
+            return None;
+        }
         match found.as_slice() {
             [] if !unknown && let Some(iface) = unmet => {
                 self.unmet_impl(ty, shown, iface, method.span);
@@ -7765,12 +7771,6 @@ impl Checker<'_> {
                 None
             }
             [] if self.private_method(ty, method) => None,
-            // A `cap record` that implements `Dir` would have `sub`, which waits for
-            // value-level narrowing (OPEN_QUESTIONS Q6).
-            [] if cap_record && name == "sub" && self.implements(ty, IfaceId::DIR) => {
-                self.not_implemented(method.span, "calls of `Dir.sub`", Planned::Unscheduled);
-                None
-            }
             [] => {
                 if !unknown {
                     let message = format!("`{}` has no method `{name}`", self.show(shown));

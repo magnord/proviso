@@ -102,6 +102,10 @@ impl Root {
         }
         let place = self.resolve(path, names_dir(path))?;
         let meta = fs::symlink_metadata(&place).map_err(|e| failure(path, e))?;
+        // A path that names a directory never removes a file, nor a link to one.
+        if names_dir(path) && !meta.is_dir() {
+            return Err(other(path, "is not a directory"));
+        }
         if meta.is_dir() { fs::remove_dir(place) } else { fs::remove_file(place) }.map_err(|e| failure(path, e))
     }
 
@@ -258,8 +262,12 @@ mod tests {
         assert_eq!(root.read_text("to_inside").unwrap(), "i");
         root.remove("to_file").unwrap();
         assert!(scratch.0.join("secret").exists());
-        // A trailing `/` follows a link in the last part, which here leads out.
+        // A trailing `/` follows a link in the last part, which here leads out, and never
+        // removes a file or a link to one.
         assert_eq!(root.remove("to_dir/"), Err(FsFailure::PermissionDenied));
+        assert_eq!(root.remove("to_inside/"), Err(other("to_inside/", "is not a directory")));
+        assert_eq!(root.remove("inside/."), Err(other("inside/.", "is not a directory")));
+        assert_eq!(root.read_text("inside").unwrap(), "i");
         assert!(scratch.0.join("outside").exists());
     }
 
