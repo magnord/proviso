@@ -1,11 +1,14 @@
 // phase: 3.6
+// expect-error: E0210
 // expect-error: E0307
-// An interface method declares no type parameters, so no effect parameter, and a `with` on
-// one names none (REFERENCE §9.5). What it fails with is unknown, so neither an `impl` nor a
-// call is checked against it, and an unrelated error in its signature is still reported
+// expect-error: E0314
+// expect-error: E0701
+// Generic interface methods aren't implemented, so no effect parameter is declared there for
+// a `with` to name (REFERENCE §9.5). The method then fails with an unknown type, as one whose
+// `fails` type is rejected does. An `impl` may declare its `fails` either way, and a call
+// must still be marked (inference/err_try). Everything else about the method is checked
 // (§15.1). A `cap interface`'s operation is the same. An `impl` method's `with` names an
 // effect parameter of its own.
-
 enum Bad {
     Oops
 }
@@ -14,6 +17,8 @@ interface Fire {
     fn fire(self) with E                                // <- E0307
     fn both(self) fails Bad with E                      // <- E0307
     fn other(self, n: Nope) with E                      // <- E0307, E0307
+    fn lost(self) fails Nope                            // <- E0307
+    fn fire(self)                                       // <- E0210
 }
 
 cap interface Shoot {
@@ -28,6 +33,8 @@ impl Fire for Gun {
     fn fire(self) {}
     fn both(self) fails Bad {}
     fn other(self, n: Int) {}
+    fn lost(self) {}
+    fn extra(self) {}                                   // <- E0314
 }
 
 impl Gun {
@@ -48,6 +55,6 @@ impl[T] Box[T] {
 
 fn calls(g: Gun) {
     try g.fire()
-    g.both()
+    g.both()                                            // <- E0701
     Box(v: 1).each(f: |x| {})
 }

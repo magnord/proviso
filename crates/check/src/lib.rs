@@ -2739,14 +2739,16 @@ impl Checker<'_> {
                     self.exposes(decl.name, vis, &fails.clone().unwrap_or(Ty::Never), at);
                 }
                 let (needs, _) = self.perms_named(id, &method.needs, "`needs`");
-                // An interface method declares no type parameters, so no effect parameter
-                // either, and its `with` names none (§9.5). What it fails with is unknown, so
-                // neither an `impl` nor a call is checked against it (§15.1).
-                if let Some(name) = method.with {
-                    self.with_effect(name);
-                    incomplete = true;
-                    continue;
-                }
+                // Generic interface methods aren't implemented, so no effect parameter is
+                // declared here for a `with` to name (§9.5). The method fails with an unknown
+                // type, so only that is left unchecked in its `impl`s and calls (§15.1).
+                let fails = match method.with {
+                    Some(name) => {
+                        self.with_effect(name);
+                        Some(Ty::Error)
+                    }
+                    None => fails,
+                };
                 if cased && !duplicate && !only {
                     methods.push(IfaceMethod {
                         name: text.into(),
@@ -3804,7 +3806,7 @@ impl Checker<'_> {
                 m.text(have.name) == &**name && have.mode == *mode && same(ty, &have.ty)
             });
         let fails_agree = match (&want.fails, &info.fails) {
-            (None, None) => true,
+            (None, None) | (Some(Ty::Error), _) | (_, Some(Ty::Error)) => true,
             (Some(want), Some(have)) => same(want, have),
             _ => false,
         };
