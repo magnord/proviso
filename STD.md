@@ -268,7 +268,7 @@ pub enum FsError derives(Eq, Show) {
 }
 ```
 
-`System.fs` is a `Dir[read, write, create, delete, list]` (§9.1). A path that is absolute, or whose `..` parts climb above the root, fails with `PermissionDenied`, and so does a symbolic link that leads out of the root (Q6, OPEN_QUESTIONS P5). A path that ends in `/` or `/.` names a directory. Removing the root fails with `PermissionDenied`, whether the path is empty or ends in a link to the root. `NotFound` and `PermissionDenied` hold the path as the call gave it. `Other` holds a message that says what is wrong with the path, such as that it is a directory. `Dir.sub` is not yet scheduled.
+`System.fs` is a `Dir[read, write, create, delete, list]` (§9.1). A path that is absolute, or whose `..` parts climb above the root, fails with `PermissionDenied`, and so does a symbolic link that leads out of the root (Q6, OPEN_QUESTIONS P5). A path that ends in `/` or `/.` names a directory. `remove` takes away a link in the last part itself, unless the path ends in `/` or `/.`. Removing the root fails with `PermissionDenied`, whether the path's text leads to it, as `.` and `d/..` do, or the path is a link to the root followed by `/`. `NotFound` and `PermissionDenied` hold the path as the call gave it. `Other` holds a message that says what is wrong with the path, such as that it is a directory. `Dir.sub` is not yet scheduled.
 
 ## std.test
 
