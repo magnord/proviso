@@ -1,5 +1,5 @@
 // §F row 13: reach is transitive through captured closures
-// phase: 3
+// phase: 3.5
 // expect-error: E0602
 //
 // `w` captures `dir`, so its type `uses Dir[write]`. The closure passed to `g`

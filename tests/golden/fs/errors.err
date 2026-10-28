@@ -1,0 +1,1 @@
+FsError.NotFound(path: Path("file.txt"))

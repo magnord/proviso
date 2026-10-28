@@ -1,0 +1,50 @@
+// phase: 3.5
+// How the runtime's `Dir` maps what the operating system reports to `FsError`'s variants
+// (OPEN_QUESTIONS Q36, P5). A missing file or directory is `NotFound` with the path as
+// written, an escape from the root is `PermissionDenied`, and anything else is `Other`, with
+// a message of the runtime's own, so it reads the same on every system. `FsError` derives
+// `Eq` and `Show`, so a failure can be compared and printed, and `main` shows the one it
+// fails with.
+// expect-exit: 1
+use std.fs { Dir, Path, FsError }
+
+fn outcome[T](result: Result[T, FsError]) -> Text {
+    return match result {
+        Ok(_) => "ok"
+        Err(FsError.NotFound(path: p)) => f"not found: {p.value}"
+        Err(FsError.PermissionDenied(path: p)) => f"denied: {p.value}"
+        Err(FsError.Other(message: m)) => f"other: {m}"
+    }
+}
+
+pub fn main(sys: keep System) fails FsError {
+    let fs = sys.fs
+    try fs.write_text(path: Path("file.txt"), text: "text")
+    try fs.create_dir(Path("dir"))
+    try fs.write_text(path: Path("dir/inner.txt"), text: "inner")
+    let out = sys.stdout
+    // `NotFound`
+    out.write_line(outcome(attempt fs.read_text(Path("missing.txt")))) else {}
+    out.write_line(outcome(attempt fs.size(Path("missing/inner.txt")))) else {}
+    out.write_line(outcome(attempt fs.write_text(path: Path("missing/new.txt"), text: ""))) else {}
+    out.write_line(outcome(attempt fs.list(Path("missing")))) else {}
+    out.write_line(outcome(attempt fs.create_dir(Path("missing/new")))) else {}
+    out.write_line(outcome(attempt fs.remove(Path("missing.txt")))) else {}
+    // `PermissionDenied`
+    out.write_line(outcome(attempt fs.read_text(Path("../file.txt")))) else {}
+    // `Other`
+    out.write_line(outcome(attempt fs.read_text(Path("dir")))) else {}
+    out.write_line(outcome(attempt fs.write_text(path: Path("dir"), text: "")))  else {}
+    out.write_line(outcome(attempt fs.size(Path("dir")))) else {}
+    out.write_line(outcome(attempt fs.list(Path("file.txt")))) else {}
+    out.write_line(outcome(attempt fs.create_dir(Path("dir")))) else {}
+    out.write_line(outcome(attempt fs.create_dir(Path("file.txt")))) else {}
+    out.write_line(outcome(attempt fs.remove(Path("dir")))) else {}
+    out.write_line(outcome(attempt fs.read_text(Path("file.txt/inner.txt")))) else {}
+    // `Eq` and `Show`
+    let failed = attempt fs.read_text(Path("missing.txt"))
+    out.write_line(f"{failed == Err(FsError.NotFound(path: Path("missing.txt")))}") else {}
+    out.write_line(f"{FsError.Other(message: "m")} {FsError.PermissionDenied(path: Path("p"))}") else {}
+    try fs.remove(Path("file.txt"))
+    let _ = try fs.read_text(Path("file.txt"))
+}

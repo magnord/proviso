@@ -709,9 +709,6 @@ enum Flow {
     Waits(u32),
 }
 
-/// The fields of `System` that come with `std.fs` in slice 3.5 (REFERENCE §9.1).
-const LATER_SYSTEM_FIELDS: &[&str] = &["fs"];
-
 /// The names a module declares and imports (REFERENCE §3). The checker keeps the scope of
 /// the module it is in in its own fields, and the others here (see [`Checker::enter`]).
 #[derive(Default)]
@@ -3543,6 +3540,10 @@ impl Checker<'_> {
             }
             match self.p.decls.iface(iface).method(text) {
                 None if incomplete => {}
+                // `Dir.sub` waits for value-level narrowing (OPEN_QUESTIONS Q6).
+                None if (iface, text) == (IfaceId::DIR, "sub") => {
+                    self.not_implemented(name.span, "`sub` methods in an `impl Dir`", Planned::Unscheduled);
+                }
                 None => {
                     let message = format!(
                         "`{iface_text}` has no method `{text}`; an `impl` gives its type exactly the methods its interface declares"
@@ -7406,6 +7407,9 @@ impl Checker<'_> {
             if matches!(iface, IfaceId::NET | IfaceId::PROCESS | IfaceId::CLOCK | IfaceId::RANDOM | IfaceId::ENV) {
                 let what = format!("the operations of `{}`", def.name);
                 self.not_implemented(method.span, &what, Planned::Unscheduled);
+            } else if (iface, name) == (IfaceId::DIR, "sub") {
+                // It narrows by value, which waits for rules of its own (OPEN_QUESTIONS Q6).
+                self.not_implemented(method.span, "calls of `Dir.sub`", Planned::Unscheduled);
             } else if !def.incomplete
                 // A rejected `impl` for the capability type may have declared the method (§15.1).
                 && !self.unknown_tys.iter().any(|ty| matches!(ty, Ty::Cap(cap) if cap.iface == iface))
@@ -7722,7 +7726,13 @@ impl Checker<'_> {
         unknown |= !interfaces_known;
         // An interface whose `impl` matches the type but whose constraints it doesn't meet.
         let mut unmet: Option<IfaceId> = None;
+        // Only a `cap record` implements a capability interface (OPEN_QUESTIONS P5), so a
+        // rejected `impl` for another type doesn't give it `Dir`'s operations.
+        let cap_record = matches!(ty, Ty::Adt(id, _) if self.p.decls.adt(*id).cap);
         for (iface, def) in self.p.decls.ifaces() {
+            if def.cap.is_some() && !cap_record {
+                continue;
+            }
             if !self.implements(ty, iface) {
                 if unmet.is_none() && def.method(name).is_some() && self.p.decls.impl_for(iface, ty).is_some() {
                     unmet = Some(iface);
@@ -7736,6 +7746,12 @@ impl Checker<'_> {
             if let Some(j) = def.method(name) {
                 found.push(Callee::Iface(iface, j));
             }
+        }
+        // A `cap record` that implements `Dir` would have `sub`, which waits for value-level
+        // narrowing (OPEN_QUESTIONS Q6), so its own `sub` would be ambiguous with it.
+        if cap_record && name == "sub" && interfaces_known && self.implements(ty, IfaceId::DIR) {
+            self.not_implemented(method.span, "calls of `Dir.sub`", Planned::Unscheduled);
+            return None;
         }
         match found.as_slice() {
             [] if !unknown && let Some(iface) = unmet => {
@@ -8019,6 +8035,10 @@ impl Checker<'_> {
             _ if cap && name == "of" && self.of_declared.contains(&iface) => true,
             None if cap && name == "of" => return self.of_call(e, iface, targs, args, span),
             None if def.incomplete => true,
+            None if (iface, name) == (IfaceId::DIR, "sub") => {
+                self.not_implemented(method.span, "calls of `Dir.sub`", Planned::Unscheduled);
+                true
+            }
             None if cap && name == "only" && self.only_declared.contains(&iface) => true,
             None if cap && name == "only" => {
                 let message = "`only` has no qualified form; call it on the capability, as in `x.only::[…]()`";
@@ -8212,10 +8232,6 @@ impl Checker<'_> {
             return ty;
         }
         match (base_ty, text) {
-            (Ty::Adt(AdtId::SYSTEM, _), text) if LATER_SYSTEM_FIELDS.contains(&text) => {
-                self.not_implemented(name.span, &format!("`sys.{text}` and the rest of `std.fs`"), Planned::Phase(3));
-                Ty::Error
-            }
             (Ty::Error, _) => Ty::Error,
             (ty, _) if self.has_method(ty, name.sym) => {
                 let message = format!(

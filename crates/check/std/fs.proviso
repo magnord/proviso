@@ -1,0 +1,34 @@
+// `std.fs` (STD.md).
+
+/// A directory tree, such as `System.fs`, which the runtime roots at the run's working
+/// directory, or a fake from `std.test`. A path is relative to the root, and one that is
+/// absolute or leaves the root fails with `FsError.PermissionDenied` (OPEN_QUESTIONS Q6).
+pub cap interface Dir observes(read, list) effects(write, create, delete) {
+    fn read_text(self, path: Path) -> Text fails FsError                   needs read
+
+    /// Replaces the file's text, and creates the file if it is missing (Q6).
+    fn write_text(self, path: Path, text: Text) fails FsError              needs write
+
+    /// The file's length in bytes.
+    fn size(self, path: Path) -> Int fails FsError                         needs read
+
+    /// The directory's entries, ordered by the bytes of their names. Each is `path`, with `.`
+    /// and `..` resolved, followed by `/` and the entry's name, or the name alone in the root.
+    fn list(self, path: Path) -> List[Path] fails FsError                  needs list
+
+    fn create_dir(self, path: Path) fails FsError                          needs create
+
+    /// Removes a file or an empty directory. A path that ends in `/` or `/.` removes only a
+    /// directory.
+    fn remove(self, path: Path) fails FsError                              needs delete
+}
+
+/// A path relative to a `Dir`'s root, with `/` between its parts.
+pub type Path = distinct Text derives(Eq, Hash, Show)
+
+/// Why an operation of a `Dir` failed.
+pub enum FsError derives(Eq, Show) {
+    NotFound(path: Path)
+    PermissionDenied(path: Path)
+    Other(message: Text)
+}

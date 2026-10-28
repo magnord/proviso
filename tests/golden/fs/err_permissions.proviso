@@ -1,0 +1,78 @@
+// phase: 3.5
+// expect-error: E0603
+// expect-error: E0901
+// Each operation of `Dir` needs one permission (OPEN_QUESTIONS Q6): `read_text` and `size`
+// need `read`, `list` needs `list`, `write_text` needs `write`, `create_dir` needs `create`
+// and `remove` needs `delete`. A call its static type doesn't permit is E0603 (REFERENCE §9.2),
+// and so is passing a `Dir` where one with more permissions is expected. `write_text` to a
+// new file needs only `write`. `sub` waits for value-level narrowing, which isn't scheduled
+// yet, in either form of the call (Q6).
+use std.fs { Dir, Path, FsError }
+use std.test { MemDir }
+
+fn reads(dir: Dir[read], p: Path) -> Int fails FsError {
+    let text = try dir.read_text(p)
+    let size = try dir.size(p)
+    let listed = try dir.list(p)                                    // <- E0603
+    try dir.write_text(path: p, text: text)                         // <- E0603
+    try dir.create_dir(p)                                           // <- E0603
+    try dir.remove(p)                                               // <- E0603
+    try Dir.remove(dir, p)                                          // <- E0603
+    return size
+}
+
+fn lists(dir: Dir[list], p: Path) -> Int fails FsError {
+    let listed = try dir.list(p)
+    let text = try dir.read_text(p)                                 // <- E0603
+    return listed.len()
+}
+
+fn writes(dir: Dir[write, create, delete], p: Path) fails FsError {
+    try dir.write_text(path: p, text: "new")
+    try dir.create_dir(p)
+    try dir.remove(p)
+    let size = try dir.size(p)                                      // <- E0603
+}
+
+fn narrowed(dir: Dir, p: Path) -> Int fails FsError {
+    let r = dir.only::[read]()
+    let size = try reads(dir: r, p: p)
+    try writes(dir: r, p: p)                                        // <- E0603
+    let full: Dir = r                                               // <- E0603
+    let inner = try dir.sub(p)                                      // <- E0901
+    let qualified = try Dir.sub(dir, p)                             // <- E0901
+    return size
+}
+
+// A `cap record` that implements `Dir` would have `sub` too, so writing one in its `impl` and
+// calling one on a value of the record wait as well.
+cap record Fake {
+    state writes: Int
+}
+
+impl Dir for Fake {
+    fn read_text(self, path: Path) -> Text fails FsError {
+        return ""
+    }
+    fn write_text(self, path: Path, text: Text) fails FsError {
+        self.writes += 1
+    }
+    fn size(self, path: Path) -> Int fails FsError {
+        return 0
+    }
+    fn list(self, path: Path) -> List[Path] fails FsError {
+        return []
+    }
+    fn create_dir(self, path: Path) fails FsError {}
+    fn remove(self, path: Path) fails FsError {}
+    fn sub(self, path: Path) -> Fake fails FsError {                // <- E0901
+        return self
+    }
+}
+
+fn fakes(fake: Fake, mem: MemDir, p: Path) fails FsError {
+    let text = try fake.read_text(p)
+    let inner = try fake.sub(p)                                     // <- E0901
+    let other = try mem.sub(p)                                      // <- E0901
+    let viewed = try Dir.of(fake).only::[read]().read_text(p)
+}

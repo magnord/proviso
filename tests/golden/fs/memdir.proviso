@@ -1,0 +1,50 @@
+// phase: 3.5
+// `std.test`'s `MemDir` is a `Dir` written in Proviso (REFERENCE §9.6). `with_files` returns
+// the capability, and copies of it share its files, as copies of any capability share its
+// state. Its files are a flat map from path to text, where a directory is any path that a
+// key continues with `/`. An empty directory is held by its path and a `/`, and the root is
+// always one (OPEN_QUESTIONS P5). Its failures read as the runtime's `Dir`'s do.
+// `Dir.of(MemDir(…))` builds one from a map of paths.
+use std.fs { Dir, Path, FsError }
+use std.test { MemDir }
+
+fn outcome[T](result: Result[T, FsError]) -> Text {
+    return match result {
+        Ok(_) => "ok"
+        Err(error) => f"{error}"
+    }
+}
+
+fn add(dir: Dir[write], name: Text) fails FsError {
+    try dir.write_text(path: Path(name), text: name)
+}
+
+pub fn main(sys: keep System) fails FsError {
+    let out = sys.stdout
+    let dir = MemDir.with_files(["b.txt": "bee", "a/x.txt": "x", "a/y/z.txt": "zz", "c": "sea"])
+    let copy = dir
+    try add(dir: copy, name: "a/new.txt")
+    out.write_line(try dir.read_text(Path("a/new.txt"))) else {}
+    out.write_line(f"{try dir.list(Path(""))} {try dir.list(Path("a"))} {try dir.list(Path("a/y"))}") else {}
+    out.write_line(f"{try dir.size(Path("a/y/z.txt"))} {try copy.size(Path("b.txt"))}") else {}
+    out.write_line(outcome(attempt dir.read_text(Path("nope")))) else {}
+    out.write_line(outcome(attempt dir.read_text(Path("a")))) else {}
+    out.write_line(outcome(attempt dir.size(Path("a")))) else {}
+    out.write_line(outcome(attempt dir.write_text(path: Path("a"), text: ""))) else {}
+    out.write_line(outcome(attempt dir.list(Path("b.txt")))) else {}
+    out.write_line(outcome(attempt dir.list(Path("nope")))) else {}
+    out.write_line(outcome(attempt dir.create_dir(Path("a")))) else {}
+    out.write_line(outcome(attempt dir.create_dir(Path("c")))) else {}
+    out.write_line(outcome(attempt dir.create_dir(Path("empty")))) else {}
+    out.write_line(outcome(attempt dir.list(Path("empty")))) else {}
+    out.write_line(outcome(attempt dir.remove(Path("a/y")))) else {}
+    out.write_line(outcome(attempt dir.remove(Path("")))) else {}
+    out.write_line(outcome(attempt dir.remove(Path("nope")))) else {}
+    try copy.remove(Path("a/y/z.txt"))
+    out.write_line(outcome(attempt dir.list(Path("a/y")))) else {}
+    // A map of paths, made a `Dir` by hand.
+    var files: Map[Path, Text] = [:]
+    let _ = files.set(key: Path("k"), value: "v")
+    let made = Dir.of(MemDir(files: files))
+    out.write_line(try made.only::[read]().read_text(Path("k"))) else {}
+}

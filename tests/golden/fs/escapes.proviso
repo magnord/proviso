@@ -1,0 +1,41 @@
+// phase: 3.5
+// A path that is absolute, or whose `..` parts climb above the root, fails with
+// `FsError.PermissionDenied` before the file system sees it, whatever the operation
+// (OPEN_QUESTIONS Q6). `..` is resolved by the path's text, so one that climbs and comes back
+// stays in the root. Removing the root itself is denied too. A symbolic link that leads out
+// of the root is denied as well, which the interpreter's unit tests check, since a program
+// can't make one (OPEN_QUESTIONS P5).
+use std.fs { Dir, Path, FsError }
+
+fn each(dir: Dir, path: Path) -> Text {
+    let read = attempt dir.read_text(path)
+    let write = attempt dir.write_text(path: path, text: "x")
+    let size = attempt dir.size(path)
+    let list = attempt dir.list(path)
+    let create = attempt dir.create_dir(path)
+    let remove = attempt dir.remove(path)
+    let denied = [read is Err(FsError.PermissionDenied(..)), write is Err(FsError.PermissionDenied(..)),
+        size is Err(FsError.PermissionDenied(..)), list is Err(FsError.PermissionDenied(..)),
+        create is Err(FsError.PermissionDenied(..)), remove is Err(FsError.PermissionDenied(..))]
+    return f"{path.value}: {denied}"
+}
+
+fn outcome[T](result: Result[T, FsError]) -> Text {
+    return match result {
+        Ok(_) => "ok"
+        Err(error) => f"{error}"
+    }
+}
+
+pub fn main(sys: keep System) fails FsError {
+    for path in ["/etc/hosts", "/", "..", "../x", "./..", "a/../..", "a/b/../../../x", "a/../../a"] {
+        sys.stdout.write_line(each(dir: sys.fs, path: Path(path))) else {}
+    }
+    sys.stdout.write_line(outcome(attempt sys.fs.read_text(Path("../x")))) else {}
+    sys.stdout.write_line(outcome(attempt sys.fs.remove(Path(".")))) else {}
+    sys.stdout.write_line(outcome(attempt sys.fs.remove(Path("a/..")))) else {}
+    // Climbing and coming back down stays in the root.
+    try sys.fs.write_text(path: Path("a/../kept.txt"), text: "in the root")
+    sys.stdout.write_line(try sys.fs.read_text(Path("kept.txt"))) else {}
+    sys.stdout.write_line(f"{try sys.fs.list(Path("x/.."))}") else {}
+}

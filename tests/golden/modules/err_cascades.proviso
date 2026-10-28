@@ -8,14 +8,14 @@
 // and an associated function, and for an item a module doesn't have. A rejected module
 // `use` makes no qualifier, so names qualified by it report nothing more either. It
 // hides nothing else of its name, so a mistake with the prelude's `Text` is reported.
-use std.fs { Dir, Path }                                    // <- E0901
+use std.task { Scope, Group }                               // <- E0901
 use std.task { checkpoint }                                 // <- E0901
 use std.io { Out, Sink }                                    // <- E0205
 use std.task                                                // <- E0901
 use mylib.Text                                              // <- E0205
 
-fn load(dir: Dir[read], s: Sink) -> Int {
-    let p = Path("u.csv")
+fn load(nursery: Scope[spawn], s: Sink) -> Int {
+    let g = Group("u.csv")
     checkpoint()
     let t: Sink = Sink(1)
     let u = Sink.empty()

@@ -1,0 +1,2 @@
+[]
+Err(FsError.NotFound(path: Path("notes.txt")))
