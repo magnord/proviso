@@ -1,0 +1,53 @@
+// phase: 3.6
+// expect-error: E0307
+// An interface method declares no type parameters, so no effect parameter, and a `with` on
+// one names none (REFERENCE §9.5). What it fails with is unknown, so neither an `impl` nor a
+// call is checked against it, and an unrelated error in its signature is still reported
+// (§15.1). A `cap interface`'s operation is the same. An `impl` method's `with` names an
+// effect parameter of its own.
+
+enum Bad {
+    Oops
+}
+
+interface Fire {
+    fn fire(self) with E                                // <- E0307
+    fn both(self) fails Bad with E                      // <- E0307
+    fn other(self, n: Nope) with E                      // <- E0307, E0307
+}
+
+cap interface Shoot {
+    fn shoot(self) with E                               // <- E0307
+}
+
+record Gun {
+    n: Int
+}
+
+impl Fire for Gun {
+    fn fire(self) {}
+    fn both(self) fails Bad {}
+    fn other(self, n: Int) {}
+}
+
+impl Gun {
+    fn go(self) with E {}                               // <- E0307
+}
+
+record Box[T] {
+    v: T
+}
+
+impl[T] Box[T] {
+    fn each[effect E](self, f: fn(T) with E) with E {
+        f(self.v)
+    }
+
+    fn bad(self) with T {}                              // <- E0307
+}
+
+fn calls(g: Gun) {
+    try g.fire()
+    g.both()
+    Box(v: 1).each(f: |x| {})
+}

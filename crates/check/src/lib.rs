@@ -2739,6 +2739,14 @@ impl Checker<'_> {
                     self.exposes(decl.name, vis, &fails.clone().unwrap_or(Ty::Never), at);
                 }
                 let (needs, _) = self.perms_named(id, &method.needs, "`needs`");
+                // An interface method declares no type parameters, so no effect parameter
+                // either, and its `with` names none (§9.5). What it fails with is unknown, so
+                // neither an `impl` nor a call is checked against it (§15.1).
+                if let Some(name) = method.with {
+                    self.with_effect(name);
+                    incomplete = true;
+                    continue;
+                }
                 if cased && !duplicate && !only {
                     methods.push(IfaceMethod {
                         name: text.into(),
