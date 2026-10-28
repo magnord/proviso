@@ -218,6 +218,19 @@ pub struct GenericInfo {
     pub bounds: Vec<IfaceId>,
     /// The declaration or a constraint was rejected, so it stands for an unknown type.
     pub rejected: bool,
+    /// Which part of an effect parameter it is, or `None` for a type parameter.
+    pub effect: Option<EffectSlot>,
+}
+
+/// An effect parameter `effect E` takes two slots among the type parameters (REFERENCE §9.5).
+/// Its error part is an ordinary type parameter, which `E` names, and its reach part is a
+/// slot no name gives, which a reach set holds as [`Reach::effect`]. `::[…]` gives neither,
+/// since the closure passed for `E` does (OPEN_QUESTIONS P5).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EffectSlot {
+    /// The error part, with the index of its reach part.
+    Error { reach: u32 },
+    Reach,
 }
 
 pub struct ParamInfo {
@@ -367,6 +380,7 @@ pub fn check_program(m: &Ast, opts: Options, diags: &mut Diagnostics) -> Program
         self_ty: None,
         cap_self: false,
         generic_scope: Vec::new(),
+        effect_slots: Vec::new(),
         param_names: Vec::new(),
         impl_generics: Vec::new(),
         copying: false,
@@ -562,6 +576,9 @@ struct LoopState {
 struct FnState {
     ret: Ty,
     fails: Option<Ty>,
+    /// The error slot of the effect parameter a `with E` function fails as, so a call that
+    /// fails with it propagates without a marker (REFERENCE §9.5). `None` in a closure.
+    through: Option<u32>,
     scopes: Vec<Vec<(Symbol, LocalId)>>,
     locals: Vec<Local>,
     /// How many of the locals are `self` and the parameters, which come first.
@@ -630,6 +647,7 @@ impl FnState {
         FnState {
             ret,
             fails,
+            through: None,
             scopes: Vec::new(),
             locals: Vec::new(),
             params: 0,
@@ -803,6 +821,8 @@ struct Checker<'a> {
     generic_scope: Vec<(Symbol, Option<u32>)>,
     /// How diagnostics write each type parameter in scope.
     param_names: Vec<Box<str>>,
+    /// Which type parameters in scope are parts of effect parameters, by index (§9.5).
+    effect_slots: Vec<Option<EffectSlot>>,
     /// The type parameters of the `impl` block being declared, which its methods' come after.
     impl_generics: Vec<GenericInfo>,
     /// Set while checking an expression whose value is copied: bound to a name, stored in a
@@ -895,7 +915,8 @@ enum Pending {
     Arith { op: BinOp, ty: Ty, span: Span },
     /// A call of `callee` that can fail with `ty` but has no marker, which is reported with
     /// the error type the statement settles (E0701).
-    Unmarked { ty: Ty, callee: Box<str>, span: Span },
+    /// `through` is the error a `with E` function propagates unmarked (REFERENCE §9.5).
+    Unmarked { ty: Ty, callee: Box<str>, span: Span, through: Option<Ty> },
     /// A `try` that propagates `errs` where there is no `fails` to take them (E0702). Its
     /// chain was `rejected` when its value has an error.
     Try { errs: Vec<Ty>, rejected: bool, span: Span },
@@ -1419,9 +1440,11 @@ impl Checker<'_> {
                 let ty = self.vars.zonk(&ty);
                 self.arithmetic(op, &ty, span);
             }
-            Pending::Unmarked { ty, callee, span } => {
+            Pending::Unmarked { ty, callee, span, through } => {
                 let ty = self.vars.zonk(&ty);
-                self.unmarked(&callee, &ty, span);
+                if through.as_ref() != Some(&ty) {
+                    self.unmarked(&callee, &ty, span);
+                }
             }
             Pending::Try { errs, rejected, span } => self.try_without_fails(errs, rejected, span),
             Pending::CanFail { err, handler, span } => self.can_fail(&err, handler, span),
@@ -2077,7 +2100,7 @@ impl Checker<'_> {
                     work.extend(args.iter().flatten().rev());
                 }
                 TypeExprKind::Tuple(parts) => work.extend(parts.iter().rev()),
-                TypeExprKind::Fn { params, ret, fails, uses } => {
+                TypeExprKind::Fn { params, ret, fails, uses, .. } => {
                     let parts = fails.iter().chain(ret.iter()).chain(params.iter().map(|(_, t)| t)).chain(uses);
                     work.extend(parts.rev());
                 }
@@ -3021,24 +3044,32 @@ impl Checker<'_> {
         generics: &mut Vec<GenericInfo>,
     ) {
         let m = self.m;
-        for param in params {
+        // Effect parameters come after the others, so `::[…]` gives the others in order.
+        for param in params.iter().filter(|p| !p.effect).chain(params.iter().filter(|p| p.effect)) {
             let text = m.text(param.name.sym);
+            let what = if param.effect { "effect parameter" } else { "type parameter" };
             // A wrongly cased name is reported once, not again for what it collides with.
-            let cased = self.pascal_case(param.name, "type parameter");
+            let cased = self.pascal_case(param.name, what);
             // A rejected parameter keeps its place, so `::[…]` still gives it, and stands for
             // an unknown type (§15.1). Its name means the first declaration of it.
-            let rejected =
-                GenericInfo { name: text.into(), sym: None, param: None, bounds: Vec::new(), rejected: true };
+            let rejected = GenericInfo {
+                name: text.into(),
+                sym: None,
+                param: None,
+                bounds: Vec::new(),
+                rejected: true,
+                effect: param.effect.then_some(EffectSlot::Reach),
+            };
             if self.generic_scope.iter().any(|(sym, _)| *sym == param.name.sym) {
                 if cased {
-                    let message = format!("type parameter `{text}` is declared twice");
+                    let message = format!("{what} `{text}` is declared twice");
                     self.error(codes::DUPLICATE_NAME, param.name.span, message);
                 }
                 generics.push(rejected);
                 continue;
             }
             if cased && self.names_type(param.name.sym) {
-                let message = format!("type parameter `{text}` would shadow the type `{text}` (H4)");
+                let message = format!("{what} `{text}` would shadow the type `{text}` (H4)");
                 self.error(codes::SHADOWING, param.name.span, message);
                 self.generic_scope.push((param.name.sym, None));
                 generics.push(GenericInfo { sym: Some(param.name.sym), ..rejected });
@@ -3055,7 +3086,19 @@ impl Checker<'_> {
             }
             let index = generics.len() as u32;
             self.generic_scope.push((param.name.sym, (!rejected).then_some(index)));
-            generics.push(GenericInfo { name: text.into(), sym: Some(param.name.sym), param: None, bounds, rejected });
+            let effect = param.effect.then_some(EffectSlot::Error { reach: index + 1 });
+            generics.push(GenericInfo {
+                name: text.into(),
+                sym: Some(param.name.sym),
+                param: None,
+                bounds,
+                rejected,
+                effect,
+            });
+            if param.effect {
+                let reach = GenericInfo { sym: None, effect: Some(EffectSlot::Reach), ..generics[index as usize].clone() };
+                generics.push(reach);
+            }
         }
     }
 
@@ -3076,6 +3119,7 @@ impl Checker<'_> {
         self.impl_scope();
         self.declare_generics(&decl.generics, Some(decl.name), vis, &mut generics);
         self.param_names = generics.iter().map(|g| g.name.clone()).collect();
+        self.effect_slots = generics.iter().map(|g| g.effect).collect();
         // A type such as `Map[K, V]` asks what its type arguments implement.
         let outer_bounds = std::mem::replace(&mut self.f.bounds, generics.iter().map(|g| g.bounds.clone()).collect());
         self.self_ty = owner.clone();
@@ -3111,6 +3155,7 @@ impl Checker<'_> {
                             param: sym,
                             bounds: vec![iface],
                             rejected: false,
+                            effect: None,
                         });
                         Ty::Param(index)
                     }
@@ -3122,8 +3167,22 @@ impl Checker<'_> {
         }
         let ret = decl.ret.map_or(Ty::Unit, |t| self.part_type(t, "a result"));
         // `Never` has no values, so a function that fails with it cannot fail.
-        let fails = decl.fails.map(|t| self.part_type(t, "an error type")).filter(|t| *t != Ty::Never);
-        let fails = self.error_type(fails, decl.fails);
+        let fails = match decl.with {
+            // It fails as its effect parameter does, and with no error of its own (Q2).
+            Some(name) if decl.fails.is_some() => {
+                let text = self.m.text(name.sym);
+                let message = format!(
+                    "a function with `with {text}` fails as `{text}` does, so it declares no `fails` of its own (§9.5, Q2)"
+                );
+                self.error(codes::WITH_AND_FAILS, name.span, message);
+                Some(Ty::Error)
+            }
+            Some(name) => Some(self.with_effect(name).map_or(Ty::Error, |(error, _)| Ty::Param(error))),
+            None => {
+                let fails = decl.fails.map(|t| self.part_type(t, "an error type")).filter(|t| *t != Ty::Never);
+                self.error_type(fails, decl.fails)
+            }
+        };
         let typed = decl.params.iter().map(|p| p.ty).chain(decl.ret).chain(decl.fails);
         let types = params.iter().map(|p| p.ty.clone()).chain(decl.ret.map(|_| ret.clone()));
         let types: Vec<(Ty, TypeId)> =
@@ -3132,6 +3191,7 @@ impl Checker<'_> {
             self.exposes(decl.name, vis, &ty, at);
         }
         self.impl_scope();
+        self.effect_slots.clear();
         self.f.bounds = outer_bounds;
         self.self_ty = None;
         Signature { generics, receiver, self_mode, params, ret, fails, rejected }
@@ -3838,7 +3898,7 @@ impl Checker<'_> {
         let te = &m.types[t];
         match te.kind {
             TypeExprKind::Named(name) => self.type_name(name),
-            TypeExprKind::Fn { ref params, ret, fails, ref uses } => self.fn_type(params, ret, fails, uses),
+            TypeExprKind::Fn { ref params, ret, fails, ref uses, with } => self.fn_type(params, ret, fails, uses, with),
             // Whether the `cap record` that implements it may use more isn't scheduled
             // (OPEN_QUESTIONS P5; issue #64).
             TypeExprKind::Uses { base, .. }
@@ -4048,10 +4108,26 @@ impl Checker<'_> {
         ret: Option<TypeId>,
         fails: Option<TypeId>,
         uses: &[TypeId],
+        with: Option<Ident>,
     ) -> Ty {
         let modes = params.iter().map(|&(mode, _)| mode).collect();
         let tys = params.iter().map(|&(_, t)| self.resolve_type(t)).collect();
         let ret = ret.map_or(Ty::Unit, |t| self.part_type(t, "a result"));
+        // `with E` gives both the error and the `uses` (REFERENCE §9.4, §9.5).
+        if let Some(name) = with {
+            if fails.is_some() || !uses.is_empty() {
+                let text = self.m.text(name.sym);
+                let message = format!(
+                    "a function type with `with {text}` fails and reaches as `{text}` does, so it has no `fails` or `uses` of its own (§9.5, Q2)"
+                );
+                self.error(codes::WITH_AND_FAILS, name.span, message);
+                return Ty::Error;
+            }
+            return match self.with_effect(name) {
+                Some((error, reach)) => Ty::func_uses(modes, tys, ret, Ty::Param(error), Ty::reach(Reach::effect(reach))),
+                None => Ty::Error,
+            };
+        }
         let at = fails;
         let fails = fails.map(|t| self.part_type(t, "an error type")).filter(|t| *t != Ty::Never);
         let fails = self.error_type(fails, at).unwrap_or(Ty::Never);
@@ -4101,6 +4177,24 @@ impl Checker<'_> {
         known.then_some(reach)
     }
 
+    /// The slots of the effect parameter that `with` names: its error part and its reach part
+    /// (REFERENCE §9.5). `None` for a name that is none, which is reported, or one whose
+    /// declaration is rejected.
+    fn with_effect(&mut self, name: Ident) -> Option<(u32, u32)> {
+        let text = self.m.text(name.sym);
+        let message = match self.generic_scope.iter().find(|(sym, _)| *sym == name.sym) {
+            Some(&(_, None)) => return None,
+            Some(&(_, Some(i))) => match self.effect_slots.get(i as usize) {
+                Some(&Some(EffectSlot::Error { reach })) => return Some((i, reach)),
+                _ => format!("`with` names an effect parameter, and `{text}` is a type parameter; declare it as `effect {text}` (§9.5)"),
+            },
+            None if self.poisoned.contains(&name.sym) => return None,
+            None => format!("`with` names an effect parameter, and no `effect {text}` is declared here (§9.5)"),
+        };
+        self.error(codes::UNKNOWN_TYPE, name.span, message);
+        None
+    }
+
     /// Reports `Self` before `uses` or in a `uses` list of a `cap interface`.
     fn self_uses(&mut self, span: Span) {
         self.not_implemented(span, "`uses` clauses with a `cap interface`'s `Self`", Planned::Unscheduled);
@@ -4113,6 +4207,15 @@ impl Checker<'_> {
             return Ty::Error;
         }
         if let Some(&(_, index)) = self.generic_scope.iter().find(|(sym, _)| *sym == name.sym) {
+            if let Some(i) = index
+                && self.effect_slots.get(i as usize).is_some_and(Option::is_some)
+            {
+                let message = format!(
+                    "`{text}` is an effect parameter, which only a `with` clause names, as in `fn() with {text}` (§9.5)"
+                );
+                self.error(codes::UNKNOWN_TYPE, name.span, message);
+                return Ty::Error;
+            }
             return index.map_or(Ty::Error, Ty::Param);
         }
         if let Some(ty) = builtin_type(text) {
@@ -4225,6 +4328,12 @@ impl Checker<'_> {
             return;
         }
         let mut state = FnState::new(info.ret.clone(), info.fails.clone());
+        // A `with E` that also declares `fails` still propagates `E` unmarked (§15.1).
+        state.through = decl.with.and_then(|with| {
+            (info.generics.iter())
+                .position(|g| g.sym == Some(with.sym) && matches!(g.effect, Some(EffectSlot::Error { .. })))
+                .map(|i| i as u32)
+        });
         // A type parameter with a rejected declaration or constraint may have had any
         // constraint, so it meets every interface, and what needs one of it, such as a copy
         // or another block's constraint, isn't reported (§15.1; issue #53).
@@ -4239,6 +4348,7 @@ impl Checker<'_> {
             .filter_map(|(i, g)| Some((g.sym?, (!g.rejected).then_some(i as u32))))
             .collect();
         self.param_names = info.generics.iter().map(|g| g.name.clone()).collect();
+        self.effect_slots = info.generics.iter().map(|g| g.effect).collect();
         self.self_ty = info.owner.clone();
         // The function borrows `self` and its parameters (REFERENCE §5.2). An `inout` one is
         // lent to it too, but it may change it. A `take` one is owned, and immutable as a `let`
@@ -4311,6 +4421,7 @@ impl Checker<'_> {
         moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags);
         self.p.fns[id].locals = self.f.locals.len();
         self.generic_scope.clear();
+        self.effect_slots.clear();
         self.param_names.clear();
         self.self_ty = None;
     }
@@ -5101,6 +5212,7 @@ impl Checker<'_> {
     fn effects_reach(&self, ty: &Ty) -> bool {
         let reach = self.reach(ty);
         !reach.params().is_empty()
+            || !reach.effects().is_empty()
             || reach.caps().iter().any(|&(iface, perms)| {
                 let observes = self.p.decls.iface(iface).cap.as_ref().map_or(Perms::NONE, |c| c.observes);
                 perms.minus(observes) != Perms::NONE
@@ -6648,6 +6760,7 @@ impl Checker<'_> {
             std::mem::take(&mut self.f.loops),
             std::mem::replace(&mut self.f.returns, true),
             std::mem::take(&mut self.markers),
+            self.f.through.take(),
         );
         let labels = outer.2.iter().filter_map(|l| l.label).collect();
         self.closure_scopes.push(ClosureScope {
@@ -6694,7 +6807,7 @@ impl Checker<'_> {
         if scope.unmarked && expected.is_none() {
             rejected = true;
         }
-        (self.f.ret, self.f.fails, self.f.loops, self.f.returns, self.markers) = outer;
+        (self.f.ret, self.f.fails, self.f.loops, self.f.returns, self.markers, self.f.through) = outer;
         let needs = scope.captures.iter().map(|(id, _)| self.local_needs(*id)).max().unwrap_or(0);
         // Its reach is what its captures reach (REFERENCE §9.4). One whose type is still open
         // is checked against it once the type settles.
@@ -7012,6 +7125,13 @@ impl Checker<'_> {
                 self.vars.poison(ty);
             }
         }
+        // An effect parameter's error part comes from the arguments alone, so a marker
+        // doesn't make a call fallible whose closure can't fail (REFERENCE §9.5).
+        for (ty, g) in tvars.iter().zip(&self.p.fns[f].generics) {
+            if matches!(g.effect, Some(EffectSlot::Error { .. })) {
+                self.vars.close_never(ty);
+            }
+        }
         self.targ_bounds(f, &tvars, span);
         if let Some(err) = fails {
             self.fallible_call(e, name, &err.subst(&tvars), span, chain);
@@ -7035,10 +7155,11 @@ impl Checker<'_> {
         let mut tvars: Vec<Option<Ty>> = rejected.iter().map(|&rejected| rejected.then_some(Ty::Error)).collect();
         // `::[…]` gives the declared parameters, which come before those of interface types,
         // and after the `impl` block's.
-        let declared = info.generics[own..].iter().filter(|g| g.param.is_none()).count();
+        let declared = info.generics[own..].iter().filter(|g| g.param.is_none() && g.effect.is_none()).count();
         // A parameter declared twice may have been meant as one, so a count without it is
         // also right.
-        let duplicates = info.generics[own..].iter().filter(|g| g.sym.is_none() && g.param.is_none()).count();
+        let duplicates =
+            info.generics[own..].iter().filter(|g| g.sym.is_none() && g.param.is_none() && g.effect.is_none()).count();
         if let Some(targs) = targs {
             let tys: Vec<Ty> = targs.iter().map(|&t| self.part_type(t, "a type argument")).collect();
             let fewest = declared - duplicates;
@@ -8633,11 +8754,19 @@ impl Checker<'_> {
                 }
             }
             _ => {
+                // A call that fails as the `with E` function does propagates (REFERENCE §9.5).
+                let through = self.f.through.map(Ty::Param);
+                if let Some(own) = &through
+                    && self.vars.resolve(err) == *own
+                {
+                    return;
+                }
                 // A later value may still give the error type, so the message waits for the
                 // statement to settle it, and this E0701 stands for one nothing gives.
                 self.vars.unmarked(err);
                 if self.vars.has_var(err) {
-                    self.pending.push(Pending::Unmarked { ty: err.clone(), callee: callee.into(), span });
+                    let (ty, callee) = (err.clone(), callee.into());
+                    self.pending.push(Pending::Unmarked { ty, callee, span, through });
                 } else {
                     if let Some(scope) = self.closure_scopes.last_mut() {
                         scope.unmarked = true;
@@ -9932,7 +10061,6 @@ struct BuiltinSig {
 /// The methods of a list or map that later phases bring, with what to call them and when.
 fn later_collection_method(name: &str) -> Option<(&'static str, Planned)> {
     Some(match name {
-        "map" | "filter" => ("operations that take a closure", Planned::Phase(3)),
         // STD.md declares none of them.
         "is_sorted" | "is_permutation_of" | "is_unique" => ("the predicates of §8.1", Planned::Unscheduled),
         // `replace` returns a resource it would otherwise discard (REFERENCE §10 rule 5), but

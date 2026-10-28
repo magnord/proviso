@@ -191,6 +191,8 @@ pub struct FnDecl {
     pub params: Vec<Param>,
     pub ret: Option<TypeId>,
     pub fails: Option<TypeId>,
+    /// `with E`, which makes the function fail as its effect parameter `E` does (§9.5).
+    pub with: Option<Ident>,
     /// The permissions an operation of a `cap interface` `needs` (REFERENCE §9.2), each once.
     pub needs: Vec<Ident>,
     /// `None` for an interface's method, which has no body (Q13), and for a function of a
@@ -204,6 +206,8 @@ pub struct FnDecl {
 pub struct GenericParam {
     pub name: Ident,
     pub bounds: Vec<Ident>,
+    /// `effect E`, which ranges over an error and a reach (REFERENCE §9.5).
+    pub effect: bool,
 }
 
 /// `self`, `inout self` or `take self`.
@@ -355,9 +359,15 @@ pub enum TypeExprKind {
     SelfType,
     /// `(A, B)`, with at least two elements.
     Tuple(Vec<TypeId>),
-    /// `fn(A, inout B) -> R fails E uses C` (REFERENCE §9.4). Without `-> R`, the result is
-    /// `Unit`, and without `uses`, it uses nothing.
-    Fn { params: Vec<(ParamMode, TypeId)>, ret: Option<TypeId>, fails: Option<TypeId>, uses: Vec<TypeId> },
+    /// `fn(A, inout B) -> R fails E uses C` or `fn(A) -> R with E` (REFERENCE §9.4). Without
+    /// `-> R`, the result is `Unit`, and without `uses` or `with`, it uses nothing.
+    Fn {
+        params: Vec<(ParamMode, TypeId)>,
+        ret: Option<TypeId>,
+        fails: Option<TypeId>,
+        uses: Vec<TypeId>,
+        with: Option<Ident>,
+    },
     /// `Dir[read] uses Out`: a capability type and the capability types its implementation
     /// uses (REFERENCE §9.2).
     Uses { base: TypeId, uses: Vec<TypeId> },

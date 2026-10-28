@@ -138,18 +138,31 @@ pub struct CapTy {
 /// capability of, with the permissions it may use, and each type parameter whose type
 /// argument may reach more (OPEN_QUESTIONS Q31). Capabilities of one interface are one
 /// entry with the permissions of all of them, so a set has one spelling, and the `uses` of
-/// a capability it reaches are in it too. Effect parameters join it in slice 3.6.
+/// a capability it reaches are in it too. So is the reach part of each effect parameter whose
+/// argument it may reach, as `with E` gives it (REFERENCE §9.5).
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Reach {
     /// Sorted by interface, each once.
     caps: Vec<(IfaceId, Perms)>,
     /// Sorted, each once.
     params: Vec<u32>,
+    /// The type parameter slots of effect parameters' reach parts, sorted, each once. A call
+    /// replaces them with what its arguments give (see [`Ty::subst`]).
+    effects: Vec<u32>,
 }
 
 impl Reach {
     pub fn is_empty(&self) -> bool {
-        self.caps.is_empty() && self.params.is_empty()
+        self.caps.is_empty() && self.params.is_empty() && self.effects.is_empty()
+    }
+
+    pub fn effects(&self) -> &[u32] {
+        &self.effects
+    }
+
+    /// What the reach part of an effect parameter in slot `i` reaches.
+    pub fn effect(i: u32) -> Reach {
+        Reach { effects: vec![i], ..Reach::default() }
     }
 
     pub fn caps(&self) -> &[(IfaceId, Perms)] {
@@ -162,7 +175,7 @@ impl Reach {
 
     /// What a value of type parameter `i` without `Copy` may reach.
     pub fn param(i: u32) -> Reach {
-        Reach { caps: Vec::new(), params: vec![i] }
+        Reach { params: vec![i], ..Reach::default() }
     }
 
     /// What it reaches apart from capabilities of `iface`.
@@ -201,9 +214,11 @@ impl Reach {
         for &(iface, perms) in &other.caps {
             self.add_cap(iface, perms);
         }
-        for &i in &other.params {
-            if let Err(at) = self.params.binary_search(&i) {
-                self.params.insert(at, i);
+        for (mine, theirs) in [(&mut self.params, &other.params), (&mut self.effects, &other.effects)] {
+            for &i in theirs {
+                if let Err(at) = mine.binary_search(&i) {
+                    mine.insert(at, i);
+                }
             }
         }
     }
@@ -214,7 +229,8 @@ impl Reach {
             .filter_map(|&(iface, perms)| other.perms(iface).map(|theirs| (iface, perms.intersect(theirs))))
             .collect();
         let params = self.params.iter().copied().filter(|i| other.params.contains(i)).collect();
-        Reach { caps, params }
+        let effects = self.effects.iter().copied().filter(|i| other.effects.contains(i)).collect();
+        Reach { caps, params, effects }
     }
 
     fn perms(&self, iface: IfaceId) -> Option<Perms> {
@@ -222,10 +238,37 @@ impl Reach {
     }
 
     /// Whether `other` covers this: it reaches each interface this does, with at least its
-    /// permissions, and each type parameter (OPEN_QUESTIONS P3, decided for phase 3).
+    /// permissions, and each type parameter and effect parameter (OPEN_QUESTIONS P3, decided
+    /// for phase 3).
     pub fn covered_by(&self, other: &Reach) -> bool {
         self.caps.iter().all(|&(iface, perms)| other.perms(iface).is_some_and(|theirs| perms.is_subset(theirs)))
             && self.params.iter().all(|i| other.params.contains(i))
+            && self.effects.iter().all(|i| other.effects.contains(i))
+    }
+
+    /// The reach with each effect parameter's reach part replaced by its argument in `args`:
+    /// a reach set, or a variable or an error where it is the whole reach, as a `with E`
+    /// written alone gives it. `None` where nothing changes.
+    fn subst(&self, args: &[Ty]) -> Option<Ty> {
+        if self.effects.is_empty() {
+            return None;
+        }
+        let mut reach = Reach { effects: Vec::new(), ..self.clone() };
+        let mut kept = Vec::new();
+        for &i in &self.effects {
+            match &args[i as usize] {
+                Ty::Reach(arg) => reach.extend(arg),
+                Ty::Error => return Some(Ty::Error),
+                // An effect parameter given by another, as in a call from a `with E` body.
+                Ty::Param(j) => reach.extend(&Reach::effect(*j)),
+                arg if self.effects.len() == 1 && reach.is_empty() => return Some(arg.clone()),
+                _ => kept.push(i),
+            }
+        }
+        for i in kept {
+            reach.extend(&Reach::effect(i));
+        }
+        Some(Ty::reach(reach))
     }
 }
 
@@ -346,6 +389,7 @@ impl Ty {
     fn subst_in(&self, args: &[Ty], seen: &mut HashMap<usize, Option<Ty>>) -> Option<Ty> {
         match self {
             Ty::Param(i) => Some(args[*i as usize].clone()),
+            Ty::Reach(reach) => reach.subst(args),
             ty if let Some(parts) = ty.parts() => {
                 let key = Arc::as_ptr(parts) as *const Ty as usize;
                 if let Some(done) = seen.get(&key) {

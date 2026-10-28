@@ -259,6 +259,8 @@ pub mod codes {
             "An `example … fails P` or `expect … fails P` whose call can't fail (REFERENCE §14).";
         RESOURCE_ERROR_TYPE = "E0709", "resource_error_type",
             "A `fails` type cannot be a resource or hold one (REFERENCE §10).";
+        WITH_AND_FAILS = "E0710", "with_and_fails",
+            "A function with `with E` cannot also declare `fails`, nor a function type `fails` or `uses` (REFERENCE §9.5, Q2).";
 
         NOT_IMPLEMENTED = "E0901", "not_implemented",
             "A construct the language has that this implementation does not support yet.";

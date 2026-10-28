@@ -1398,6 +1398,16 @@ impl Decls {
                 f.write_str(" -> ")?;
                 self.write_ty(f, ret, names, budget)?;
             }
+            // `with E` gives an effect parameter's two slots one name (REFERENCE §9.5).
+            if let (Ty::Param(i), Some(Ty::Reach(uses))) = (fails, ty.fn_uses())
+                && let [effect] = uses.effects()
+                && uses.caps().is_empty()
+                && uses.params().is_empty()
+                && let Some(name) = names.get(*i as usize)
+                && names.get(*effect as usize) == Some(name)
+            {
+                return write!(f, " with {name}");
+            }
             if *fails != Ty::Never {
                 f.write_str(" fails ")?;
                 self.write_ty(f, fails, names, budget)?;
@@ -1469,7 +1479,7 @@ impl Decls {
     /// (OPEN_QUESTIONS Q41). A capability with every permission is written bare, and a type
     /// parameter by its name.
     fn write_reach(&self, f: &mut fmt::Formatter, reach: &Reach, names: &[Box<str>]) -> fmt::Result {
-        let several = reach.caps().len() + reach.params().len() > 1;
+        let several = reach.caps().len() + reach.params().len() + reach.effects().len() > 1;
         if several {
             f.write_str("(")?;
         }
@@ -1482,7 +1492,7 @@ impl Decls {
             first = false;
             self.write_ty(f, &Ty::cap(iface, perms), names, &budget)?;
         }
-        for &i in reach.params() {
+        for &i in reach.params().iter().chain(reach.effects()) {
             if !first {
                 f.write_str(", ")?;
             }

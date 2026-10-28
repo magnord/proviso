@@ -1003,6 +1003,7 @@ impl Parser<'_> {
     fn impl_rest(&mut self) -> PResult<ImplDecl> {
         self.bump();
         let generics = if self.at(T::LBracket) { self.generics()? } else { Vec::new() };
+        self.no_effects(&generics)?;
         let first = self.type_expr()?;
         let (iface, target) = if self.eat(T::Keyword(Kw::For)) {
             if let TypeExprKind::Applied { args: Some(_), .. } = self.m.types[first].kind {
@@ -1362,6 +1363,7 @@ impl Parser<'_> {
             return Ok(Vec::new());
         }
         let generics = self.generics()?;
+        self.no_effects(&generics)?;
         if let Some(param) = generics.iter().find(|g| !g.bounds.is_empty()) {
             let span = param.name.span.to(param.bounds.last().map_or(param.name.span, |b| b.span));
             self.diags.not_implemented(span, "constraints on a type's own type parameters", Planned::Unscheduled);
@@ -1370,15 +1372,27 @@ impl Parser<'_> {
         Ok(generics)
     }
 
-    /// `[T: Ord + Copy, U]` after a function's name (REFERENCE §4.8).
+    /// Rejects an effect parameter among the type parameters of a type or an `impl` block,
+    /// since only a function's calls say what its effect parameters are (REFERENCE §9.5).
+    fn no_effects(&mut self, generics: &[GenericParam]) -> PResult<()> {
+        let Some(param) = generics.iter().find(|g| g.effect) else { return Ok(()) };
+        let message = "only a function declares an effect parameter (§9.5)";
+        self.error(codes::UNEXPECTED_TOKEN, param.name.span, message);
+        Err(())
+    }
+
+    /// `[T: Ord + Copy, U]` or `[B, effect E]` after a function's name (REFERENCE §4.8, §9.5).
     fn generics(&mut self) -> PResult<Vec<GenericParam>> {
         let open = self.bump();
         let mut params = Vec::new();
         while !self.at(T::RBracket) {
-            if self.at_kw(Kw::Effect) {
-                return self.not_implemented("effect parameters", Planned::Phase(3));
+            let effect = self.eat(T::Keyword(Kw::Effect));
+            let name = self.ident(if effect { "an effect parameter" } else { "a type parameter" })?;
+            if effect && self.at(T::Colon) {
+                let message = "an effect parameter takes no constraints (§9.5)";
+                self.error(codes::UNEXPECTED_TOKEN, self.peek().span, message);
+                return Err(());
             }
-            let name = self.ident("a type parameter")?;
             let mut bounds = Vec::new();
             if self.eat(T::Colon) {
                 loop {
@@ -1394,7 +1408,7 @@ impl Parser<'_> {
                     }
                 }
             }
-            params.push(GenericParam { name, bounds });
+            params.push(GenericParam { name, bounds, effect });
             if !self.eat(T::Comma) {
                 break;
             }
@@ -1451,7 +1465,7 @@ impl Parser<'_> {
         }
         self.close(&open, T::RParen, "`,` or `)`")?;
         let mut ret = if self.eat(T::Arrow) { Some(self.clause_type()?) } else { None };
-        let mut fails = None;
+        let (mut fails, mut with) = (None, None);
         let mut needs: Option<Vec<Ident>> = None;
         loop {
             // A rejected `uses` right after the result type may have been meant for it, so the
@@ -1498,9 +1512,14 @@ impl Parser<'_> {
                         ret = Some(self.m.types.alloc(TypeExpr { kind: TypeExprKind::Rejected, span }));
                     }
                 }
-                // Effect variables come in slice 3.6.
                 T::Keyword(Kw::With) => {
-                    return self.not_implemented("`with` clauses", Planned::Phase(3));
+                    let keyword = self.bump();
+                    let name = self.ident("an effect parameter")?;
+                    if with.is_some() {
+                        let message = "a function declares at most one `with` clause (§9.5)";
+                        self.error(codes::UNEXPECTED_TOKEN, keyword.span, message);
+                    }
+                    with = Some(name);
                 }
                 T::Keyword(Kw::Observes | Kw::Effects) => {
                     let keyword = self.bump();
@@ -1534,6 +1553,7 @@ impl Parser<'_> {
                 params,
                 ret,
                 fails,
+                with,
                 needs: Vec::new(),
                 body,
                 recovered: self.recovered,
@@ -1554,7 +1574,7 @@ impl Parser<'_> {
             self.block()?;
         }
         let needs = needs.unwrap_or_default();
-        Ok(FnDecl { name, generics, receiver, params, ret, fails, needs, body: None, recovered: false })
+        Ok(FnDecl { name, generics, receiver, params, ret, fails, with, needs, body: None, recovered: false })
     }
 
     fn param(&mut self) -> PResult<Param> {
@@ -1636,23 +1656,22 @@ impl Parser<'_> {
         }
         self.close(&open, T::RParen, "`,` or `)`")?;
         let ret = if self.eat(T::Arrow) { Some(self.clause_type()?) } else { None };
-        // `fails` and `uses` come in either order, as a declaration's clauses do.
-        let (mut fails, mut uses) = (None, None);
+        // `fails`, `uses` and `with` come in any order, as a declaration's clauses do. The
+        // checker rejects `with` beside either of the others (§9.5).
+        let (mut fails, mut uses, mut with) = (None, None, None);
         loop {
             if fails.is_none() && self.eat(T::Keyword(Kw::Fails)) {
                 fails = Some(self.clause_type()?);
             } else if uses.is_none() && self.eat(T::Keyword(Kw::Uses)) {
                 uses = Some(self.uses_list()?);
+            } else if with.is_none() && self.eat(T::Keyword(Kw::With)) {
+                with = Some(self.ident("an effect parameter")?);
             } else {
                 break;
             }
         }
         let uses = uses.unwrap_or_default();
-        // Effect variables come in slice 3.6.
-        if self.at_kw(Kw::With) {
-            return self.not_implemented("`with` clauses on function types", Planned::Phase(3));
-        }
-        Ok(TypeExprKind::Fn { params, ret, fails, uses })
+        Ok(TypeExprKind::Fn { params, ret, fails, uses, with })
     }
 
     /// A signature's result or error type, which a `uses` clause may follow.
@@ -3001,7 +3020,7 @@ fn item_keyword(kw: Kw) -> bool {
 /// Item keywords that belong to later phases, with what to call them.
 fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
     Some(match kw {
-        Kw::Effect => ("effect parameters", Planned::Phase(3)),
+        Kw::Effect => ("`effect` items", Planned::Unscheduled),
         Kw::Pred => ("`pred` functions", Planned::Phase(5)),
         Kw::Unit | Kw::Tag => ("units and tags", Planned::PastV1),
         Kw::Extern => ("`extern` functions", Planned::Unscheduled),
