@@ -1,15 +1,18 @@
 // phase: 3.4
 // expect-error: E0901
 // expect-error: E0205
+// expect-error: E0301
 // A rejected `use` brings in nothing, so the uses of the names it lists report nothing
 // more, as a rejected declaration's don't (REFERENCE §15.1; issue #26). That holds for a
 // module of a later phase, as a type, a type with arguments, a constructor, a function
 // and an associated function, and for an item a module doesn't have. A rejected module
-// `use` makes no qualifier, so names qualified by it report nothing more either.
+// `use` makes no qualifier, so names qualified by it report nothing more either. It
+// hides nothing else of its name, so a mistake with the prelude's `Text` is reported.
 use std.fs { Dir, Path }                                    // <- E0901
 use std.task { checkpoint }                                 // <- E0901
 use std.io { Out, Sink }                                    // <- E0205
 use std.task                                                // <- E0901
+use mylib.Text                                              // <- E0205
 
 fn load(dir: Dir[read], s: Sink) -> Int {
     let p = Path("u.csv")
@@ -23,4 +26,8 @@ fn qualified(g: task.Group[spawn]) -> Int {
     let n = task.spawn()
     let m = task.Group.empty()
     return 1
+}
+
+fn unrelated(t: Text) -> Int {
+    return t                                                // <- E0301
 }

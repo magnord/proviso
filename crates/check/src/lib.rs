@@ -449,8 +449,11 @@ fn holds_var(ty: &Ty, seen: &mut HashSet<usize>) -> bool {
 #[derive(Clone)]
 enum Import {
     Type(Ty),
-    /// `use a.b` makes `b` usable as a qualifier.
-    Module,
+    /// `use a.b` makes `b` usable as a qualifier. A rejected `use` makes one whose qualified
+    /// names report nothing more (REFERENCE §15.1).
+    Module {
+        rejected: bool,
+    },
     /// A name bound before the module it comes from has declared its items, which
     /// [`Checker::resolve_imports`] replaces.
     Pending,
@@ -1642,7 +1645,7 @@ impl Checker<'_> {
         let m = self.m;
         if decl.names.is_empty() {
             let last = decl.path[decl.path.len() - 1];
-            self.bind_import(last, Import::Module);
+            self.bind_import(last, Import::Module { rejected: false });
             return;
         }
         let prelude =
@@ -1730,8 +1733,8 @@ impl Checker<'_> {
                 }
             }
             // The qualifier it would make names nothing, so its uses report nothing more.
-            if decl.names.is_empty() {
-                self.poisoned.insert(decl.path[decl.path.len() - 1].sym);
+            if let Some(Import::Module { rejected }) = self.imports.get_mut(&decl.path[decl.path.len() - 1].sym) {
+                *rejected = true;
             }
         }
         for name in &decl.names {
@@ -3958,8 +3961,10 @@ impl Checker<'_> {
         let text: Vec<&str> = path.iter().map(|name| m.text(name.sym)).collect();
         let full = text.join(".");
         if self.poisoned.contains(&first.sym) {
-        } else if let Some(Import::Module) = self.imports.get(&first.sym) {
-            self.module_qualified(first);
+        } else if let Some(&Import::Module { rejected }) = self.imports.get(&first.sym) {
+            if !rejected {
+                self.module_qualified(first);
+            }
         } else if self.names_type(first.sym) || prelude_type(text[0]) {
             let message = format!("`{full}` isn't a type, since `{}` is a type, not a module", text[0]);
             self.error(codes::UNKNOWN_TYPE, span, message);
@@ -3982,10 +3987,11 @@ impl Checker<'_> {
     /// reported, or rejected before (REFERENCE §3, §15.1).
     fn qualifies(&mut self, base: ExprId) -> bool {
         let ExprKind::Name(name) = self.m.exprs[base].kind else { return false };
-        if self.lookup_local(name.sym).is_some() || !matches!(self.imports.get(&name.sym), Some(Import::Module)) {
+        let Some(&Import::Module { rejected }) = self.imports.get(&name.sym) else { return false };
+        if self.lookup_local(name.sym).is_some() {
             return false;
         }
-        if !self.poisoned.contains(&name.sym) {
+        if !rejected {
             self.module_qualified(name);
         }
         true
@@ -4128,7 +4134,7 @@ impl Checker<'_> {
         }
         match self.imports.get(&name.sym) {
             Some(Import::Type(ty)) => return ty.clone(),
-            Some(Import::Module) => {
+            Some(Import::Module { .. }) => {
                 self.error(codes::UNKNOWN_TYPE, name.span, format!("`{text}` is a module, not a type"));
                 return Ty::Error;
             }
