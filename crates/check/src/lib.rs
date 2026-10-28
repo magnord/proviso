@@ -1360,12 +1360,16 @@ impl Checker<'_> {
                             _ => None,
                         })
                         .collect();
-                    // An effect parameter is named once, by its error part.
+                    // An effect parameter is named once, by its error part, which is the slot
+                    // before its reach part.
                     let effect = |param: usize| info.generics[param].effect.is_some();
-                    let missing: Vec<String> = (params.iter())
-                        .filter(|&&param| info.generics[param].effect != Some(EffectSlot::Reach))
-                        .map(|&param| format!("`{}`", info.generics[param].name))
+                    let mut named: Vec<usize> = (params.iter())
+                        .map(|&param| param - usize::from(info.generics[param].effect == Some(EffectSlot::Reach)))
                         .collect();
+                    named.sort_unstable();
+                    named.dedup();
+                    let missing: Vec<String> =
+                        named.iter().map(|&param| format!("`{}`", info.generics[param].name)).collect();
                     let noun = if missing.len() == 1 { "type argument" } else { "type arguments" };
                     // `::[…]` gives only the function's own type parameters, not its `impl`'s
                     // or its effect parameters.
@@ -3208,11 +3212,13 @@ impl Checker<'_> {
         for (ty, at) in types {
             self.exposes(decl.name, vis, &ty, at);
         }
-        // An effect parameter no parameter's type mentions is given by nothing, as when the
-        // `with E` that named it was rejected, so it stands for an unknown type (§15.1).
+        // A rejected parameter type may have been the one to mention an effect parameter, as a
+        // rejected `with E` is, so one no other parameter mentions stands for an unknown type
+        // (§15.1). Without a rejected type, its calls report that nothing gives it (E0312).
         for i in 0..generics.len() {
             if let Some(EffectSlot::Error { reach }) = generics[i].effect
                 && !params.iter().any(|p| mentions_effect(&p.ty, i as u32, reach))
+                && params.iter().any(|p| mentions_error(&p.ty))
             {
                 generics[i].rejected = true;
                 generics[reach as usize].rejected = true;
@@ -8803,8 +8809,12 @@ impl Checker<'_> {
                 self.vars.unmarked(err);
                 if self.vars.has_var(err) {
                     let (ty, callee) = (err.clone(), callee.into());
+                    // One only `Never` has reached settles as `Never` and is no failure. Any
+                    // other may be, so an effect parameter's part it went into stays open.
+                    if !self.vars.only_never(&ty) {
+                        self.holes += 1;
+                    }
                     self.pending.push(Pending::Unmarked { ty, callee, span, through });
-                    self.holes += 1;
                 } else {
                     if let Some(scope) = self.closure_scopes.last_mut() {
                         scope.unmarked = true;

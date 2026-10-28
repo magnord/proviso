@@ -11,9 +11,9 @@
 // `fails T` (REFERENCE §15.1). Nor is it after an unmarked call that a nested call reports
 // once the statement settles. A name declared twice means its first declaration, effect or
 // not, and a second `with` is reported alone. An effect parameter nothing gives is named
-// once, without `::[…]`, which doesn't give it, and one no parameter mentions, as after a
-// rejected `with`, stands for an unknown type, so a call of it is marked as one whose error
-// type is unknown (inference/err_try). A literal's error defaults to `Int`.
+// once, without `::[…]`, which doesn't give it. One no parameter mentions after a rejected
+// `with` stands for an unknown type, so a call of it is marked as one whose error type is
+// unknown (inference/err_try). A literal's error defaults to `Int`.
 enum Bad {
     Oops
 }
@@ -54,14 +54,9 @@ fn rejected[effect E](f: fn() fails Bad with E) -> Int with E {    // <- E0710
     return 0
 }
 
-fn none[effect E]() -> Int with E {
-    return 0
-}
-
 fn unused() -> Int {
     let a = rejected(f: || 1)                           // <- E0701
-    let b = none()                                      // <- E0701
-    return a + b
+    return a
 }
 
 fn raise[T: Copy](e: T) -> Int fails T {

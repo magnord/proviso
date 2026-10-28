@@ -1,0 +1,41 @@
+// phase: 3.6
+// expect-error: E0312
+// expect-error: E0701
+// expect-error: E0703
+// An effect parameter that no parameter mentions, with no rejected type to blame, is given
+// by nothing, so each call reports E0312, with or without a marker (REFERENCE §9.5). Without
+// one, the call's error type is unknown and must be marked (inference/err_try). A nested
+// call left unmarked whose error only `Never` reaches can't fail, so the `try` around the
+// outer call is reported (§7.2).
+enum Bad {
+    Oops
+}
+
+fn none[effect E]() -> Int with E {
+    return 0
+}
+
+fn plain[effect E](f: fn() -> Int) -> Int with E {
+    return f()
+}
+
+fn apply[effect E](f: fn() -> Int with E) -> Int with E {
+    return f()
+}
+
+fn relay[T](f: fn() -> Int fails T) -> Int fails T {
+    return try f()
+}
+
+fn unmentioned() -> Int {
+    let a = try none()                                  // <- E0312
+    let b = try plain(f: || 1)                          // <- E0312
+    let c = none()                                      // <- E0312, E0701
+    return a + b + c
+}
+
+fn nested(xs: List[Int]) -> Int fails Bad {
+    let a = try apply(f: || relay(f: || 1))             // <- E0703
+    let b = try xs.map(|x| relay(f: || x))              // <- E0703
+    return a + b.len()
+}

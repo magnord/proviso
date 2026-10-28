@@ -670,6 +670,11 @@ impl Vars {
         }
     }
 
+    /// Whether `ty` is a variable that only `Never` has reached.
+    pub fn only_never(&self, ty: &Ty) -> bool {
+        matches!(self.resolve(ty), Ty::Var(v) if self.open(v).is_some_and(|open| open.never))
+    }
+
     /// Settles open variable `v`'s class as `ty`.
     pub fn settle(&mut self, v: u32, ty: Ty) {
         let root = self.root(v);
