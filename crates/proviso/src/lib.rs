@@ -183,7 +183,7 @@ impl Compiled {
                 TypeExprKind::Named(name) | TypeExprKind::Applied { name, .. } => m.text(name.sym),
                 TypeExprKind::SelfType => "Self",
                 // The parser rejects implementations for tuples and function types.
-                TypeExprKind::Tuple(_) | TypeExprKind::Rejected => "(…)",
+                TypeExprKind::Tuple(_) | TypeExprKind::Qualified(_) | TypeExprKind::Rejected => "(…)",
                 TypeExprKind::Fn { .. } => "fn",
                 // The checker rejects implementations for capability types.
                 TypeExprKind::Uses { base, .. } => match &m.types[*base].kind {

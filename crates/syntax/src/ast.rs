@@ -361,6 +361,9 @@ pub enum TypeExprKind {
     /// `Dir[read] uses Out`: a capability type and the capability types its implementation
     /// uses (REFERENCE §9.2).
     Uses { base: TypeId, uses: Vec<TypeId> },
+    /// `io.Out`: a name and the names before it, which `use` may make qualifiers (REFERENCE
+    /// §3). Its type arguments are skipped until qualified names exist.
+    Qualified(Vec<Ident>),
     /// A type the parser rejected after reporting it, which checks as unknown.
     Rejected,
 }

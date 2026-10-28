@@ -1729,6 +1729,10 @@ impl Checker<'_> {
                     self.error(codes::UNKNOWN_IMPORT, span, message);
                 }
             }
+            // The qualifier it would make names nothing, so its uses report nothing more.
+            if decl.names.is_empty() {
+                self.poisoned.insert(decl.path[decl.path.len() - 1].sym);
+            }
         }
         for name in &decl.names {
             let bound = name.alias.unwrap_or(name.name);
@@ -2062,7 +2066,10 @@ impl Checker<'_> {
         while let Some(t) = work.pop() {
             match &self.m.types[t].kind {
                 TypeExprKind::Named(name) if self.aliases.contains_key(&name.sym) => found.push(name.sym),
-                TypeExprKind::Named(_) | TypeExprKind::SelfType | TypeExprKind::Rejected => {}
+                TypeExprKind::Named(_)
+                | TypeExprKind::SelfType
+                | TypeExprKind::Qualified(_)
+                | TypeExprKind::Rejected => {}
                 TypeExprKind::Applied { name, args } => {
                     if self.aliases.contains_key(&name.sym) {
                         found.push(name.sym);
@@ -3852,6 +3859,7 @@ impl Checker<'_> {
                     }
                 }
             }
+            TypeExprKind::Qualified(ref path) => self.qualified_type(path, te.span),
             TypeExprKind::Rejected => Ty::Error,
             TypeExprKind::Tuple(ref elements) => {
                 let tys = elements.iter().map(|&t| self.part_type(t, "a tuple's element")).collect();
@@ -3940,6 +3948,47 @@ impl Checker<'_> {
                 Ty::Error
             }
         }
+    }
+
+    /// `io.Out`, a type that `path` names through a qualifier (REFERENCE §3). A module's
+    /// qualified names are not yet scheduled (OPEN_QUESTIONS P5).
+    fn qualified_type(&mut self, path: &[Ident], span: Span) -> Ty {
+        let m = self.m;
+        let first = path[0];
+        let text: Vec<&str> = path.iter().map(|name| m.text(name.sym)).collect();
+        let full = text.join(".");
+        if self.poisoned.contains(&first.sym) {
+        } else if let Some(Import::Module) = self.imports.get(&first.sym) {
+            self.module_qualified(first);
+        } else if self.names_type(first.sym) || prelude_type(text[0]) {
+            let message = format!("`{full}` isn't a type, since `{}` is a type, not a module", text[0]);
+            self.error(codes::UNKNOWN_TYPE, span, message);
+        } else {
+            let (module, last) = (text[..text.len() - 1].join("."), text[text.len() - 1]);
+            let message =
+                format!("unknown type `{full}`; a module's type is imported, as in `use {module} {{ {last} }}`");
+            self.error(codes::UNKNOWN_TYPE, span, message);
+        }
+        Ty::Error
+    }
+
+    /// Reports a name qualified by `module`, which `use` made a qualifier (REFERENCE §3).
+    fn module_qualified(&mut self, module: Ident) {
+        let what = format!("names qualified by a module, as `{}` qualifies them,", self.m.text(module.sym));
+        self.not_implemented(module.span, &what, Planned::Unscheduled);
+    }
+
+    /// Whether `base` names a module that `use` made a qualifier, whose qualified names are
+    /// reported, or rejected before (REFERENCE §3, §15.1).
+    fn qualifies(&mut self, base: ExprId) -> bool {
+        let ExprKind::Name(name) = self.m.exprs[base].kind else { return false };
+        if self.lookup_local(name.sym).is_some() || !matches!(self.imports.get(&name.sym), Some(Import::Module)) {
+            return false;
+        }
+        if !self.poisoned.contains(&name.sym) {
+            self.module_qualified(name);
+        }
+        true
     }
 
     /// `Log[read, append]`: capability interface `iface` with the permissions `args` name, each
@@ -5830,6 +5879,9 @@ impl Checker<'_> {
                 self.method_call(e, *receiver, *method, targs.as_deref(), args, span, chain, expected)
             }
             ExprKind::Field { base, name } => {
+                if self.qualifies(*base) {
+                    return Ty::Error;
+                }
                 let enum_id = self.enum_named(*base);
                 if let Some(id) = enum_id
                     && self.p.decls.adt(id).variant_named(self.m.text(name.sym)).is_some()
@@ -6358,10 +6410,6 @@ impl Checker<'_> {
         } else if self.unqualified_variant(name) || self.poisoned.contains(&name.sym) {
         } else if self.aliases.contains_key(&name.sym) {
             self.alias_value(name);
-        } else if let Some(Import::Module) = self.imports.get(&name.sym) {
-            // `use std.io` makes `io` a qualifier, as in `io.f()` (REFERENCE §3).
-            let what = format!("names qualified by a module, as `{text}` qualifies them,");
-            self.not_implemented(name.span, &what, Planned::Unscheduled);
         } else if self.imports.contains_key(&name.sym)
             || self.adt_named(name.sym).is_some()
             || self.iface_names.contains_key(&name.sym)
@@ -7158,6 +7206,10 @@ impl Checker<'_> {
                 self.ctor_targs(targs, id, &ctor, span);
             }
             return self.construct_variant(e, id, method, args, span, expected);
+        }
+        if self.qualifies(receiver) {
+            self.rejected_args(args);
+            return Ty::Error;
         }
         if let ExprKind::Name(receiver_name) = m.exprs[receiver].kind
             && self.lookup_local(receiver_name.sym).is_none()
