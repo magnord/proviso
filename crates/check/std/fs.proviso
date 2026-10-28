@@ -18,7 +18,8 @@ pub cap interface Dir observes(read, list) effects(write, create, delete) {
 
     fn create_dir(self, path: Path) fails FsError                          needs create
 
-    /// Removes a file or an empty directory.
+    /// Removes a file or an empty directory. A path that ends in `/` or `/.` removes only a
+    /// directory.
     fn remove(self, path: Path) fails FsError                              needs delete
 }
 

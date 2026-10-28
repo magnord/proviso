@@ -23,8 +23,8 @@ enum Place {
 
 impl MemDir {
     /// A `Dir` that holds `files`, each keyed by its path. Two paths with one normal form are
-    /// one file, which holds the later text. A path that ends in `/` is a directory, and its
-    /// text is ignored. A path that leaves the root, or goes through another file, holds
+    /// one file, which holds the later text. A path that ends in `/` or `/.` is a directory,
+    /// and its text is ignored. A path that leaves the root, or goes through another file, holds
     /// nothing, and neither does the root.
     pub fn with_files(files: Map[Text, Text]) -> Dir[read, list, write, create, delete] {
         var paths: Map[Path, Text] = [:]

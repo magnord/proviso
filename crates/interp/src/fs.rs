@@ -8,7 +8,8 @@
 //! the path that walk found, which has no links in it, except that `create_dir` and `remove`
 //! act on a link in the last part rather than on what it leads to. A path that ends in `/` or
 //! `/.` names a directory, so `read_text`, `write_text` and `size` refuse it, and the other
-//! operations follow a link in its last part.
+//! operations follow a link in its last part. `remove` refuses one that leads to no directory,
+//! and any path that leads to the root.
 //!
 //! Confinement is by path. Another process that replaces a part of the path with a link
 //! between the walk and the operation can still lead the operation out of the root. A hard
@@ -95,12 +96,14 @@ impl Root {
     }
 
     /// Removes a file, a link, or an empty directory. A link is removed itself, not what it
-    /// leads to. The root isn't the capability's to remove.
+    /// leads to, unless the path ends in `/`. The root isn't the capability's to remove, by any
+    /// path.
     pub fn remove(&self, path: &str) -> Result<(), FsFailure> {
-        if parts(path)?.is_empty() {
+        let place = self.resolve(path, names_dir(path))?;
+        // The path may be empty, or end in a link to the root.
+        if place == self.0 {
             return Err(FsFailure::PermissionDenied);
         }
-        let place = self.resolve(path, names_dir(path))?;
         let meta = fs::symlink_metadata(&place).map_err(|e| failure(path, e))?;
         // A path that names a directory never removes a file, nor a link to one.
         if names_dir(path) && !meta.is_dir() {
@@ -269,6 +272,24 @@ mod tests {
         assert_eq!(root.remove("inside/."), Err(other("inside/.", "is not a directory")));
         assert_eq!(root.read_text("inside").unwrap(), "i");
         assert!(scratch.0.join("outside").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_root_is_not_removed_through_a_link() {
+        use std::os::unix::fs::symlink;
+        let scratch = Scratch::new("root_link");
+        let root_path = scratch.0.join("root");
+        fs::create_dir(root_path.join("d")).unwrap();
+        symlink(".", root_path.join("here")).unwrap();
+        symlink("..", root_path.join("d/back")).unwrap();
+        let root = Root::new(&root_path);
+        for path in ["", ".", "d/..", "here/", "here/.", "d/back/", "d/back/."] {
+            assert_eq!(root.remove(path), Err(FsFailure::PermissionDenied), "{path}");
+        }
+        // Without a trailing `/`, the link itself is removed.
+        root.remove("here").unwrap();
+        assert!(root_path.exists() && !root_path.join("here").exists());
     }
 
     #[cfg(unix)]

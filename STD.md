@@ -252,7 +252,8 @@ pub cap interface Dir observes(read, list) effects(write, create, delete) {
 
     fn create_dir(self, path: Path) fails FsError                          needs create
 
-    /// Removes a file or an empty directory.
+    /// Removes a file or an empty directory. A path that ends in `/` or `/.` removes only a
+    /// directory.
     fn remove(self, path: Path) fails FsError                              needs delete
 }
 
@@ -267,7 +268,7 @@ pub enum FsError derives(Eq, Show) {
 }
 ```
 
-`System.fs` is a `Dir[read, write, create, delete, list]` (§9.1). A path that is absolute, or whose `..` parts climb above the root, fails with `PermissionDenied`, and so does a symbolic link that leads out of the root (Q6, OPEN_QUESTIONS P5). A path that ends in `/` names a directory. `NotFound` and `PermissionDenied` hold the path as the call gave it. `Other` holds a message that says what is wrong with the path, such as that it is a directory. `Dir.sub` is not yet scheduled.
+`System.fs` is a `Dir[read, write, create, delete, list]` (§9.1). A path that is absolute, or whose `..` parts climb above the root, fails with `PermissionDenied`, and so does a symbolic link that leads out of the root (Q6, OPEN_QUESTIONS P5). A path that ends in `/` or `/.` names a directory. Removing the root fails with `PermissionDenied`, whether the path is empty or ends in a link to the root. `NotFound` and `PermissionDenied` hold the path as the call gave it. `Other` holds a message that says what is wrong with the path, such as that it is a directory. `Dir.sub` is not yet scheduled.
 
 ## std.test
 
