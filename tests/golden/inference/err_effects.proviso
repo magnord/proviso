@@ -1,0 +1,46 @@
+// phase: 3.6
+// expect-error: E0301
+// expect-error: E0701
+// expect-error: E0702
+// expect-error: E0703
+// Two arguments that meet one effect parameter give the same verdict in either order
+// (OPEN_QUESTIONS P5, Type arguments). One error type is all `E` has, so closures that fail
+// with different ones disagree, a closure that can fail makes the call fallible from either
+// position, and closures that can't leave it infallible. Which argument the disagreement is
+// reported at does depend on the order: the first error type `E` meets fixes it, as for a type
+// parameter's `fails T`, so a `try` around the call may disagree too (OPEN_QUESTIONS P5,
+// Effect parameters).
+enum Bad {
+    Oops
+}
+
+enum Other {
+    Worse
+}
+
+fn both[effect E](f: fn() -> Int with E, g: fn() -> Int with E) -> Int with E {
+    return f() + g()
+}
+
+fn risky() -> Int fails Bad {
+    return 1
+}
+
+fn worse() -> Int fails Other {
+    return 2
+}
+
+fn disagree() -> Int fails Bad {
+    let a = try both(f: || try risky(), g: || try worse())  // <- E0702
+    let b = try both(f: || try worse(), g: || try risky())  // <- E0702, E0702
+    let c = try both(f: risky, g: worse)                    // <- E0301
+    let d = try both(f: worse, g: risky)                    // <- E0702, E0301
+    return 0
+}
+
+fn unmarked() -> Int fails Bad {
+    let a = both(f: || try risky(), g: || 1)                // <- E0701
+    let b = both(f: || 1, g: || try risky())                // <- E0701
+    let c = try both(f: || 1, g: || 2)                      // <- E0703
+    return a + b + c
+}

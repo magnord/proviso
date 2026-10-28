@@ -9,7 +9,7 @@ record Span {
 }
 
 fn f(xs: List[Int]) -> Int {
-    let ys = xs.map(f: 1)                           // <- E0901
+    let ys = xs.is_sorted()                         // <- E0901
     let n = ys[0]
     let copy = ys
     return n
@@ -36,7 +36,7 @@ fn h(callback: scoped fn(Int)) {                    // <- E0901
     let a = 1
 }
 
-fn pair(p: fn(Int) -> Int with E) -> Int {          // <- E0901
+fn pair(p: fn(keep Int) -> Int) -> Int {            // <- E0901
     return 1
 }
 

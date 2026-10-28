@@ -1,0 +1,60 @@
+// phase: 3.6
+// Two arguments that meet one effect parameter give it the join of their errors and their
+// reach, so their order doesn't change the verdict (OPEN_QUESTIONS P5, Type arguments and
+// Reach inference). A closure whose parameter type a later argument gives, or whose error a
+// generic call in its body gives, settles `E` the same way.
+use std.io { Out }
+
+enum Bad derives(Show) {
+    Oops
+}
+
+fn both[effect E](f: fn() -> Int with E, g: fn() -> Int with E) -> Int with E {
+    return f() + g()
+}
+
+fn on[A, effect E](f: fn(A) -> A with E, x: A) -> A with E {
+    return f(x)
+}
+
+fn risky() -> Int fails Bad {
+    return 1
+}
+
+fn raise[T: Copy](e: T) -> Int fails T {
+    fail e
+}
+
+fn orders(out: Out) -> Int fails Bad {
+    let a1 = try both(f: || try risky(), g: || 2)
+    let a2 = try both(f: || 2, g: || try risky())
+    let b1 = try both(f: risky, g: || 3)
+    let b2 = try both(f: || 3, g: risky)
+    let c1 = both(f: || 4, g: || {
+        out.write_line("c1") else ()
+        4
+    })
+    let c2 = both(f: || {
+        out.write_line("c2") else ()
+        4
+    }, g: || 4)
+    let d1 = try both(f: || try risky(), g: || {
+        out.write_line("d1") else ()
+        5
+    })
+    let d2 = try both(f: || {
+        out.write_line("d2") else ()
+        5
+    }, g: || try risky())
+    let e1 = try on(f: |n| n + (try risky()), x: 6)
+    let e2 = on(f: |n| n + 1, x: 6)
+    let f1 = attempt both(f: || try raise(e: Bad.Oops), g: || 7)
+    let f2 = attempt both(f: || 7, g: || try raise(e: Bad.Oops))
+    out.write_line(f"{f1} {f2}") else ()
+    return a1 + a2 + b1 + b2 + c1 + c2 + d1 + d2 + e1 + e2
+}
+
+pub fn main(sys: keep System) fails Bad {
+    let total = try orders(out: sys.stdout)
+    sys.stdout.write_line(f"{total}") else ()
+}

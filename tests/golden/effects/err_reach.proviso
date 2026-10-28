@@ -1,0 +1,46 @@
+// phase: 3.6
+// expect-error: E0602
+// expect-error: E0701
+// A closure that captures a capability gives `E` its reach, and a `with E` parameter admits
+// it. A parameter without `uses` or `with E` still admits no reach (REFERENCE §9.4, §6.7), a
+// type parameter's `fails T` included, as §F row 5 shows. Inside a `with E` function, `E`'s
+// reach is part of `f`'s type and of every closure that captures `f`, so it passes only to a
+// parameter that admits it. A call whose argument is rejected doesn't know its error type, so
+// it is marked as one that can fail (OPEN_QUESTIONS P5, inference/err_try).
+use std.io { Out }
+
+fn plain(f: fn(Int) -> Int) -> Int {
+    return f(0)
+}
+
+fn generic[T](f: fn(Int) -> Int fails T) -> Int fails T {
+    return try f(0)
+}
+
+fn apply[effect E](x: Int, f: fn(Int) -> Int with E) -> Int with E {
+    return f(x)
+}
+
+fn outer(out: Out) -> Int {
+    let a = apply(x: 1, f: |n| {
+        out.write_line("a") else ()
+        n
+    })
+    let b = plain(f: |n| {                              // <- E0602
+        out.write_line("b") else ()
+        n
+    })
+    let c = generic(f: |n| {                            // <- E0701, E0602
+        out.write_line("c") else ()
+        n
+    })
+    return a + b + c
+}
+
+fn forward[effect E](f: fn(Int) -> Int with E) -> Int with E {
+    let a = apply(x: 1, f: f)
+    let b = apply(x: 2, f: |n| try f(n))
+    let c = generic(f: f)                               // <- E0602
+    let d = try generic(f: |n| try f(n))                // <- E0602
+    return a + b + c + d
+}

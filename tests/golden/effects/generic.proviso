@@ -1,0 +1,56 @@
+// phase: 3.6
+// A function generic over `effect E` takes its error and its reach from the closure or
+// function value passed for `E`, and fails and reaches as it does (REFERENCE §9.5). Inside
+// it, a call through `E` needs no marker, and `E` passes on to other `with E` functions,
+// `map` among them. `debug` writes `E` by name.
+use std.io { Out }
+
+enum Bad derives(Show) {
+    Negative(n: Int)
+}
+
+fn apply[effect E](x: Int, f: fn(Int) -> Int with E) -> Int with E {
+    let y = f(x)
+    return y + 1
+}
+
+fn twice[effect E](x: Int, f: fn(Int) -> Int with E) -> Int with E {
+    debug(f)
+    return apply(x: apply(x: x, f: f), f: f)
+}
+
+fn each[A, effect E](xs: List[A], f: fn(A) -> A with E) -> List[A] with E {
+    return xs.map(f)
+}
+
+fn positive(n: Int) -> Int fails Bad {
+    if n < 0 {
+        fail Bad.Negative(n: n)
+    }
+    return n
+}
+
+fn halve(n: Int) -> Int {
+    return n / 2
+}
+
+fn logged(out: Out, x: Int) -> Int {
+    return apply(x: x, f: |n| {
+        out.write_line(f"saw {n}") else ()
+        n * 10
+    })
+}
+
+pub fn main(sys: keep System) fails Bad {
+    let out = sys.stdout
+    let a = apply(x: 1, f: |n| n + 1)
+    let b = try apply(x: 2, f: |n| try positive(n))
+    let c = logged(out: out, x: 3)
+    let d = twice(x: 4, f: halve)
+    let e = try twice(x: 5, f: positive)
+    let f = each(xs: ["a", "b"], f: |t| f"{t}{t}")
+    let g = try each(xs: [1, 2], f: |n| try positive(n))
+    out.write_line(f"{a} {b} {c} {d} {e} {f} {g}") else ()
+    let h = attempt twice(x: -6, f: positive)
+    out.write_line(f"{h}") else ()
+}

@@ -1,0 +1,43 @@
+// phase: 3.6
+// expect-exit: 1
+// A failure of a call through `E` leaves the `with E` function at that call, as `try` would,
+// so nothing after it runs, and the outer call fails with it (REFERENCE §9.5). `map` stops at
+// the first element whose closure fails. A `main` that fails exits with 1.
+use std.io { Out }
+
+enum Stop derives(Show) {
+    At(n: Int)
+}
+
+fn around[effect E](out: Out, f: fn() -> Int with E) -> Int with E {
+    out.write_line("before") else ()
+    let n = f()
+    out.write_line("after") else ()
+    return n
+}
+
+fn nested[effect E](out: Out, f: fn() -> Int with E) -> Int with E {
+    let n = around(out: out, f: f)
+    out.write_line("nested after") else ()
+    return n
+}
+
+fn stop_at(out: Out, n: Int, at: Int) -> Int fails Stop {
+    out.write_line(f"visit {n}") else ()
+    if n == at {
+        fail Stop.At(n: n)
+    }
+    return n
+}
+
+pub fn main(sys: keep System) fails Stop {
+    let out = sys.stdout
+    let fine = try nested(out: out, f: || try stop_at(out: out, n: 1, at: 0))
+    out.write_line(f"fine {fine}") else ()
+    let caught = attempt nested(out: out, f: || try stop_at(out: out, n: 2, at: 2))
+    out.write_line(f"caught {caught}") else ()
+    let partial = attempt [1, 2, 3, 4].map(|n| try stop_at(out: out, n: n, at: 2))
+    out.write_line(f"partial {partial}") else ()
+    let last = try [5, 6].map(|n| try stop_at(out: out, n: n, at: 6))
+    out.write_line(f"unreached {last}") else ()
+}

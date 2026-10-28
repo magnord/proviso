@@ -1,0 +1,13 @@
+before
+visit 1
+after
+nested after
+fine 1
+before
+visit 2
+caught Err(Stop.At(n: 2))
+visit 1
+visit 2
+partial Err(Stop.At(n: 2))
+visit 5
+visit 6
