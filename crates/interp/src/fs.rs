@@ -96,7 +96,7 @@ impl Root {
     }
 
     /// Removes a file, a link, or an empty directory. A link is removed itself, not what it
-    /// leads to, unless the path ends in `/`. The root isn't the capability's to remove, by any
+    /// leads to, unless the path ends in `/` or `/.`. The root isn't the capability's to remove, by any
     /// path.
     pub fn remove(&self, path: &str) -> Result<(), FsFailure> {
         let place = self.resolve(path, names_dir(path))?;
