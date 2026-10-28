@@ -1,0 +1,5 @@
+second, longer
+ logs=-1 notes.txt=14 z.txt=2
+ logs/a.log=1 logs/b.log=2
+[Path("notes.txt"), Path("z.txt")]
+from the copy

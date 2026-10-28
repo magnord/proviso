@@ -1,0 +1,9 @@
+// phase: 3.5
+// Each run starts in a new, empty working directory, where `sys.fs` is rooted (README,
+// Environment). `write_read` leaves `notes.txt` behind, and this run doesn't see it.
+use std.fs { Path, FsError }
+
+pub fn main(sys: keep System) fails FsError {
+    sys.stdout.write_line(f"{try sys.fs.list(Path(""))}") else {}
+    sys.stdout.write_line(f"{attempt sys.fs.read_text(Path("notes.txt"))}") else {}
+}

@@ -1,0 +1,40 @@
+// phase: 3.5
+// `sys.fs` is a `Dir` rooted at the run's working directory (REFERENCE §9.1, OPEN_QUESTIONS
+// Q6). A program writes files through it and reads them back. `write_text` creates a missing
+// file under `write` and replaces an existing one's text. `list` gives each entry as the
+// directory's path, `/` and the entry's name, ordered by name, and `remove` takes a file or
+// an empty directory. The runner removes what the run leaves (README, Environment).
+use std.fs { Dir, Path, FsError }
+
+fn save(dir: Dir[write], name: Text, text: Text) fails FsError {
+    try dir.write_text(path: Path(name), text: text)
+}
+
+fn show(dir: Dir[read, list], path: Path) -> Text fails FsError {
+    var out = ""
+    for entry in try dir.list(path) {
+        out = f"{out} {entry.value}={dir.size(entry) else -1}"
+    }
+    return out
+}
+
+pub fn main(sys: keep System) fails FsError {
+    let fs = sys.fs
+    try save(dir: fs, name: "notes.txt", text: "first")
+    try save(dir: fs, name: "notes.txt", text: "second, longer")
+    try fs.create_dir(Path("logs"))
+    try save(dir: fs, name: "logs/b.log", text: "bb")
+    try save(dir: fs, name: "logs/a.log", text: "a")
+    try save(dir: fs, name: "./logs/../z.txt", text: "é")
+    sys.stdout.write_line(try fs.read_text(Path("notes.txt"))) else {}
+    sys.stdout.write_line(try show(dir: fs, path: Path(""))) else {}
+    sys.stdout.write_line(try show(dir: fs, path: Path("logs/"))) else {}
+    try fs.remove(Path("logs/a.log"))
+    try fs.remove(Path("logs/b.log"))
+    try fs.remove(Path("logs"))
+    sys.stdout.write_line(f"{try fs.list(Path("."))}") else {}
+    // A copy of the capability shares the file system.
+    let copy = fs
+    try copy.write_text(path: Path("notes.txt"), text: "from the copy")
+    sys.stdout.write_line(try fs.only::[read]().read_text(Path("notes.txt"))) else {}
+}

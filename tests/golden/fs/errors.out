@@ -1,0 +1,17 @@
+not found: missing.txt
+not found: missing/inner.txt
+not found: missing/new.txt
+not found: missing
+not found: missing/new
+not found: missing.txt
+denied: ../file.txt
+other: `dir` is a directory
+other: `dir` is a directory
+other: `dir` is a directory
+other: `file.txt` is not a directory
+other: `dir` already exists
+other: `file.txt` already exists
+other: `dir` is not empty
+other: `file.txt/inner.txt` goes through a file
+true
+FsError.Other(message: "m") FsError.PermissionDenied(path: Path("p"))

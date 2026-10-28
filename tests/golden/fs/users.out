@@ -1,0 +1,4 @@
+fs/users.proviso:48:1: example passed
+fs/users.proviso:49:1: example passed
+fs/users.proviso:51:1: test "a bad line reports its line number" passed
+2 examples and 1 test: 3 passed, 0 failed

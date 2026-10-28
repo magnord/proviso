@@ -1,0 +1,18 @@
+a/new.txt
+[Path("a"), Path("b.txt"), Path("c")] [Path("a/new.txt"), Path("a/x.txt"), Path("a/y")] [Path("a/y/z.txt")]
+2 3
+FsError.NotFound(path: Path("nope"))
+FsError.Other(message: "`a` is a directory")
+FsError.Other(message: "`a` is a directory")
+FsError.Other(message: "`a` is a directory")
+FsError.Other(message: "`b.txt` is not a directory")
+FsError.NotFound(path: Path("nope"))
+FsError.Other(message: "`a` already exists")
+FsError.Other(message: "`c` already exists")
+ok
+FsError.NotFound(path: Path("empty"))
+FsError.Other(message: "`a/y` is not empty")
+FsError.PermissionDenied(path: Path(""))
+FsError.NotFound(path: Path("nope"))
+FsError.NotFound(path: Path("a/y"))
+v
