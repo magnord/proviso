@@ -1,0 +1,3 @@
+create d/new/ #0: runtime FsError.Other(message: "`d/new/` already exists"), MemDir ok
+remove d/new #0: runtime ok, MemDir FsError.NotFound(path: Path("d/new"))
+2 outcomes differ

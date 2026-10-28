@@ -5,8 +5,15 @@
 //! the root, is refused before the file system sees it. `..` is resolved by the text of the
 //! path, before any link. Then each existing part is looked up in turn, and a symbolic link
 //! is followed only when the place it leads to is under the root too. The operation runs on
-//! the path that walk found, which has no links in it. Another process that replaces a part
-//! of it with a link between the walk and the operation can still lead it out of the root.
+//! the path that walk found, which has no links in it, except that `create_dir` and `remove`
+//! act on a link in the last part rather than on what it leads to. A path that ends in `/` or
+//! `/.` names a directory, so `read_text`, `write_text` and `size` refuse it, and the other
+//! operations follow a link in its last part.
+//!
+//! Confinement is by path. Another process that replaces a part of the path with a link
+//! between the walk and the operation can still lead the operation out of the root. A hard
+//! link or a mount that someone else put under the root reaches what it leads to, and
+//! following a link shows whether the places it passes through exist.
 
 use std::fs;
 use std::io::{ErrorKind, Read};
@@ -32,7 +39,7 @@ impl Root {
     }
 
     pub fn read_text(&self, path: &str) -> Result<String, FsFailure> {
-        let place = self.resolve(path, true)?;
+        let place = self.file(path)?;
         let mut text = String::new();
         fs::File::open(&place).and_then(|mut file| file.read_to_string(&mut text)).map_err(|e| failure(path, e))?;
         Ok(text)
@@ -40,17 +47,30 @@ impl Root {
 
     /// Replaces the file's text, creating the file if it is missing (Q6).
     pub fn write_text(&self, path: &str, text: &str) -> Result<(), FsFailure> {
-        let place = self.resolve(path, true)?;
+        let place = self.file(path)?;
         fs::write(place, text).map_err(|e| failure(path, e))
     }
 
     pub fn size(&self, path: &str) -> Result<u64, FsFailure> {
-        let place = self.resolve(path, true)?;
-        let meta = fs::metadata(place).map_err(|e| failure(path, e))?;
-        if meta.is_dir() {
-            return Err(other(path, "is a directory"));
+        let place = self.file(path)?;
+        fs::metadata(place).map(|meta| meta.len()).map_err(|e| failure(path, e))
+    }
+
+    /// The place of the file `path` names, which may be missing. A directory, a path that
+    /// names one, and a place that is neither a file nor a directory, such as a pipe that
+    /// would block a read, are refused.
+    fn file(&self, path: &str) -> Result<PathBuf, FsFailure> {
+        // An escape is refused first, as it is for every operation.
+        parts(path)?;
+        if names_dir(path) {
+            return Err(other(path, "names a directory"));
         }
-        Ok(meta.len())
+        let place = self.resolve(path, true)?;
+        match fs::metadata(&place) {
+            Ok(meta) if meta.is_dir() => Err(other(path, "is a directory")),
+            Ok(meta) if !meta.is_file() => Err(other(path, "is not a regular file")),
+            _ => Ok(place),
+        }
     }
 
     /// The paths of the directory's entries, ordered by the bytes of their names, each the
@@ -70,7 +90,7 @@ impl Root {
     }
 
     pub fn create_dir(&self, path: &str) -> Result<(), FsFailure> {
-        let place = self.resolve(path, false)?;
+        let place = self.resolve(path, names_dir(path))?;
         fs::create_dir(place).map_err(|e| failure(path, e))
     }
 
@@ -80,7 +100,7 @@ impl Root {
         if parts(path)?.is_empty() {
             return Err(FsFailure::PermissionDenied);
         }
-        let place = self.resolve(path, false)?;
+        let place = self.resolve(path, names_dir(path))?;
         let meta = fs::symlink_metadata(&place).map_err(|e| failure(path, e))?;
         if meta.is_dir() { fs::remove_dir(place) } else { fs::remove_file(place) }.map_err(|e| failure(path, e))
     }
@@ -133,6 +153,12 @@ fn parts(path: &str) -> Result<Vec<&str>, FsFailure> {
     Ok(parts)
 }
 
+/// Whether `path` ends in `/` or `/.`, which `Path::components` drops but which names a
+/// directory.
+fn names_dir(path: &str) -> bool {
+    path.ends_with('/') || path.ends_with("/.")
+}
+
 fn other(path: &str, what: &str) -> FsFailure {
     FsFailure::Other(format!("`{path}` {what}"))
 }
@@ -179,13 +205,30 @@ mod tests {
     fn lexical_escapes_are_denied() {
         let scratch = Scratch::new("lexical");
         let root = Root::new(&scratch.0.join("root"));
-        for path in ["/etc/hosts", "..", "../x", "a/../../x", "./.."] {
+        for path in ["/etc/hosts", "/", "..", "../", "../x", "a/../../x", "./..", "../."] {
             assert_eq!(root.read_text(path), Err(FsFailure::PermissionDenied), "{path}");
             assert_eq!(root.write_text(path, "x"), Err(FsFailure::PermissionDenied), "{path}");
         }
         assert!(!scratch.0.join("x").exists());
         root.write_text("a/../b", "in").unwrap();
         assert_eq!(fs::read_to_string(scratch.0.join("root/b")).unwrap(), "in");
+    }
+
+    #[test]
+    fn a_trailing_slash_names_a_directory() {
+        let scratch = Scratch::new("slash");
+        let root = Root::new(&scratch.0.join("root"));
+        root.write_text("f", "text").unwrap();
+        for path in ["f/", "f/.", "new/", "new/."] {
+            let names = || other(path, "names a directory");
+            assert_eq!(root.read_text(path), Err(names()), "{path}");
+            assert_eq!(root.write_text(path, "x"), Err(names()), "{path}");
+            assert_eq!(root.size(path), Err(names()), "{path}");
+        }
+        assert!(!scratch.0.join("root/new").exists());
+        root.create_dir("d/").unwrap();
+        assert_eq!(root.list("d/."), Ok(Vec::new()));
+        root.remove("d/").unwrap();
     }
 
     #[cfg(unix)]
@@ -215,5 +258,22 @@ mod tests {
         assert_eq!(root.read_text("to_inside").unwrap(), "i");
         root.remove("to_file").unwrap();
         assert!(scratch.0.join("secret").exists());
+        // A trailing `/` follows a link in the last part, which here leads out.
+        assert_eq!(root.remove("to_dir/"), Err(FsFailure::PermissionDenied));
+        assert!(scratch.0.join("outside").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_is_not_read() {
+        let scratch = Scratch::new("pipe");
+        let root_path = scratch.0.join("root");
+        let made = std::process::Command::new("mkfifo").arg(root_path.join("pipe")).status();
+        if !made.is_ok_and(|status| status.success()) {
+            return;
+        }
+        let root = Root::new(&root_path);
+        assert_eq!(root.read_text("pipe"), Err(other("pipe", "is not a regular file")));
+        assert_eq!(root.write_text("pipe", "x"), Err(other("pipe", "is not a regular file")));
     }
 }

@@ -8,6 +8,7 @@
 // new file needs only `write`. `sub` waits for value-level narrowing, which isn't scheduled
 // yet, in either form of the call (Q6).
 use std.fs { Dir, Path, FsError }
+use std.test { MemDir }
 
 fn reads(dir: Dir[read], p: Path) -> Int fails FsError {
     let text = try dir.read_text(p)
@@ -41,4 +42,37 @@ fn narrowed(dir: Dir, p: Path) -> Int fails FsError {
     let inner = try dir.sub(p)                                      // <- E0901
     let qualified = try Dir.sub(dir, p)                             // <- E0901
     return size
+}
+
+// A `cap record` that implements `Dir` would have `sub` too, so writing one in its `impl` and
+// calling one on a value of the record wait as well.
+cap record Fake {
+    state writes: Int
+}
+
+impl Dir for Fake {
+    fn read_text(self, path: Path) -> Text fails FsError {
+        return ""
+    }
+    fn write_text(self, path: Path, text: Text) fails FsError {
+        self.writes += 1
+    }
+    fn size(self, path: Path) -> Int fails FsError {
+        return 0
+    }
+    fn list(self, path: Path) -> List[Path] fails FsError {
+        return []
+    }
+    fn create_dir(self, path: Path) fails FsError {}
+    fn remove(self, path: Path) fails FsError {}
+    fn sub(self, path: Path) -> Fake fails FsError {                // <- E0901
+        return self
+    }
+}
+
+fn fakes(fake: Fake, mem: MemDir, p: Path) fails FsError {
+    let text = try fake.read_text(p)
+    let inner = try fake.sub(p)                                     // <- E0901
+    let other = try mem.sub(p)                                      // <- E0901
+    let viewed = try Dir.of(fake).only::[read]().read_text(p)
 }

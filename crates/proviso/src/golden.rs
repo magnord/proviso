@@ -328,7 +328,8 @@ fn run_file(path: &Path, name: &str, phase: Phase, bless: bool) -> Result<Verdic
     } else {
         // Each run gets a new, empty working directory for `System.fs`, without changing the
         // runner's own (README, Environment).
-        let dir = WorkDir::new().map_err(|e| format!("cannot make a working directory: {e}"))?;
+        let dir = WorkDir::new()
+            .map_err(|e| format!("cannot make a working directory in {}: {e}", std::env::temp_dir().display()))?;
         run(&compiled, &mut &input[..], &mut stdout, &mut stderr, &dir.0)
     };
     let stdout = String::from_utf8_lossy(&stdout).into_owned();

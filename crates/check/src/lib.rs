@@ -3540,6 +3540,10 @@ impl Checker<'_> {
             }
             match self.p.decls.iface(iface).method(text) {
                 None if incomplete => {}
+                // `Dir.sub` waits for value-level narrowing (OPEN_QUESTIONS Q6).
+                None if (iface, text) == (IfaceId::DIR, "sub") => {
+                    self.not_implemented(name.span, "`sub` methods in an `impl Dir`", Planned::Unscheduled);
+                }
                 None => {
                     let message = format!(
                         "`{iface_text}` has no method `{text}`; an `impl` gives its type exactly the methods its interface declares"
@@ -7761,6 +7765,12 @@ impl Checker<'_> {
                 None
             }
             [] if self.private_method(ty, method) => None,
+            // A `cap record` that implements `Dir` would have `sub`, which waits for
+            // value-level narrowing (OPEN_QUESTIONS Q6).
+            [] if cap_record && name == "sub" && self.implements(ty, IfaceId::DIR) => {
+                self.not_implemented(method.span, "calls of `Dir.sub`", Planned::Unscheduled);
+                None
+            }
             [] => {
                 if !unknown {
                     let message = format!("`{}` has no method `{name}`", self.show(shown));

@@ -2771,7 +2771,6 @@ fn lines(text: &str) -> Vec<&str> {
     out
 }
 
-/// `Some(value)`, or `None`.
 /// `std.fs`'s `Path` holding `text`.
 fn path_value(text: &str) -> Value {
     Value::Adt(Adt { def: AdtId::PATH, variant: VariantIdx::RECORD, fields: Arc::from([Value::Text(text.into())]) })
@@ -2788,6 +2787,7 @@ fn fs_error(failure: fs::FsFailure, path: &Value) -> Value {
     Value::Adt(Adt { def: AdtId::FS_ERROR, variant: VariantIdx::new(variant), fields: Arc::from([field]) })
 }
 
+/// `Some(value)`, or `None`.
 fn option(value: Option<Value>) -> Value {
     let (variant, fields): (VariantIdx, Arc<[Value]>) = match value {
         Some(value) => (VariantIdx::SOME, Arc::from([value])),

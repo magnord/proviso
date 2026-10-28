@@ -267,7 +267,7 @@ pub enum FsError derives(Eq, Show) {
 }
 ```
 
-`System.fs` is a `Dir[read, write, create, delete, list]` (§9.1). A path that is absolute, or whose `..` parts climb above the root, fails with `PermissionDenied`, and so does a symbolic link that leads out of the root (Q6, OPEN_QUESTIONS P5). `NotFound` and `PermissionDenied` hold the path as the call gave it. `Other` holds a message that says what is wrong with the path, such as that it is a directory. `Dir.sub` is not yet scheduled.
+`System.fs` is a `Dir[read, write, create, delete, list]` (§9.1). A path that is absolute, or whose `..` parts climb above the root, fails with `PermissionDenied`, and so does a symbolic link that leads out of the root (Q6, OPEN_QUESTIONS P5). A path that ends in `/` names a directory. `NotFound` and `PermissionDenied` hold the path as the call gave it. `Other` holds a message that says what is wrong with the path, such as that it is a directory. `Dir.sub` is not yet scheduled.
 
 ## std.test
 
@@ -285,7 +285,7 @@ impl MemDir {
 }
 ```
 
-`MemDir` is written in Proviso (§9.6). A path is a key, compared as written. A directory is any path that a file's path continues with `/`, and the root, `""`, is always one. Its failures read as the runtime's `Dir`'s do (OPEN_QUESTIONS P5).
+`MemDir` is written in Proviso (§9.6). It reads a path as the runtime's `Dir` does, and keys each file by its path in that form. A directory is any path that a file's path continues with `/`, and the root, `""`, is always one. Its failures read as the runtime's `Dir`'s do, except that it can't hold a directory with no files (OPEN_QUESTIONS P5).
 
 ## std.pool
 

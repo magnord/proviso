@@ -1,114 +1,213 @@
 // `std.test` (STD.md).
 use std.fs { Dir, Path, FsError }
 
-/// A directory tree in memory, for tests (REFERENCE §9.6). Copies of it share its files. A
-/// path is a key, compared as written, and a directory is any path that a file's path
-/// continues with `/`. The root, `""`, is always a directory (OPEN_QUESTIONS P5).
+/// A directory tree in memory, for tests (REFERENCE §9.6). Copies of it share its files. It
+/// reads a path as the runtime's `Dir` does, and keys each file by its path in that form. A
+/// directory is any path that a file's path continues with `/`, and the root, `""`, is always
+/// one (OPEN_QUESTIONS P5).
 pub cap record MemDir {
     state files: Map[Path, Text]
 }
 
+/// What a path names in a `MemDir`.
+enum Place {
+    File
+    Dir
+    /// A path whose part before the last is a file.
+    Through
+    Missing
+}
+
 impl MemDir {
-    /// A `Dir` that holds `files`, each keyed by its path.
+    /// A `Dir` that holds `files`, each keyed by its path. A path that names the root, which
+    /// is always a directory, or leaves it, holds no file.
     pub fn with_files(files: Map[Text, Text]) -> Dir[read, list, write, create, delete] {
         var paths: Map[Path, Text] = [:]
         for (path, text) in files {
-            let _ = paths.set(key: Path(path), value: text)
+            if MemDir.normal(Path(path)) is Some((key, _)) and not key.value.is_empty() {
+                let _ = paths.set(key: key, value: text)
+            }
         }
         return Dir.of(MemDir(files: paths))
     }
 
-    /// What follows `path` and a `/` in `file`, or all of `file` when `path` is the root.
-    fn below(path: Path, file: Path) -> Option[Text] {
-        if path.value.is_empty() {
-            return Some(file.value)
+    /// `path` with `.` and empty parts dropped and each `..` taking away the part before it,
+    /// and whether it ends in `/` or `/.`, which names a directory. `None` when `path` is
+    /// absolute or a `..` climbs above the root.
+    fn normal(path: Path) -> Option[(Path, Bool)] {
+        if path.value.starts_with("/") {
+            return None
         }
-        return file.value.strip_prefix(f"{path.value}/")
-    }
-
-    /// Whether `path` is the root, or a file's path continues it with a `/`. It takes the
-    /// files rather than `self`, since an operation that only reads sees `self` through the
-    /// observes-only view (REFERENCE §9.2).
-    fn is_dir(files: Map[Path, Text], path: Path) -> Bool {
-        for (file, _) in files {
-            if MemDir.below(path: path, file: file) is Some(_) {
-                return true
+        var given: List[Text] = []
+        var rest = path.value
+        while rest.split_once("/") is Some((part, after)) {
+            given.push(part)
+            rest = after
+        }
+        given.push(rest)
+        var parts: List[Text] = []
+        for part in given {
+            if part == ".." {
+                if parts.pop() is None {
+                    return None
+                }
+            } else if not part.is_empty() and part != "." {
+                parts.push(part)
             }
         }
-        return path.value.is_empty()
+        let last = given[given.len() - 1]
+        let dir = given.len() > 1 and (last.is_empty() or last == ".")
+        var out = ""
+        for (i, part) in parts.enumerate() {
+            out = if i == 0 { part } else { f"{out}/{part}" }
+        }
+        return Some((Path(out), dir))
+    }
+
+    /// What `path`, in normal form, names among `files`. Only a path that is no file, and goes
+    /// through none, scans them all.
+    fn place(files: Map[Path, Text], path: Path) -> Place {
+        if path.value.is_empty() {
+            return Place.Dir
+        }
+        if files.contains_key(path) {
+            return Place.File
+        }
+        var before = ""
+        var rest = path.value
+        while rest.split_once("/") is Some((part, after)) {
+            before = if before.is_empty() { part } else { f"{before}/{part}" }
+            if files.contains_key(Path(before)) {
+                return Place.Through
+            }
+            rest = after
+        }
+        for (file, _) in files {
+            if file.value.starts_with(f"{path.value}/") {
+                return Place.Dir
+            }
+        }
+        return Place.Missing
+    }
+
+    /// `given` in normal form, and what it names, or `PermissionDenied` when it leaves the root.
+    fn find(files: Map[Path, Text], given: Path) -> (Path, Bool, Place) fails FsError {
+        let (path, dir) = MemDir.normal(given) else fail FsError.PermissionDenied(path: given)
+        return (path, dir, MemDir.place(files: files, path: path))
+    }
+
+    /// The file `given` names, which may be missing, or why it can't be a file.
+    fn file(files: Map[Path, Text], given: Path) -> Path fails FsError {
+        let (path, dir, place) = try MemDir.find(files: files, given: given)
+        check not dir else fail FsError.Other(message: f"`{given.value}` names a directory")
+        return match place {
+            Place.Dir => fail FsError.Other(message: f"`{given.value}` is a directory")
+            Place.Through => fail FsError.Other(message: f"`{given.value}` goes through a file")
+            Place.File => path
+            Place.Missing => path
+        }
+    }
+
+    /// `names` in the order of their bytes, by merging, since a list has no `sort` yet.
+    fn sorted(names: List[Text]) -> List[Text] {
+        if names.len() < 2 {
+            return names
+        }
+        var left: List[Text] = []
+        var right: List[Text] = []
+        for (i, name) in names.enumerate() {
+            if i < names.len() / 2 {
+                left.push(name)
+            } else {
+                right.push(name)
+            }
+        }
+        let a = MemDir.sorted(left)
+        let b = MemDir.sorted(right)
+        var out: List[Text] = []
+        var i = 0
+        var j = 0
+        while i < a.len() or j < b.len() {
+            if j == b.len() or (i < a.len() and a[i] <= b[j]) {
+                out.push(a[i])
+                i += 1
+            } else {
+                out.push(b[j])
+                j += 1
+            }
+        }
+        return out
     }
 }
 
+// An operation that needs only `observes` permissions sees `self` through the observes-only
+// view (REFERENCE §9.2), so the helpers take the files rather than `self`.
 impl Dir for MemDir {
     fn read_text(self, path: Path) -> Text fails FsError {
-        return self.files.get(path) else fail MemDir.missing(path: path, dir: MemDir.is_dir(files: self.files, path: path))
+        let file = try MemDir.file(files: self.files, given: path)
+        return self.files.get(file) else fail FsError.NotFound(path: path)
     }
 
     fn write_text(self, path: Path, text: Text) fails FsError {
-        check not MemDir.is_dir(files: self.files, path: path) else fail FsError.Other(message: f"`{path.value}` is a directory")
-        let _ = self.files.set(key: path, value: text)
+        let file = try MemDir.file(files: self.files, given: path)
+        let _ = self.files.set(key: file, value: text)
     }
 
     fn size(self, path: Path) -> Int fails FsError {
-        let text = self.files.get(path) else fail MemDir.missing(path: path, dir: MemDir.is_dir(files: self.files, path: path))
+        let file = try MemDir.file(files: self.files, given: path)
+        let text = self.files.get(file) else fail FsError.NotFound(path: path)
         return text.byte_len()
     }
 
     /// Each entry once, in the order of the names' bytes, as the runtime's `Dir` gives them.
     fn list(self, path: Path) -> List[Path] fails FsError {
-        check not self.files.contains_key(path)
-            else fail FsError.Other(message: f"`{path.value}` is not a directory")
+        let (dir, _, place) = try MemDir.find(files: self.files, given: path)
+        match place {
+            Place.File => fail FsError.Other(message: f"`{path.value}` is not a directory")
+            Place.Through => fail FsError.Other(message: f"`{path.value}` goes through a file")
+            Place.Missing => fail FsError.NotFound(path: path)
+            Place.Dir => {}
+        }
+        var seen: Map[Text, Bool] = [:]
         var names: List[Text] = []
         for (file, _) in self.files {
-            if MemDir.below(path: path, file: file) is Some(rest) {
+            let below = if dir.value.is_empty() { Some(file.value) } else { file.value.strip_prefix(f"{dir.value}/") }
+            if below is Some(rest) and not rest.is_empty() {
                 let name = if rest.split_once("/") is Some((first, _)) { first } else { rest }
-                if not names.contains(name) {
+                if seen.set(key: name, value: true) is None {
                     names.push(name)
                 }
             }
         }
-        check not names.is_empty() or path.value.is_empty() else fail FsError.NotFound(path: path)
         var out: List[Path] = []
         for name in MemDir.sorted(names) {
-            out.push(if path.value.is_empty() { Path(name) } else { Path(f"{path.value}/{name}") })
+            out.push(if dir.value.is_empty() { Path(name) } else { Path(f"{dir.value}/{name}") })
         }
         return out
     }
 
-    /// A directory needs no entry of its own, so this changes nothing unless `path` exists.
+    /// A directory has no entry of its own in `files`, so this changes nothing (OPEN_QUESTIONS
+    /// P5).
     fn create_dir(self, path: Path) fails FsError {
-        check not self.files.contains_key(path) and not MemDir.is_dir(files: self.files, path: path)
-            else fail FsError.Other(message: f"`{path.value}` already exists")
+        let (_, _, place) = try MemDir.find(files: self.files, given: path)
+        match place {
+            Place.File => fail FsError.Other(message: f"`{path.value}` already exists")
+            Place.Dir => fail FsError.Other(message: f"`{path.value}` already exists")
+            Place.Through => fail FsError.Other(message: f"`{path.value}` goes through a file")
+            Place.Missing => {}
+        }
     }
 
     fn remove(self, path: Path) fails FsError {
-        check not path.value.is_empty() else fail FsError.PermissionDenied(path: path)
-        if self.files.remove(path) is Some(_) {
-            return
-        }
-        check not MemDir.is_dir(files: self.files, path: path)
-            else fail FsError.Other(message: f"`{path.value}` is not empty")
-        fail FsError.NotFound(path: path)
-    }
-}
-
-impl MemDir {
-    fn missing(path: Path, dir: Bool) -> FsError {
-        return if dir { FsError.Other(message: f"`{path.value}` is a directory") } else { FsError.NotFound(path: path) }
-    }
-
-    /// `names` in the order of their bytes, by insertion, since a list has no `sort` yet.
-    fn sorted(names: List[Text]) -> List[Text] {
-        var out: List[Text] = []
-        for name in names {
-            var i = out.len()
-            out.push(name)
-            while i > 0 and out[i - 1] > name {
-                out[i] = out[i - 1]
-                i -= 1
+        let (target, _, place) = try MemDir.find(files: self.files, given: path)
+        check not target.value.is_empty() else fail FsError.PermissionDenied(path: path)
+        match place {
+            Place.File => {
+                let _ = self.files.remove(target)
             }
-            out[i] = name
+            Place.Dir => fail FsError.Other(message: f"`{path.value}` is not empty")
+            Place.Through => fail FsError.Other(message: f"`{path.value}` goes through a file")
+            Place.Missing => fail FsError.NotFound(path: path)
         }
-        return out
     }
 }

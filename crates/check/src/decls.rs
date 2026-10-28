@@ -1418,6 +1418,7 @@ impl Decls {
             f.write_str(match cap.iface {
                 IfaceId::OUT => std("Out", "std.io.Out"),
                 IfaceId::IN => std("In", "std.io.In"),
+                IfaceId::DIR => std("Dir", "std.fs.Dir"),
                 // No module exports these yet, so they are named for where they come from.
                 IfaceId::NET => std("Net", "System.Net"),
                 IfaceId::CLOCK => std("Clock", "System.Clock"),
@@ -1445,6 +1446,8 @@ impl Decls {
             Ty::Adt(AdtId::PARSE_ERROR, _) => std("ParseError", "std.text.ParseError"),
             Ty::Adt(AdtId::CONVERSION_ERROR, _) => std("ConversionError", "std.num.ConversionError"),
             Ty::Adt(AdtId::IO_ERROR, _) => std("IoError", "std.io.IoError"),
+            Ty::Adt(AdtId::PATH, _) => std("Path", "std.fs.Path"),
+            Ty::Adt(AdtId::FS_ERROR, _) => std("FsError", "std.fs.FsError"),
             Ty::Adt(id, _) => &self.adt(*id).name,
             Ty::Cap(_) => unreachable!("written above"),
             Ty::Param(_) | Ty::Var(_) => "_",
