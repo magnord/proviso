@@ -82,8 +82,9 @@ impl MemDir {
             }
             rest = after
         }
+        let prefix = f"{path.value}/"
         for (file, _) in files {
-            if file.value.starts_with(f"{path.value}/") {
+            if file.value.starts_with(prefix) {
                 return Place.Dir
             }
         }
