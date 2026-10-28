@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use proviso_check::Options;
 use proviso_syntax::diag::{Severity, codes};
@@ -199,6 +200,32 @@ fn reports(stderr: &str) -> Reports {
     found
 }
 
+/// A new, empty directory under the system's temporary directory, removed with what the run
+/// left in it when dropped.
+struct WorkDir(PathBuf);
+
+impl WorkDir {
+    fn new() -> std::io::Result<WorkDir> {
+        static RUNS: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let run = RUNS.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("proviso-golden-{}-{run}", std::process::id()));
+            // A directory left by an earlier process with the same id is skipped, not reused.
+            match fs::create_dir(&dir) {
+                Ok(()) => return Ok(WorkDir(dir)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl Drop for WorkDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 fn run_file(path: &Path, name: &str, phase: Phase, bless: bool) -> Result<Verdict, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("cannot read: {e}"))?;
     let header = parse_header(&text)?;
@@ -299,7 +326,10 @@ fn run_file(path: &Path, name: &str, phase: Phase, bless: bool) -> Result<Verdic
     let code = if header.test {
         test(&compiled, true, &mut stdout, &mut stderr)
     } else {
-        run(&compiled, &mut &input[..], &mut stdout, &mut stderr)
+        // Each run gets a new, empty working directory for `System.fs`, without changing the
+        // runner's own (README, Environment).
+        let dir = WorkDir::new().map_err(|e| format!("cannot make a working directory: {e}"))?;
+        run(&compiled, &mut &input[..], &mut stdout, &mut stderr, &dir.0)
     };
     let stdout = String::from_utf8_lossy(&stdout).into_owned();
     let stderr = String::from_utf8_lossy(&stderr).into_owned();

@@ -41,12 +41,15 @@ impl AdtId {
     pub const CONVERSION_ERROR: AdtId = AdtId(11);
     /// `std.text`'s (STD.md).
     pub const PARSE_ERROR: AdtId = AdtId(12);
+    /// `std.fs`'s, which the runtime's `Dir` takes and fails with.
+    pub const PATH: AdtId = AdtId(13);
+    pub const FS_ERROR: AdtId = AdtId(14);
 
     /// How many records and enums the toolchain declares, before the standard library's.
     const BUILT_IN: usize = 6;
 
     /// The standard library's at fixed ids, by name, which the checker confirms.
-    pub const PINNED: [(AdtId, &str); 7] = [
+    pub const PINNED: [(AdtId, &str); 9] = [
         (AdtId::OPTION, "Option"),
         (AdtId::RESULT, "Result"),
         (AdtId::ORDERING, "Ordering"),
@@ -54,6 +57,8 @@ impl AdtId {
         (AdtId::IO_ERROR, "IoError"),
         (AdtId::CONVERSION_ERROR, "ConversionError"),
         (AdtId::PARSE_ERROR, "ParseError"),
+        (AdtId::PATH, "Path"),
+        (AdtId::FS_ERROR, "FsError"),
     ];
 
     pub fn index(self) -> usize {
@@ -90,13 +95,15 @@ impl IfaceId {
     /// `std.io`'s output and input streams.
     pub const OUT: IfaceId = IfaceId(17);
     pub const IN: IfaceId = IfaceId(18);
+    /// `std.fs`'s directory tree.
+    pub const DIR: IfaceId = IfaceId(19);
 
     /// The interfaces at fixed ids, in id order: the prelude's (REFERENCE §3), `System`'s
-    /// capabilities, and `std.io`'s. The checker confirms that the standard library declares
-    /// them so.
-    pub const PINNED: [&str; 19] = [
+    /// capabilities, `std.io`'s and `std.fs`'s. The checker confirms that the standard library
+    /// declares them so.
+    pub const PINNED: [&str; 20] = [
         "Eq", "Ord", "Show", "Hash", "Copy", "Abandon", "Index", "Add", "Sub", "Mul", "Div", "Neg", "Net", "Process",
-        "Clock", "Random", "Env", "Out", "In",
+        "Clock", "Random", "Env", "Out", "In", "Dir",
     ];
 
     /// The prelude interface named `name`, which every module sees (REFERENCE §3).
@@ -619,8 +626,8 @@ impl Default for Decls {
     /// The types the toolchain declares, each at the id its constant names. The standard
     /// library's declarations follow, from Proviso source.
     fn default() -> Decls {
-        // REFERENCE §9.1's fields, but `fs`, which comes with `std.fs` in slice 3.5. Their
-        // interfaces are the standard library's, at their pinned ids.
+        // REFERENCE §9.1's fields, whose interfaces are the standard library's, at their
+        // pinned ids.
         let field = |name: &str, iface: IfaceId, perms: usize| FieldDef {
             name: name.into(),
             ty: Ty::cap(iface, Perms::all(perms)),
@@ -629,6 +636,7 @@ impl Default for Decls {
         let mut system = AdtDef::record(
             "System",
             vec![
+                field("fs", IfaceId::DIR, 5),
                 field("net", IfaceId::NET, 2),
                 field("clock", IfaceId::CLOCK, 0),
                 field("random", IfaceId::RANDOM, 0),

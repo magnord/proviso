@@ -7,19 +7,20 @@ use crate::decls::AdtId;
 /// The standard library's modules, by name, in the order they are declared. That order pins
 /// each of their types and interfaces at the id its constant in [`crate::decls`] names. The
 /// prelude comes first, and a program's own module comes after them all.
-pub const STD: [(&str, &str); 5] = [
+pub const STD: [(&str, &str); 7] = [
     ("std.prelude", include_str!("../std/prelude.proviso")),
     ("std.io", include_str!("../std/io.proviso")),
     ("std.num", include_str!("../std/num.proviso")),
     ("std.text", include_str!("../std/text.proviso")),
     ("std.pool", include_str!("../std/pool.proviso")),
+    ("std.fs", include_str!("../std/fs.proviso")),
+    ("std.test", include_str!("../std/test.proviso")),
 ];
 
 /// The standard library's modules that later phases bring, which a `use` may name already.
 pub fn later_module(name: &str) -> Option<proviso_syntax::diag::Planned> {
     use proviso_syntax::diag::Planned;
     match name {
-        "std.fs" | "std.test" => Some(Planned::Phase(3)),
         "std.task" => Some(Planned::Phase(6)),
         _ => None,
     }

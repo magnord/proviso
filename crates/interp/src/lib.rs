@@ -5,12 +5,15 @@
 //! language treats as copies are shared behind `Arc`, so a later phase can hand them to
 //! other task threads unchanged.
 
+mod fs;
+
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use proviso_check::decls::{AdtId, Decls, FieldIdx, IfaceId, ImplKey, VariantIdx};
@@ -371,6 +374,8 @@ pub enum Cap {
     Stdin,
     Stdout,
     Stderr,
+    /// A directory tree, such as `System.fs` (REFERENCE §9.2).
+    Dir(Arc<fs::Root>),
     /// One of `System`'s capabilities that has no operations yet, such as its `Clock`
     /// (OPEN_QUESTIONS Q6).
     Inert(IfaceId),
@@ -537,15 +542,16 @@ pub struct Streams<'a> {
     pub stderr: &'a mut (dyn Write + Send),
 }
 
-/// Runs `main` on a thread of its own, with `streams` as its standard streams. An `Err` is a
-/// panic in the interpreter, which is a bug.
+/// Runs `main` on a thread of its own, with `streams` as its standard streams and `System.fs`
+/// rooted at `root`. An `Err` is a panic in the interpreter, which is a bug.
 pub fn run_main<'a>(
     sources: &'a SourceMap,
     m: &'a Ast,
     p: &'a Program,
     streams: Streams<'a>,
+    root: &Path,
 ) -> std::thread::Result<Outcome> {
-    on_interp_thread(sources, m, p, streams, |interp| interp.main())
+    on_interp_thread(sources, m, p, streams, |interp| interp.main(root))
 }
 
 /// Runs each example, and each test when `tests` is set, in declaration order, each with
@@ -714,12 +720,13 @@ enum Owned {
 }
 
 impl Interp<'_> {
-    fn main(&mut self) -> Outcome {
+    fn main(&mut self, root: &Path) -> Outcome {
         let main = self.p.main.expect("the driver checks that `main` exists");
         let site = self.p.decl(self.m, main).name.span;
-        // In the order of `System`'s fields, `net`, `clock`, `random`, `env`, `stdin`,
+        // In the order of `System`'s fields, `fs`, `net`, `clock`, `random`, `env`, `stdin`,
         // `stdout`, `stderr` and `process` (REFERENCE §9.1).
         let fields = Arc::from([
+            Value::Cap(Cap::Dir(Arc::new(fs::Root::new(root)))),
             Value::Cap(Cap::Inert(IfaceId::NET)),
             Value::Cap(Cap::Inert(IfaceId::CLOCK)),
             Value::Cap(Cap::Inert(IfaceId::RANDOM)),
@@ -2467,6 +2474,21 @@ impl Interp<'_> {
                     Err(err) => fail("read from stdin", err),
                 }
             }
+            (Cap::Dir(root), _, [Value::Adt(path), rest @ ..]) => {
+                let Value::Text(text) = &path.fields[0] else { unreachable!("a `Path` holds its text") };
+                let result = match (name, rest) {
+                    ("read_text", []) => root.read_text(text).map(|text| Value::Text(text.into())),
+                    ("write_text", [Value::Text(contents)]) => root.write_text(text, contents).map(|()| Value::Unit),
+                    ("size", []) => root.size(text).map(|size| Value::Int(size.into(), IntTy::I64)),
+                    ("list", []) => root.list(text).map(|paths| {
+                        Value::List(Arc::new(ListValue { items: paths.iter().map(|p| path_value(p)).collect() }))
+                    }),
+                    ("create_dir", []) => root.create_dir(text).map(|()| Value::Unit),
+                    ("remove", []) => root.remove(text).map(|()| Value::Unit),
+                    _ => unreachable!("the checker resolves only the runtime's operations, not {name}"),
+                };
+                result.map_err(|failure| Unwind::Fail(fs_error(failure, &args[0])))
+            }
             _ => unreachable!("the checker resolves only the runtime's operations, not {name}"),
         }
     }
@@ -2750,6 +2772,22 @@ fn lines(text: &str) -> Vec<&str> {
 }
 
 /// `Some(value)`, or `None`.
+/// `std.fs`'s `Path` holding `text`.
+fn path_value(text: &str) -> Value {
+    Value::Adt(Adt { def: AdtId::PATH, variant: VariantIdx::RECORD, fields: Arc::from([Value::Text(text.into())]) })
+}
+
+/// `std.fs`'s `FsError` for an operation on `path` that failed with `failure`. Its variants
+/// are `NotFound`, `PermissionDenied` and `Other`, in that order (STD.md).
+fn fs_error(failure: fs::FsFailure, path: &Value) -> Value {
+    let (variant, field) = match failure {
+        fs::FsFailure::NotFound => (0, path.clone()),
+        fs::FsFailure::PermissionDenied => (1, path.clone()),
+        fs::FsFailure::Other(message) => (2, Value::Text(message.into())),
+    };
+    Value::Adt(Adt { def: AdtId::FS_ERROR, variant: VariantIdx::new(variant), fields: Arc::from([field]) })
+}
+
 fn option(value: Option<Value>) -> Value {
     let (variant, fields): (VariantIdx, Arc<[Value]>) = match value {
         Some(value) => (VariantIdx::SOME, Arc::from([value])),
@@ -3439,6 +3477,7 @@ fn write_value<E>(
             Value::Cap(cap) => out.push_str(match cap {
                 Cap::Stdin => "In",
                 Cap::Stdout | Cap::Stderr => "Out",
+                Cap::Dir(_) => "Dir",
                 Cap::Inert(iface) => &decls.iface(*iface).name,
             }),
             // `debug` writes a function value's type, which only the checker knows.

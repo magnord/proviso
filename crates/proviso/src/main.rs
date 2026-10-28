@@ -134,7 +134,8 @@ fn check_or_run(command: Command, args: &[String]) -> i32 {
         Command::Check => exit::OK,
         Command::Run => {
             let mut stdin = std::io::BufReader::new(std::io::stdin());
-            run(&compiled, &mut stdin, &mut std::io::stdout(), &mut std::io::stderr())
+            // `System.fs` is rooted at the working directory (OPEN_QUESTIONS Q6).
+            run(&compiled, &mut stdin, &mut std::io::stdout(), &mut std::io::stderr(), std::path::Path::new("."))
         }
         Command::Test => test(&compiled, true, &mut std::io::stdout(), &mut std::io::stderr()),
     }

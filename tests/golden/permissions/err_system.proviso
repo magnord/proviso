@@ -4,8 +4,8 @@
 // expect-error: E0901
 // The runtime gives `main` the only `System` (REFERENCE §9.1), so a program can't build one,
 // copy one with `with`, or match one with a pattern (issue #11). It reads the fields by
-// name. `sys.fs` comes with `std.fs` in slice 3.5, and the operations of `Net`, `Process`,
-// `Clock`, `Random` and `Env` aren't scheduled yet (OPEN_QUESTIONS Q6).
+// name. The operations of `Net`, `Process`, `Clock`, `Random` and `Env` aren't scheduled yet
+// (OPEN_QUESTIONS Q6).
 use std.io { IoError }
 
 fn netted(n: Net[connect]) -> Int {                         // <- E0901
@@ -20,7 +20,7 @@ fn system(sys: System) -> Int {
     let d = match sys {
         System(..) => 1                                     // <- E0604
     }
-    let fs = sys.fs                                         // <- E0901
+    let fs = sys.fs
     let now = sys.clock.now()                               // <- E0901
     let later = Clock.now(sys.clock)                        // <- E0901
     let nothing = sys.stdout.nosuch()                       // <- E0303

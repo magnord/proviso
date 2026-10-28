@@ -14,8 +14,8 @@ use proviso_syntax::parse_module;
 use proviso_syntax::source::{SourceMap, Span};
 
 /// How far this toolchain implements the v1 plan (OPEN_QUESTIONS P3): phases 1 and 2, and
-/// slices 3.1 to 3.4 of phase 3.
-pub const IMPLEMENTED_PHASE: Phase = Phase::slice(3, 4);
+/// slices 3.1 to 3.5 of phase 3.
+pub const IMPLEMENTED_PHASE: Phase = Phase::slice(3, 5);
 
 /// A point in the v1 plan: a whole phase, or a slice of one. A phase delivered over several
 /// pull requests numbers its slices `2.1`, `2.2` and so on, and each pull request turns its
@@ -289,14 +289,16 @@ impl Compiled {
 
 /// Runs a compiled program without errors and returns its exit code. The program reads
 /// `stdin` and writes to `stdout` and `stderr`; failures and defects are reported on `stderr`.
+/// Its `System.fs` is rooted at `root`.
 pub fn run(
     compiled: &Compiled,
     stdin: &mut (dyn BufRead + Send),
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
+    root: &Path,
 ) -> i32 {
     let streams = Streams { stdin, stdout: &mut *stdout, stderr: &mut *stderr };
-    let outcome = run_main(&compiled.sources, &compiled.ast, &compiled.program, streams);
+    let outcome = run_main(&compiled.sources, &compiled.ast, &compiled.program, streams, root);
     let _ = stdout.flush();
     match outcome {
         Ok(Outcome::Done) => exit::OK,
@@ -424,7 +426,7 @@ mod tests {
         let compiled = compile_with("m.proviso", text.to_string(), &[("std.extra", extra)], Options::default());
         assert!(!compiled.has_errors(), "{}", compiled.render());
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        assert_eq!(run(&compiled, &mut std::io::empty(), &mut stdout, &mut stderr), exit::OK);
+        assert_eq!(run(&compiled, &mut std::io::empty(), &mut stdout, &mut stderr, &std::env::temp_dir()), exit::OK);
         assert_eq!(String::from_utf8_lossy(&stdout), "20\n");
     }
 

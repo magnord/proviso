@@ -1,0 +1,114 @@
+// `std.test` (STD.md).
+use std.fs { Dir, Path, FsError }
+
+/// A directory tree in memory, for tests (REFERENCE §9.6). Copies of it share its files. A
+/// path is a key, compared as written, and a directory is any path that a file's path
+/// continues with `/`. The root, `""`, is always a directory (OPEN_QUESTIONS P5).
+pub cap record MemDir {
+    state files: Map[Path, Text]
+}
+
+impl MemDir {
+    /// A `Dir` that holds `files`, each keyed by its path.
+    pub fn with_files(files: Map[Text, Text]) -> Dir[read, list, write, create, delete] {
+        var paths: Map[Path, Text] = [:]
+        for (path, text) in files {
+            let _ = paths.set(key: Path(path), value: text)
+        }
+        return Dir.of(MemDir(files: paths))
+    }
+
+    /// What follows `path` and a `/` in `file`, or all of `file` when `path` is the root.
+    fn below(path: Path, file: Path) -> Option[Text] {
+        if path.value.is_empty() {
+            return Some(file.value)
+        }
+        return file.value.strip_prefix(f"{path.value}/")
+    }
+
+    /// Whether `path` is the root, or a file's path continues it with a `/`. It takes the
+    /// files rather than `self`, since an operation that only reads sees `self` through the
+    /// observes-only view (REFERENCE §9.2).
+    fn is_dir(files: Map[Path, Text], path: Path) -> Bool {
+        for (file, _) in files {
+            if MemDir.below(path: path, file: file) is Some(_) {
+                return true
+            }
+        }
+        return path.value.is_empty()
+    }
+}
+
+impl Dir for MemDir {
+    fn read_text(self, path: Path) -> Text fails FsError {
+        return self.files.get(path) else fail MemDir.missing(path: path, dir: MemDir.is_dir(files: self.files, path: path))
+    }
+
+    fn write_text(self, path: Path, text: Text) fails FsError {
+        check not MemDir.is_dir(files: self.files, path: path) else fail FsError.Other(message: f"`{path.value}` is a directory")
+        let _ = self.files.set(key: path, value: text)
+    }
+
+    fn size(self, path: Path) -> Int fails FsError {
+        let text = self.files.get(path) else fail MemDir.missing(path: path, dir: MemDir.is_dir(files: self.files, path: path))
+        return text.byte_len()
+    }
+
+    /// Each entry once, in the order of the names' bytes, as the runtime's `Dir` gives them.
+    fn list(self, path: Path) -> List[Path] fails FsError {
+        check not self.files.contains_key(path)
+            else fail FsError.Other(message: f"`{path.value}` is not a directory")
+        var names: List[Text] = []
+        for (file, _) in self.files {
+            if MemDir.below(path: path, file: file) is Some(rest) {
+                let name = if rest.split_once("/") is Some((first, _)) { first } else { rest }
+                if not names.contains(name) {
+                    names.push(name)
+                }
+            }
+        }
+        check not names.is_empty() or path.value.is_empty() else fail FsError.NotFound(path: path)
+        var out: List[Path] = []
+        for name in MemDir.sorted(names) {
+            out.push(if path.value.is_empty() { Path(name) } else { Path(f"{path.value}/{name}") })
+        }
+        return out
+    }
+
+    /// A directory needs no entry of its own, so this changes nothing unless `path` exists.
+    fn create_dir(self, path: Path) fails FsError {
+        check not self.files.contains_key(path) and not MemDir.is_dir(files: self.files, path: path)
+            else fail FsError.Other(message: f"`{path.value}` already exists")
+    }
+
+    fn remove(self, path: Path) fails FsError {
+        check not path.value.is_empty() else fail FsError.PermissionDenied(path: path)
+        if self.files.remove(path) is Some(_) {
+            return
+        }
+        check not MemDir.is_dir(files: self.files, path: path)
+            else fail FsError.Other(message: f"`{path.value}` is not empty")
+        fail FsError.NotFound(path: path)
+    }
+}
+
+impl MemDir {
+    fn missing(path: Path, dir: Bool) -> FsError {
+        return if dir { FsError.Other(message: f"`{path.value}` is a directory") } else { FsError.NotFound(path: path) }
+    }
+
+    /// `names` in the order of their bytes, by insertion, since a list has no `sort` yet.
+    fn sorted(names: List[Text]) -> List[Text] {
+        var out: List[Text] = []
+        for name in names {
+            var i = out.len()
+            out.push(name)
+            while i > 0 and out[i - 1] > name {
+                out[i] = out[i - 1]
+                i -= 1
+            }
+            out[i] = name
+        }
+        return out
+    }
+}
