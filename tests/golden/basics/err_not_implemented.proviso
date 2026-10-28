@@ -44,8 +44,6 @@ fn id(x: Int) -> Int requires x > 0 {               // <- E0901
     return x
 }
 
-effect Foo                                          // <- E0901
-
 fn uses_poisoned() -> Int {
     return ys                                       // <- E0201
 }

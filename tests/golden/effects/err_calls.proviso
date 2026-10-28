@@ -4,6 +4,7 @@
 // expect-error: E0317
 // expect-error: E0602
 // expect-error: E0701
+// expect-error: E0702
 // `filter` copies the elements it keeps, so it needs `T: Copy` (OPEN_QUESTIONS P5). `::[…]`
 // gives a function's type parameters and not its effect parameters, which the closure gives.
 // A rejected closure leaves `E` unknown, so the call is marked as one that can fail
@@ -37,11 +38,20 @@ fn mistyped(xs: List[Int]) -> Int {
     return 0
 }
 
-fn updates(out: Out) {
+fn updates(out: Out) fails Bad {
     var pool: Pool[Int] = Pool.new()
     let h = pool.insert(1)
     let changed = pool.update(handle: h, change: |n| {  // <- E0602
         out.write_line("changing") else ()
         n + 1
     })
+    let failed = pool.update(handle: h, change: |n| try fallible(n)) // <- E0702
+}
+
+enum Bad {
+    Oops
+}
+
+fn fallible(n: Int) -> Int fails Bad {
+    return n
 }

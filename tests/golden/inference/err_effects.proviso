@@ -7,9 +7,9 @@
 // (OPEN_QUESTIONS P5, Type arguments). One error type is all `E` has, so closures that fail
 // with different ones disagree, a closure that can fail makes the call fallible from either
 // position, and closures that can't leave it infallible. Which argument the disagreement is
-// reported at does depend on the order: the first error type `E` meets fixes it, as for a type
-// parameter's `fails T`, so a `try` around the call may disagree too (OPEN_QUESTIONS P5,
-// Effect parameters).
+// reported at does depend on the order, a limit this shares with a type parameter's `fails T`.
+// The first error type `E` meets fixes it, so a `try` around the call may disagree too
+// (OPEN_QUESTIONS P5, Order of a disagreement about `E`).
 enum Bad {
     Oops
 }

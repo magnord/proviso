@@ -383,6 +383,7 @@ pub fn check_program(m: &Ast, opts: Options, diags: &mut Diagnostics) -> Program
         cap_self: false,
         generic_scope: Vec::new(),
         effect_slots: Vec::new(),
+        holes: 0,
         param_names: Vec::new(),
         impl_generics: Vec::new(),
         copying: false,
@@ -823,6 +824,10 @@ struct Checker<'a> {
     generic_scope: Vec<(Symbol, Option<u32>)>,
     /// How diagnostics write each type parameter in scope.
     param_names: Vec<Box<str>>,
+    /// How many `todo` holes have been checked, and how many unmarked calls wait for the
+    /// statement to settle their error, so a call can tell whether its arguments held one
+    /// (Q25, §15.1).
+    holes: usize,
     /// Which type parameters in scope are parts of effect parameters, by index (§9.5).
     effect_slots: Vec<Option<EffectSlot>>,
     /// The type parameters of the `impl` block being declared, which its methods' come after.
@@ -1355,11 +1360,16 @@ impl Checker<'_> {
                             _ => None,
                         })
                         .collect();
-                    let missing: Vec<String> =
-                        params.iter().map(|&param| format!("`{}`", info.generics[param].name)).collect();
+                    // An effect parameter is named once, by its error part.
+                    let effect = |param: usize| info.generics[param].effect.is_some();
+                    let missing: Vec<String> = (params.iter())
+                        .filter(|&&param| info.generics[param].effect != Some(EffectSlot::Reach))
+                        .map(|&param| format!("`{}`", info.generics[param].name))
+                        .collect();
                     let noun = if missing.len() == 1 { "type argument" } else { "type arguments" };
-                    // `::[…]` gives only the function's own type parameters, not its `impl`'s.
-                    let fix = if params.iter().all(|&param| param < info.impl_params) {
+                    // `::[…]` gives only the function's own type parameters, not its `impl`'s
+                    // or its effect parameters.
+                    let fix = if params.iter().all(|&param| param < info.impl_params || effect(param)) {
                         String::new()
                     } else {
                         format!(", or write `{name}::[…](…)`")
@@ -3046,8 +3056,13 @@ impl Checker<'_> {
         generics: &mut Vec<GenericInfo>,
     ) {
         let m = self.m;
+        // A name declared twice means its first declaration in the source, effect or not.
+        let mut seen = HashSet::new();
+        let later: Vec<bool> = params.iter().map(|p| !seen.insert(p.name.sym)).collect();
         // Effect parameters come after the others, so `::[…]` gives the others in order.
-        for param in params.iter().filter(|p| !p.effect).chain(params.iter().filter(|p| p.effect)) {
+        let order =
+            (0..params.len()).filter(|&i| !params[i].effect).chain((0..params.len()).filter(|&i| params[i].effect));
+        for (param, later) in order.map(|i| (&params[i], later[i])) {
             let text = m.text(param.name.sym);
             let what = if param.effect { "effect parameter" } else { "type parameter" };
             // A wrongly cased name is reported once, not again for what it collides with.
@@ -3062,7 +3077,7 @@ impl Checker<'_> {
                 rejected: true,
                 effect: param.effect.then_some(EffectSlot::Reach),
             };
-            if self.generic_scope.iter().any(|(sym, _)| *sym == param.name.sym) {
+            if later || self.generic_scope.iter().any(|(sym, _)| *sym == param.name.sym) {
                 if cased {
                     let message = format!("{what} `{text}` is declared twice");
                     self.error(codes::DUPLICATE_NAME, param.name.span, message);
@@ -3192,6 +3207,16 @@ impl Checker<'_> {
             types.chain(decl.fails.map(|_| fails.clone().unwrap_or(Ty::Never))).zip(typed).collect();
         for (ty, at) in types {
             self.exposes(decl.name, vis, &ty, at);
+        }
+        // An effect parameter no parameter's type mentions is given by nothing, as when the
+        // `with E` that named it was rejected, so it stands for an unknown type (§15.1).
+        for i in 0..generics.len() {
+            if let Some(EffectSlot::Error { reach }) = generics[i].effect
+                && !params.iter().any(|p| mentions_effect(&p.ty, i as u32, reach))
+            {
+                generics[i].rejected = true;
+                generics[reach as usize].rejected = true;
+            }
         }
         self.impl_scope();
         self.effect_slots.clear();
@@ -4121,7 +4146,7 @@ impl Checker<'_> {
             if fails.is_some() || !uses.is_empty() {
                 let text = self.m.text(name.sym);
                 let message = format!(
-                    "a function type with `with {text}` fails and reaches as `{text}` does, so it has no `fails` or `uses` of its own (§9.5, Q2)"
+                    "a function type with `with {text}` fails and reaches as `{text}` does, so it has no `fails` or `uses` of its own (§9.4)"
                 );
                 self.error(codes::WITH_AND_FAILS, name.span, message);
                 return Ty::Error;
@@ -6110,6 +6135,7 @@ impl Checker<'_> {
             ExprKind::For { label, pat, iter, consume, body } => self.for_loop(e, *label, *pat, *iter, *consume, body),
             // What the hole meets may be given its type by the code that fills it (Q25).
             ExprKind::Todo(_) if self.opts.incomplete => {
+                self.holes += 1;
                 if let Some(expected) = expected {
                     self.vars.hole(expected);
                 }
@@ -7124,6 +7150,7 @@ impl Checker<'_> {
         {
             self.vars.subsume(expected, &ret.subst(&tvars));
         }
+        let (errors, holes) = (self.errors, self.holes);
         let counted = self.generic_args(name, &params, &tvars, args, span, Modes::Each(&modes));
         // An expected type with an error may have given them, and arguments that don't
         // match their parameters leave them to nothing (§15.1).
@@ -7133,9 +7160,12 @@ impl Checker<'_> {
             }
         }
         // An effect parameter's error part comes from the arguments alone, so a marker
-        // doesn't make a call fallible whose closure can't fail (REFERENCE §9.5).
+        // doesn't make a call fallible whose closure can't fail (REFERENCE §9.5). Arguments
+        // with an error or a `todo` hole may have meant one that can fail, so their part
+        // stays open, as a type parameter's does (§15.1, Q25).
+        let settled = self.errors == errors && self.holes == holes;
         for (ty, g) in tvars.iter().zip(&self.p.fns[f].generics) {
-            if matches!(g.effect, Some(EffectSlot::Error { .. })) {
+            if settled && matches!(g.effect, Some(EffectSlot::Error { .. })) {
                 self.vars.close_never(ty);
             }
         }
@@ -8774,6 +8804,7 @@ impl Checker<'_> {
                 if self.vars.has_var(err) {
                     let (ty, callee) = (err.clone(), callee.into());
                     self.pending.push(Pending::Unmarked { ty, callee, span, through });
+                    self.holes += 1;
                 } else {
                     if let Some(scope) = self.closure_scopes.last_mut() {
                         scope.unmarked = true;
@@ -10063,6 +10094,16 @@ struct BuiltinSig {
     /// The type arguments of the receiver's type that its `impl` block constrains, each with
     /// an interface it must implement and the type parameter's name.
     needs: Vec<(Ty, IfaceId, Box<str>)>,
+}
+
+/// Whether `ty` mentions the effect parameter whose error part is slot `i` and whose reach
+/// part is slot `reach`.
+fn mentions_effect(ty: &Ty, i: u32, reach: u32) -> bool {
+    match ty {
+        Ty::Param(j) => *j == i,
+        Ty::Reach(uses) => uses.effects().contains(&reach),
+        _ => ty.parts().is_some_and(|parts| parts.iter().any(|part| mentions_effect(part, i, reach))),
+    }
 }
 
 /// The methods of a list or map that later phases bring, with what to call them and when.

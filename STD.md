@@ -5,7 +5,7 @@ This file lists the standard library items that phases 1 and 2 implement (OPEN_Q
 - **Source.** From slice 3.4, the toolchain reads these declarations from Proviso source in `crates/check/std/`, one file per module. It binds each declaration without a body to an operation it implements (OPEN_QUESTIONS P5). `List.map` and `List.filter` have bodies there, written in Proviso as §9.5 writes `map`. The sources hold the items here that the toolchain implements, without their contracts, which wait for the verifier. `Set` stays E0901, and the checker still implements `parse` and the conversions itself.
 - **Phase 1** already has `System.stdout`, `Out.write_line` and `IoError`. Slice 3.1 adds `In.read_line` and the permissions of `Out` and `In`, slice 3.5 adds `std.fs`, `System.fs` and `std.test`, and slice 3.6 adds `List.map` and `List.filter`. Everything else here is phase 2.
 - **Contracts.** An `ensures` clause is listed where the verifier will need it (phase 5). The other items get theirs when `sig` exists (phase 4, T11). The toolchain implements these items natively and trusts them to meet their contracts, so the v1 profile doesn't check std contracts at runtime.
-- **Later phases.** `File`, `Dir.sub`, `FakeClock`, `FakeNet` and `SeededRandom` are not yet scheduled (Q6, Q36). `Pool.update`'s `change` has no `with E`, so it may not fail or reach (OPEN_QUESTIONS P5).
+- **Later phases.** `File`, `Dir.sub`, `FakeClock`, `FakeNet` and `SeededRandom` are not yet scheduled (Q6, Q36). `Pool.update`'s `change` has no `with E` yet, so it may not fail or reach, and that is not yet scheduled (OPEN_QUESTIONS P5).
 
 ## The prelude
 

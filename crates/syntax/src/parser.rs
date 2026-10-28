@@ -1515,11 +1515,13 @@ impl Parser<'_> {
                 T::Keyword(Kw::With) => {
                     let keyword = self.bump();
                     let name = self.ident("an effect parameter")?;
+                    // The first one stands, so a second is reported alone (§15.1).
                     if with.is_some() {
                         let message = "a function declares at most one `with` clause (§9.5)";
                         self.error(codes::UNEXPECTED_TOKEN, keyword.span, message);
+                    } else {
+                        with = Some(name);
                     }
-                    with = Some(name);
                 }
                 T::Keyword(Kw::Observes | Kw::Effects) => {
                     let keyword = self.bump();
@@ -3020,7 +3022,6 @@ fn item_keyword(kw: Kw) -> bool {
 /// Item keywords that belong to later phases, with what to call them.
 fn planned_item(kw: Kw) -> Option<(&'static str, Planned)> {
     Some(match kw {
-        Kw::Effect => ("`effect` items", Planned::Unscheduled),
         Kw::Pred => ("`pred` functions", Planned::Phase(5)),
         Kw::Unit | Kw::Tag => ("units and tags", Planned::PastV1),
         Kw::Extern => ("`extern` functions", Planned::Unscheduled),
