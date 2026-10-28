@@ -13,7 +13,7 @@
 //! same however wide the row is. Some sets of arms still take exponential work, so the check
 //! gives up after [`MAX_STEPS`] steps.
 
-use crate::decls::{Decls, Inhabited, VariantIdx};
+use crate::decls::{AdtId, Decls, Inhabited, VariantIdx};
 use crate::types::Ty;
 
 /// The most work one `match` may take to check, counted in rows visited and columns added.
@@ -54,9 +54,16 @@ enum Witness {
 
 /// A pattern for a value of type `ty` that none of `rows` covers, or `None` if they cover
 /// every value.
-/// `inhabited` says which types have values (see [`Decls::inhabited`]).
-pub fn uncovered(decls: &Decls, inhabited: &Inhabited, ty: &Ty, rows: &[Space]) -> Result<Option<String>, TooComplex> {
-    let mut m = Matrices { decls, inhabited, cells: Vec::new(), tys: Vec::new(), steps: 0 };
+/// `inhabited` says which types have values (see [`Decls::inhabited`]), and `sealed` which
+/// records are another module's opaque ones, whose patterns the module can't write.
+pub fn uncovered(
+    decls: &Decls,
+    inhabited: &Inhabited,
+    sealed: &dyn Fn(AdtId) -> bool,
+    ty: &Ty,
+    rows: &[Space],
+) -> Result<Option<String>, TooComplex> {
+    let mut m = Matrices { decls, inhabited, sealed, cells: Vec::new(), tys: Vec::new(), steps: 0 };
     let tys = Some(m.push_ty(ty.clone(), None));
     let rows = rows.iter().map(|row| Some(m.push_cell(row, None))).collect();
     let witness = m.useful(rows, tys)?;
@@ -66,10 +73,16 @@ pub fn uncovered(decls: &Decls, inhabited: &Inhabited, ty: &Ty, rows: &[Space]) 
 /// The constructors of `ty` that build values, with their field types, or `None` when its
 /// values are too many to list. An unknown type, or an enum with a rejected variant, is taken
 /// to have none, so that nothing about it is reported (REFERENCE §15.1).
-fn constructors(decls: &Decls, inhabited: &Inhabited, ty: &Ty) -> Option<Vec<(Ctor, Vec<Ty>)>> {
+fn constructors(
+    decls: &Decls,
+    inhabited: &Inhabited,
+    sealed: &dyn Fn(AdtId) -> bool,
+    ty: &Ty,
+) -> Option<Vec<(Ctor, Vec<Ty>)>> {
     match ty {
-        // The values of a collection or a handle are too many to list, as text's are.
-        Ty::Adt(id, _) if decls.adt(*id).is_native() => None,
+        // The values of a collection or a handle are too many to list, as text's are, and
+        // another module's opaque record shows none of its own (REFERENCE §3).
+        Ty::Adt(id, _) if decls.adt(*id).is_native() || sealed(*id) => None,
         Ty::Adt(id, args) => {
             let def = decls.adt(*id);
             if def.unknown_variants {
@@ -85,7 +98,7 @@ fn constructors(decls: &Decls, inhabited: &Inhabited, ty: &Ty) -> Option<Vec<(Ct
         // A variable left here has been reported as one that can't be inferred.
         Ty::Never | Ty::Error | Ty::Var(_) | Ty::Reach(_) => Some(Vec::new()),
         // A type parameter stands for any type, so its values can't be listed.
-        Ty::Int(_) | Ty::Float(_) | Ty::Char | Ty::Text | Ty::IoError | Ty::Cap(_) | Ty::Fn(..) | Ty::Param(_) => None,
+        Ty::Int(_) | Ty::Float(_) | Ty::Char | Ty::Text | Ty::Cap(_) | Ty::Fn(..) | Ty::Param(_) => None,
     }
 }
 
@@ -111,6 +124,7 @@ type List = Option<usize>;
 struct Matrices<'a, 's> {
     decls: &'a Decls,
     inhabited: &'a Inhabited,
+    sealed: &'a dyn Fn(AdtId) -> bool,
     /// A pattern and the rest of its row.
     cells: Vec<(&'s Space, List)>,
     /// A column's type and the types of the columns after it.
@@ -198,7 +212,7 @@ impl<'s> Matrices<'_, 's> {
                 return Ok(Walk::Decided(rows.is_empty().then_some(heads)));
             };
             let (ty, rest) = &self.tys[column];
-            let (ctors, rest) = (constructors(self.decls, self.inhabited, ty), *rest);
+            let (ctors, rest) = (constructors(self.decls, self.inhabited, self.sealed, ty), *rest);
             // No row covers the rest, so any value of the remaining columns is a witness, if
             // they all have values. A column of a type without any, such as an enum without
             // variants, is covered.
@@ -207,7 +221,7 @@ impl<'s> Matrices<'_, 's> {
                     heads.push(any(ctors)?);
                     let mut tys = rest;
                     while let Some(column) = tys {
-                        heads.push(any(constructors(self.decls, self.inhabited, &self.tys[column].0))?);
+                        heads.push(any(constructors(self.decls, self.inhabited, self.sealed, &self.tys[column].0))?);
                         tys = self.tys[column].1;
                     }
                     Some(heads)

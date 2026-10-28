@@ -100,10 +100,8 @@ pub enum Ty {
     Text,
     Unit,
     Never,
-    /// A record declared in Proviso: the module's, or the prelude's `System`.
+    /// A record or enum: one a module declares, or one of the toolchain's, such as `System`.
     Adt(AdtId, Arc<[Ty]>),
-    /// The error of `std.io` operations.
-    IoError,
     /// A capability interface type such as `Out`. Copies of its values share state (REFERENCE §9.6).
     Cap(Arc<CapTy>),
     /// A function type: the modes of its parameters, and its parts, `[result, error, uses,

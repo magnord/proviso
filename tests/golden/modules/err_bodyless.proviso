@@ -1,0 +1,24 @@
+// phase: 3.4
+// expect-error: E0101
+// Only the standard library declares a record without braces, or a function or method
+// without a body, which the toolchain implements (OPEN_QUESTIONS P5). In a program both are
+// syntax errors.
+pub opaque record A[T] derives(Eq, Hash)                    // <- E0101
+cap record B                                                // <- E0101
+resource record C                                           // <- E0101
+
+interface I {
+    fn m(self) -> Int
+}
+
+record E {}
+
+impl I for E {
+    fn m(self) -> Int                                       // <- E0101
+}
+
+impl E {
+    pub fn n(self) -> Int                                   // <- E0101
+}
+
+fn g() -> Int fails Int                                     // <- E0101

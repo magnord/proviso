@@ -1,0 +1,32 @@
+// phase: 3.4
+// expect-error: E0213
+// `std.io`'s `IoError` is a `pub opaque record`, so another module sees only the type and
+// its `pub` methods (REFERENCE §3). It can't build one, read or replace a field, or match
+// fields in a pattern, whether or not the record has a field of that name. It can call
+// `show`, which `IoError` implements.
+use std.io { IoError }
+
+fn build() -> IoError {
+    return IoError(message: "lost")                         // <- E0213
+}
+
+fn read(e: IoError) -> Text {
+    return e.message                                        // <- E0213
+}
+
+fn read_missing(e: IoError) -> Int {
+    return e.code                                           // <- E0213
+}
+
+fn replace(e: IoError) -> IoError {
+    return e.with(message: "other")                         // <- E0213
+}
+
+fn destructure(e: IoError) -> Int {
+    let IoError(..) = e                                     // <- E0213
+    return 0
+}
+
+fn shows(e: IoError) -> Text {
+    return e.show()
+}

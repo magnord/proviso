@@ -1,0 +1,173 @@
+// The prelude, whose `pub` items every module sees without a `use` (REFERENCE §3, STD.md).
+// The checker declares the standard library's modules first, in the order of
+// `proviso_check::STD`, so each type and interface here is at the id its constant in
+// `decls.rs` names. A declaration without a body binds to the native table (`native.rs`).
+use std.num { ConversionError }
+
+pub enum Option[T] derives(Eq, Ord, Hash, Show) {
+    Some(value: T)
+    None
+}
+
+pub enum Result[T, E] derives(Eq, Ord, Hash, Show) {
+    Ok(value: T)
+    Err(error: E)
+}
+
+/// What `cmp` returns, ordered `Less < Equal < Greater`.
+pub enum Ordering derives(Eq, Ord, Hash, Show) {
+    Less
+    Equal
+    Greater
+}
+
+/// How `to_int` rounds a `Float` that isn't a whole number. The names are IEEE 754's.
+pub enum Rounding derives(Eq, Hash, Show) {
+    TowardZero
+    TowardNegative
+    TowardPositive
+    NearestEven
+    NearestAway
+}
+
+pub interface Eq {
+    fn eq(self, other: Self) -> Bool
+}
+
+pub interface Ord {
+    fn cmp(self, other: Self) -> Ordering
+}
+
+pub interface Show {
+    fn show(self) -> Text
+}
+
+/// Only derived. No code calls a method of it yet (STD.md).
+pub interface Hash {
+}
+
+/// Met by every copyable type without reach, which nothing implements by hand (§5.1).
+pub interface Copy {
+}
+
+/// Ends a resource on a failure exit (§10). Every resource type implements it.
+pub interface Abandon {
+    fn abandon(take self)
+}
+
+/// `xs[i]` and `pool[h]`, which are built in. STD.md declares no methods for it yet.
+pub interface Index {
+}
+
+/// The operators a distinct type may derive (§4.6). STD.md declares no methods for them yet.
+pub interface Add {
+}
+
+pub interface Sub {
+}
+
+pub interface Mul {
+}
+
+pub interface Div {
+}
+
+pub interface Neg {
+}
+
+// The capabilities of `System`'s other fields (§9.1). No module exports them yet, and they
+// have no operations yet (STD.md, OPEN_QUESTIONS Q6).
+cap interface Net effects(connect, listen) {
+}
+
+cap interface Process effects(spawn) {
+}
+
+cap interface Clock {
+}
+
+cap interface Random {
+}
+
+cap interface Env {
+}
+
+impl Text {
+    /// The length of the UTF-8 encoding, in bytes.
+    pub fn byte_len(self) -> Int
+
+    pub fn is_empty(self) -> Bool
+
+    /// The text without leading and trailing Unicode `White_Space` characters.
+    pub fn trim(self) -> Text
+
+    /// The text before and after the first `sep`, or `None` if `sep` doesn't occur. An empty
+    /// `sep` matches at the start.
+    pub fn split_once(self, sep: Text) -> Option[(Text, Text)]
+
+    /// The lines, without their `\n` or `\r\n` endings. A final line ending doesn't start an
+    /// empty line.
+    pub fn lines(self) -> List[Text]
+
+    pub fn starts_with(self, prefix: Text) -> Bool
+
+    /// The text after `prefix`, or `None` if the text doesn't start with it.
+    pub fn strip_prefix(self, prefix: Text) -> Option[Text]
+}
+
+impl Float {
+    /// `self` rounded to a whole number by `rounding`. Fails with `ConversionError.NotANumber`
+    /// on NaN, and with `ConversionError.OutOfRange` when the result is infinite or doesn't
+    /// fit an `Int`.
+    pub fn to_int(self, rounding: Rounding) -> Int fails ConversionError
+}
+
+impl Float32 {
+    pub fn to_int(self, rounding: Rounding) -> Int fails ConversionError
+}
+
+impl[T] List[T] {
+    /// The number of elements.
+    pub fn len(self) -> Int
+
+    pub fn is_empty(self) -> Bool
+
+    /// Appends `value` at the end.
+    pub fn push(inout self, value: take T)
+
+    /// Removes the last element and returns it. The caller owns it (Q35). Returns `None` if
+    /// the list is empty.
+    pub fn pop(inout self) -> Option[T]
+}
+
+impl[T: Copy] List[T] {
+    /// The element at `index`, or `None` if `index` is out of bounds.
+    pub fn get(self, index: Int) -> Option[T]
+
+    /// Each element with its index, starting at 0.
+    pub fn enumerate(self) -> List[(Int, T)]
+}
+
+impl[T: Eq] List[T] {
+    pub fn contains(self, value: T) -> Bool
+}
+
+impl[K: Eq + Hash, V] Map[K, V] {
+    pub fn len(self) -> Int
+
+    pub fn is_empty(self) -> Bool
+
+    pub fn contains_key(self, key: K) -> Bool
+
+    /// Maps `key` to `value`. Returns the value it replaces, so a resource is never discarded
+    /// (§10 rule 5).
+    pub fn set(inout self, key: take K, value: take V) -> Option[V]
+
+    /// Removes `key` and returns its value, or `None` if `key` is absent.
+    pub fn remove(inout self, key: K) -> Option[V]
+}
+
+impl[K: Eq + Hash, V: Copy] Map[K, V] {
+    /// The value for `key`, or `None` if `key` is absent.
+    pub fn get(self, key: K) -> Option[V]
+}

@@ -1,0 +1,66 @@
+// phase: 3.4
+// expect-error: E0205
+// expect-error: E0213
+// expect-error: E0203
+// expect-error: E0901
+// expect-error: E0201
+// expect-error: E0307
+// A `use` names a module and items that it exports with `pub` (REFERENCE §3). A module
+// that doesn't exist, or an item the module doesn't declare, is E0205. An item the module
+// keeps private is E0213, such as the capability interfaces of `System`'s fields, which
+// `std.prelude` declares and no module exports yet (STD.md). The prelude's own items are
+// in scope already, so importing one shadows it, and so would a second name for one (H4).
+// A rejected import brings in nothing, so the uses of its names report nothing more
+// (§15.1), and neither does a qualifier that names no module. `use std.num` makes `num` a
+// qualifier, whose qualified names are not yet scheduled (OPEN_QUESTIONS P5). It names no
+// value or type of its own, and a type such as `Ordering` is no qualifier.
+use std.io { Out, Writer }                                  // <- E0205
+use std.prelude { Net }                                     // <- E0213
+use std.prelude { Option }                                  // <- E0203
+use std.prelude { Ordering as Order, Eq as Equal }          // <- E0203, E0203
+use std.io { Rounding }                                     // <- E0203, E0205
+use std.nowhere { Thing }                                   // <- E0205
+use mylib.things                                            // <- E0205
+use std.text { ParseError }
+use std.num
+
+fn write(o: Out, w: Writer) -> Int {
+    let x = Writer(1)
+    return 1
+}
+
+fn reach(n: Net[connect], t: Thing) -> Int {
+    let made = Thing.make()
+    return 1
+}
+
+fn parse(text: Text) -> Int fails ParseError {
+    return try Int.parse(text)
+}
+
+fn order(o: Order) -> Int {
+    return 1
+}
+
+fn qualified(c: num.ConversionError) -> Int {               // <- E0901
+    let e = num.ConversionError.OutOfRange                  // <- E0901
+    return 1
+}
+
+fn unqualified(n: Int) -> Int {
+    let x = num                                             // <- E0201
+    return n
+}
+
+fn lost(t: things.T) -> Int {
+    let made = things.make()
+    return 1
+}
+
+fn variant(o: Ordering.Less) -> Int {                       // <- E0307
+    return 1
+}
+
+fn spelled(c: std.num.ConversionError) -> Int {             // <- E0307
+    return 1
+}

@@ -1,0 +1,7 @@
+// `std.num` (STD.md).
+
+/// Why a conversion failed.
+pub enum ConversionError derives(Eq, Show) {
+    OutOfRange
+    NotANumber
+}

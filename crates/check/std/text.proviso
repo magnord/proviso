@@ -1,0 +1,8 @@
+// `std.text` (STD.md).
+
+/// Why `parse` failed.
+pub enum ParseError derives(Eq, Show) {
+    Empty
+    Invalid
+    OutOfRange
+}

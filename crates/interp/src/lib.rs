@@ -17,7 +17,7 @@ use proviso_check::decls::{AdtId, Decls, FieldIdx, IfaceId, ImplKey, VariantIdx}
 use proviso_check::types::{FloatTy, IntTy, Ty};
 use proviso_check::{Builtin, ExampleInfo, FnId, LocalId, Num, Program, Res};
 use proviso_syntax::ast::*;
-use proviso_syntax::source::{SourceFile, Span};
+use proviso_syntax::source::{SourceMap, Span};
 
 /// Calls nested deeper than this are a stack-exhaustion defect (REFERENCE §7.3).
 pub const MAX_CALL_DEPTH: usize = 10_000;
@@ -55,7 +55,6 @@ pub enum Value {
     /// call may still fail and roll it back, and a write copies it then (REFERENCE §5.5).
     Pool(Arc<PoolValue>),
     Handle(HandleValue),
-    IoError(Arc<str>),
     Cap(Cap),
     /// A value of a `cap record`, which is a handle to its object (REFERENCE §9.6). The `Arc`
     /// keeps a `Value` as small as it is without one.
@@ -541,12 +540,12 @@ pub struct Streams<'a> {
 /// Runs `main` on a thread of its own, with `streams` as its standard streams. An `Err` is a
 /// panic in the interpreter, which is a bug.
 pub fn run_main<'a>(
-    file: &'a SourceFile,
-    m: &'a Module,
+    sources: &'a SourceMap,
+    m: &'a Ast,
     p: &'a Program,
     streams: Streams<'a>,
 ) -> std::thread::Result<Outcome> {
-    on_interp_thread(file, m, p, streams, |interp| interp.main())
+    on_interp_thread(sources, m, p, streams, |interp| interp.main())
 }
 
 /// Runs each example, and each test when `tests` is set, in declaration order, each with
@@ -554,8 +553,8 @@ pub fn run_main<'a>(
 /// streams, so a result is written next to its `debug` output. `debug` output goes to
 /// `stderr`.
 pub fn run_examples(
-    file: &SourceFile,
-    m: &Module,
+    sources: &SourceMap,
+    m: &Ast,
     p: &Program,
     tests: bool,
     stdout: &mut (dyn Write + Send),
@@ -564,7 +563,7 @@ pub fn run_examples(
 ) -> std::thread::Result<()> {
     // An example or a test gets no `System`, so it reads no input (REFERENCE §14).
     let streams = Streams { stdin: &mut std::io::empty(), stdout, stderr };
-    on_interp_thread(file, m, p, streams, |interp| {
+    on_interp_thread(sources, m, p, streams, |interp| {
         let run = |info: &&ExampleInfo| tests || matches!(m.items[info.item].kind, ItemKind::Example(_));
         for info in p.examples.iter().filter(run) {
             let outcome = interp.example(info);
@@ -574,8 +573,8 @@ pub fn run_examples(
 }
 
 fn on_interp_thread<'a, R: Send>(
-    file: &'a SourceFile,
-    m: &'a Module,
+    sources: &'a SourceMap,
+    m: &'a Ast,
     p: &'a Program,
     Streams { stdin, stdout, stderr }: Streams<'a>,
     run: impl FnOnce(&mut Interp<'a>) -> R + Send,
@@ -588,7 +587,7 @@ fn on_interp_thread<'a, R: Send>(
                 // The stack grows down, so this is close to its top.
                 let stack_limit = stack_address().saturating_sub(STACK_SIZE - STACK_RESERVE);
                 let mut interp = Interp {
-                    file,
+                    sources,
                     m,
                     p,
                     stdin,
@@ -639,7 +638,7 @@ enum Unwind {
 type Flow<T> = Result<T, Unwind>;
 
 /// Whether `e` is an `if`, or a chain of `else if`s, that ends without an `else`.
-fn lacks_final_else(m: &Module, mut e: ExprId) -> bool {
+fn lacks_final_else(m: &Ast, mut e: ExprId) -> bool {
     loop {
         match &m.exprs[e].kind {
             ExprKind::If { else_branch: None, .. } => return true,
@@ -654,8 +653,8 @@ fn defect(kind: DefectKind, message: impl Into<String>, span: Span) -> Unwind {
 }
 
 struct Interp<'a> {
-    file: &'a SourceFile,
-    m: &'a Module,
+    sources: &'a SourceMap,
+    m: &'a Ast,
     p: &'a Program,
     stdin: &'a mut (dyn BufRead + Send),
     stdout: &'a mut (dyn Write + Send),
@@ -832,7 +831,7 @@ impl Interp<'_> {
                 }
             }
             (Expectation::Fails(pat), outcome) => {
-                let text = self.file.slice(self.m.pats[*pat].span);
+                let text = self.sources.slice(self.m.pats[*pat].span);
                 match outcome {
                     Err(error) if self.matches(*pat, &error, frame)? => None,
                     Err(error) => Some(format!(
@@ -1433,7 +1432,7 @@ impl Interp<'_> {
                 let why = match expect {
                     Some(expect) => self.expect(*value, expect, frame)?,
                     None if self.bool(*value, frame)? => None,
-                    None => Some(format!("`{}` is false", self.file.slice(m.exprs[*value].span))),
+                    None => Some(format!("`{}` is false", self.sources.slice(m.exprs[*value].span))),
                 };
                 if let Some(why) = why {
                     return Err(Unwind::Expected(why, stmt.span));
@@ -1481,7 +1480,7 @@ impl Interp<'_> {
             StmtKind::Continue(_) => return Err(Unwind::Continue(self.jump_target(s))),
             StmtKind::Assert(cond) => {
                 if !self.bool(*cond, frame)? {
-                    let text = self.file.slice(m.exprs[*cond].span);
+                    let text = self.sources.slice(m.exprs[*cond].span);
                     return Err(defect(DefectKind::AssertionFailed, format!("assertion failed: {text}"), stmt.span));
                 }
             }
@@ -1493,7 +1492,7 @@ impl Interp<'_> {
     /// once built, so only one that was just built or changed is checked (OPEN_QUESTIONS P3).
     fn refine(&mut self, value: &Value, span: Span) -> Flow<()> {
         let Value::Adt(adt) = value else { return Ok(()) };
-        let (p, file) = (self.p, self.file);
+        let (p, sources) = (self.p, self.sources);
         let def = p.decls.adt(adt.def);
         let variant = &def.variants[adt.variant.index()];
         if variant.preds.is_empty() {
@@ -1513,7 +1512,7 @@ impl Interp<'_> {
                 }
                 Err(other) => return Err(other),
             }
-            let text = file.slice(self.m.exprs[pred.expr].span);
+            let text = sources.slice(self.m.exprs[pred.expr].span);
             let message = match pred.field {
                 Some(i) => {
                     let shown = debug_repr(&adt.fields[i.index()], &p.decls);
@@ -2109,9 +2108,8 @@ impl Interp<'_> {
                         None => debug_repr(&shown, &self.p.decls),
                     });
                 }
-                let (line, col) = self.file.line_col(span.lo);
                 // `debug` output is best effort; a failed write is not a program error.
-                let _ = writeln!(self.stderr, "[debug {}:{line}:{col}] {}", self.file.path, parts.join(", "));
+                let _ = writeln!(self.stderr, "[debug {}] {}", self.sources.location(span.lo), parts.join(", "));
                 Value::Unit
             }
         })
@@ -2437,7 +2435,13 @@ impl Interp<'_> {
     fn operation(&mut self, cap: &Cap, iface: IfaceId, method: usize, args: &[Value]) -> Flow<Value> {
         let name = &*self.p.decls.iface(iface).methods[method].name;
         let fail = |stream: &str, err: std::io::Error| {
-            Err(Unwind::Fail(Value::IoError(format!("cannot {stream}: {err}").into())))
+            // `std.io`'s `IoError`, whose one field is the message its `show` gives.
+            let message = Value::Text(format!("cannot {stream}: {err}").into());
+            Err(Unwind::Fail(Value::Adt(Adt {
+                def: AdtId::IO_ERROR,
+                variant: VariantIdx::RECORD,
+                fields: Arc::from([message]),
+            })))
         };
         match (cap, name, args) {
             (Cap::Stdout | Cap::Stderr, "write_line", [Value::Text(text)]) => {
@@ -2809,7 +2813,6 @@ fn impl_key(value: &Value) -> ImplKey {
         Value::Char(_) => ImplKey::Char,
         Value::Text(_) => ImplKey::Text,
         Value::Unit => ImplKey::Unit,
-        Value::IoError(_) => ImplKey::IoError,
         Value::Adt(adt) => ImplKey::Adt(adt.def),
         Value::Object(object) => ImplKey::Adt(object.def),
         // A module may implement its interface for a standard type, as `List[Int]` (§4.9).
@@ -3252,7 +3255,7 @@ fn hash_value(value: &Value, decls: &Decls) -> u64 {
             Value::Bool(x) => x.hash(&mut hasher),
             Value::Char(x) => x.hash(&mut hasher),
             Value::Text(x) => x.hash(&mut hasher),
-            Value::Unit | Value::IoError(_) | Value::Cap(_) => {}
+            Value::Unit | Value::Cap(_) => {}
             // A `cap record` has a hand-written `eq` if any, so it hashes as its type alone.
             Value::Object(object) => object.def.index().hash(&mut hasher),
             Value::Handle(handle) => handle.hash(&mut hasher),
@@ -3344,6 +3347,12 @@ fn write_value<E>(
                     out.push_str(&text);
                     continue;
                 }
+                // `std.io`'s `IoError` is opaque to the modules that `debug` one, so `debug` writes it
+                // as its `show` does, without its field's name (OPEN_QUESTIONS P5).
+                if let (AdtId::IO_ERROR, [Value::Text(message)]) = (adt.def, &adt.fields[..]) {
+                    out.push_str(message);
+                    continue;
+                }
                 let def = decls.adt(adt.def);
                 let variant = &def.variants[adt.variant.index()];
                 // A tuple is written `(1, "a")`, as its literal is (OPEN_QUESTIONS P5).
@@ -3422,7 +3431,6 @@ fn write_value<E>(
             Value::Handle(handle) => {
                 out.push_str(&format!("Handle(slot: {}, generation: {})", handle.slot, handle.generation));
             }
-            Value::IoError(message) => out.push_str(message),
             // Only a `cap record` that implements `Show` is shown, and `debug` writes its name.
             Value::Object(object) => match hand_written(value)? {
                 Some(text) => out.push_str(&text),

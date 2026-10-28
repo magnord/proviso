@@ -1,6 +1,8 @@
-//! The syntax tree. Nodes live in arenas owned by [`Module`] and refer to each other by id.
+//! The syntax tree. Nodes live in arenas owned by [`Ast`], which every module of a program
+//! shares, and refer to each other by id.
 
 use std::collections::HashSet;
+use std::ops::Range;
 
 use crate::arena::{Arena, Id};
 use crate::intern::{Interner, Symbol};
@@ -11,15 +13,34 @@ pub type StmtId = Id<Stmt>;
 pub type TypeId = Id<TypeExpr>;
 pub type PatId = Id<Pat>;
 
-pub struct Module {
-    /// The module path, such as `users` for `users.proviso`.
-    pub name: String,
+/// A module's index in [`Ast::modules`].
+pub type ModId = usize;
+
+/// The syntax of a program: the items of each of its modules, in arenas they share, so an
+/// id names one node of the whole program.
+#[derive(Default)]
+pub struct Ast {
+    pub modules: Vec<Module>,
+    /// Every module's items, a module's together and in its order.
     pub items: Vec<Item>,
     pub exprs: Arena<Expr>,
     pub stmts: Arena<Stmt>,
     pub types: Arena<TypeExpr>,
     pub pats: Arena<Pat>,
     pub interner: Interner,
+}
+
+/// One file of a program, parsed into its [`Ast`] (REFERENCE §3).
+pub struct Module {
+    /// The module path, such as `users` for `users.proviso`, or `std.io`.
+    pub name: String,
+    /// Part of the standard library, whose declarations may lack a body when the toolchain
+    /// implements them (OPEN_QUESTIONS P5).
+    pub std: bool,
+    /// Its file's offsets in the program's [`crate::source::SourceMap`].
+    pub span: Span,
+    /// Its items' indices in [`Ast::items`].
+    pub items: Range<usize>,
     /// Names of items whose declarations were rejected, such as a function that failed to
     /// parse or a later-phase `impl`. Uses of them are not reported again.
     pub poisoned: HashSet<Symbol>,
@@ -40,6 +61,23 @@ pub struct Module {
 }
 
 impl Module {
+    pub fn new(name: &str, std: bool, span: Span, first_item: usize) -> Module {
+        Module {
+            name: name.to_string(),
+            std,
+            span,
+            items: first_item..first_item,
+            poisoned: HashSet::new(),
+            lost_fns: HashSet::new(),
+            planned_names: HashSet::new(),
+            impls: HashSet::new(),
+            tuple_impls: false,
+            everywhere: HashSet::new(),
+        }
+    }
+}
+
+impl Ast {
     pub fn text(&self, sym: Symbol) -> &str {
         self.interner.resolve(sym)
     }
@@ -82,6 +120,8 @@ pub enum Visibility {
 
 pub struct Item {
     pub kind: ItemKind,
+    /// The module that declares it.
+    pub module: ModId,
     pub vis: Visibility,
     pub doc: Option<String>,
     pub span: Span,
@@ -153,7 +193,8 @@ pub struct FnDecl {
     pub fails: Option<TypeId>,
     /// The permissions an operation of a `cap interface` `needs` (REFERENCE §9.2), each once.
     pub needs: Vec<Ident>,
-    /// `None` for an interface's method, which has no body (Q13).
+    /// `None` for an interface's method, which has no body (Q13), and for a function of a
+    /// standard library module that the toolchain implements (OPEN_QUESTIONS P5).
     pub body: Option<Block>,
     /// The body needed error recovery, so its control flow is unknown.
     pub recovered: bool,
@@ -254,6 +295,9 @@ pub struct RecordDecl {
     pub opaque: bool,
     /// The capability types after `uses`, which only an opaque record may have.
     pub uses: Option<Vec<TypeId>>,
+    /// Declared without braces in a standard library module, so it names a type that the
+    /// toolchain builds, such as `Pool[T]`, through the native table (OPEN_QUESTIONS P5).
+    pub native: bool,
     /// Declared `cap record`: a capability implemented in Proviso, whose values are handles
     /// that share its `state` fields (REFERENCE §9.6).
     pub cap: bool,
@@ -317,6 +361,9 @@ pub enum TypeExprKind {
     /// `Dir[read] uses Out`: a capability type and the capability types its implementation
     /// uses (REFERENCE §9.2).
     Uses { base: TypeId, uses: Vec<TypeId> },
+    /// `io.Out`: a name and the names before it, which `use` may make qualifiers (REFERENCE
+    /// §3). Its type arguments are skipped until qualified names exist.
+    Qualified(Vec<Ident>),
     /// A type the parser rejected after reporting it, which checks as unknown.
     Rejected,
 }

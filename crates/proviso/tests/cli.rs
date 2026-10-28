@@ -96,6 +96,21 @@ fn messages_name_what_they_mean() {
     }
 }
 
+/// `debug` writes another module's `IoError` as its `show` does, without the name of the
+/// field that `std.io` keeps to itself (OPEN_QUESTIONS P5).
+#[test]
+fn debug_writes_an_io_error_as_its_message() {
+    let file = source(
+        "debug_io_error.proviso",
+        "use std.io { IoError }\n\nfn read(sys: System) -> Unit fails IoError {\n    let line = try sys.stdin.read_line()\n}\n\npub fn main(sys: keep System) {\n    debug(attempt read(sys))\n}\n",
+    );
+    // Reading a directory fails.
+    let stdin = std::fs::File::open(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let output = proviso().arg("run").arg(&file).stdin(stdin).output().unwrap();
+    let errors = stderr(&output);
+    assert!(errors.contains("] Err(cannot read from stdin: "), "{errors}");
+}
+
 /// A type argument that nothing has given yet is written `_`, never as the `Never` it once
 /// stood in for, which a reader takes for the type the program asked for (issue #22). A
 /// literal's is written as its default.

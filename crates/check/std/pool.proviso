@@ -1,0 +1,36 @@
+// `std.pool` (STD.md). The toolchain builds both types, which the native table binds their
+// declarations to.
+
+/// A collection whose elements are addressed by handles (§5.5). A pool is unique, so it
+/// moves and is never copied.
+pub opaque unique record Pool[T]
+
+/// A slot in one pool, and the generation of the element it was issued for.
+pub opaque record Handle[T] derives(Eq, Hash)
+
+impl[T] Pool[T] {
+    /// An empty pool with a new identity.
+    pub fn new() -> Pool[T]
+
+    pub fn len(self) -> Int
+
+    /// Stores `value` and returns a handle with a generation no other handle has had.
+    pub fn insert(inout self, value: take T) -> Handle[T]
+
+    /// Removes the element and returns it. Returns `None` if `handle` is stale or belongs to
+    /// another pool.
+    pub fn remove(inout self, handle: Handle[T]) -> Option[T]
+
+    /// Replaces the element with `change(element)`. Returns `false`, and doesn't call
+    /// `change`, if `handle` is stale or belongs to another pool.
+    pub fn update(inout self, handle: Handle[T], change: fn(take T) -> T) -> Bool
+}
+
+impl[T: Copy] Pool[T] {
+    /// The element, or `None` if `handle` is stale or belongs to another pool.
+    pub fn get(self, handle: Handle[T]) -> Option[T]
+
+    /// A new pool with the same elements and a new identity. Handles into `self` aren't
+    /// valid in it.
+    pub fn duplicate(self) -> Pool[T]
+}

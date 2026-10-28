@@ -257,7 +257,12 @@ fn run_file(path: &Path, name: &str, phase: Phase, bless: bool) -> Result<Verdic
         }
         let mut got: BTreeMap<(usize, String), usize> = BTreeMap::new();
         for d in compiled.diagnostics.iter().filter(|d| d.severity == Severity::Error) {
-            let (line, _) = compiled.file.line_col(d.span.lo);
+            // A marker is on a line of the program's file, which is the first.
+            let file = compiled.sources.file_at(d.span.lo);
+            if file.base != 0 {
+                return Err(format!("an error is reported in `{}`:\n{}", file.path, compiled.render()));
+            }
+            let (line, _) = file.line_col(d.span.lo);
             *got.entry((line as usize, d.code.id.to_string())).or_insert(0) += 1;
         }
         if got != marked {

@@ -1,0 +1,25 @@
+// `std.io` (STD.md).
+
+/// A text output stream, such as `System.stdout` or `System.stderr`.
+pub cap interface Out effects(write) {
+    /// Writes `text` followed by a newline.
+    fn write_line(self, text: Text) fails IoError                needs write
+}
+
+/// A text input stream, such as `System.stdin`.
+pub cap interface In effects(read) {
+    /// The next line, without its `\n` or `\r\n`, or `None` at the end of the input.
+    fn read_line(self) -> Option[Text] fails IoError             needs read
+}
+
+/// An I/O failure. `show` gives the operating system's message, which the runtime puts in
+/// `message` when an operation fails.
+pub opaque record IoError {
+    message: Text
+}
+
+impl Show for IoError {
+    fn show(self) -> Text {
+        return self.message
+    }
+}
