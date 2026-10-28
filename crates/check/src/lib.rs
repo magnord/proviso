@@ -229,7 +229,9 @@ pub struct GenericInfo {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EffectSlot {
     /// The error part, with the index of its reach part.
-    Error { reach: u32 },
+    Error {
+        reach: u32,
+    },
     Reach,
 }
 
@@ -3096,7 +3098,8 @@ impl Checker<'_> {
                 effect,
             });
             if param.effect {
-                let reach = GenericInfo { sym: None, effect: Some(EffectSlot::Reach), ..generics[index as usize].clone() };
+                let reach =
+                    GenericInfo { sym: None, effect: Some(EffectSlot::Reach), ..generics[index as usize].clone() };
                 generics.push(reach);
             }
         }
@@ -4124,7 +4127,9 @@ impl Checker<'_> {
                 return Ty::Error;
             }
             return match self.with_effect(name) {
-                Some((error, reach)) => Ty::func_uses(modes, tys, ret, Ty::Param(error), Ty::reach(Reach::effect(reach))),
+                Some((error, reach)) => {
+                    Ty::func_uses(modes, tys, ret, Ty::Param(error), Ty::reach(Reach::effect(reach)))
+                }
                 None => Ty::Error,
             };
         }
@@ -4186,7 +4191,9 @@ impl Checker<'_> {
             Some(&(_, None)) => return None,
             Some(&(_, Some(i))) => match self.effect_slots.get(i as usize) {
                 Some(&Some(EffectSlot::Error { reach })) => return Some((i, reach)),
-                _ => format!("`with` names an effect parameter, and `{text}` is a type parameter; declare it as `effect {text}` (§9.5)"),
+                _ => format!(
+                    "`with` names an effect parameter, and `{text}` is a type parameter; declare it as `effect {text}` (§9.5)"
+                ),
             },
             None if self.poisoned.contains(&name.sym) => return None,
             None => format!("`with` names an effect parameter, and no `effect {text}` is declared here (§9.5)"),
