@@ -3,9 +3,9 @@
 This file lists the standard library items that phases 1 and 2 implement (OPEN_QUESTIONS Q36, P3). Each item is written as its declaration without a body. From phase 4, `proviso sig std` serves the same information from the installed toolchain (REFERENCE §16), and this file goes away.
 
 - **Source.** From slice 3.4, the toolchain reads these declarations from Proviso source in `crates/check/std/`, one file per module. It binds each declaration without a body to an operation it implements (OPEN_QUESTIONS P5). The sources hold the items here that the toolchain implements, without their contracts, which wait for the verifier. `Set` stays E0901, and the checker still implements `parse` and the conversions itself.
-- **Phase 1** already has `System.stdout`, `Out.write_line` and `IoError`. Slice 3.1 adds `In.read_line` and the permissions of `Out` and `In`. Everything else here is phase 2.
+- **Phase 1** already has `System.stdout`, `Out.write_line` and `IoError`. Slice 3.1 adds `In.read_line` and the permissions of `Out` and `In`, and slice 3.5 adds `std.fs`, `System.fs` and `std.test`. Everything else here is phase 2.
 - **Contracts.** An `ensures` clause is listed where the verifier will need it (phase 5). The other items get theirs when `sig` exists (phase 4, T11). The toolchain implements these items natively and trusts them to meet their contracts, so the v1 profile doesn't check std contracts at runtime.
-- **Later phases.** `map`, `filter` and the other operations that take a closure that may fail need effect variables (§9.5), which arrive in phase 3. `Dir` also arrives in phase 3 (Q6). `File` and `Dir.sub` are not yet scheduled (Q6, Q36).
+- **Later phases.** `map`, `filter` and the other operations that take a closure that may fail need effect variables (§9.5), which arrive in slice 3.6. `File`, `Dir.sub`, `FakeClock`, `FakeNet` and `SeededRandom` are not yet scheduled (Q6, Q36).
 
 ## The prelude
 
@@ -233,6 +233,59 @@ pub opaque record IoError derives(Show)
 ```
 
 Reading a line consumes it, so `read` is an `effects` permission (Q6). `System`'s `net`, `clock`, `random`, `env` and `process` fields have the types `Net[connect, listen]`, `Clock`, `Random`, `Env` and `Process[spawn]`, which no module exports yet and which have no operations yet. Their permissions are `effects` permissions (OPEN_QUESTIONS P5).
+
+## std.fs
+
+```proviso
+/// A directory tree, such as `System.fs`, which the runtime roots at the run's working directory, or a fake from `std.test`.
+pub cap interface Dir observes(read, list) effects(write, create, delete) {
+    fn read_text(self, path: Path) -> Text fails FsError                   needs read
+
+    /// Replaces the file's text, and creates the file if it is missing.
+    fn write_text(self, path: Path, text: Text) fails FsError              needs write
+
+    /// The file's length in bytes.
+    fn size(self, path: Path) -> Int fails FsError                         needs read
+
+    /// The directory's entries, ordered by the bytes of their names. Each is `path`, with `.` and `..` resolved, followed by `/` and the entry's name, or the name alone in the root.
+    fn list(self, path: Path) -> List[Path] fails FsError                  needs list
+
+    fn create_dir(self, path: Path) fails FsError                          needs create
+
+    /// Removes a file or an empty directory.
+    fn remove(self, path: Path) fails FsError                              needs delete
+}
+
+/// A path relative to a `Dir`'s root, with `/` between its parts.
+pub type Path = distinct Text derives(Eq, Hash, Show)
+
+/// Why an operation of a `Dir` failed.
+pub enum FsError derives(Eq, Show) {
+    NotFound(path: Path)
+    PermissionDenied(path: Path)
+    Other(message: Text)
+}
+```
+
+`System.fs` is a `Dir[read, write, create, delete, list]` (§9.1). A path that is absolute, or whose `..` parts climb above the root, fails with `PermissionDenied`, and so does a symbolic link that leads out of the root (Q6, OPEN_QUESTIONS P5). `NotFound` and `PermissionDenied` hold the path as the call gave it. `Other` holds a message that says what is wrong with the path, such as that it is a directory. `Dir.sub` is not yet scheduled.
+
+## std.test
+
+```proviso
+/// A directory tree in memory, for tests. Copies of it share its files.
+pub cap record MemDir {
+    state files: Map[Path, Text]
+}
+
+impl Dir for MemDir
+
+impl MemDir {
+    /// A `Dir` that holds `files`, each keyed by its path.
+    pub fn with_files(files: Map[Text, Text]) -> Dir[read, list, write, create, delete]
+}
+```
+
+`MemDir` is written in Proviso (§9.6). A path is a key, compared as written. A directory is any path that a file's path continues with `/`, and the root, `""`, is always one. Its failures read as the runtime's `Dir`'s do (OPEN_QUESTIONS P5).
 
 ## std.pool
 

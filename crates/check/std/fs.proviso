@@ -12,7 +12,8 @@ pub cap interface Dir observes(read, list) effects(write, create, delete) {
     /// The file's length in bytes.
     fn size(self, path: Path) -> Int fails FsError                         needs read
 
-    /// The directory's entries, each as `path` followed by `/` and its name, ordered by name.
+    /// The directory's entries, ordered by the bytes of their names. Each is `path`, with `.`
+    /// and `..` resolved, followed by `/` and the entry's name, or the name alone in the root.
     fn list(self, path: Path) -> List[Path] fails FsError                  needs list
 
     fn create_dir(self, path: Path) fails FsError                          needs create

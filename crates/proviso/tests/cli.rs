@@ -783,3 +783,18 @@ fn an_expect_else_is_reported_at_its_own_span() {
         assert_eq!(errors.matches("error[").count(), 1, "{line}: {errors}");
     }
 }
+
+/// `proviso run` roots `System.fs` at its working directory (OPEN_QUESTIONS Q6).
+#[test]
+fn sys_fs_is_rooted_at_the_working_directory() {
+    let text = "use std.fs { Path, FsError }\n\npub fn main(sys: keep System) fails FsError {\n    try sys.fs.write_text(path: Path(\"out.txt\"), text: try sys.fs.read_text(Path(\"in.txt\")))\n}\n";
+    let file = source("fs_root.proviso", text);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli-fs-root");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("in.txt"), "copied").unwrap();
+    let output = proviso().arg("run").arg(&file).current_dir(&dir).output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(std::fs::read_to_string(dir.join("out.txt")).unwrap(), "copied");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
