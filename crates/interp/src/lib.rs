@@ -8,8 +8,8 @@
 mod fs;
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, Write};
@@ -63,6 +63,10 @@ pub enum Value {
     /// keeps a `Value` as small as it is without one.
     Object(Arc<CapObject>),
     Fn(FnValue),
+    /// A variable a closure captures, which the frame that made it shares with the closure,
+    /// so each sees what the other changes. Only a frame's slot or a closure's captures hold
+    /// one, and reading the variable reads what is in it (OPEN_QUESTIONS Q34).
+    Cell(Arc<CapState>),
 }
 
 /// A function value: a module function, or a closure (REFERENCE §6.7).
@@ -72,16 +76,15 @@ pub enum FnValue {
     Closure(Arc<ClosureValue>),
 }
 
-/// A closure, with the values of the locals it captures. It borrows them, so the frame that
-/// made it reads them again whenever a local of its holds the closure, and a call sees them as
-/// they are then (OPEN_QUESTIONS P5).
+/// A closure, with the values of the locals it captures. It borrows them, so a variable it
+/// captures is a cell it shares with the frame that made it, and a call sees the variable as
+/// it is then (OPEN_QUESTIONS P5). A kept closure copies what it captures instead (REFERENCE
+/// §6.7).
 #[derive(Debug)]
 pub struct ClosureValue {
     expr: ExprId,
-    /// The call whose frame made it.
-    frame: u64,
-    /// The size of that frame. The closure's own locals are slots of the function it is
-    /// written in.
+    /// The size of the frame that made it. The closure's own locals are slots of the
+    /// function it is written in.
     locals: usize,
     env: Vec<(LocalId, Value)>,
     /// The `cap record` whose own `impl` blocks it is written in.
@@ -439,6 +442,31 @@ impl CapState {
     /// poisoned one is still consistent.
     fn lock(&self) -> MutexGuard<'_, StateInner> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// What a variable's cell holds.
+    fn get(&self) -> Value {
+        self.lock().values[0].clone()
+    }
+
+    fn set(&self, value: Value) {
+        self.lock().values[0] = value;
+    }
+}
+
+/// Runs `f` on the value of local `id`, or on what its cell holds.
+fn in_local<R>(frame: &mut Frame, id: LocalId, f: impl FnOnce(&mut Value) -> R) -> R {
+    match &mut frame[id.index()] {
+        Value::Cell(cell) => f(&mut cell.lock().values[0]),
+        value => f(value),
+    }
+}
+
+/// `value`, or what it holds when it is a variable's cell.
+fn unshared(value: Value) -> Value {
+    match value {
+        Value::Cell(cell) => cell.get(),
+        value => value,
     }
 }
 
@@ -987,7 +1015,7 @@ impl Interp<'_> {
             },
         };
         let slot = |i: usize| params.map_or(i, |params| params[i].index());
-        let finals = keep.iter().map(|&i| std::mem::replace(&mut frame[slot(i)], Value::Unit)).collect();
+        let finals = keep.iter().map(|&i| unshared(std::mem::replace(&mut frame[slot(i)], Value::Unit))).collect();
         (result, finals)
     }
 
@@ -999,7 +1027,9 @@ impl Interp<'_> {
         owned.sort_by_key(|(acquired, _)| *acquired);
         while let Some((_, entry)) = owned.pop() {
             let (value, span) = match entry {
-                Owned::Local(local, span) => (std::mem::replace(&mut frame[local.index()], Value::Unit), span),
+                Owned::Local(local, span) => {
+                    (unshared(std::mem::replace(&mut frame[local.index()], Value::Unit)), span)
+                }
                 Owned::Value(value, span) => (value, span),
                 Owned::Rest(mut rest, span) => {
                     rest.reverse();
@@ -1144,6 +1174,9 @@ impl Interp<'_> {
                 values.push(self.held(arg.value, frame)?);
             }
         }
+        for place in &mut places {
+            place.root = current(place.root.clone(), frame);
+        }
         for k in 0..places.len() {
             let take = !can_fail || places[k].partial;
             values[places[k].index] = match &places[k].root {
@@ -1153,8 +1186,9 @@ impl Interp<'_> {
                 Root::Local(_) => self.read_place(frame, &places[k].root, &places[k].path, places[k].span)?,
                 // A `state` field is lent out of its object for the call, once however many
                 // places it holds, so nothing reads or changes it meanwhile (REFERENCE §9.6).
-                // A call that may roll it back gets a copy, as for a local.
-                Root::State(..) => {
+                // A call that may roll it back gets a copy, as for a local. So is a
+                // variable's cell.
+                Root::State(..) | Root::Cell(_) => {
                     let key = places[k].root.key();
                     let owner =
                         match places[..k].iter().position(|place| place.lent.is_some() && place.root.key() == key) {
@@ -1170,13 +1204,6 @@ impl Interp<'_> {
                     if take { std::mem::replace(slot(lent, &path)?, Value::Unit) } else { at(lent, &path)?.clone() }
                 }
             };
-            let place = &places[k];
-            // A closure this call made reads what it captures as it is now (REFERENCE §6.7).
-            if let Value::Fn(FnValue::Closure(c)) = &values[place.index]
-                && c.frame == self.frame
-            {
-                values[place.index] = self.closure(c.expr, frame);
-            }
         }
         Ok((values, places))
     }
@@ -1273,9 +1300,11 @@ impl Interp<'_> {
         base.reverse();
         for path in paths.iter() {
             let full: Vec<Step> = base.iter().chain(path.iter()).map(|&i| Step::Field(i)).collect();
-            if let Ok(place) = slot(&mut frame[root.index()], &full) {
-                *place = Value::Unit;
-            }
+            in_local(frame, root, |value| {
+                if let Ok(place) = slot(value, &full) {
+                    *place = Value::Unit;
+                }
+            });
         }
     }
 
@@ -1289,10 +1318,28 @@ impl Interp<'_> {
         values: Vec<Value>,
         mut places: Vec<Inout>,
         frame: &mut Frame,
-        site: Span,
+        (call, site): (ExprId, Span),
     ) -> Flow<Value> {
         let keep: Vec<usize> = places.iter().map(|place| place.index).collect();
+        // The variables that the closures the call is given or calls change go back as they
+        // were if it fails, as its `&` arguments do (OPEN_QUESTIONS Q34).
+        let cells = match self.p.rollback.get(call) {
+            Some(_) => {
+                let closure = match callee {
+                    Callee::Closure(c) => Some(c),
+                    Callee::Fn(_) => None,
+                };
+                self.changed_cells(closure, &values)
+            }
+            None => Vec::new(),
+        };
+        let saved: Vec<Value> = cells.iter().map(|cell| cell.get()).collect();
         let (result, finals) = self.run(callee, values, site, &keep);
+        if matches!(result, Err(Unwind::Fail(_) | Unwind::Attempted(..))) {
+            for (cell, value) in cells.iter().zip(saved) {
+                cell.set(value);
+            }
+        }
         if places.is_empty() {
             return result;
         }
@@ -1335,73 +1382,103 @@ impl Interp<'_> {
         Ok(value)
     }
 
-    /// The value of local `id`. A closure that the running call made reads what it captures
-    /// again, so a call sees them as they are now (REFERENCE §6.7).
-    fn local(&self, id: LocalId, frame: &Frame) -> Value {
-        match &frame[id.index()] {
-            Value::Fn(FnValue::Closure(c)) if c.frame == self.frame => self.closure(c.expr, frame),
-            value => value.clone(),
-        }
-    }
-
-    /// The closure `e`, with the values of what it captures in `frame`. A captured closure
-    /// that the running call made reads what it captures again too. Each is made once, and
-    /// without recursion, since a chain of them may be as long as the function.
-    fn closure(&self, e: ExprId, frame: &Frame) -> Value {
-        let fresh = |id: LocalId| match &frame[id.index()] {
-            Value::Fn(FnValue::Closure(c)) if c.frame == self.frame => Some(c.expr),
-            _ => None,
-        };
-        let mut made: HashMap<LocalId, Value> = HashMap::new();
-        // Each closure to make, with the local that holds it, once what it captures is made.
-        let mut stack = vec![(e, None, false)];
-        while let Some((expr, holder, ready)) = stack.pop() {
-            if holder.is_some_and(|id| made.contains_key(&id)) {
-                continue;
+    /// The cells of the variables that `closure`, or a closure in `values`, changes, at any
+    /// depth, each once. A value that several others share is walked once, so a value built
+    /// by sharing one part at each level costs time in its size, not in its paths.
+    fn changed_cells(&self, closure: Option<&ClosureValue>, values: &[Value]) -> Vec<Arc<CapState>> {
+        let mut cells: Vec<Arc<CapState>> = Vec::new();
+        let mut stack = values.to_vec();
+        let mut seen: HashSet<*const ClosureValue> = HashSet::new();
+        // `values` and the cells keep each part alive, so no address is reused meanwhile.
+        let mut walked: HashSet<*const ()> = HashSet::new();
+        let mut visit = |c: &ClosureValue, stack: &mut Vec<Value>| {
+            if !seen.insert(c as *const ClosureValue) {
+                return;
             }
-            let captures = &self.p.closures.get(expr).expect("closures are checked").captures;
-            if !ready {
-                stack.push((expr, holder, true));
-                for &(id, _) in captures {
-                    if let Some(inner) = fresh(id).filter(|_| !made.contains_key(&id)) {
-                        stack.push((inner, Some(id), false));
+            let info = self.p.closures.get(c.expr).expect("closures are checked");
+            for (id, value) in &c.env {
+                match value {
+                    Value::Cell(cell) if info.changes.contains(id) => {
+                        if !cells.iter().any(|known| Arc::ptr_eq(known, cell)) {
+                            cells.push(cell.clone());
+                        }
                     }
+                    Value::Cell(cell) => stack.push(cell.get()),
+                    value => stack.push(value.clone()),
                 }
+            }
+        };
+        if let Some(c) = closure {
+            visit(c, &mut stack);
+        }
+        while let Some(value) = stack.pop() {
+            let shared = match &value {
+                Value::Adt(adt) if !adt.fields.is_empty() => Some(adt.fields.as_ptr() as *const ()),
+                Value::List(list) => Some(Arc::as_ptr(list) as *const ()),
+                Value::Map(map) => Some(Arc::as_ptr(map) as *const ()),
+                Value::Pool(pool) => Some(Arc::as_ptr(pool) as *const ()),
+                Value::Object(object) => Some(Arc::as_ptr(object) as *const ()),
+                _ => None,
+            };
+            if shared.is_some_and(|ptr| !walked.insert(ptr)) {
                 continue;
             }
-            let env = captures
-                .iter()
-                .map(|&(id, _)| (id, made.get(&id).cloned().unwrap_or_else(|| frame[id.index()].clone())))
-                .collect();
-            let value = Value::Fn(FnValue::Closure(Arc::new(ClosureValue {
-                expr,
-                frame: self.frame,
-                locals: frame.len(),
-                env,
-                owner: self.owner,
-            })));
-            match holder {
-                Some(id) => {
-                    made.insert(id, value);
-                }
-                None => return value,
+            match value {
+                Value::Fn(FnValue::Closure(c)) => visit(&c, &mut stack),
+                Value::Adt(adt) => stack.extend(adt.fields.iter().cloned()),
+                Value::List(list) => stack.extend(list.items.iter().cloned()),
+                Value::Map(map) => stack.extend(map.iter().flat_map(|(k, v)| [k.clone(), v.clone()])),
+                Value::Pool(pool) => stack.extend(pool.elements().cloned()),
+                // A `state` field can't hold a function value, so only the plain ones are walked.
+                Value::Object(object) => stack.extend(object.fields.iter().cloned()),
+                _ => {}
             }
         }
-        unreachable!("the closure asked for is made last")
+        cells
     }
 
-    /// The closure `e` for a local, with what it captures as it is in `frame`, though not
-    /// read again. [`Interp::local`] reads it again.
-    fn bound(&self, e: ExprId, frame: &Frame) -> Value {
+    /// What `cell` holds, unless it is lent to a change in progress.
+    #[inline(never)]
+    fn cell_value(&self, cell: &Arc<CapState>, span: Span) -> Flow<Value> {
+        let cell = cell.lock();
+        if cell.lent[0] {
+            return Err(changing_cell(span));
+        }
+        Ok(cell.values[0].clone())
+    }
+
+    /// The value of local `id`, or what its cell holds. A cell lent to a change in progress
+    /// is a defect to read, which the checker rules out.
+    fn local(&self, id: LocalId, frame: &Frame, span: Span) -> Flow<Value> {
+        match &frame[id.index()] {
+            Value::Cell(cell) => self.cell_value(cell, span),
+            value => Ok(value.clone()),
+        }
+    }
+
+    /// The closure `e`, with what it captures in `frame`. It shares each variable it captures
+    /// with the frame, in a cell, so each sees what the other changes. A kept closure copies
+    /// what it captures instead, as it is now (REFERENCE §6.7).
+    fn closure(&self, e: ExprId, frame: &mut Frame) -> Value {
         let info = self.p.closures.get(e).expect("closures are checked");
-        let env = info.captures.iter().map(|&(id, _)| (id, frame[id.index()].clone())).collect();
-        Value::Fn(FnValue::Closure(Arc::new(ClosureValue {
-            expr: e,
-            frame: self.frame,
-            locals: frame.len(),
-            env,
-            owner: self.owner,
-        })))
+        if !info.kept {
+            for id in &info.vars {
+                let slot = &mut frame[id.index()];
+                if !matches!(slot, Value::Cell(_)) {
+                    let value = std::mem::replace(slot, Value::Unit);
+                    *slot = Value::Cell(Arc::new(CapState::new(vec![value])));
+                }
+            }
+        }
+        let env = info
+            .captures
+            .iter()
+            .map(|&(id, _)| {
+                let value = frame[id.index()].clone();
+                (id, if info.kept { unshared(value) } else { value })
+            })
+            .collect();
+        Value::Fn(FnValue::Closure(Arc::new(ClosureValue { expr: e, locals: frame.len(), env, owner: self.owner })))
     }
 
     /// Runs a block and returns the value of its final expression, or `Unit`.
@@ -1424,12 +1501,7 @@ impl Interp<'_> {
         let stmt = &m.stmts[s];
         match &stmt.kind {
             StmtKind::Let { pat, init, .. } => {
-                // A local reads its closure's captures again whenever it is read, so they
-                // aren't read here, and a chain of closures is made in linear time.
-                let value = match m.exprs[*init].kind {
-                    ExprKind::Closure(_) => self.bound(*init, frame),
-                    _ => self.expr(*init, frame)?,
-                };
+                let value = self.expr(*init, frame)?;
                 // The checker proved that the pattern matches every value.
                 self.matches(*pat, &value, frame)?;
                 self.take_parts(*init, *pat, frame);
@@ -1558,9 +1630,13 @@ impl Interp<'_> {
                 (_, res) => unreachable!("assignment targets are places, not {res:?}"),
             }
         };
-        let mut root = Root::Local(root);
+        let mut root = match &frame[root.index()] {
+            Value::Cell(cell) => Root::Cell(cell.clone()),
+            _ => Root::Local(root),
+        };
         let mut path = Vec::with_capacity(steps.len());
         for step in steps.into_iter().rev() {
+            root = current(root, frame);
             match step {
                 Ok(i) => match self.state_root(frame, &root, &path, i, span)? {
                     Some(state) => {
@@ -1570,12 +1646,14 @@ impl Interp<'_> {
                     None => path.push(Step::Field(i)),
                 },
                 Err((index, span)) => {
-                    path.push(Step::Index(self.int(index, frame)?.0, span));
+                    let index = self.int(index, frame)?.0;
+                    root = current(root, frame);
+                    path.push(Step::Index(index, span));
                     self.read_place(frame, &root, &path, span)?;
                 }
             }
         }
-        Ok((root, path))
+        Ok((current(root, frame), path))
     }
 
     /// The root of the place at field `i` of the value at `path` under `root`, if that value
@@ -1589,7 +1667,7 @@ impl Interp<'_> {
         };
         match root {
             Root::Local(id) => Ok(object(at(&frame[id.index()], path)?)),
-            Root::State(..) => Ok(object(&self.read_place(frame, root, path, span)?)),
+            Root::State(..) | Root::Cell(_) => Ok(object(&self.read_place(frame, root, path, span)?)),
         }
     }
 
@@ -1603,6 +1681,13 @@ impl Interp<'_> {
                     return Err(self.lent_read(*def, *i, span));
                 }
                 Ok(at(&state_ref.values[i.index()], path)?.clone())
+            }
+            Root::Cell(cell) => {
+                let cell = cell.lock();
+                if cell.lent[0] {
+                    return Err(changing_cell(span));
+                }
+                Ok(at(&cell.values[0], path)?.clone())
             }
         }
     }
@@ -1618,14 +1703,21 @@ impl Interp<'_> {
     /// Lends the `state` field that `root` names, if it names one, out of its object while it
     /// is changed in place. Reading the field meanwhile is a defect.
     fn lend(&self, root: &Root, span: Span) -> Flow<Option<Lent>> {
-        let Root::State(state, def, i) = root else { return Ok(None) };
+        let (state, i) = match root {
+            Root::Local(_) => return Ok(None),
+            Root::State(state, _, i) => (state, i.index()),
+            Root::Cell(cell) => (cell, 0),
+        };
         let mut inner = state.lock();
-        if inner.lent[i.index()] {
-            return Err(self.lent_read(*def, *i, span));
+        if inner.lent[i] {
+            return Err(match root {
+                Root::State(_, def, field) => self.lent_read(*def, *field, span),
+                _ => changing_cell(span),
+            });
         }
-        inner.lent[i.index()] = true;
-        let value = std::mem::replace(&mut inner.values[i.index()], Value::Unit);
-        Ok(Some(Lent { state: state.clone(), field: i.index(), value }))
+        inner.lent[i] = true;
+        let value = std::mem::replace(&mut inner.values[i], Value::Unit);
+        Ok(Some(Lent { state: state.clone(), field: i, value }))
     }
 
     /// The defect of reading `state` field `i` of a `def` while a change to it is in progress,
@@ -1700,8 +1792,7 @@ impl Interp<'_> {
             }
         };
         path.reverse();
-        let place = slot(&mut frame[root.index()], &path).ok()?;
-        Some(std::mem::replace(place, Value::Unit))
+        in_local(frame, root, |value| Some(std::mem::replace(slot(value, &path).ok()?, Value::Unit)))
     }
 
     fn jump_target(&self, s: StmtId) -> ExprId {
@@ -1765,7 +1856,7 @@ impl Interp<'_> {
                 Some(Res::Local(_)) if self.p.moves_out.get(e).is_some() => {
                     self.take_out(e, frame).expect("a moved name is a local")
                 }
-                Some(Res::Local(id)) => self.local(id, frame),
+                Some(Res::Local(id)) => self.local(id, frame, self.m.exprs[e].span)?,
                 Some(Res::Ctor(def, variant)) => Value::Adt(Adt { def, variant, fields: Arc::from([]) }),
                 Some(Res::Fn(f)) => Value::Fn(FnValue::Named(f)),
                 other => unreachable!("names evaluate to locals, not {other:?}"),
@@ -1785,7 +1876,7 @@ impl Interp<'_> {
                     FnValue::Named(f) => Callee::Fn(*f),
                     FnValue::Closure(c) => Callee::Closure(c),
                 };
-                let result = self.call_back(callee, values, places, frame, span);
+                let result = self.call_back(callee, values, places, frame, (e, span));
                 return self.attempted(e, result);
             }
             ExprKind::Call { callee, args, .. } => {
@@ -1798,7 +1889,7 @@ impl Interp<'_> {
                 match self.p.res(*callee) {
                     Some(Res::Fn(f)) => {
                         self.owned.truncate(mark);
-                        let result = self.call_back(Callee::Fn(f), values, places, frame, span);
+                        let result = self.call_back(Callee::Fn(f), values, places, frame, (e, span));
                         return self.attempted(e, result);
                     }
                     // `T(x)` converts its one value (STD.md).
@@ -1878,7 +1969,7 @@ impl Interp<'_> {
                         return self.attempted(e, result);
                     }
                     Res::Fn(f) => {
-                        let result = self.call_back(Callee::Fn(f), values, places, frame, span);
+                        let result = self.call_back(Callee::Fn(f), values, places, frame, (e, span));
                         return self.attempted(e, result);
                     }
                     Res::Dispatch { iface, method, .. } => {
@@ -1896,7 +1987,7 @@ impl Interp<'_> {
                                 // A call through a capability handle, rather than on a value of
                                 // the `cap record`, may not re-enter its object (OPEN_QUESTIONS Q30).
                                 self.handle_call = matches!(self.p.ty(self_value), Ty::Cap(_));
-                                self.call_back(Callee::Fn(f), values, places, frame, span)
+                                self.call_back(Callee::Fn(f), values, places, frame, (e, span))
                             }
                         };
                         return self.attempted(e, result);
@@ -2102,7 +2193,7 @@ impl Interp<'_> {
                 },
             },
             ExprKind::It => match self.p.res(e) {
-                Some(Res::Local(id)) => self.local(id, frame),
+                Some(Res::Local(id)) => self.local(id, frame, self.m.exprs[e].span)?,
                 other => unreachable!("`it` is a local, not {other:?}"),
             },
             ExprKind::Error => unreachable!("programs with errors don't run"),
@@ -2221,6 +2312,7 @@ impl Interp<'_> {
         for arg in args {
             values.push(self.held(arg.value, frame)?);
         }
+        let root = current(root, frame);
         let mut lent = self.lend(&root, span)?;
         let base = base(frame, &root, &mut lent);
         let value = self.change(builtin, slot(base, &path)?, values, span)?;
@@ -2859,6 +2951,7 @@ fn impl_key(value: &Value) -> ImplKey {
         Value::Pool(_) => ImplKey::Adt(AdtId::POOL),
         Value::Handle(_) => ImplKey::Adt(AdtId::HANDLE),
         Value::Cap(_) | Value::Fn(_) => unreachable!("capabilities and function values implement no interface"),
+        Value::Cell(_) => unreachable!("a variable's cell is read, never passed"),
     }
 }
 
@@ -2920,12 +3013,23 @@ struct Inout {
     shares: Option<usize>,
 }
 
-/// Where a place is rooted: a local of the running call, or a `state` field of a `cap
-/// record`'s object, which every copy of the object shares (REFERENCE §9.6).
+/// Where a place is rooted: a local of the running call, a `state` field of a `cap
+/// record`'s object, which every copy of the object shares (REFERENCE §9.6), or the cell of
+/// a variable a closure captures, which it shares with the frame that made it.
 #[derive(Clone)]
 enum Root {
     Local(LocalId),
     State(Arc<CapState>, AdtId, FieldIdx),
+    Cell(Arc<CapState>),
+}
+
+/// `root`, or the cell its local holds now. A closure made while a place's indices or a
+/// call's later arguments run may have moved the local into a cell after its root was taken.
+fn current(root: Root, frame: &Frame) -> Root {
+    match root {
+        Root::Local(id) if let Value::Cell(cell) = &frame[id.index()] => Root::Cell(cell.clone()),
+        root => root,
+    }
 }
 
 /// What tells two places apart: their roots, and the keys of their steps.
@@ -2937,6 +3041,7 @@ impl Root {
         match self {
             Root::Local(id) => (0, id.index()),
             Root::State(state, _, i) => (Arc::as_ptr(state) as usize, i.index()),
+            Root::Cell(cell) => (Arc::as_ptr(cell) as usize, 0),
         }
     }
 }
@@ -2957,12 +3062,19 @@ impl Drop for Lent {
     }
 }
 
+/// The defect of using a variable while a closure that captures it changes it in place,
+/// which the checker rules out (OPEN_QUESTIONS Q34).
+fn changing_cell(span: Span) -> Unwind {
+    let message = "this uses a variable while a change to it through a closure is in progress (§5.3)";
+    defect(DefectKind::ReentrantCall, message.to_string(), span)
+}
+
 /// The value a place under `root` starts from: the local's, or the lent `state` field's.
 fn base<'v>(frame: &'v mut Frame, root: &Root, lent: &'v mut Option<Lent>) -> &'v mut Value {
     match (root, lent) {
         (Root::Local(id), _) => &mut frame[id.index()],
-        (Root::State(..), Some(lent)) => &mut lent.value,
-        (Root::State(..), None) => unreachable!("a `state` root is lent before it is changed"),
+        (Root::State(..) | Root::Cell(_), Some(lent)) => &mut lent.value,
+        (Root::State(..) | Root::Cell(_), None) => unreachable!("a shared root is lent before it is changed"),
     }
 }
 
@@ -2971,8 +3083,8 @@ fn base<'v>(frame: &'v mut Frame, root: &Root, lent: &'v mut Option<Lent>) -> &'
 fn lent_base<'v>(frame: &'v mut Frame, place: &'v mut Inout) -> &'v mut Value {
     match (&place.root, &mut place.lent) {
         (Root::Local(id), _) => &mut frame[id.index()],
-        (Root::State(..), Some(lent)) => &mut lent.value,
-        (Root::State(..), None) => unreachable!("a `state` root is lent for the call"),
+        (Root::State(..) | Root::Cell(_), Some(lent)) => &mut lent.value,
+        (Root::State(..) | Root::Cell(_), None) => unreachable!("a shared root is lent for the call"),
     }
 }
 
@@ -3299,6 +3411,7 @@ fn hash_value(value: &Value, decls: &Decls) -> u64 {
             Value::Handle(handle) => handle.hash(&mut hasher),
             Value::Pool(_) => unreachable!("a pool implements no `Hash`"),
             Value::Fn(_) => unreachable!("a function value implements no `Hash`"),
+            Value::Cell(_) => unreachable!("a variable's cell is read, never passed"),
             Value::Adt(adt) => {
                 adt.def.index().hash(&mut hasher);
                 if decls.impl_method(IfaceId::EQ, ImplKey::Adt(adt.def), 0).is_none() {
@@ -3482,6 +3595,7 @@ fn write_value<E>(
             }),
             // `debug` writes a function value's type, which only the checker knows.
             Value::Fn(_) => out.push_str("fn"),
+            Value::Cell(_) => unreachable!("a variable's cell is read, never passed"),
         }
     }
     Ok(out)

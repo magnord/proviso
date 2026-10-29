@@ -1,0 +1,43 @@
+// phase: 3.7
+// expect-error: E0509
+// expect-error: E0607
+// A `try` fails with the error of the call it marks, so that error goes out of the function
+// as the value of a `fail` does (OPEN_QUESTIONS P5). The call's result, and so its error, is
+// bounded by what the call is given.
+use std.io { Out, IoError }
+
+enum Lost {
+    Gone(out: Out)
+}
+
+enum Hold {
+    Got(f: fn() -> Int)
+}
+
+fn give(out: take Out) fails Lost {
+    fail Lost.Gone(out: out)
+}
+
+fn leak(out: Out) fails Lost {
+    try give(out: out)                              // <- E0607
+}
+
+fn give_fn(f: take fn() -> Int) fails Hold {
+    fail Hold.Got(f: f)
+}
+
+fn leak_fn() fails Hold {
+    let n = 41
+    try give_fn(f: || n + 1)                        // <- E0509
+}
+
+pub fn main(sys: keep System) fails IoError {
+    match attempt leak(out: sys.stderr) {
+        Err(Lost.Gone(out)) => try out.write_line("hi")
+        Ok(_) => {}
+    }
+    match attempt leak_fn() {
+        Err(Hold.Got(f)) => try sys.stdout.write_line(f"{f()}")
+        Ok(_) => {}
+    }
+}

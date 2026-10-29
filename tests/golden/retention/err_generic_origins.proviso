@@ -1,0 +1,44 @@
+// phase: 3.7
+// expect-error: E0509
+// expect-error: E0607
+// A value of a type parameter without `Copy` has an origin, since its type argument may be a
+// function type or reach a capability (OPEN_QUESTIONS P5). So a call whose result or `&`
+// argument has type `T` can't take a closure over a local, or a borrowed `Out`, out of the
+// frame. A value whose type is only `T` is E0607, since its type can't say what it holds.
+use std.io { Out, IoError }
+
+fn mk[T](f: fn(take fn() -> Int) -> T) -> T {
+    var n = 41
+    return f(|| {                                   // <- E0607
+        n += 1
+        n
+    })
+}
+
+fn put[T](f: fn(take fn() -> Int, inout T), into: inout T) {
+    var n = 41
+    let bump = || {
+        n += 1
+        n
+    }
+    f(bump, &into)                                  // <- E0509
+}
+
+fn leak[T](f: fn(take Out, inout T), into: inout T, out: Out) {
+    f(out, &into)                                   // <- E0607
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let g = mk(f: |h| h)
+    try sys.stdout.write_line(f"{g()} {g()}")
+    var fs: List[fn() -> Int] = []
+    put(f: |h, xs| xs.push(h), into: &fs)
+    for h in fs {
+        try sys.stdout.write_line(f"{h()} {h()}")
+    }
+    var outs: List[Out] = []
+    leak(f: |o, xs| xs.push(o), into: &outs, out: sys.stderr)
+    for o in outs {
+        try o.write_line("hi")
+    }
+}

@@ -1,0 +1,32 @@
+// phase: 3.7
+// A call that fails restores the `var`s its closures change, which it finds by walking
+// what it is given. A value that shares one part at each level, here 2^60 paths through 60
+// nodes, is walked once per node, so the call returns at once (OPEN_QUESTIONS P5 "Changed
+// captures").
+use std.io { IoError }
+
+enum Stop {
+    Halt
+}
+
+enum Tree {
+    Leaf
+    Node(l: Tree, r: Tree)
+}
+
+fn run(f: fn(), t: Tree) fails Stop {
+    f()
+    fail Stop.Halt
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var n = 0
+    var t = Tree.Leaf
+    var i = 0
+    while i < 60 {
+        t = Tree.Node(l: t, r: t)
+        i += 1
+    }
+    let _ = attempt run(f: || { n += 1 }, t: t)
+    try sys.stdout.write_line(f"n={n}")
+}

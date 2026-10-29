@@ -1,0 +1,79 @@
+// phase: 3.7
+// A closure may change a `var` it captures (REFERENCE §5.3). The change is visible to the
+// frame that made it, after the call the closure was passed to or after a call of the local
+// that holds it (OPEN_QUESTIONS Q34). The `var` counts as an `inout` argument of the call the
+// closure is passed to, so a call that fails leaves it as it was (§5.4), and so does a
+// failing call of the closure itself. A default closure may be stored in a value that lives
+// no longer than what it captures, and it sees a `var` as the `var` is when it is called
+// (P5).
+use std.io { IoError }
+
+enum Stop {
+    Halt
+}
+
+record Counter {
+    bump: fn()
+}
+
+record Reader {
+    get: fn() -> Int
+}
+
+fn run(f: fn()) {
+    f()
+}
+
+fn run_twice(f: fn()) {
+    f()
+    f()
+}
+
+fn run_then_fail(f: fn()) fails Stop {
+    f()
+    fail Stop.Halt
+}
+
+fn add_one(n: inout Int) {
+    n += 1
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var n = 0
+    run(f: || { n += 1 })
+    run_twice(f: || {
+        n = n * 10
+    })
+    try sys.stdout.write_line(f"{n}")
+    run(f: || add_one(n: &n))
+    try sys.stdout.write_line(f"{n}")
+    var xs: List[Int] = []
+    let add = |x: Int| xs.push(x)
+    add(1)
+    add(2)
+    try sys.stdout.write_line(f"{xs.len()}")
+    let _ = attempt run_then_fail(f: || { n += 5 })
+    try sys.stdout.write_line(f"{n}")
+    let fragile = || {
+        n += 7
+        fail Stop.Halt
+    }
+    let _ = attempt fragile()
+    try sys.stdout.write_line(f"{n}")
+    var m = 1
+    let c = Counter(bump: || { m += 1 })
+    let bump = c.bump
+    bump()
+    bump()
+    try sys.stdout.write_line(f"{m}")
+    var seen = 1
+    let reader = Reader(get: || seen)
+    var readers = [reader]
+    seen = 5
+    readers.push(Reader(get: || seen * 2))
+    seen = 6
+    for r in readers {
+        let get = r.get
+        try sys.stdout.write_line(f"{get()}")
+    }
+}

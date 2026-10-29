@@ -1,0 +1,42 @@
+// phase: 3.7
+// A failed call restores what the closures its receiver or its `&` arguments hold change
+// (REFERENCE §5.4, OPEN_QUESTIONS P5 "Changed captures").
+use std.io { IoError }
+use std.pool { Pool, Handle }
+
+enum Stop {
+    Halt
+}
+
+record Plain {
+    f: fn()
+}
+
+impl Plain {
+    pub fn go(self) fails Stop {
+        let f = self.f
+        f()
+        fail Stop.Halt
+    }
+}
+
+fn run_pool(p: inout Pool[fn()], h: Handle[fn()]) fails Stop {
+    match p.remove(h) {
+        Some(f) => f(),
+        None => {}
+    }
+    fail Stop.Halt
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var n = 0
+    let pp = Plain(f: || { n += 10 })
+    let _ = attempt pp.go()
+    try sys.stdout.write_line(f"receiver {n}")
+    var m = 0
+    var p: Pool[fn()] = Pool.new()
+    let h = p.insert(|| { m += 100 })
+    let _ = attempt run_pool(p: &p, h: h)
+    let len = p.len()
+    try sys.stdout.write_line(f"pool {m} {len}")
+}

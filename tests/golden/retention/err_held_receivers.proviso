@@ -1,0 +1,36 @@
+// phase: 3.7
+// expect-error: E0505
+// A method call's receiver that holds a closure that changes a captured `var` holds the `var`
+// for the call, as an argument does, so an `&` argument can't reach the `var` too (REFERENCE
+// §5.3, OPEN_QUESTIONS P5 "Changed captures").
+use std.io { IoError }
+
+enum Stop {
+    Halt
+}
+
+record Counter {
+    bump: fn()
+}
+
+impl Counter {
+    fn run(self) fails Stop {
+        let b = self.bump
+        b()
+        fail Stop.Halt
+    }
+
+    fn twice(self, x: inout Int) {
+        x += 100
+        let b = self.bump
+        b()
+        x += 1000
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var n = 0
+    let c = Counter(bump: || { n += 1 })
+    c.twice(x: &n)                                  // <- E0505
+    try sys.stdout.write_line(f"n={n}")
+}

@@ -1588,9 +1588,6 @@ impl Parser<'_> {
         let name = self.ident("a parameter name")?;
         self.expect(T::Colon, "`:` and the parameter's type")?;
         let mode = self.mode();
-        if mode == ParamMode::Keep && self.at_kw(Kw::Fn) {
-            return self.not_implemented("`keep` function parameters", Planned::Phase(3));
-        }
         let ty = self.type_expr()?;
         let span = name.span.to(self.prev_span());
         Ok(Param { name, mode, ty, span })
@@ -1634,22 +1631,10 @@ impl Parser<'_> {
         while !self.at(T::RParen) {
             let start = self.peek().span;
             let mode = self.mode();
-            match mode {
-                ParamMode::Keep => {
-                    let span = start.to(self.prev_span());
-                    self.diags.not_implemented(span, "`keep` parameters of function types", Planned::Phase(3));
-                    return Err(());
-                }
-                ParamMode::InoutPartial => {
-                    let span = start.to(self.prev_span());
-                    self.diags.not_implemented(
-                        span,
-                        "`inout(partial)` parameters of function types",
-                        Planned::Unscheduled,
-                    );
-                    return Err(());
-                }
-                _ => {}
+            if mode == ParamMode::InoutPartial {
+                let span = start.to(self.prev_span());
+                self.diags.not_implemented(span, "`inout(partial)` parameters of function types", Planned::Unscheduled);
+                return Err(());
             }
             params.push((mode, self.nested(Self::type_expr)?));
             if !self.eat(T::Comma) {

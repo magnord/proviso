@@ -1,0 +1,21 @@
+// phase: 3.7
+// expect-error: E0505
+// A closure held in a record reads what it captures for the call it is passed to, as a closure
+// argument does, so an `&` argument can't change it meanwhile (REFERENCE §5.3).
+use std.io { IoError }
+
+record Plain {
+    f: fn() -> Int
+}
+
+fn go(p: Plain, n: inout Int) {
+    let f = p.f
+    n += f()
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var n = 1
+    let p = Plain(f: || n * 10)
+    go(p: p, n: &n)                                 // <- E0505
+    try sys.stdout.write_line(f"{n}")
+}

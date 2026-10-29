@@ -1,0 +1,51 @@
+// phase: 3.7
+// expect-error: E0509
+// expect-error: E0607
+// Where a borrowed and a kept value meet, in a branch, a collection or a type argument, the
+// result lives as long as the shorter lived of them, whichever comes first (OPEN_QUESTIONS P5).
+// So does a closure that captures a parameter against one that captures nothing. Each group writes
+// one meeting in both orders. Two kept values, or two closures that capture nothing, may be
+// kept in either order.
+use std.io { Out }
+
+fn pick[T](a: take T, b: take T) -> T {
+    return a
+}
+
+fn branch_first(flag: Bool, out: Out, kept: keep Out) -> Out {
+    return if flag { out } else { kept }            // <- E0607
+}
+
+fn branch_second(flag: Bool, out: Out, kept: keep Out) -> Out {
+    return if flag { kept } else { out }            // <- E0607
+}
+
+fn argument_first(out: Out, kept: keep Out) -> Out {
+    return pick(a: out, b: kept)                    // <- E0607
+}
+
+fn argument_second(out: Out, kept: keep Out) -> Out {
+    return pick(a: kept, b: out)                    // <- E0607
+}
+
+fn list_first(out: Out, kept: keep Out) -> List[Out] {
+    return [out, kept]                              // <- E0607
+}
+
+fn list_second(out: Out, kept: keep Out) -> List[Out] {
+    return [kept, out]                              // <- E0607
+}
+
+fn closure_first(n: Int) -> fn() -> Int {
+    return pick(a: || n, b: || 1)                   // <- E0509
+}
+
+fn closure_second(n: Int) -> fn() -> Int {
+    return pick(a: || 1, b: || n)                   // <- E0509
+}
+
+fn kept_both(flag: Bool, a: keep Out, b: keep Out) -> (Out, Out, fn() -> Int) {
+    let x = pick(a: a, b: b)
+    let y = if flag { b } else { a }
+    return (x, y, pick(a: || 1, b: || 2))
+}

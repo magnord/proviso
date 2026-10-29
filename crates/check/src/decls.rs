@@ -334,6 +334,9 @@ pub struct AdtDef {
     /// a capability, at any depth (see [`Decls::holds_handle`]). A `cap record`'s own values
     /// are handles too, which [`AdtDef::cap`] says.
     pub handle: bool,
+    /// A field can hold a function value whatever its type arguments are (see
+    /// [`Decls::holds_fn`]).
+    pub func: bool,
 }
 
 impl AdtDef {
@@ -369,6 +372,7 @@ impl AdtDef {
             distinct: false,
             cap: false,
             handle: false,
+            func: false,
         }
     }
 
@@ -499,6 +503,7 @@ struct Kinds {
     resource: bool,
     reach: Reach,
     handle: bool,
+    func: bool,
 }
 
 impl Kinds {
@@ -507,6 +512,7 @@ impl Kinds {
         self.resource |= other.resource;
         self.reach.extend(&other.reach);
         self.handle |= other.handle;
+        self.func |= other.func;
         self
     }
 }
@@ -620,6 +626,8 @@ pub struct Decls {
     /// such as a list of lists costs each level once over the whole program. Each entry keeps
     /// its list alive, so the address isn't reused.
     resource_args: Mutex<HashMap<(u32, usize), Known>>,
+    /// The argument lists [`Decls::holds_fn`] has answered for, kept as `resource_args` is.
+    fn_args: Mutex<HashMap<(u32, usize), Known>>,
 }
 
 impl Default for Decls {
@@ -676,6 +684,7 @@ impl Default for Decls {
             everywhere: HashSet::new(),
             any_resource: false,
             resource_args: Mutex::default(),
+            fn_args: Mutex::default(),
         }
     }
 }
@@ -892,8 +901,8 @@ impl Decls {
 
     /// Whether a value of `ty` is or may hold a capability handle, which is a value of a `cap
     /// record` or a capability. A `state` field that holds one could let an object refer to itself, which
-    /// reference counting never frees (OPEN_QUESTIONS P5). A function value can't be held,
-    /// which is E0509, and a type parameter holds none, since a generic `cap record` isn't
+    /// reference counting never frees (OPEN_QUESTIONS P5). A function value counts as one,
+    /// since it may capture one, and a type parameter holds none, since a generic `cap record` isn't
     /// scheduled. A record or enum holds one if [`settle_kinds`](Decls::settle_kinds) found
     /// that it does whatever its type arguments are, or if a type argument it holds does.
     pub fn holds_handle(&self, ty: &Ty) -> bool {
@@ -905,7 +914,7 @@ impl Decls {
     /// types must outlive `memo`.
     pub fn holds_handle_memo(&self, ty: &Ty, memo: &mut HashMap<(u32, usize), bool>) -> bool {
         match ty {
-            Ty::Cap(_) => true,
+            Ty::Cap(_) | Ty::Fn(..) => true,
             Ty::Adt(id, _) if self.adt(*id).cap || self.adt(*id).handle => true,
             Ty::Adt(id, args) if !args.is_empty() => {
                 let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
@@ -915,6 +924,28 @@ impl Decls {
                 let held = self.held_args(*id, args).any(|arg| self.holds_handle_memo(arg, memo));
                 memo.insert(key, held);
                 held
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a value of `ty` can hold a function value: it is one, or a record, enum or
+    /// tuple holds one at any depth. A type parameter holds none here, which phase 2's `Copy`
+    /// rule covers (E0503). Each argument list is answered once over the whole program, so a
+    /// deep type that shares its parts costs each level once.
+    pub fn holds_fn(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Fn(..) => true,
+            Ty::Adt(id, _) if self.adt(*id).func => true,
+            Ty::Adt(id, args) if !args.is_empty() => {
+                let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
+                let cache = || self.fn_args.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some((_, known)) = cache().get(&key) {
+                    return *known;
+                }
+                let known = self.held_args(*id, args).any(|arg| self.holds_fn(arg));
+                cache().insert(key, (args.clone(), known));
+                known
             }
             _ => false,
         }
@@ -1189,6 +1220,7 @@ impl Decls {
             }
         }
         self.resource_args.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.fn_args.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// Settles record or enum `a` from what its fields' types are so far, and returns
@@ -1196,8 +1228,13 @@ impl Decls {
     fn settle_kind(&mut self, a: usize) -> bool {
         let def = &self.adts[a];
         let mut held = def.held.clone();
-        let mut kind =
-            Kinds { unique: def.unique, resource: def.resource, reach: def.reach.clone(), handle: def.handle };
+        let mut kind = Kinds {
+            unique: def.unique,
+            resource: def.resource,
+            reach: def.reach.clone(),
+            handle: def.handle,
+            func: def.func,
+        };
         for field in def.variants.iter().flat_map(|v| &v.fields) {
             kind = kind.or(&self.base_kind(&field.ty, &mut held));
         }
@@ -1217,12 +1254,13 @@ impl Decls {
             && kind.resource == def.resource
             && kind.reach == def.reach
             && kind.handle == def.handle
+            && kind.func == def.func
         {
             return false;
         }
         def.held = held;
         (def.unique, def.resource, def.reach) = (kind.unique || kind.resource, kind.resource, kind.reach);
-        def.handle = kind.handle;
+        (def.handle, def.func) = (kind.handle, kind.func);
         true
     }
 
@@ -1244,7 +1282,11 @@ impl Decls {
         match ty {
             Ty::Param(i) => (Kinds::default(), vec![*i]),
             Ty::Cap(cap) => (Kinds { reach: Reach::of_cap(cap), handle: true, ..Kinds::default() }, Vec::new()),
-            Ty::Fn(..) => (Kinds { reach: self.reach(ty, &[]), ..Kinds::default() }, Vec::new()),
+            // A function value is a handle to what it captures, which a `state` field can't
+            // hold yet.
+            Ty::Fn(..) => {
+                (Kinds { reach: self.reach(ty, &[]), handle: true, func: true, ..Kinds::default() }, Vec::new())
+            }
             Ty::Adt(id, args) => {
                 let key = (id.0, Arc::as_ptr(args) as *const Ty as usize);
                 if let Some((known, _)) = memo.get(&key) {
@@ -1256,6 +1298,7 @@ impl Decls {
                     resource: def.resource,
                     reach: def.reach.clone(),
                     handle: def.cap || def.handle,
+                    func: def.func,
                 };
                 let mut params = Vec::new();
                 for (i, arg) in args.iter().enumerate() {
@@ -1283,10 +1326,11 @@ impl Decls {
     /// when the type arguments it holds are.
     fn copyable(&self, ty: &Ty, params: &[Vec<IfaceId>], memo: &mut Memo) -> bool {
         match ty {
-            Ty::Cap(_) => false,
-            Ty::Fn(..) => self.reach(ty, params).is_empty(),
+            // A function value may capture locals by reference, so it isn't `Copy` (OPEN_QUESTIONS
+            // P5).
+            Ty::Cap(_) | Ty::Fn(..) => false,
             Ty::Param(i) => params.get(*i as usize).is_some_and(|bounds| bounds.contains(&IfaceId::COPY)),
-            Ty::Adt(id, _) if self.adt(*id).unique || !self.adt(*id).reach.is_empty() => false,
+            Ty::Adt(id, _) if self.adt(*id).unique || self.adt(*id).func || !self.adt(*id).reach.is_empty() => false,
             Ty::Adt(id, args) if !args.is_empty() => {
                 let key = (id.0, IfaceId::COPY.0, Arc::as_ptr(args) as *const Ty as usize);
                 if let Some(&known) = memo.get(&key) {

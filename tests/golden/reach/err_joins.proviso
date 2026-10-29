@@ -88,11 +88,11 @@ fn all_branches(dir: Dir[read], x: Int) -> Text {
 }
 
 fn give_all(d: Dir) -> Dir {
-    return d
+    unreachable
 }
 
 fn give_read(d: Dir) -> Dir[read] {
-    return d.only::[read]()
+    unreachable
 }
 
 fn middle(dir: Dir, x: Int) {

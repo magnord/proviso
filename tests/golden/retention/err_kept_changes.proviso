@@ -1,0 +1,17 @@
+// phase: 3.7
+// expect-error: E0305
+// A closure passed to a `keep fn` parameter can't change what it captures (E0305). It copies
+// its captures, so it holds no `var` and nothing more is reported (REFERENCE §15.1).
+fn keep_fn(f: keep fn() -> Int) -> fn() -> Int {
+    return f
+}
+
+fn t1() -> Int {
+    var n = 0
+    let f = keep_fn(f: || {
+        n += 1                                              // <- E0305
+        n
+    })
+    n = 5
+    return f() + n
+}

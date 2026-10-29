@@ -1,0 +1,76 @@
+// phase: 3.7
+// expect-error: E0509
+// expect-error: E0607
+// `try`, `attempt` and `else` cover a whole postfix chain, so the error they handle is the
+// one a call anywhere in the chain fails with, which that call's arguments bound, even when
+// a later call in the chain borrows its receiver (REFERENCE §6, §7.2; OPEN_QUESTIONS P5
+// "Where function values go").
+use std.io { Out, IoError }
+
+enum Lost {
+    Gone(out: Out)
+}
+
+enum Hold {
+    Got(f: fn() -> Int)
+}
+
+record W {
+    n: Int
+}
+
+impl W {
+    fn get(self) -> Int {
+        return self.n
+    }
+}
+
+fn give(out: take Out) -> W fails Lost {
+    fail Lost.Gone(out: out)
+}
+
+fn give_fn(f: take fn() -> Int) -> W fails Hold {
+    fail Hold.Got(f: f)
+}
+
+fn tried(out: Out) -> Int fails Lost {
+    return try give(out: out).get()                 // <- E0607
+}
+
+fn tried_fn() -> Int fails Hold {
+    let n = 41
+    return try give_fn(f: || n + 1).get()           // <- E0509
+}
+
+fn attempted(out: Out, into: inout List[Out]) {
+    let r = attempt give(out: out).get()
+    match r {
+        Err(Lost.Gone(o)) => into.push(o)           // <- E0607
+        Ok(_) => {}
+    }
+}
+
+fn fallback(out: Out, into: inout List[Out]) {
+    let n = give(out: out).get() else {
+        match it {
+            Lost.Gone(o) => into.push(o)            // <- E0607
+        }
+        0
+    }
+}
+
+fn fallback_plain(out: Out, into: inout List[Out]) {
+    let w = give(out: out) else {
+        match it {
+            Lost.Gone(o) => into.push(o)            // <- E0607
+        }
+        W(n: 0)
+    }
+}
+
+fn kept(out: keep Out) -> Int fails Lost {
+    return try give(out: out).get()
+}
+
+pub fn main(sys: keep System) fails IoError {
+}

@@ -1,0 +1,43 @@
+// phase: 3.7
+// expect-error: E0309
+// expect-error: E0503
+// Generic code keeps the rule of phase 2: a borrowed `T` may be copied, stored or returned
+// only when `T: Copy` (REFERENCE §9.3, OPEN_QUESTIONS Q31). A function type doesn't meet
+// `Copy`, as a type with reach doesn't, and nor does a type that can hold a function value.
+// So generic code can't launder a borrowed closure or capability out of its frame (Q34). An
+// owned `T` moves out, and the caller bounds what comes back by what went in.
+use std.io { Out }
+
+record Holder {
+    f: fn() -> Int
+}
+
+enum Maybe[T] {
+    Some(value: T)
+    None
+}
+
+fn dup[T: Copy](x: T) -> T {
+    return x
+}
+
+fn leak[T](x: T) -> T {
+    return x                                        // <- E0503
+}
+
+fn stash[T](x: T, into: inout Option[T]) {
+    into = Some(x)                                  // <- E0503
+}
+
+fn moved[T](x: take T, into: inout Option[T]) {
+    into = Some(x)
+}
+
+fn launder(f: fn() -> Int, out: Out, h: Holder) {
+    let a = dup(x: f)                               // <- E0309
+    let b = dup(x: out)                             // <- E0309
+    let c = dup(x: h)                               // <- E0309
+    let d = dup(x: Some(f))                         // <- E0309
+    let e = dup(x: Maybe.Some(h))                   // <- E0309
+    let n = dup(x: 1)
+}

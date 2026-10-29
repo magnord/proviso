@@ -1,0 +1,58 @@
+// phase: 3.7
+// expect-error: E0509
+// A closure that captures a local of a block can't be the block's value. It is reported once,
+// where it leaves the innermost block, and not again at the `if`, `match`, closure or `return`
+// around it (REFERENCE §15.1).
+fn v(flag: Bool, other: Bool) -> Int {
+    let base = 3
+    let f = if flag {
+        if other {
+            let w = 2
+            || w                                            // <- E0509
+        } else {
+            || base
+        }
+    } else {
+        || base
+    }
+    let g = match flag {
+        true => match other {
+            true => {
+                let w = 2
+                || w                                        // <- E0509
+            }
+            false => || base
+        }
+        false => || base
+    }
+    return f() + g()
+}
+
+fn in_closure() -> Int {
+    let base = 3
+    let mk = |a: Int| {
+        if a > 0 {
+            let w = 2
+            || w                                            // <- E0509
+        } else {
+            || base
+        }
+    }
+    return 1
+}
+
+// The value a `return` or a store passes on is reported again too.
+fn returned(flag: Bool, into: inout List[fn() -> Int]) -> fn() -> Int {
+    into.push(if flag {
+        let w = 2
+        || w                                                // <- E0509
+    } else {
+        || 0
+    })
+    return if flag {
+        let w = 2
+        || w                                                // <- E0509
+    } else {
+        || 0
+    }
+}

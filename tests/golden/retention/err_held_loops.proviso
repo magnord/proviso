@@ -1,0 +1,26 @@
+// phase: 3.7
+// expect-error: E0505
+// A value that holds a closure that changes a `var` holds it until its last use. A hold that
+// begins in a loop that doesn't declare the value is there from the loop's start on the next
+// turn (OPEN_QUESTIONS P5 "Changed captures").
+use std.io { IoError }
+
+fn apply(fs: List[fn()], x: inout Int) {
+    x += 100
+    for f in fs {
+        f()
+    }
+    x += 1000
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var n = 0
+    let z = 0
+    var fs: List[fn()] = []
+    fs.push(|| { let _ = z })
+    for i in [1, 2] {
+        apply(fs: fs, x: &n)                        // <- E0505
+        fs.push(|| { n += 1 })                      // <- E0505
+    }
+    try sys.stdout.write_line(f"n={n}")
+}

@@ -1,0 +1,88 @@
+// phase: 3.7
+// expect-error: E0505
+// A closure that changes a `var` it captures holds the `var` exclusively from where it is made
+// to its last use, so nothing else may read or change the `var` in between, not even another
+// closure that captures it (OPEN_QUESTIONS Q34). A local that holds the closure, or a value
+// that holds it, holds the `var` the same way. A use inside a loop that doesn't declare the
+// closure holds the `var` for the whole loop. Passed directly, the closure holds the `var`
+// for the call, as an `&` argument does, so the call's other arguments may read it but
+// another `&` argument or closure may not reach it (REFERENCE §5.3; P5).
+record Counter {
+    bump: fn()
+}
+
+fn run(f: fn()) {
+    f()
+}
+
+fn both(f: fn(), g: fn()) {
+    f()
+    g()
+}
+
+fn read_after(f: fn(), x: Int) {
+    f()
+}
+
+fn with_inout(f: fn(), n: inout Int) {
+    f()
+}
+
+fn spans() -> Int {
+    var n = 0
+    let inc = || { n += 1 }
+    inc()
+    let a = n                                       // <- E0505
+    inc()
+    let b = n
+    let twice = || { n *= 2 }
+    n = 3                                           // <- E0505
+    twice()
+    let shown = || n
+    let dec = || { n -= 1 }
+    let c = shown()                                 // <- E0505
+    dec()
+    let d = shown()
+    return a + b + c + d
+}
+
+fn held_in_values() -> Int {
+    var n = 0
+    let counter = Counter(bump: || { n += 1 })
+    let a = n                                       // <- E0505
+    let bump = counter.bump
+    bump()
+    var fs: List[fn()] = []
+    fs.push(|| { n += 2 })
+    let b = n                                       // <- E0505
+    let first = fs.pop()
+    return a + b
+}
+
+fn direct() {
+    var n = 0
+    read_after(f: || { n += 1 }, x: n)
+    run(f: || { n += 1 })
+    both(f: || { n += 1 }, g: || { n += 2 })        // <- E0505
+    both(f: || { n += 1 }, g: || { let seen = n })  // <- E0505
+    with_inout(f: || { n += 1 }, n: &n)             // <- E0505
+    let inc = || { n += 1 }
+    run(f: inc)
+    run(f: inc)
+}
+
+fn loops(xs: List[Int]) -> Int {
+    var n = 0
+    let inc = || { n += 1 }
+    for x in xs {
+        let seen = n                                // <- E0505
+        inc()
+    }
+    var m = 0
+    for x in xs {
+        let bump = || { m += x }
+        bump()
+        let seen = m
+    }
+    return n + m
+}

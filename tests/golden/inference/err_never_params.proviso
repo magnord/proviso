@@ -1,0 +1,66 @@
+// phase: 3.7
+// expect-error: E0301
+// Where `fn(Int) -> Int` and `fn(Never) -> Int` meet, in a branch, a collection or a type
+// argument, the result takes only what both take, which is `Never`, so it is `fn(Never) -> Int`
+// whichever comes first (OPEN_QUESTIONS P5). Each group writes one meeting in both orders, and
+// calling the result with an `Int` shows its type. A closure whose parameter has no written
+// type takes the parameter of the value before it.
+fn pick[T](a: take T, b: take T) -> T {
+    return a
+}
+
+fn never(n: Never) -> Int {
+    return 1
+}
+
+fn int(n: Int) -> Int {
+    return n
+}
+
+fn text(t: Text) -> Int {
+    return 1
+}
+
+fn argument_first() -> Int {
+    let f = pick(a: int, b: never)
+    return f(1)                                     // <- E0301
+}
+
+fn argument_second() -> Int {
+    let f = pick(a: never, b: int)
+    return f(1)                                     // <- E0301
+}
+
+fn list_first() -> Int {
+    let fs = [int, never]
+    return fs[0](1)                                 // <- E0301
+}
+
+fn list_second() -> Int {
+    let fs = [never, int]
+    return fs[0](1)                                 // <- E0301
+}
+
+fn branch_first(flag: Bool) -> Int {
+    let f = if flag { int } else { never }
+    return f(1)                                     // <- E0301
+}
+
+fn branch_second(flag: Bool) -> Int {
+    let f = if flag { never } else { int }
+    return f(1)                                     // <- E0301
+}
+
+fn same() -> Int {
+    let f = pick(a: int, b: int)
+    let g = pick(a: int, b: |x| x + 1)
+    return f(1) + g(2)
+}
+
+fn unrelated_first() {
+    let f = pick(a: int, b: text)                   // <- E0301
+}
+
+fn unrelated_second() {
+    let f = pick(a: text, b: int)                   // <- E0301
+}

@@ -1,0 +1,65 @@
+// phase: 3.7
+// expect-error: E0509
+// expect-error: E0607
+// What a closure's body stores into a captured `var` stays there after the closure, even
+// when the body saw the `var` with that origin already, through `push` and through a nested
+// closure too (OPEN_QUESTIONS P5 "Where function values go", REFERENCE §6.7, §9.3).
+use std.io { Out, IoError }
+
+fn assigned(out: Out, k: keep Out, into: inout List[Out]) {
+    var v = k
+    let c = || { v = out }
+    c()
+    into.push(v)                                    // <- E0607
+}
+
+fn assigned_fn(k: keep fn() -> Int, into: inout List[fn() -> Int]) {
+    let n = 41
+    var v = k
+    let c = || { v = || n + 1 }
+    c()
+    into.push(v)                                    // <- E0509
+}
+
+fn pushed(out: Out, into: inout List[Out]) {
+    var vs: List[Out] = []
+    let c = || { vs.push(out) }
+    c()
+    for o in vs {
+        into.push(o)                                // <- E0607
+    }
+}
+
+fn nested(out: Out, k: keep Out, into: inout List[Out]) {
+    var v = k
+    let c = || {
+        let d = || { v = out }
+        d()
+    }
+    c()
+    into.push(v)                                    // <- E0607
+}
+
+fn chained(out: Out, k: keep Out, into: inout List[Out]) {
+    var v0 = k
+    var v1 = k
+    var v2 = k
+    let c1 = || { v2 = v1 }
+    let c0 = || { v1 = v0 }
+    v0 = out
+    c0()
+    c1()
+    into.push(v2)                                   // <- E0607
+}
+
+fn kept_only(k: keep Out, into: inout List[Out]) {
+    var v = k
+    let c = || { v = k }
+    c()
+    into.push(v)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var outs: List[Out] = []
+    kept_only(k: sys.stdout, into: &outs)
+}

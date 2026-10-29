@@ -1,0 +1,86 @@
+// phase: 3.7
+// A `keep` parameter may be retained (REFERENCE §5.2, §9.3). It may be stored in a record or a
+// collection, returned, or passed on to another `keep` parameter, and used after the call
+// that kept it. `main` receives `System` as `keep` (§9.1), so its fields may be kept, and so
+// may a capability derived from one, as `only` gives (§9.2). A closure passed to a `keep fn`
+// parameter lives indefinitely, so it may be stored and called later. It captures values by
+// copy, so it sees a `var` as the `var` was when the closure was made, and it captures only
+// kept capabilities (§6.7). A function with a `keep` parameter is a value, and a `keep self`
+// method may keep its receiver (OPEN_QUESTIONS P5).
+use std.io { Out, IoError }
+
+record Logger {
+    out: Out
+    prefix: Text
+}
+
+impl Logger {
+    fn log(self, line: Text) fails IoError {
+        try self.out.write_line(f"{self.prefix}{line}")
+    }
+
+    fn register(keep self, into: inout List[Logger]) {
+        into.push(self)
+    }
+}
+
+record Task {
+    name: Text
+    run: fn() -> Int uses Out
+}
+
+fn logger(out: keep Out, prefix: Text) -> Logger {
+    return Logger(out: out, prefix: prefix)
+}
+
+fn task(name: Text, run: keep fn() -> Int uses Out) -> Task {
+    return Task(name: name, run: run)
+}
+
+fn later(f: keep fn(Int) -> Int) -> fn(Int) -> Int {
+    return f
+}
+
+fn store(out: keep Out, sinks: inout List[Out]) {
+    sinks.push(out)
+}
+
+fn each_task(tasks: List[Task], out: Out) fails IoError {
+    for each in tasks {
+        let run = each.run
+        try out.write_line(f"{each.name} {run()}")
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    let log = logger(out: sys.stdout, prefix: "> ")
+    try log.log("kept")
+    let out = sys.stdout
+    var n = 1
+    let first = task(name: "copy", run: || n * 10)
+    n = 2
+    var tasks = [first, task(name: "out", run: || {
+        let _ = attempt out.write_line("ran")
+        n
+    })]
+    tasks.push(task(name: "plain", run: || 7))
+    try each_task(tasks: tasks, out: out)
+    n = 3
+    let add = later(f: |x| x + n)
+    n = 4
+    try out.write_line(f"{add(1)}")
+    var sinks: List[Out] = []
+    store(out: sys.stdout, sinks: &sinks)
+    store(out: sys.stderr.only::[write](), sinks: &sinks)
+    let keeper = store
+    keeper(out, &sinks)
+    for sink in sinks {
+        try sink.write_line("sink")
+    }
+    var loggers: List[Logger] = []
+    log.register(into: &loggers)
+    logger(out: sys.stderr, prefix: "! ").register(into: &loggers)
+    for each in loggers {
+        try each.log("registered")
+    }
+}

@@ -5,7 +5,7 @@
 // A part of a refined value can't be the receiver of an `inout(partial) self` method, since
 // a failure would leave it breaking its refinement (REFERENCE §5.4), nor can a `let`
 // binding, which can't change. An interface's method can't take `inout(partial) self` yet,
-// as it can't take `inout self`, and `keep self` comes with retention in phase 3.
+// as it can't take `inout self`.
 record Counter {
     n: Int
 }
@@ -15,7 +15,7 @@ impl Counter {
         self.n += 1
     }
 
-    fn kept(keep self) {                            // <- E0901
+    fn kept(keep self) {
     }
 }
 

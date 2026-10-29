@@ -1,0 +1,85 @@
+// phase: 3.7
+// expect-error: E0314
+// expect-error: E0509
+// expect-error: E0607
+// A `keep self` method may keep its receiver, so its receiver must be kept, as a `keep`
+// argument must (REFERENCE §5.2, §9.3). An interface's method may take `keep self` too, and
+// an implementation's method must take it the same way (§4.9). Another receiver is borrowed,
+// so a method without `keep self` can't keep `self` (OPEN_QUESTIONS P5).
+use std.io { Out }
+
+record Sink {
+    out: Out
+}
+
+record Job {
+    run: fn() -> Int
+}
+
+interface Registered {
+    fn register(keep self, into: inout List[Sink])
+}
+
+impl Registered for Sink {
+    fn register(keep self, into: inout List[Sink]) {
+        into.push(self)
+    }
+}
+
+impl Sink {
+    fn keep_self(keep self) -> Sink {
+        return self
+    }
+
+    fn borrow_self(self) -> Sink {
+        return self                                 // <- E0607
+    }
+}
+
+impl Job {
+    fn kept(keep self) -> fn() -> Int {
+        return self.run
+    }
+
+    fn lent(self) -> fn() -> Int {
+        return self.run                             // <- E0509
+    }
+}
+
+fn borrowed(s: Sink, into: inout List[Sink]) {
+    s.register(into: &into)                         // <- E0607
+    let again = s.keep_self()                       // <- E0607
+}
+
+fn kept(s: keep Sink, into: inout List[Sink]) -> Sink {
+    s.register(into: &into)
+    return s.keep_self()
+}
+
+fn jobs(job: Job) -> Int {
+    let n = 1
+    let local = Job(run: || n)
+    let f = local.kept()                            // <- E0509
+    let g = job.kept()                              // <- E0509
+    return f() + g()
+}
+
+interface Kept {
+    fn hold(keep self) -> Int
+}
+
+impl Kept for Sink {
+    fn hold(self) -> Int {                          // <- E0314
+        return 1
+    }
+}
+
+interface Lent {
+    fn look(self) -> Int
+}
+
+impl Lent for Job {
+    fn look(keep self) -> Int {                     // <- E0314
+        return 1
+    }
+}

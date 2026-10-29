@@ -39,7 +39,7 @@ fn calls(plain: Dir[read], logging: Dir[read] uses Log, writing: Dir[read, write
     return f"{a}{b}{c}{d}{e}"
 }
 
-fn options(logging: Dir[read] uses Log) -> Option[Dir[read] uses (Log, Out)] {
+fn options(logging: keep Dir[read] uses Log) -> Option[Dir[read] uses (Log, Out)] {
     return Some(logging)
 }
 

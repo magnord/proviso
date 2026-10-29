@@ -211,6 +211,10 @@ pub struct Open {
     pub handled: Option<u32>,
     /// It is a capability, or a function type's `uses`, that is still open.
     pub bounds: Option<Bounds>,
+    /// It is the parameter of a function type that one value gave, so it is this type unless
+    /// a later value takes less, such as `Never`, and the join takes that (see
+    /// [`Vars::open_caps`]).
+    pub upper: Option<Box<Ty>>,
     pub origin: Origin,
 }
 
@@ -385,6 +389,12 @@ impl Vars {
         }
     }
 
+    /// Whether `ty` has no variable, capability or `Never` in it.
+    fn ground(&self, ty: &Ty) -> bool {
+        let shape = self.shape(ty);
+        !shape.var && !shape.never && !shape.cap
+    }
+
     /// Whether `ty` has a variable in it, bound or open.
     pub fn has_var(&self, ty: &Ty) -> bool {
         self.shape(ty).var
@@ -400,6 +410,7 @@ impl Vars {
             hole: false,
             handled: None,
             bounds: None,
+            upper: None,
             origin,
         }));
         Ty::Var(self.count() - 1)
@@ -414,6 +425,16 @@ impl Vars {
         ty
     }
 
+    /// A variable for a function type's parameter of type `ty`, which a later value may
+    /// narrow.
+    fn narrow(&mut self, ty: Ty) -> Ty {
+        let var = self.fresh(Kind::Any, Origin::Defaulted);
+        let Ty::Var(v) = var else { unreachable!("fresh makes a variable") };
+        let State::Open(open) = &mut self.states[v as usize] else { unreachable!("fresh is open") };
+        open.upper = Some(Box::new(ty));
+        var
+    }
+
     /// A variable that only `Never` has reached, as a `Never` in an expected type is.
     fn never(&mut self) -> Ty {
         self.states.push(State::Open(Open {
@@ -425,6 +446,7 @@ impl Vars {
             hole: false,
             handled: None,
             bounds: None,
+            upper: None,
             origin: Origin::Defaulted,
         }));
         Ty::Var(self.count() - 1)
@@ -554,10 +576,11 @@ impl Vars {
     /// [`Vars::as_never`], which reads each shared type argument list once, by address.
     fn as_never_part(&self, ty: &Ty, seen: &mut HashMap<usize, Ty>) -> Ty {
         match self.resolve(ty) {
-            Ty::Var(v) => match self.open(v).map(|open| (open.kind, &open.bounds)) {
-                Some((Kind::Int, _)) => Ty::INT,
-                Some((Kind::Float, _)) => Ty::Float(FloatTy::F64),
-                Some((_, Some(bounds))) => bounds.solution(),
+            Ty::Var(v) => match self.open(v).map(|open| (open.kind, &open.bounds, &open.upper)) {
+                Some((Kind::Int, ..)) => Ty::INT,
+                Some((Kind::Float, ..)) => Ty::Float(FloatTy::F64),
+                Some((_, Some(bounds), _)) => bounds.solution(),
+                Some((_, _, Some(upper))) => (**upper).clone(),
                 _ => Ty::Never,
             },
             ty if !self.has_var(&ty) => ty,
@@ -584,12 +607,13 @@ impl Vars {
     /// [`Vars::defaulted`], where `memo` holds what each shared part gave.
     fn defaulted_part(&self, ty: &Ty, memo: &mut HashMap<usize, Ty>) -> Ty {
         match self.resolve(ty) {
-            Ty::Var(v) => match self.open(v).map(|open| (open.kind, open.never, &open.bounds)) {
+            Ty::Var(v) => match self.open(v).map(|open| (open.kind, open.never, &open.bounds, &open.upper)) {
                 Some((Kind::Int, ..)) => Ty::INT,
                 Some((Kind::Float, ..)) => Ty::Float(FloatTy::F64),
-                Some((_, _, Some(bounds))) => bounds.solution(),
+                Some((_, _, Some(bounds), _)) => bounds.solution(),
+                Some((_, _, _, Some(upper))) => (**upper).clone(),
                 // Only `Never` has reached it, as a closure's error type when nothing fails.
-                Some((_, true, _)) => Ty::Never,
+                Some((_, true, ..)) => Ty::Never,
                 _ => Ty::Var(self.root(v)),
             },
             ty if self.has_var(&ty) && ty.parts().is_some() => {
@@ -841,9 +865,11 @@ impl Vars {
             Ty::Never if flow == Flow::In => return Some(self.never()),
             _ => {}
         }
-        // A part without either is shared, and its shape is known once.
+        // A part without either is shared, and its shape is known once. A function type that
+        // flows in has parameters that a later value may narrow.
         let shape = self.shape(ty);
-        if !shape.cap && !(shape.never && flow == Flow::In) {
+        let narrows = flow == Flow::In && matches!(ty, Ty::Fn(..));
+        if !shape.cap && !(shape.never && flow == Flow::In) && !narrows {
             return None;
         }
         let parts = ty.parts()?;
@@ -856,6 +882,9 @@ impl Vars {
                 .map(|(i, part)| match i.checked_sub(FN_PARAMS).map(|p| modes[p]) {
                     None => self.open_caps_part(part, flow, seen),
                     Some(ParamMode::Inout | ParamMode::InoutPartial) => None,
+                    // The meet of two parameter types, as of `Int` and `Never`, is the less of
+                    // them, so either order of the values gives it (OPEN_QUESTIONS P5).
+                    Some(_) if flow == Flow::In && self.ground(part) => Some(self.narrow(part.clone())),
                     Some(_) => self.open_caps_part(part, flow.flip(), seen),
                 })
                 .collect(),
@@ -965,6 +994,23 @@ impl Vars {
             (Some(_), None) | (None, Some(_)) => return false,
             (None, None) => None,
         };
+        // A narrow variable met by one of a literal's kind, or a capability, is its parameter's
+        // type after all.
+        let upper = match (&kept.upper, &other.upper) {
+            (Some(a), Some(b)) if a == b => Some(a.clone()),
+            (Some(upper), None) | (None, Some(upper)) if kind == Kind::Any && bounds.is_none() => Some(upper.clone()),
+            (Some(upper), _) => {
+                let upper = (**upper).clone();
+                self.settle(keep, upper.clone());
+                return self.subsume(&upper, &Ty::Var(gone)) && self.subsume(&Ty::Var(gone), &upper);
+            }
+            (None, Some(upper)) => {
+                let upper = (**upper).clone();
+                self.settle(gone, upper.clone());
+                return self.subsume(&upper, &Ty::Var(keep)) && self.subsume(&Ty::Var(keep), &upper);
+            }
+            (None, None) => None,
+        };
         let never = kept.never || other.never;
         let quiet = kept.quiet || other.quiet;
         let unmarked = kept.unmarked || other.unmarked;
@@ -974,7 +1020,7 @@ impl Vars {
         // An error about the class names the value that first left it open.
         let origin = if matches!(kept.origin, Origin::Defaulted) { other.origin } else { kept.origin };
         self.states[keep as usize] =
-            State::Open(Open { kind, never, quiet, unmarked, owed, hole, handled, bounds, origin });
+            State::Open(Open { kind, never, quiet, unmarked, owed, hole, handled, bounds, upper, origin });
         self.states[gone as usize] = State::Bound(Ty::Var(keep));
         self.trail.push(gone);
         true
@@ -988,6 +1034,10 @@ impl Vars {
         if *ty == Ty::Never {
             open.never = true;
             return true;
+        }
+        if let Some(upper) = open.upper.clone() {
+            self.settle(v, (*upper).clone());
+            return self.subsume(&upper, ty);
         }
         if let Some(bounds) = open.bounds.clone() {
             return self.bounds_meet(v, &bounds, ty, Flow::In);
@@ -1021,6 +1071,9 @@ impl Vars {
     fn exact(&mut self, v: u32, ty: &Ty) -> bool {
         let v = self.root(v);
         let State::Open(open) = &self.states[v as usize] else { unreachable!("roots are open") };
+        if let Some(upper) = open.upper.clone() {
+            return self.narrow_to(v, *upper, ty);
+        }
         if let Some(bounds) = open.bounds.clone() {
             return self.bounds_meet(v, &bounds, ty, Flow::Out);
         }
@@ -1032,6 +1085,30 @@ impl Vars {
         self.bind_marks(marks, &ty);
         self.settle(v, ty);
         true
+    }
+
+    /// Narrow variable `v`, at most `upper`, is also at most `ty`. It stays open at the less of
+    /// the two when one is, and settles as `upper` otherwise, so `ty` must take it.
+    fn narrow_to(&mut self, v: u32, upper: Ty, ty: &Ty) -> bool {
+        let ty = self.resolve(ty);
+        if ty == Ty::Never {
+            self.settle(v, Ty::Never);
+            return true;
+        }
+        if !self.has_var(&ty) {
+            let less = if self.subsume(&ty, &upper) {
+                upper
+            } else if self.subsume(&upper, &ty) {
+                ty
+            } else {
+                return false;
+            };
+            let State::Open(open) = &mut self.states[v as usize] else { unreachable!("roots are open") };
+            open.upper = Some(Box::new(less));
+            return true;
+        }
+        self.settle(v, upper.clone());
+        self.subsume(&ty, &upper)
     }
 
     /// Whether a value of type `actual` may be used where `expected` is required, binding
