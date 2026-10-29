@@ -1631,17 +1631,10 @@ impl Parser<'_> {
         while !self.at(T::RParen) {
             let start = self.peek().span;
             let mode = self.mode();
-            match mode {
-                ParamMode::InoutPartial => {
-                    let span = start.to(self.prev_span());
-                    self.diags.not_implemented(
-                        span,
-                        "`inout(partial)` parameters of function types",
-                        Planned::Unscheduled,
-                    );
-                    return Err(());
-                }
-                _ => {}
+            if mode == ParamMode::InoutPartial {
+                let span = start.to(self.prev_span());
+                self.diags.not_implemented(span, "`inout(partial)` parameters of function types", Planned::Unscheduled);
+                return Err(());
             }
             params.push((mode, self.nested(Self::type_expr)?));
             if !self.eat(T::Comma) {

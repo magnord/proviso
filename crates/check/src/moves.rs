@@ -1479,7 +1479,7 @@ impl Walk<'_> {
             self.param(local, mode, closure_call(info.base), None);
             self.declared[local.index()] = self.span(e).lo;
         }
-        let frame = std::mem::replace(&mut self.frame, Some(2 * info.base + 1));
+        let frame = self.frame.replace(2 * info.base + 1);
         let outer = (
             self.state.replace(State::default()),
             std::mem::take(&mut self.loops),
@@ -1626,7 +1626,7 @@ impl Walk<'_> {
     /// A closure lives as long as the shortest lived local it captures by reference. A kept
     /// one copies what it captures, which must be free, so it is free.
     fn closure_origin(&self, e: ExprId) -> Origin {
-        let Some(info) = self.p.closures.get(e) else { return None };
+        let info = self.p.closures.get(e)?;
         if info.kept {
             return None;
         }

@@ -1344,6 +1344,7 @@ impl Checker<'_> {
                 Kind::Any if open.quiet => Ty::Error,
                 // A capability whose permissions the values and places it met leave open.
                 Kind::Any if let Some(bounds) = &open.bounds => bounds.solution(),
+                Kind::Any if let Some(upper) = &open.upper => (**upper).clone(),
                 Kind::Any if open.never || open.hole => Ty::Never,
                 Kind::Any if open.unmarked && !open.owed => Ty::Error,
                 Kind::Any => {
