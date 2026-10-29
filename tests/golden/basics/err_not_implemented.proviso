@@ -36,7 +36,7 @@ fn h(callback: scoped fn(Int)) {                    // <- E0901
     let a = 1
 }
 
-fn pair(p: fn(keep Int) -> Int) -> Int {            // <- E0901
+fn pair(p: fn(inout(partial) Int) -> Int) -> Int {   // <- E0901
     return 1
 }
 

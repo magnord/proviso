@@ -1,0 +1,61 @@
+// phase: 3.7
+// expect-error: E0305
+// expect-error: E0509
+// expect-error: E0607
+// expect-error: E0901
+// A closure passed to a `keep fn` parameter lives indefinitely (REFERENCE §6.7). So it
+// captures values by copy, and capabilities only when they are kept. A borrowed capability,
+// or a value that holds one, is E0607 where the closure uses it. A function value it
+// captures must be kept too, or it is E0509. It captures nothing mutably, so it can't change
+// what it captures (E0305). A unique or resource value it captured would make a copyable
+// function value own one, so capturing one waits (E0901, OPEN_QUESTIONS P5). Each branch
+// of an `if` or `match` passed to such a parameter is a kept closure too.
+use std.io { Out }
+
+unique record Token {
+    id: Int
+}
+
+record Sink {
+    out: Out
+}
+
+fn keep_fn(f: keep fn() -> Int uses Out) {}
+
+fn kept_captures(out: keep Out, s: keep Sink, g: keep fn() -> Int) {
+    var n = 1
+    keep_fn(f: || {
+        let _ = attempt out.write_line("x")
+        n + g()
+    })
+    keep_fn(f: || {
+        let _ = attempt s.out.write_line("y")
+        n
+    })
+    keep_fn(f: if n > 0 { || n } else { || 0 })
+    keep_fn(f: match n {
+        0 => || n
+        _ => || g()
+    })
+}
+
+fn borrowed_captures(out: Out, s: Sink, g: fn() -> Int, t: Token) {
+    var n = 1
+    keep_fn(f: || {
+        let _ = attempt out.write_line("x")         // <- E0607
+        1
+    })
+    keep_fn(f: || {
+        let o = s.out                               // <- E0607
+        1
+    })
+    keep_fn(f: || g())                              // <- E0509
+    let h = || n
+    keep_fn(f: || h())                              // <- E0509
+    keep_fn(f: if n > 0 { || g() } else { || 0 })   // <- E0509
+    keep_fn(f: || {
+        n = 2                                       // <- E0305
+        n
+    })
+    keep_fn(f: || t.id)                             // <- E0901
+}

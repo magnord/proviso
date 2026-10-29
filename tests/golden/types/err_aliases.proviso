@@ -7,7 +7,6 @@
 // expect-error: E0211
 // expect-error: E0307
 // expect-error: E0322
-// expect-error: E0509
 // expect-error: E0901
 // An alias that names itself, directly or through other aliases, is E0322, reported once at
 // the first alias of the cycle, also when it closes more than one cycle (OPEN_QUESTIONS P5).
@@ -72,7 +71,7 @@ pub fn takes(cb: fn(Int) -> Hidden) {               // <- E0211
 }
 
 record Holder {
-    f: Callback                                     // <- E0509
+    f: Callback
 }
 
 enum Shape {

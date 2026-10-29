@@ -1,0 +1,160 @@
+// phase: 3.7
+// expect-error: E0509
+// expect-error: E0607
+// A parameter without `keep` is borrowed (REFERENCE §9.3). So a value with reach that comes
+// from one, or is derived from one, lives only until the call returns. It can't be returned,
+// failed with, or stored where it outlives the call, as in an `inout` parameter, an `inout
+// self` receiver or a `var` declared before it. Nor can it be passed to a `keep` parameter
+// (E0607). A default closure lives only as long as what it captures (§6.7). So it can't go
+// to the same places, or leave a block that declares something it captures, and nor can a
+// value that holds one (E0509). A value that can hold a function value is E0509 at each of
+// these places, and any other is E0607 (OPEN_QUESTIONS P5). A borrowed value may still be
+// passed on, bound to a local or stored in one, and a closure may be stored where it doesn't
+// outlive what it captures.
+use std.io { Out }
+
+record Sink {
+    out: Out
+}
+
+record Holder {
+    f: fn() -> Int
+}
+
+enum Lost {
+    Gone(out: Out)
+}
+
+record Slot {
+    out: Option[Out]
+}
+
+impl Slot {
+    fn set(inout self, out: Out) {
+        self.out = Some(out)                        // <- E0607
+    }
+
+    fn set_kept(inout self, out: keep Out) {
+        self.out = Some(out)
+    }
+}
+
+fn keep_out(out: keep Out) {}
+
+fn keep_sink(s: keep Sink) {}
+
+fn keep_fn(f: keep fn() -> Int) {}
+
+fn pass_on(out: Out) {}
+
+fn returned(out: Out) -> Out {
+    return out                                      // <- E0607
+}
+
+fn returned_sink(out: Out) -> Sink {
+    return Sink(out: out)                           // <- E0607
+}
+
+fn returned_field(s: Sink) -> Out {
+    return s.out                                    // <- E0607
+}
+
+fn narrowed(out: Out) -> Out[write] {
+    return out.only::[write]()                      // <- E0607
+}
+
+fn failed(out: Out) fails Lost {
+    fail Lost.Gone(out: out)                        // <- E0607
+}
+
+fn stored(out: Out, into: inout Option[Out]) {
+    into = Some(out)                                // <- E0607
+}
+
+fn pushed(out: Out, into: inout List[Out]) {
+    into.push(out)                                  // <- E0607
+}
+
+fn kept(out: Out, s: Sink) {
+    keep_out(out: out)                              // <- E0607
+    keep_sink(s: s)                                 // <- E0607
+    keep_out(out: s.out)                            // <- E0607
+    pass_on(out: out)
+    let local = Sink(out: out)
+    var outs = [out]
+    outs.push(s.out)
+}
+
+fn closure_returned() -> fn() -> Int {
+    let n = 1
+    return || n                                     // <- E0509
+}
+
+fn closure_param(f: fn() -> Int) -> fn() -> Int {
+    return f                                        // <- E0509
+}
+
+fn closure_in_value(f: fn() -> Int) -> Holder {
+    return Holder(f: f)                             // <- E0509
+}
+
+fn closure_failed() fails Holder {
+    let n = 1
+    fail Holder(f: || n)                            // <- E0509
+}
+
+fn closure_stored(f: fn() -> Int, into: inout Option[fn() -> Int]) {
+    into = Some(f)                                  // <- E0509
+}
+
+fn closure_kept(f: fn() -> Int) {
+    let n = 1
+    keep_fn(f: f)                                   // <- E0509
+    let g = || n
+    keep_fn(f: g)                                   // <- E0509
+    keep_fn(f: Holder(f: g).f)                      // <- E0509
+}
+
+fn closure_var() -> Int {
+    var h = || 0
+    let n = 2
+    h = || n                                        // <- E0509
+    var held = Holder(f: || 0)
+    held = Holder(f: || n)                          // <- E0509
+    var hs = [Holder(f: || 1)]
+    hs.push(Holder(f: || n))                        // <- E0509
+    let k = held.f
+    return h() + k()
+}
+
+fn closure_block(flag: Bool) -> Int {
+    let base = 1
+    let f = if flag {
+        let local = 2
+        || local                                    // <- E0509
+    } else {
+        || base
+    }
+    let g = match flag {
+        true => {
+            let inner = 3
+            Holder(f: || inner)                     // <- E0509
+        }
+        false => Holder(f: || base)
+    }
+    let k = g.f
+    return f() + k()
+}
+
+fn closure_scoped(flag: Bool) -> Int {
+    let n = 1
+    let held = Holder(f: || n)
+    var later = Holder(f: || 0)
+    later = Holder(f: || n)
+    var fs: List[fn() -> Int] = []
+    fs.push(|| n)
+    fs.push(held.f)
+    let opt = Some(|| n)
+    let (a, b) = (held.f, later.f)
+    return a() + b() + fs.len()
+}

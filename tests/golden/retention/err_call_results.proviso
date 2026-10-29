@@ -1,0 +1,67 @@
+// phase: 3.7
+// expect-error: E0509
+// expect-error: E0607
+// A call's result may hold what its arguments hold, so it lives no longer than the shortest
+// lived of its arguments that have reach or can hold a function value (OPEN_QUESTIONS Q34,
+// P5). A generic function that takes a closure and gives it back gives back a closure bound
+// by what it captures, and one that wraps a borrowed capability gives back a borrowed value.
+// A `keep` argument lends the result the origin of the value passed, so a result built only
+// from kept values may be kept. Calling a function value counts the function value too.
+use std.io { Out }
+
+fn generic[T](x: take T) -> T {
+    return x
+}
+
+fn wrap[T](x: take T) -> Option[T] {
+    return Some(x)
+}
+
+fn pair[A, B](a: take A, b: take B) -> (A, B) {
+    return (a, b)
+}
+
+fn retain(out: keep Out) -> Out {
+    return out
+}
+
+fn closure_back() -> fn() -> Int {
+    let n = 1
+    let f = generic(x: || n)
+    return f                                        // <- E0509
+}
+
+fn closure_wrapped() -> Option[fn() -> Int] {
+    let n = 1
+    return wrap(x: || n)                            // <- E0509
+}
+
+fn closure_paired(f: fn() -> Int) -> (Int, fn() -> Int) {
+    return pair(a: 1, b: f)                         // <- E0509
+}
+
+fn cap_back(out: Out) -> Out {
+    return generic(x: out)                          // <- E0607
+}
+
+fn shortest(out: Out, kept: keep Out) -> (Out, Out) {
+    return pair(a: kept, b: out)                    // <- E0607
+}
+
+fn through_value(out: Out) -> Out {
+    let get = || out
+    return get()                                    // <- E0607
+}
+
+fn kept_back(kept: keep Out) -> (Out, Option[Out]) {
+    let again = retain(out: kept)
+    return (generic(x: again), wrap(x: kept))
+}
+
+fn free_closure() -> fn() -> Int {
+    return generic(x: || 3)
+}
+
+fn kept_closure(f: keep fn() -> Int) -> Option[fn() -> Int] {
+    return wrap(x: generic(x: f))
+}

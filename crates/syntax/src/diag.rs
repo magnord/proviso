@@ -227,7 +227,7 @@ pub mod codes {
         RESOURCE_DISCARDED = "E0508", "resource_discarded",
             "A resource is overwritten or discarded: assigned over, or produced by an expression that nothing consumes (REFERENCE §10).";
         FUNCTION_VALUE_ESCAPES = "E0509", "function_value_escapes",
-            "A function value is put where it could outlive what it captures, such as a field, a result, an error, an element, a type argument, an assignment to a `var`, or the value of a block, branch or arm that declares a local it captures (REFERENCE §6.7; OPEN_QUESTIONS P5).";
+            "A value that can hold a function value goes where it could outlive what it captures: it is returned, failed with, stored in a place that outlives it, passed to a `keep` parameter, captured by a `keep fn` closure, or given by a block, branch or arm that declares a local it captures (REFERENCE §6.7; OPEN_QUESTIONS Q34, P5).";
         EFFECTS_CALL_IN_OBSERVES = "E0601", "effects_call_in_observes",
             "An operation that needs only `observes` permissions calls an `effects` operation (REFERENCE §9.2). It sees `self` through the observes-only view, where a capability on a path from `self` has its `observes` permissions only, so a call of an operation it then lacks, an `only` that keeps one, or passing it where the full type is expected, is reported here (REFERENCE §9.6; OPEN_QUESTIONS Q39).";
         REACH_NOT_ADMITTED = "E0602", "reach_not_admitted",
@@ -240,6 +240,8 @@ pub mod codes {
             "In an operation that needs no `effects` permission, which sees `self` through the observes-only view, a value leaves the view: `self`, a `cap record` at the end of a path from it, or another value there that reaches an `effects` permission is bound, passed, returned, stored or iterated, or is the receiver of a call other than an operation of a `cap interface` that needs no `effects` permission. A closure may capture `self`, since its body sees the same view (REFERENCE §9.6; OPEN_QUESTIONS Q39).";
         NOT_A_CAP_RECORD = "E0606", "not_a_cap_record",
             "An `impl` of a capability interface for a type that isn't a `cap record`. Only a `cap record` implements one, so its values are handles whose copies share `state` (REFERENCE §9.6; OPEN_QUESTIONS Q30).";
+        BORROWED_RETAINED = "E0607", "borrowed_retained",
+            "A borrowed value with reach, which comes from a parameter without `keep` or is derived from one, is retained: returned, failed with, stored in a place that outlives the call, passed to a `keep` parameter or captured by a `keep fn` closure (REFERENCE §9.3; OPEN_QUESTIONS P5).";
 
         UNMARKED_FALLIBLE_CALL = "E0701", "unmarked_fallible_call",
             "A call that can fail must be marked with `try`, `else` or `attempt` (REFERENCE §7.2).";

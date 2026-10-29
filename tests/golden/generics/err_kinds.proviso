@@ -3,13 +3,12 @@
 // expect-error: E0501
 // expect-error: E0503
 // expect-error: E0507
-// expect-error: E0509
 // A generic record or enum that holds a unique value moves, and one that holds a resource
 // must be consumed, as any aggregate (REFERENCE §5.1, §10). Neither meets a `Copy`
 // constraint, at any depth, and nor does a `unique record` whatever its type arguments. A
 // value built from a type parameter without `Copy` can't be copied out of a borrow (§4.8).
-// A function type can't be a type argument of a generic type, whether written or inferred
-// (§6.7, OPEN_QUESTIONS Q34). A type argument gives reach even when no field holds a value
+// A function type may be a type argument of a generic type, but a type that may hold a
+// function value doesn't meet `Copy` (OPEN_QUESTIONS Q34, P5). A type argument gives reach even when no field holds a value
 // of it, so `Phantom[Out]` isn't `Copy`, nor is a record with a field of that type, though
 // a handle is whatever its element (§5.1). A borrowed `Phantom[T]` can't be copied unless
 // `T: Copy`, since `T` may have reach.
@@ -51,7 +50,7 @@ enum Slot[T] {
 }
 
 record Holder {
-    f: Box[fn(Int) -> Int]                          // <- E0509
+    f: Box[fn(Int) -> Int]
 }
 
 fn dup[T: Copy](x: T) -> T {
@@ -99,12 +98,12 @@ fn lent[T](x: Box[T], y: Slot[T]) -> Box[T] {
 }
 
 fn functions(f: fn(Int) -> Int) {
-    let b = Box(item: f)                            // <- E0509
-    let s = Slot.Full(f)                            // <- E0509
-    let n = Box(item: Box(item: f))                 // <- E0509
+    let b = dup(x: Box(item: f))                    // <- E0309
+    let s = dup(x: Slot.Full(f))                    // <- E0309
+    let n = Box(item: Box(item: f))
 }
 
-fn written(b: Box[fn()], s: Slot[Option[fn()]]) {}  // <- E0509, E0509
+fn written(b: Box[fn()], s: Slot[Option[fn()]]) {}
 
 fn phantoms(p: Phantom[Out], q: Phantom[Option[Out]], h: Handle[Out], r: Ref[Out]) {
     let a = dup(x: p)                               // <- E0309
