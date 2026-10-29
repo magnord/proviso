@@ -315,6 +315,9 @@ pub struct ClosureInfo {
     pub spans: Vec<Span>,
     /// The captures it changes, itself or through a closure inside it (OPEN_QUESTIONS Q34).
     pub changes: Vec<LocalId>,
+    /// The captures that are variables, `var`s and `inout` parameters, which it shares with
+    /// the frame that made it, so each sees what the other changes.
+    pub vars: Vec<LocalId>,
     /// It is passed to a `keep fn` parameter, so it lives indefinitely and copies what it
     /// captures when it is made (REFERENCE §6.7).
     pub kept: bool,
@@ -6808,6 +6811,7 @@ impl Checker<'_> {
             }
         }
         self.f.closures.push(e);
+        let vars = scope.captures.iter().map(|(id, _)| *id).filter(|id| self.f.locals[id.index()].mutable).collect();
         let info = ClosureInfo {
             base,
             params: locals,
@@ -6815,6 +6819,7 @@ impl Checker<'_> {
             captures: scope.captures,
             spans: scope.spans,
             changes: scope.changes.iter().map(|(id, _)| *id).collect(),
+            vars,
             kept: false,
             owned: Vec::new(),
         };
