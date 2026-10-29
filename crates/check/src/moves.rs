@@ -137,6 +137,7 @@ pub(crate) fn check(
             handled: HashMap::new(),
             loop_cache: HashMap::new(),
             memo: RefCell::new(HashMap::new()),
+            reading: RefCell::new(None),
             touched: Vec::new(),
             reach: usize::MAX,
             moves_out: HashSet::new(),
@@ -167,7 +168,7 @@ pub(crate) fn check(
             declared: vec![0; locals.len()],
             holds_fn: locals.iter().map(|local| p.decls.holds_fn(&local.ty)).collect(),
             loop_spans: Vec::new(),
-            var_uses: Vec::new(),
+            var_uses: HashMap::new(),
             rollbacks: HashMap::new(),
             var_names: HashMap::new(),
             view: std::mem::take(&mut view),
@@ -254,6 +255,10 @@ pub(crate) fn check(
     }
     used
 }
+
+/// The uses of a `var`, by where each is and the local holding a closure it is used through,
+/// each once however often a loop is walked, with the use's span and the `var`'s name.
+type VarUses = HashMap<(u32, Option<LocalId>), (Span, Arc<str>)>;
 
 /// A local, or a field of one, by the index of each field on the way.
 type Path = Vec<u32>;
@@ -547,6 +552,8 @@ struct Walk<'a> {
     handled: HashMap<ExprId, Option<State>>,
     /// What [`Walk::moves`] found for each argument list, by its address.
     memo: RefCell<HashMap<(u32, usize), bool>>,
+    /// The locals [`Walk::origin`] reads, while [`Walk::loop_origins`] collects them.
+    reading: RefCell<Option<Vec<LocalId>>>,
     /// What each loop reached when it was last walked.
     loop_cache: HashMap<ExprId, LoopWalk>,
     /// The locals each loop being walked has touched, innermost last.
@@ -623,7 +630,7 @@ struct Walk<'a> {
     loop_spans: Vec<Span>,
     /// Each use of a `var`: where, how diagnostics write the `var`, and the local holding a
     /// closure it is used through, if any.
-    var_uses: Vec<(LocalId, Span, Arc<str>, Option<LocalId>)>,
+    var_uses: HashMap<LocalId, VarUses>,
     /// See [`Program::rollback`].
     rollbacks: HashMap<ExprId, Vec<LocalId>>,
     /// The names of the locals the closures walked so far capture.
@@ -1671,7 +1678,12 @@ impl Walk<'_> {
         };
         match &m.exprs[e].kind {
             ExprKind::Name(_) | ExprKind::It => match self.p.res(e) {
-                Some(Res::Local(local)) => self.origins[local.index()],
+                Some(Res::Local(local)) => {
+                    if let Some(read) = self.reading.borrow_mut().as_mut() {
+                        read.push(local);
+                    }
+                    self.origins[local.index()]
+                }
                 _ => None,
             },
             ExprKind::Field { base, .. } => match self.p.res(e) {
@@ -1747,6 +1759,9 @@ impl Walk<'_> {
         let info = self.p.closures.get(e)?;
         if info.kept {
             return None;
+        }
+        if let Some(read) = self.reading.borrow_mut().as_mut() {
+            read.extend(info.captures.iter().map(|(local, _)| *local));
         }
         info.captures.iter().map(|(local, _)| alive(*local).max(self.origins[local.index()])).max().flatten()
     }
@@ -1997,12 +2012,12 @@ impl Walk<'_> {
         }
         if self.locals[local.index()].mutable {
             let name: Arc<str> = self.describe(e).into();
-            self.var_uses.push((local, span, name, None));
+            self.var_uses.entry(local).or_default().insert((span.lo, None), (span, name));
         }
         if let Some(reads) = self.fn_reads.get(&local).cloned() {
             for (var, name) in reads.iter() {
                 if self.locals[var.index()].mutable {
-                    self.var_uses.push((*var, span, name.clone(), Some(local)));
+                    self.var_uses.entry(*var).or_default().insert((span.lo, Some(local)), (span, name.clone()));
                 }
             }
         }
@@ -2014,7 +2029,14 @@ impl Walk<'_> {
         let mut found = Vec::new();
         for (&holder, (vars, from, name)) in &self.holders {
             let until = self.last_use[holder.index()];
-            for (var, span, var_name, through) in &self.var_uses {
+            let uses = vars.iter().flat_map(|var| {
+                self.var_uses
+                    .get(var)
+                    .into_iter()
+                    .flatten()
+                    .map(move |((_, through), (span, name))| (var, span, name, through))
+            });
+            for (var, span, var_name, through) in uses {
                 // A use through a closure that holds the `var` too, as one that calls this
                 // holder does, was checked where that closure captured it.
                 let held_through = through.is_some_and(|other| {
@@ -2028,7 +2050,7 @@ impl Walk<'_> {
                 }
             }
         }
-        found.sort_by_key(|(span, _)| span.lo);
+        found.sort_by(|(a, x), (b, y)| (a.lo, x).cmp(&(b.lo, y)));
         for (span, message) in found {
             self.report(codes::OVERLAPPING_ACCESS, span, message);
         }
@@ -2682,6 +2704,7 @@ impl Walk<'_> {
                 return;
             }
         }
+        self.loop_origins(e);
         let mut head = match (&entry, self.loop_cache.get(&e)) {
             (Some(_), Some(last)) => join(entry.clone(), Some(last.head.clone())),
             _ => entry.clone(),
@@ -2726,6 +2749,55 @@ impl Walk<'_> {
                 return;
             }
             head = next;
+        }
+    }
+
+    /// Gives each local that a statement of loop `e`'s body assigns, or binds with a `let`,
+    /// the origin those statements give it over any number of turns, so a chain of them
+    /// doesn't walk the loop again once per link. A worklist reevaluates a statement when a
+    /// local it reads grew. Turns of the walk still grow what this leaves out.
+    fn loop_origins(&mut self, e: ExprId) {
+        let body = match &self.m.exprs[e].kind {
+            ExprKind::While { body, .. } | ExprKind::Loop { body, .. } | ExprKind::For { body, .. } => body,
+            _ => return,
+        };
+        let mut pairs: Vec<(LocalId, ExprId)> = Vec::new();
+        for &s in &body.stmts {
+            match &self.m.stmts[s].kind {
+                StmtKind::Assign { target, op: AssignOp::Set, value } => {
+                    if let (ExprKind::Name(_), Some(Res::Local(local))) =
+                        (&self.m.exprs[*target].kind, self.p.res(*target))
+                    {
+                        pairs.push((local, *value));
+                    }
+                }
+                StmtKind::Let { pat, init, .. } => {
+                    if let Some(&local) = self.p.pat_local.get(*pat) {
+                        pairs.push((local, *init));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if pairs.len() < 2 {
+            return;
+        }
+        let mut readers: HashMap<LocalId, Vec<usize>> = HashMap::new();
+        for (i, &(_, value)) in pairs.iter().enumerate() {
+            *self.reading.borrow_mut() = Some(Vec::new());
+            self.tracked_origin(value);
+            for local in self.reading.borrow_mut().take().unwrap_or_default() {
+                readers.entry(local).or_default().push(i);
+            }
+        }
+        let mut work: Vec<usize> = (0..pairs.len()).rev().collect();
+        while let Some(i) = work.pop() {
+            let (target, value) = pairs[i];
+            let origin = self.tracked_origin(value);
+            if origin > self.origins[target.index()] {
+                self.grow(target, origin);
+                work.extend(readers.get(&target).into_iter().flatten().copied());
+            }
         }
     }
 

@@ -3811,7 +3811,13 @@ impl Checker<'_> {
             return true;
         }
         let (decls, names) = (&self.p.decls, &self.param_names);
-        let receiver = if want.self_mode == ParamMode::Take { "take self" } else { "self" };
+        let receiver = match want.self_mode {
+            ParamMode::Take => "take self",
+            ParamMode::Keep => "keep self",
+            ParamMode::Inout => "inout self",
+            ParamMode::InoutPartial => "inout(partial) self",
+            ParamMode::Borrow => "self",
+        };
         let mut declared = format!("fn {}({receiver}", want.name);
         for ((param, ty), mode) in want.params.iter().zip(&want.modes) {
             let mode = match mode {

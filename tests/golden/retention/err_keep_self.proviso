@@ -1,4 +1,5 @@
 // phase: 3.7
+// expect-error: E0314
 // expect-error: E0509
 // expect-error: E0607
 // A `keep self` method may keep its receiver, so its receiver must be kept, as a `keep`
@@ -61,4 +62,24 @@ fn jobs(job: Job) -> Int {
     let f = local.kept()                            // <- E0509
     let g = job.kept()                              // <- E0509
     return f() + g()
+}
+
+interface Kept {
+    fn hold(keep self) -> Int
+}
+
+impl Kept for Sink {
+    fn hold(self) -> Int {                          // <- E0314
+        return 1
+    }
+}
+
+interface Lent {
+    fn look(self) -> Int
+}
+
+impl Lent for Job {
+    fn look(keep self) -> Int {                     // <- E0314
+        return 1
+    }
 }
