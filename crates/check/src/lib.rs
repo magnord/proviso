@@ -384,6 +384,7 @@ pub fn check_program(m: &Ast, opts: Options, diags: &mut Diagnostics) -> Program
         generic_scope: Vec::new(),
         effect_slots: Vec::new(),
         holes: 0,
+        deferred: Vec::new(),
         param_names: Vec::new(),
         impl_generics: Vec::new(),
         copying: false,
@@ -828,6 +829,10 @@ struct Checker<'a> {
     /// statement to settle their error, so a call can tell whether its arguments held one
     /// (Q25, §15.1).
     holes: usize,
+    /// The error types of the unmarked calls that wait for the statement to settle them, each
+    /// with the `with E` error that its call propagates unmarked. A handler that marks nothing
+    /// around one of them is reported only if none of them can fail (§15.1).
+    deferred: Vec<(Ty, Option<Ty>)>,
     /// Which type parameters in scope are parts of effect parameters, by index (§9.5).
     effect_slots: Vec<Option<EffectSlot>>,
     /// The type parameters of the `impl` block being declared, which its methods' come after.
@@ -926,11 +931,17 @@ enum Pending {
     Unmarked { ty: Ty, callee: Box<str>, span: Span, through: Option<Ty> },
     /// A `try` that propagates `errs` where there is no `fails` to take them (E0702). Its
     /// chain was `rejected` when its value has an error.
-    Try { errs: Vec<Ty>, rejected: bool, span: Span },
+    /// `watch` holds the error types of the unmarked calls inside its chain that the
+    /// statement settles, as [`Checker::deferred`] does.
+    Try { errs: Vec<Ty>, watch: Vec<(Ty, Option<Ty>)>, rejected: bool, span: Span },
+    /// A `try`, `attempt` or `else` form, or an example's `fails`, that marks no call that can
+    /// fail, which is reported with `code` unless an unmarked call inside it, whose error type
+    /// is in `watch`, can (§15.1).
+    MarksNothing { watch: Vec<(Ty, Option<Ty>)>, code: Code, message: String, span: Span },
     /// An `attempt` or `else` form whose calls fail with `err`, which must not settle as
     /// `Never` (E0706, E0707; OPEN_QUESTIONS P5, `fails Never`). An example's error type is
     /// settled where it is checked.
-    CanFail { err: Ty, handler: Handler, span: Span },
+    CanFail { err: Ty, watch: Vec<(Ty, Option<Ty>)>, handler: Handler, span: Span },
     /// Code that leaves if `ty` does, which must not finish: the fallback of a `check`
     /// (E0415), or a block that ends without the value it is `expected` to give (E0301).
     Leaves { ty: Ty, must: Must },
@@ -952,7 +963,7 @@ enum Handler {
 
 impl Pending {
     /// The types whose variables the check waits on.
-    fn tys(&self) -> &[Ty] {
+    fn tys(&self) -> Vec<&Ty> {
         match self {
             Pending::Int { ty, .. }
             | Pending::Float { ty, .. }
@@ -961,9 +972,10 @@ impl Pending {
             | Pending::Neg { ty, .. }
             | Pending::Arith { ty, .. }
             | Pending::Unmarked { ty, .. }
-            | Pending::Leaves { ty, .. }
-            | Pending::CanFail { err: ty, .. } => std::slice::from_ref(ty),
-            Pending::Try { errs, .. } => errs,
+            | Pending::Leaves { ty, .. } => vec![ty],
+            Pending::CanFail { err, watch, .. } => std::iter::once(err).chain(watch.iter().map(|(ty, _)| ty)).collect(),
+            Pending::Try { errs, watch, .. } => errs.iter().chain(watch.iter().map(|(ty, _)| ty)).collect(),
+            Pending::MarksNothing { watch, .. } => watch.iter().map(|(ty, _)| ty).collect(),
         }
     }
 }
@@ -1462,8 +1474,13 @@ impl Checker<'_> {
                     self.unmarked(&callee, &ty, span);
                 }
             }
-            Pending::Try { errs, rejected, span } => self.try_without_fails(errs, rejected, span),
-            Pending::CanFail { err, handler, span } => self.can_fail(&err, handler, span),
+            Pending::Try { errs, watch, rejected, span } => self.try_without_fails(errs, &watch, rejected, span),
+            Pending::MarksNothing { watch, code, message, span } => {
+                if !self.inner_failure(&watch) {
+                    self.error(code, span, message);
+                }
+            }
+            Pending::CanFail { err, watch, handler, span } => self.can_fail(&err, &watch, handler, span),
             Pending::Leaves { ty, must: Must::Check(span) } => self.check_leaves(&ty, span),
             Pending::Leaves { ty, must: Must::Value { expected, span } } => {
                 if self.flow(&ty) != Flow::Leaves {
@@ -1477,6 +1494,7 @@ impl Checker<'_> {
     /// without variables, so the interpreter never sees one.
     fn settle(&mut self) {
         self.solve(0, 0, 0);
+        self.deferred.clear();
         // A value that holds a function value could outlive what it captures (E0509). It is
         // reported where a function value goes into it. A part that holds one already was
         // reported where it was made (§15.1).
@@ -4549,8 +4567,10 @@ impl Checker<'_> {
     fn expectation(&mut self, call: ExprId, expect: &Expectation, what: &str) {
         self.markers.push(Marker { handler: Some(call), errors: Vec::new(), target: None });
         self.in_chain = true;
+        let start = self.deferred.len();
         let ty = self.expr(call, None);
         let errors = self.pop_marker();
+        let watch = self.deferred[start..].to_vec();
         let span = self.span(call);
         let hole = self.met_hole(&errors);
         // "the calls this example marks", but "an example expects".
@@ -4591,14 +4611,14 @@ impl Checker<'_> {
                     Some(err) => {
                         let forced = self.force(&err);
                         if ty != Ty::Error && !hole {
-                            self.can_fail(&err, Handler::Example, span);
+                            self.wait_can_fail(&err, watch, Handler::Example, span);
                         }
                         forced
                     }
                     None => {
                         if !ty.is_unknown() {
                             let message = "`fails` needs a call that can fail, and this one can't";
-                            self.error(codes::EXAMPLE_CANNOT_FAIL, span, message);
+                            self.marks_nothing(watch, codes::EXAMPLE_CANNOT_FAIL, message, span);
                         }
                         Ty::Error
                     }
@@ -6247,8 +6267,10 @@ impl Checker<'_> {
         self.markers.push(Marker { handler: Some(e), errors: Vec::new(), target: None });
         self.in_chain = true;
         self.copying = copying;
+        let start = self.deferred.len();
         let value_ty = self.expr(value, None);
         let errors = self.pop_marker();
+        let watch = self.deferred[start..].to_vec();
         let span = self.span(e);
         let hole = self.met_hole(&errors);
         let it = match self.one_error(errors, span, "`else`", "`it` has one type") {
@@ -6260,7 +6282,7 @@ impl Checker<'_> {
             && value_ty != Ty::Error
             && !hole
         {
-            self.wait_can_fail(err, Handler::Else, span);
+            self.wait_can_fail(err, watch.clone(), Handler::Else, span);
         }
         let unwrapped = match (&it, &value_ty) {
             (Some(_), ty) => ty.clone(),
@@ -6275,7 +6297,7 @@ impl Checker<'_> {
                     "`else` needs an `Option` or a call that can fail on its left, but this is a `{}`{hint}",
                     self.show(ty)
                 );
-                self.error(codes::NOTHING_TO_UNWRAP, span, message);
+                self.marks_nothing(watch, codes::NOTHING_TO_UNWRAP, message, span);
                 Ty::Error
             }
         };
@@ -8819,11 +8841,13 @@ impl Checker<'_> {
                 self.vars.unmarked(err);
                 if self.vars.has_var(err) {
                     let (ty, callee) = (err.clone(), callee.into());
-                    // One only `Never` has reached settles as `Never` and is no failure. Any
-                    // other may be, so an effect parameter's part it went into stays open.
+                    // A handler around it waits for the statement to settle it. One only `Never`
+                    // has reached settles as `Never` and is no failure. Any other may be, so an
+                    // effect parameter's part it went into stays open.
                     if !self.vars.only_never(&ty) {
                         self.holes += 1;
                     }
+                    self.deferred.push((ty.clone(), through.clone()));
                     self.pending.push(Pending::Unmarked { ty, callee, span, through });
                 } else {
                     if let Some(scope) = self.closure_scopes.last_mut() {
@@ -8848,25 +8872,53 @@ impl Checker<'_> {
         self.inner_errors += 1;
     }
 
+    /// Reports a `try`, `attempt` or `else` form, or an example's `fails`, at `span` that marks
+    /// no call that can fail, once the statement settles the unmarked calls inside it whose
+    /// error types are in `watch`. One that can fail may have been the call the marker was
+    /// meant for (§15.1).
+    fn marks_nothing(&mut self, watch: Vec<(Ty, Option<Ty>)>, code: Code, message: impl Into<String>, span: Span) {
+        if watch.is_empty() {
+            self.error(code, span, message);
+        } else {
+            self.pending.push(Pending::MarksNothing { watch, code, message: message.into(), span });
+        }
+    }
+
+    /// Whether an unmarked call whose error type is in `watch` was reported, or may have
+    /// been one that fails, once the statement settles them. One that fails with the `with E`
+    /// error it propagates needs no marker.
+    fn inner_failure(&self, watch: &[(Ty, Option<Ty>)]) -> bool {
+        watch.iter().any(|(err, through)| {
+            let settled = self.vars.zonk(err);
+            settled != Ty::Never && through.as_ref() != Some(&settled)
+        })
+    }
+
     fn try_expr(&mut self, inner: ExprId, expected: Option<&Ty>, span: Span) -> Ty {
         let target = self.f.fails.clone().filter(|own| *own != Ty::Error);
         self.markers.push(Marker { handler: None, errors: Vec::new(), target });
         self.in_chain = true;
+        let start = self.deferred.len();
         let ty = self.expr(inner, expected);
         let errors = self.pop_marker();
+        let watch = self.deferred[start..].to_vec();
         // A chain with an error may hold the fallible call that didn't resolve.
         let rejected = ty == Ty::Error;
         if errors.is_empty() && !rejected {
-            self.error(codes::TRY_WITHOUT_FAILURE, span, "`try` marks no call that can fail");
+            self.marks_nothing(watch.clone(), codes::TRY_WITHOUT_FAILURE, "`try` marks no call that can fail", span);
         }
         if self.f.fails.is_none() && !errors.is_empty() {
             // Error types the statement has yet to settle are reported with the types it
-            // settles, and nothing else reports one that nothing gives.
-            if errors.iter().any(|err| self.vars.has_var(err)) {
+            // settles, and nothing else reports one that nothing gives. Calls that fail with
+            // `Never` wait for the unmarked calls inside them too.
+            let never = errors.iter().all(|err| self.vars.resolve(err) == Ty::Never);
+            if errors.iter().any(|err| self.vars.has_var(err))
+                || (never && watch.iter().any(|(ty, _)| self.vars.has_var(ty)))
+            {
                 errors.iter().for_each(|err| self.vars.owe(err));
-                self.pending.push(Pending::Try { errs: errors, rejected, span });
+                self.pending.push(Pending::Try { errs: errors, watch, rejected, span });
             } else {
-                self.try_without_fails(errors, rejected, span);
+                self.try_without_fails(errors, &watch, rejected, span);
             }
             return ty;
         }
@@ -8900,14 +8952,14 @@ impl Checker<'_> {
     /// all fail with `Never` marks no call that can fail (OPEN_QUESTIONS P5), unless its chain
     /// was `rejected` or a call's error type has an error, which may have been one that can
     /// fail (§15.1; issue #30). Calls that fail with one type are one mistake.
-    fn try_without_fails(&mut self, errs: Vec<Ty>, rejected: bool, span: Span) {
+    fn try_without_fails(&mut self, errs: Vec<Ty>, watch: &[(Ty, Option<Ty>)], rejected: bool, span: Span) {
         let mut settled: Vec<Ty> = Vec::new();
         for err in errs.iter().map(|err| self.vars.zonk(err)) {
             if !settled.contains(&err) {
                 settled.push(err);
             }
         }
-        let unknown = rejected || settled.contains(&Ty::Error);
+        let unknown = rejected || settled.contains(&Ty::Error) || self.inner_failure(watch);
         let errs: Vec<Ty> = settled.into_iter().filter(|err| *err != Ty::Error).collect();
         if errs.is_empty() {
             return;
@@ -8943,20 +8995,23 @@ impl Checker<'_> {
         };
         self.markers.push(Marker { handler: Some(e), errors: Vec::new(), target });
         self.in_chain = true;
+        let start = self.deferred.len();
         let ty = self.expr(inner, value_expected.as_ref());
         let errors = self.pop_marker();
+        let watch = self.deferred[start..].to_vec();
         let hole = self.met_hole(&errors);
         match self.one_error(errors, span, "`attempt`", "its `Result` has one error type") {
             // A chain with an error may hold the fallible call that didn't resolve.
             None => {
                 if ty != Ty::Error {
-                    self.error(codes::ATTEMPT_WITHOUT_FAILURE, span, "`attempt` marks no call that can fail");
+                    let message = "`attempt` marks no call that can fail";
+                    self.marks_nothing(watch, codes::ATTEMPT_WITHOUT_FAILURE, message, span);
                 }
                 Ty::Error
             }
             Some(err) => {
                 if ty != Ty::Error && !hole {
-                    self.wait_can_fail(&err, Handler::Attempt, span);
+                    self.wait_can_fail(&err, watch, Handler::Attempt, span);
                 }
                 Ty::result(ty, err)
             }
@@ -8970,20 +9025,22 @@ impl Checker<'_> {
         errors.iter().any(|err| self.vars.from_hole(err))
     }
 
-    /// Reports the `attempt` or `else` form at `span` if its calls fail with `Never`, which
-    /// can't happen, once the statement settles `err` (OPEN_QUESTIONS P5, `fails Never`).
-    fn wait_can_fail(&mut self, err: &Ty, handler: Handler, span: Span) {
-        if self.vars.has_open(err) {
-            self.pending.push(Pending::CanFail { err: err.clone(), handler, span });
+    /// Reports the `attempt` or `else` form or the example at `span` if its calls fail with `Never`, which
+    /// can't happen, once the statement settles `err` and the unmarked calls inside it whose
+    /// error types are in `watch` (OPEN_QUESTIONS P5, `fails Never`).
+    fn wait_can_fail(&mut self, err: &Ty, watch: Vec<(Ty, Option<Ty>)>, handler: Handler, span: Span) {
+        if self.vars.has_open(err) || watch.iter().any(|(ty, _)| self.vars.has_open(ty)) {
+            self.pending.push(Pending::CanFail { err: err.clone(), watch, handler, span });
         } else {
-            self.can_fail(err, handler, span);
+            self.can_fail(err, &watch, handler, span);
         }
     }
 
-    fn can_fail(&mut self, err: &Ty, handler: Handler, span: Span) {
+    fn can_fail(&mut self, err: &Ty, watch: &[(Ty, Option<Ty>)], handler: Handler, span: Span) {
         // A `todo` hole that met the error type may be filled with a value of another type
-        // (Q25; issue #30).
-        if self.vars.zonk(err) != Ty::Never || self.vars.from_hole(err) {
+        // (Q25; issue #30). An unmarked call inside that can fail may have been the one the
+        // handler was meant for (§15.1).
+        if self.vars.zonk(err) != Ty::Never || self.vars.from_hole(err) || self.inner_failure(watch) {
             return;
         }
         match handler {

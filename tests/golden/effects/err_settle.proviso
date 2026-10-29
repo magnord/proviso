@@ -1,12 +1,20 @@
 // phase: 3.6
 // expect-error: E0312
 // expect-error: E0701
+// expect-error: E0702
 // expect-error: E0703
+// expect-error: E0706
+// expect-error: E0707
+// expect-error: E0708
 // An effect parameter that no parameter mentions, with no rejected type to blame, is given
 // by nothing, so each call reports E0312, with or without a marker (REFERENCE §9.5). Without
 // one, the call's error type is unknown and must be marked (inference/err_try). A nested
-// call left unmarked whose error only `Never` reaches can't fail, so the `try` around the
-// outer call is reported (§7.2).
+// call left unmarked whose error only `Never` reaches can't fail, so the `try`, `attempt`,
+// `else` or example's `fails` around the outer call is reported once the statement settles
+// it (§7.2). One whose error a later value in the statement widens can fail, and the marker
+// may have been meant for it, so only the missing marker is reported (§15.1, issue #74),
+// whatever the order of the arguments that widen it. A `try` whose call fails with a known
+// type is reported where it is, as in a closure without `fails` (cli.rs has the message).
 enum Bad {
     Oops
 }
@@ -38,4 +46,70 @@ fn nested(xs: List[Int]) -> Int fails Bad {
     let a = try apply(f: || relay(f: || 1))             // <- E0703
     let b = try xs.map(|x| relay(f: || x))              // <- E0703
     return a + b.len()
+}
+
+fn pick[T](a: fn() -> Int fails T) -> List[T] fails T {
+    let n = try a()
+    return []
+}
+
+fn first[T](xs: List[T], x: T) -> Int {
+    return 0
+}
+
+fn second[T](x: T, xs: List[T]) -> Int {
+    return 0
+}
+
+fn widened(xs: List[Int]) -> Int fails Bad {
+    let a = try apply(f: || first(xs: pick(a: || 1), x: Bad.Oops))      // <- E0701
+    let b = try first(xs: pick(a: || 1), x: Bad.Oops)                   // <- E0701
+    let c = try xs.map(|x| first(xs: pick(a: || x), x: Bad.Oops))       // <- E0701
+    let d = try second(x: Bad.Oops, xs: pick(a: || 1))                  // <- E0701
+    return a + b + c.len() + d
+}
+
+fn widened_handlers() -> Int {
+    let a = attempt apply(f: || first(xs: pick(a: || 1), x: Bad.Oops))  // <- E0701
+    let b = first(xs: pick(a: || 1), x: Bad.Oops) else 0                // <- E0701
+    let c = try first(xs: pick(a: || 1), x: Bad.Oops)                   // <- E0701
+    let d = relay(f: || try first(xs: pick(a: || 1), x: Bad.Oops)) else 0  // <- E0701
+    return b + c + d
+}
+
+example first(xs: pick(a: || 1), x: Bad.Oops) fails _                  // <- E0701
+example relay(f: || first(xs: pick(a: || 1), x: Bad.Oops)) fails _     // <- E0701
+example relay(f: || 1) fails _                                          // <- E0708
+
+test "expectations" {
+    expect first(xs: pick(a: || 1), x: Bad.Oops) fails _                // <- E0701
+}
+
+fn never_handlers() -> Int {
+    let a = attempt apply(f: || relay(f: || 1))                         // <- E0706
+    let b = apply(f: || relay(f: || 1)) else 0                          // <- E0707
+    return b
+}
+
+fn wrap[T](xs: List[T]) -> Int {
+    return 0
+}
+
+example relay(f: || wrap(xs: pick(a: || 1))) fails _                  // <- E0708
+example relay(f: || relay(f: || wrap(xs: pick(a: || 1)))) fails _     // <- E0708
+
+test "settled" {
+    expect relay(f: || wrap(xs: pick(a: || 1))) fails _                 // <- E0708
+}
+
+fn boom(n: Int) -> Int fails Bad {
+    fail Bad.Oops
+}
+
+fn run_it(f: fn() -> Int) -> Int {
+    return f()
+}
+
+fn in_closure() -> Int {
+    return run_it(f: || try boom(n: wrap(xs: pick(a: || 1))))          // <- E0702
 }
