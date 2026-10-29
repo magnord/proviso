@@ -54,6 +54,19 @@ The slices of phase 3 follow OPEN_QUESTIONS P3 and the decisions it and Q6, Q30,
 | 3.6 | effect variables: `effect E`, `with E` on function types and functions, unmarked calls through `E`, and `List.map` and `List.filter`, written in std source. §9.5's two calls behave as it says. Later than this slice is retention, and not yet scheduled is `with E` on `Pool.update`'s `change` |
 | 3.7 | retention: borrowed and kept values, `keep` parameters of any type, `keep self`, `keep fn` parameters, closures that change a captured `var`, and functions with `keep` parameters as values. The retention check replaces E0509's list of places, and a function type is not `Copy`. Later than this slice are `scoped fn` (phase 6) and, not yet scheduled, `Dir.sub`, `File`, `FakeClock`, `FakeNet` and `SeededRandom` |
 
+The slices of phase 4 follow OPEN_QUESTIONS P3 and the decisions it and Q36, Q42 to Q44, T2, T6, T11, T12 and P4 record for phase 4:
+
+| Slice | Scope |
+|---|---|
+| 4.1 | ranges and `in`: `Range[T]` in the prelude, ranges of integer and `Char` types as values, `for` over a `Range` value, `contains`, `is_empty`, `Eq` and `Show`, `x in r` tests, and the quantifiers `all` and `any` (Q44, Q42). The runner's `sig` gate moves to slice 4.4, so f14 stays active. `records/refinement_order`'s `record Range` is renamed. Later than this slice are contracts, loop invariants, `fmt`, `sig` and `diff-contracts` |
+| 4.2 | contracts under the v1 profile: `requires` and `ensures` with their levels, `old` and `result`, what a clause may contain, the runtime checks in the entry path every call shares with the defects `requires_failed` and `ensures_failed`, and loop invariants with `invariant_failed` (Q42). Interface contracts: E0414 for `requires`, and a new code for an `ensures` an implementation leaves out or weakens (Q43). `List.is_sorted`, `is_permutation_of` and `is_unique` (Q36). §F row 12 can be checked by hand, and turns on with the whole phase. Later than this slice are `fmt`, `sig` and `diff-contracts` |
+| 4.3 | `fmt`: the canonical format of T12, comments kept by the lexer, `proviso fmt [--check]`, `.fmt` goldens, W0001 from `proviso check`, the std sources made canonical, and a test that formats every golden and std file and finds the same tokens and a fixed point. Later than this slice are `sig` and `diff-contracts` |
+| 4.4 | `sig`: one contract summary per item, revisions (T2), the lines and layout of T11, examples run with fuel, the defect sites, `proviso sig <file> [item]`, and `.sig` files matched exactly. `fs/users.sig` holds §17's output under the v1 profile, which is the milestone, and f14's `.sig` is regenerated in full. Later than this slice are `sig std` and `diff-contracts` |
+| 4.5 | the standard library in `sig`: doc comments and contracts on every public std function, native `ensures` labelled `[trusted]`, declarations for `parse` and the conversions with `Integer`, `proviso sig std[.module]`, the quality test of §16, and STD.md retired (Q36). Later than this slice is `diff-contracts` |
+| 4.6 | `diff-contracts`: the classes of T6 over two contract summaries, §15.5's format, `proviso diff-contracts <old> <new>`, and the `diff-contracts` directive. `IMPLEMENTED_PHASE` becomes 4, and §F row 12 passes. Later than phase 4 are `pred` functions, refinement clauses on functions and generated validators (phase 5), and, not yet scheduled, `extern`, `trusted`, `property`, `query`, `--json` for the new commands, `A..B` revisions and the example cache |
+
+The P4 criteria are first measured after slice 4.6, by a session that changes no code (OPEN_QUESTIONS P4).
+
 ## Directives
 
 | Directive | Meaning |
@@ -76,7 +89,7 @@ The slices of phase 3 follow OPEN_QUESTIONS P3 and the decisions it and Q6, Q30,
 - **Reports.** A report is a stderr line that starts with `<kind>[<detail>]: <message>`, as in `defect[assertion_failed]: assertion failed: n % 2 == 0`. Its kind is one of the runtime reports in DIAGNOSTICS.md, which are `defect`, `leak` and `overlap`. The runner rejects any other kind. The indented lines after it, such as its call sites, belong to it. `expect-report` lists the reports that must appear, and a report listed twice must appear at least twice. Other reports don't fail the test.
 - **Alternatives.** Where the language allows several results, the `.out` lists them separated by a line `--- or ---`, and the run must match one of them (f10).
 - **Environment.** Each run's `sys.fs` is rooted at a new, empty directory that the runner makes under the system's temporary directory and removes, with what the run left, once the run ends (slice 3.5). The runner runs each program inside its own process, so it hands the directory to the run rather than changing its own working directory. `proviso run` roots `sys.fs` at its working directory (Q6). Examples and tests get no `System`, so they have no file system.
-- **`.sig` files** are checked from phase 4, when `sig` exists. Until the canonical format covers what they test (T11), each line of the `.sig` must occur in the output in order, as a substring of a line, with runs of whitespace collapsed. After that they become exact goldens.
+- **`.sig` files** are checked from slice 4.4, when `sig` exists. Then a `.sig` must equal the output of `proviso sig` exactly, in the format of OPEN_QUESTIONS T11. f14's `.sig`, written before that format, is regenerated in full at that slice and keeps its two original lines.
 
 ## Running
 
@@ -84,7 +97,7 @@ The slices of phase 3 follow OPEN_QUESTIONS P3 and the decisions it and Q6, Q30,
 
 The runner checks these directives: `phase`, `expect-error`, `expect-exit`, `expect-report`, `flags` and `run: test`, and the `// <-` markers. It also checks `.out` files, including `--- or ---` alternatives, and `.err` files, and feeds `.in` files to stdin.
 
-If an active file uses a directive the runner can't check yet, the file fails instead of passing unchecked. Those directives are `expect-log`, `run: record-replay`, `schedules`, and `sig` from phase 4. Each of them has to be implemented before its phase is reached.
+If an active file uses a directive the runner can't check yet, the file fails instead of passing unchecked. Those directives are `expect-log`, `run: record-replay` and `schedules`. Each of them has to be implemented before its phase is reached. The runner skips `sig` until slice 4.4, which implements it.
 
 ## Rows
 
