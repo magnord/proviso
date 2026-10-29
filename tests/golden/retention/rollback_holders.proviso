@@ -1,0 +1,50 @@
+// phase: 3.7
+// A call that is passed a value holding a closure that changes a captured `var` restores the
+// `var` when it fails: through an `&` argument, a map and a `cap record`'s plain field too
+// (REFERENCE §5.4, OPEN_QUESTIONS P5 "Changed captures").
+use std.io { IoError }
+
+enum Stop {
+    Halt
+}
+
+cap record Job {
+    run: fn()
+}
+
+fn run_list(fs: inout List[fn()]) fails Stop {
+    for f in fs {
+        f()
+    }
+    fail Stop.Halt
+}
+
+fn run_map(m: Map[Text, fn()]) fails Stop {
+    for (k, f) in m {
+        f()
+    }
+    fail Stop.Halt
+}
+
+fn run_job(j: Job) fails Stop {
+    let f = j.run
+    f()
+    fail Stop.Halt
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var n = 0
+    var fs: List[fn()] = []
+    fs.push(|| { n += 1 })
+    let _ = attempt run_list(fs: &fs)
+    try sys.stdout.write_line(f"inout list={n}")
+    var m = 0
+    var ms: Map[Text, fn()] = [:]
+    let _ = ms.set(key: "a", value: || { m += 1 })
+    let _ = attempt run_map(m: ms)
+    try sys.stdout.write_line(f"map={m}")
+    var k = 0
+    let j = Job(run: || { k += 1 })
+    let _ = attempt run_job(j: j)
+    try sys.stdout.write_line(f"cap record={k}")
+}

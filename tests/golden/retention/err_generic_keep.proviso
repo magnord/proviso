@@ -1,0 +1,45 @@
+// phase: 3.7
+// expect-error: E0607
+// A borrowed value of a type parameter without `Copy` can't be kept, as a `keep` argument
+// or a `keep self` receiver, since its type argument may reach a capability (REFERENCE §9.3,
+// OPEN_QUESTIONS P5).
+use std.io { Out, IoError }
+
+record Sink {
+    out: Out
+}
+
+interface Registered {
+    fn register(keep self, into: inout List[Sink])
+}
+
+impl Registered for Sink {
+    fn register(keep self, into: inout List[Sink]) {
+        into.push(self)
+    }
+}
+
+fn kept[T: Registered](x: keep T, into: inout List[Sink]) {
+    x.register(into: &into)
+}
+
+fn by_receiver[T: Registered](s: T, into: inout List[Sink]) {
+    s.register(into: &into)                         // <- E0607
+}
+
+fn by_argument[T: Registered](s: T, into: inout List[Sink]) {
+    kept(x: s, into: &into)                         // <- E0607
+}
+
+fn borrowed(s: Sink, into: inout List[Sink]) {
+    by_receiver(s: s, into: &into)
+    by_argument(s: s, into: &into)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var sinks: List[Sink] = []
+    borrowed(s: Sink(out: sys.stderr), into: &sinks)
+    for s in sinks {
+        try s.out.write_line("hi")
+    }
+}

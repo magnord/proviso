@@ -1,0 +1,23 @@
+// phase: 3.7
+// A failed call leaves its `inout` argument as it was, also when a later argument makes a
+// closure that captures it (REFERENCE §5.4).
+use std.io { IoError }
+
+enum Stop {
+    Halt
+}
+
+fn one(f: fn() -> Int) -> Int {
+    return f()
+}
+
+fn bump_fail(n: inout Int, k: Int) fails Stop {
+    n += k
+    fail Stop.Halt
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var m = 1
+    bump_fail(n: &m, k: one(f: || m)) else {}
+    try sys.stdout.write_line(f"{m}")
+}

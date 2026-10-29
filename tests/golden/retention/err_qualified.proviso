@@ -1,0 +1,37 @@
+// phase: 3.7
+// expect-error: E0607
+// A call of an interface's method written `I.m(x, …)` passes `x` as the receiver, in the
+// method's `self` mode, so it retains what `x.m(…)` retains and no more (OPEN_QUESTIONS P5).
+use std.io { Out }
+
+interface Dump {
+    fn dump(self, into: inout List[Out])
+}
+
+interface Keeper {
+    fn keep_out(self, n: Int, out: keep Out) -> Out
+}
+
+record S {
+    out: Out
+}
+
+impl Dump for S {
+    fn dump(self, into: inout List[Out]) {}
+}
+
+impl Keeper for S {
+    fn keep_out(self, n: Int, out: keep Out) -> Out {
+        return out
+    }
+}
+
+fn method_form(s: S, out: Out, into: inout List[Out]) {
+    s.dump(into: &into)
+    let kept = s.keep_out(n: 1, out: out)                   // <- E0607
+}
+
+fn qualified_form(s: S, out: Out, into: inout List[Out]) {
+    Dump.dump(s, into: &into)
+    let kept = Keeper.keep_out(s, n: 1, out: out)           // <- E0607
+}

@@ -1,0 +1,16 @@
+// phase: 3.7
+// A closure that calls a closure that changes a `var` changes the `var` through it, so the
+// two may be used in turn (OPEN_QUESTIONS P5 "Changed captures").
+use std.io { IoError }
+
+pub fn main(sys: keep System) fails IoError {
+    var log: List[Text] = []
+    let add = |s: Text| log.push(s)
+    let add_twice = |s: Text| {
+        add(s)
+        add(s)
+    }
+    add_twice("a")
+    add("b")
+    try sys.stdout.write_line(f"{log.len()}")
+}

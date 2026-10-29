@@ -1,0 +1,35 @@
+// phase: 3.7
+// A failed call restores what the closures in a map value or a `cap record`'s field change
+// (REFERENCE §5.4, OPEN_QUESTIONS P5 "Changed captures").
+use std.io { IoError }
+
+enum Stop {
+    Halt
+}
+
+cap record Holder {
+    f: fn()
+    state count: Int
+}
+
+fn run_map(xs: Map[Int, fn()]) fails Stop {
+    for (k, f) in xs {
+        f()
+    }
+    fail Stop.Halt
+}
+
+fn run_holder(h: Holder) fails Stop {
+    let f = h.f
+    f()
+    fail Stop.Halt
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var n = 0
+    let _ = attempt run_map(xs: [1: || { n += 1 }])
+    try sys.stdout.write_line(f"map {n}")
+    var m = 0
+    let _ = attempt run_holder(h: Holder(f: || { m += 1 }, count: 0))
+    try sys.stdout.write_line(f"holder {m}")
+}

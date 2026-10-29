@@ -1,0 +1,15 @@
+// phase: 3.7
+// A let-bound closure that calls a closure that changes a `var` uses the `var` only through
+// it (OPEN_QUESTIONS P5 "Changed captures").
+use std.io { IoError }
+
+pub fn main(sys: keep System) fails IoError {
+    var n = 0
+    let inc = || { n += 1 }
+    let inc3 = || {
+        inc()
+    }
+    inc3()
+    inc()
+    try sys.stdout.write_line(f"{n}")
+}

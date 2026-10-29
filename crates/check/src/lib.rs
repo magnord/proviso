@@ -4443,7 +4443,8 @@ impl Checker<'_> {
             .map(|(l, span, _)| (*l, *span))
             .collect();
         self.p.fns[id].owned = owned;
-        let body = moves::Body::Fn(moves::FnBody { block: body, params, consumes_self, modes });
+        let body =
+            moves::Body::Fn(moves::FnBody { block: body, params, consumes_self, modes, fails: self.f.fails.clone() });
         moves::check(m, &mut self.p, &self.f.locals, &self.f.bounds, &found, body, self.diags);
         self.p.fns[id].locals = self.f.locals.len();
         self.generic_scope.clear();

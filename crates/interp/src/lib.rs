@@ -1174,6 +1174,9 @@ impl Interp<'_> {
                 values.push(self.held(arg.value, frame)?);
             }
         }
+        for place in &mut places {
+            place.root = current(place.root.clone(), frame);
+        }
         for k in 0..places.len() {
             let take = !can_fail || places[k].partial;
             values[places[k].index] = match &places[k].root {
@@ -1410,17 +1413,28 @@ impl Interp<'_> {
                 Value::Fn(FnValue::Closure(c)) => visit(&c, &mut stack),
                 Value::Adt(adt) => stack.extend(adt.fields.iter().cloned()),
                 Value::List(list) => stack.extend(list.items.iter().cloned()),
+                Value::Map(map) => stack.extend(map.iter().flat_map(|(k, v)| [k.clone(), v.clone()])),
+                Value::Pool(pool) => stack.extend(pool.elements().cloned()),
+                // A `state` field can't hold a function value, so only the plain ones are walked.
+                Value::Object(object) => stack.extend(object.fields.iter().cloned()),
                 _ => {}
             }
         }
         cells
     }
 
-    /// The value of local `id`, or what its cell holds.
-    fn local(&self, id: LocalId, frame: &Frame) -> Value {
+    /// The value of local `id`, or what its cell holds. A cell lent to a change in progress
+    /// is a defect to read, which the checker rules out.
+    fn local(&self, id: LocalId, frame: &Frame, span: Span) -> Flow<Value> {
         match &frame[id.index()] {
-            Value::Cell(cell) => cell.get(),
-            value => value.clone(),
+            Value::Cell(cell) => {
+                let cell = cell.lock();
+                if cell.lent[0] {
+                    return Err(changing_cell(span));
+                }
+                Ok(cell.values[0].clone())
+            }
+            value => Ok(value.clone()),
         }
     }
 
@@ -1604,6 +1618,7 @@ impl Interp<'_> {
         };
         let mut path = Vec::with_capacity(steps.len());
         for step in steps.into_iter().rev() {
+            root = current(root, frame);
             match step {
                 Ok(i) => match self.state_root(frame, &root, &path, i, span)? {
                     Some(state) => {
@@ -1613,12 +1628,14 @@ impl Interp<'_> {
                     None => path.push(Step::Field(i)),
                 },
                 Err((index, span)) => {
-                    path.push(Step::Index(self.int(index, frame)?.0, span));
+                    let index = self.int(index, frame)?.0;
+                    root = current(root, frame);
+                    path.push(Step::Index(index, span));
                     self.read_place(frame, &root, &path, span)?;
                 }
             }
         }
-        Ok((root, path))
+        Ok((current(root, frame), path))
     }
 
     /// The root of the place at field `i` of the value at `path` under `root`, if that value
@@ -1821,7 +1838,7 @@ impl Interp<'_> {
                 Some(Res::Local(_)) if self.p.moves_out.get(e).is_some() => {
                     self.take_out(e, frame).expect("a moved name is a local")
                 }
-                Some(Res::Local(id)) => self.local(id, frame),
+                Some(Res::Local(id)) => self.local(id, frame, self.m.exprs[e].span)?,
                 Some(Res::Ctor(def, variant)) => Value::Adt(Adt { def, variant, fields: Arc::from([]) }),
                 Some(Res::Fn(f)) => Value::Fn(FnValue::Named(f)),
                 other => unreachable!("names evaluate to locals, not {other:?}"),
@@ -2158,7 +2175,7 @@ impl Interp<'_> {
                 },
             },
             ExprKind::It => match self.p.res(e) {
-                Some(Res::Local(id)) => self.local(id, frame),
+                Some(Res::Local(id)) => self.local(id, frame, self.m.exprs[e].span)?,
                 other => unreachable!("`it` is a local, not {other:?}"),
             },
             ExprKind::Error => unreachable!("programs with errors don't run"),
@@ -2277,6 +2294,7 @@ impl Interp<'_> {
         for arg in args {
             values.push(self.held(arg.value, frame)?);
         }
+        let root = current(root, frame);
         let mut lent = self.lend(&root, span)?;
         let base = base(frame, &root, &mut lent);
         let value = self.change(builtin, slot(base, &path)?, values, span)?;
@@ -2985,6 +3003,15 @@ enum Root {
     Local(LocalId),
     State(Arc<CapState>, AdtId, FieldIdx),
     Cell(Arc<CapState>),
+}
+
+/// `root`, or the cell its local holds now. A closure made while a place's indices or a
+/// call's later arguments run may have moved the local into a cell after its root was taken.
+fn current(root: Root, frame: &Frame) -> Root {
+    match root {
+        Root::Local(id) if let Value::Cell(cell) = &frame[id.index()] => Root::Cell(cell.clone()),
+        root => root,
+    }
 }
 
 /// What tells two places apart: their roots, and the keys of their steps.

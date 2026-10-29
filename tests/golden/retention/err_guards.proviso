@@ -1,0 +1,25 @@
+// phase: 3.7
+// expect-error: E0607
+// A binding of an arm's pattern takes the origin of what the arm matches, in its guard too
+// (OPEN_QUESTIONS P5).
+use std.io { Out, IoError }
+
+fn store(out: keep Out, into: inout List[Out]) -> Bool {
+    into.push(out)
+    return true
+}
+
+fn leak(out: Out, into: inout List[Out]) {
+    match Some(out) {
+        Some(o) if store(out: o, into: &into) => {} // <- E0607
+        _ => {}
+    }
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var outs: List[Out] = []
+    leak(out: sys.stderr, into: &outs)
+    for o in outs {
+        try o.write_line("hi")
+    }
+}
