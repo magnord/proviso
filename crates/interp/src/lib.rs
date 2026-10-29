@@ -1383,11 +1383,14 @@ impl Interp<'_> {
     }
 
     /// The cells of the variables that `closure`, or a closure in `values`, changes, at any
-    /// depth, each once.
+    /// depth, each once. A value that several others share is walked once, so a value built
+    /// by sharing one part at each level costs time in its size, not in its paths.
     fn changed_cells(&self, closure: Option<&ClosureValue>, values: &[Value]) -> Vec<Arc<CapState>> {
         let mut cells: Vec<Arc<CapState>> = Vec::new();
         let mut stack = values.to_vec();
         let mut seen: HashSet<*const ClosureValue> = HashSet::new();
+        // `values` and the cells keep each part alive, so no address is reused meanwhile.
+        let mut walked: HashSet<*const ()> = HashSet::new();
         let mut visit = |c: &ClosureValue, stack: &mut Vec<Value>| {
             if !seen.insert(c as *const ClosureValue) {
                 return;
@@ -1409,6 +1412,17 @@ impl Interp<'_> {
             visit(c, &mut stack);
         }
         while let Some(value) = stack.pop() {
+            let shared = match &value {
+                Value::Adt(adt) if !adt.fields.is_empty() => Some(adt.fields.as_ptr() as *const ()),
+                Value::List(list) => Some(Arc::as_ptr(list) as *const ()),
+                Value::Map(map) => Some(Arc::as_ptr(map) as *const ()),
+                Value::Pool(pool) => Some(Arc::as_ptr(pool) as *const ()),
+                Value::Object(object) => Some(Arc::as_ptr(object) as *const ()),
+                _ => None,
+            };
+            if shared.is_some_and(|ptr| !walked.insert(ptr)) {
+                continue;
+            }
             match value {
                 Value::Fn(FnValue::Closure(c)) => visit(&c, &mut stack),
                 Value::Adt(adt) => stack.extend(adt.fields.iter().cloned()),
