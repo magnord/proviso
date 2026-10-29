@@ -38,6 +38,8 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy with `-D warnings`, and the tes
 
 Shell commands run in zsh on macOS. There is no `timeout`, so use `perl -e 'alarm 60; exec @ARGV' -- cmd`, which exits 142 when time runs out. Quote a word that starts with `=`, such as `'====='`, and a glob in a flag, such as `--include='*.md'`.
 
+To build another commit, such as main for a baseline or a copy to sabotage, run `git archive <sha> | tar -x -C <dir>` and build it with its own `CARGO_TARGET_DIR`. A `git worktree add` registers in the shared repository and outlives the session, so remove one with `git worktree remove` before you finish.
+
 ## Architecture
 
 The pipeline is split into one crate per stage, and each crate depends only on the ones before it:
