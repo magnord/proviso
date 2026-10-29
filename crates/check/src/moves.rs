@@ -24,6 +24,23 @@
 //! `&` argument or `inout self` receiver may not reach them, and a captured unique value may
 //! not move in a later argument (E0505; OPEN_QUESTIONS P5).
 //!
+//! A value with reach, or that can hold a function value, has an origin: how long it may
+//! live (OPEN_QUESTIONS P5). A `keep` parameter and an owned value built from free parts are
+//! free. A borrowed parameter is bounded by the call, and a closure that captures locals by
+//! reference by the last of them to end. A value derived from others, by a field, an element,
+//! a call or a construction, takes the shortest of their origins. A value can't escape where
+//! it would outlive its origin: a `return`, a `fail`, a store into a place that outlives it,
+//! a `keep` argument, a capture by a closure passed to a `keep fn` parameter, or the value of
+//! a block that declares what it depends on. One that can hold a function value is E0509,
+//! and any other E0607.
+//!
+//! A closure that changes a `var` it captures holds the `var` exclusively from where a local
+//! gets it to the local's last use, which a use in a loop that doesn't declare the local
+//! extends to the loop's end. Any other use of the `var` in between, by name or through a
+//! closure that captures it, is E0505 (OPEN_QUESTIONS Q34). Passed to a call directly, the
+//! closure changes the `var` as an `&` argument does, once the other arguments are
+//! evaluated, and the call rolls the `var` back if it fails.
+//!
 //! Resources (REFERENCE §10) are tracked twice: a resource may have moved (E0501), and it
 //! is released where it has moved, or holds none, on every path. Each owned resource must be
 //! released at every normal exit of its scope (E0507), and nothing may overwrite or drop one
@@ -77,6 +94,8 @@ pub(crate) struct FnBody<'a> {
     /// It is a `take self` method of a base resource, which consumes `self` when it returns
     /// once the resources `self` holds are consumed (OPEN_QUESTIONS Q35).
     pub consumes_self: bool,
+    /// The mode of each parameter, `self` first, by local.
+    pub modes: Vec<ParamMode>,
 }
 
 /// Checks the moves and accesses of `body`, whose locals are `locals` and whose type
@@ -130,15 +149,34 @@ pub(crate) fn check(
         fn_reads: HashMap::new(),
         listed: Vec::new(),
         expands: 0,
+        origins: vec![None; locals.len()],
+        inout_limits: HashMap::new(),
+        frame: None,
+        grown: 0,
+        holders: HashMap::new(),
+        last_use: vec![0; locals.len()],
+        declared: vec![0; locals.len()],
+        holds_fn: locals.iter().map(|local| p.decls.holds_fn(&local.ty)).collect(),
+        loop_spans: Vec::new(),
+        var_uses: Vec::new(),
+        rollbacks: HashMap::new(),
+        var_names: HashMap::new(),
     };
     match body {
         Body::Fn(body) => {
             walk.consumes_self = body.consumes_self;
+            walk.frame = INOUT;
+            for (i, mode) in body.modes.iter().enumerate() {
+                walk.param(LocalId(i as u32), *mode, CALL, INOUT);
+            }
             walk.scopes.push(body.params);
             walk.block(body.block);
             walk.close_scope("the end of the function");
         }
-        Body::Predicate(e) => walk.expr(e),
+        Body::Predicate(e) => {
+            walk.origins.fill(CALL);
+            walk.expr(e)
+        }
         Body::Test(block) => {
             walk.scopes.push(Vec::new());
             walk.block(block);
@@ -154,7 +192,12 @@ pub(crate) fn check(
             }
         }
     }
-    let Walk { errors, later, moves_out, arms_out, unscheduled, held, owned_binds, parts_out, used, .. } = walk;
+    walk.held_vars();
+    let Walk { errors, later, moves_out, arms_out, unscheduled, held, owned_binds, parts_out, used, rollbacks, .. } =
+        walk;
+    for (e, vars) in rollbacks {
+        p.rollback.insert(e, vars.into_boxed_slice());
+    }
     for (code, span, message) in errors {
         diags.error(code, span, message);
     }
@@ -188,6 +231,26 @@ pub(crate) fn check(
 
 /// A local, or a field of one, by the index of each field on the way.
 type Path = Vec<u32>;
+
+/// How long a value may live (see the module's documentation). `None` is free, so it may be
+/// kept. A position bounds it, and a larger position ends sooner: [`INOUT`] is what an
+/// `inout` parameter of the function holds, [`CALL`] the function's call, [`closure_call`]
+/// the call of a closure, and [`alive`] the life of a local. Where values meet, the larger
+/// position wins, which doesn't depend on their order.
+type Origin = Option<u32>;
+
+const INOUT: Origin = Some(0);
+const CALL: Origin = Some(1);
+
+/// Bounded by local `i`: a closure that captures it by reference.
+fn alive(i: LocalId) -> Origin {
+    Some(2 * i.0 + 3)
+}
+
+/// Bounded by the call of a closure whose first local is `base`: its parameters.
+fn closure_call(base: u32) -> Origin {
+    Some(2 * base + 2)
+}
 
 /// What may have moved at a point of the body that is reached: each place, by its local's
 /// index and its path, with how diagnostics write it. The map is shared until it changes,
@@ -403,6 +466,8 @@ struct LoopWalk {
     head: State,
     exit: Option<State>,
     touched: HashSet<LocalId>,
+    /// [`Walk::grown`] when it was walked, since a grown origin changes what its turn checks.
+    grown: u32,
 }
 
 struct LoopFrame {
@@ -492,6 +557,34 @@ struct Walk<'a> {
     /// For each local, the last [`Walk::expand`] that listed it, so each lists it once.
     listed: Vec<u32>,
     expands: u32,
+    /// The origin of what each local may hold, which only grows as the walk goes on.
+    origins: Vec<Origin>,
+    /// The longest origin a store into each `inout` parameter may take.
+    inout_limits: HashMap<LocalId, Origin>,
+    /// The longest origin the value the frame being walked returns or fails with may take.
+    frame: Origin,
+    /// How many times a local's origin has grown, so a loop whose turn grew one is walked
+    /// again.
+    grown: u32,
+    /// The locals that may hold a closure that changes a `var` it captures: those `var`s,
+    /// where the local first may, and how diagnostics write the local.
+    holders: HashMap<LocalId, (Vec<LocalId>, u32, String)>,
+    /// Where each local is used last, so far, where a use in a loop that doesn't declare it
+    /// lasts to the loop's end.
+    last_use: Vec<u32>,
+    /// Where each local is declared.
+    declared: Vec<u32>,
+    /// Whether each local's type can hold a function value.
+    holds_fn: Vec<bool>,
+    /// The loops around the code being walked, outermost first, also outside a closure.
+    loop_spans: Vec<Span>,
+    /// Each use of a `var`: where, how diagnostics write the `var`, and the local holding a
+    /// closure it is used through, if any.
+    var_uses: Vec<(LocalId, Span, Arc<str>, Option<LocalId>)>,
+    /// See [`Program::rollback`].
+    rollbacks: HashMap<ExprId, Vec<LocalId>>,
+    /// The names of the locals the closures walked so far capture.
+    var_names: HashMap<LocalId, Arc<str>>,
 }
 
 impl Walk<'_> {
@@ -1082,6 +1175,7 @@ impl Walk<'_> {
     /// Reports a use of `local`'s `path` that may have moved, or a part of which may have.
     fn use_place(&mut self, e: ExprId, local: LocalId, path: &[u32]) {
         self.touch(local);
+        self.used_at(e, local);
         // A rejected capture may have been meant to be consumed (REFERENCE §15.1).
         if self.captured.contains(&local) && self.tainted(e) {
             self.excused.insert(local);
@@ -1238,6 +1332,7 @@ impl Walk<'_> {
     /// of a value that may have moved can't be assigned.
     fn assign_place(&mut self, e: ExprId, local: LocalId, path: &[u32]) {
         self.touch(local);
+        self.used_at(e, local);
         let Some(state) = &self.state else { return };
         if state.of(local).any(|(m, _)| m.len() < path.len() && is_prefix(m, path)) {
             self.use_place(e, local, path);
@@ -1350,6 +1445,9 @@ impl Walk<'_> {
     fn closure(&mut self, e: ExprId, closure: &Closure) {
         let Some(info) = self.p.closures.get(e) else { return };
         let captures: Vec<(LocalId, Box<str>)> = info.captures.clone();
+        for (local, name) in &captures {
+            self.var_names.entry(*local).or_insert_with(|| Arc::from(&**name));
+        }
         let reads = self.fn_reads(e);
         self.reads(e, &reads, |captured| {
             format!("`{captured}` may have moved already, so this closure can't capture it (§5.1)")
@@ -1360,6 +1458,28 @@ impl Walk<'_> {
                 (*local, *span, self.m.text(closure.params[i].name.sym).to_string())
             })
             .collect();
+        // A kept closure copies what it captures, which must be free (REFERENCE §6.7).
+        if info.kept {
+            for ((local, _), &span) in captures.iter().zip(&info.spans) {
+                let ty = &self.locals[local.index()].ty;
+                if self.origins[local.index()].is_none() || !self.tracked(ty) {
+                    continue;
+                }
+                let (code, message) = if self.p.decls.holds_fn(ty) {
+                    let message = "a closure passed to a `keep fn` parameter lives indefinitely, so it can't capture a function value, or a value that holds one, unless that is kept too (§6.7)";
+                    (codes::FUNCTION_VALUE_ESCAPES, message)
+                } else {
+                    let message = "a closure passed to a `keep fn` parameter lives indefinitely, so it can't capture a borrowed capability or a value that holds or comes from one; take it as `keep` (§6.7, §9.3)";
+                    (codes::BORROWED_RETAINED, message)
+                };
+                self.report(code, span, message.to_string());
+            }
+        }
+        for (&local, &mode) in info.params.iter().zip(&info.modes) {
+            self.param(local, mode, closure_call(info.base), None);
+            self.declared[local.index()] = self.span(e).lo;
+        }
+        let frame = std::mem::replace(&mut self.frame, Some(2 * info.base + 1));
         let outer = (
             self.state.replace(State::default()),
             std::mem::take(&mut self.loops),
@@ -1374,6 +1494,12 @@ impl Walk<'_> {
         let depth = self.captured.len();
         self.captured.extend(captures.iter().map(|(local, _)| *local));
         self.value_block(&closure.body, true);
+        if let Some(&s) = closure.body.stmts.last()
+            && let StmtKind::Expr(tail) = self.m.stmts[s].kind
+        {
+            self.escapes(tail, self.frame, "be the closure's result");
+        }
+        self.frame = frame;
         self.close_scope("the end of the closure");
         self.captured.truncate(depth);
         let touched;
@@ -1401,6 +1527,379 @@ impl Walk<'_> {
             let access = CallAccess { access, local, steps: Vec::new(), expr: e, by, captured: Some(name) };
             self.lent.push(access.clone());
             accesses.push(access);
+        }
+    }
+
+    // ---- origins ----
+
+    /// Gives parameter `local`, taken in `mode`, its origin: free for `keep` and `take`,
+    /// `inout` for an `inout` one, and `bounded` for a borrowed one. A store into an `inout`
+    /// one may take at most `inout`.
+    fn param(&mut self, local: LocalId, mode: ParamMode, bounded: Origin, inout: Origin) {
+        let origin = match mode {
+            ParamMode::Keep | ParamMode::Take => None,
+            ParamMode::Inout | ParamMode::InoutPartial => {
+                self.inout_limits.insert(local, inout);
+                if inout.is_none() { bounded } else { inout }
+            }
+            ParamMode::Borrow => bounded,
+        };
+        self.origins[local.index()] = origin;
+    }
+
+    /// Notes that `local` may hold a value of `origin`.
+    fn grow(&mut self, local: LocalId, origin: Origin) {
+        let slot = &mut self.origins[local.index()];
+        if origin > *slot {
+            *slot = origin;
+            self.grown += 1;
+        }
+    }
+
+    /// Whether a value of `ty` has an origin: it reaches a capability, or can hold a function
+    /// value. One that reaches only type parameters is left to phase 2's `Copy` rule (E0503).
+    fn tracked(&self, ty: &Ty) -> bool {
+        let reach = self.p.decls.reach(ty, self.bounds);
+        !reach.caps().is_empty() || !reach.effects().is_empty() || self.p.decls.holds_fn(ty)
+    }
+
+    /// The origin of the value `e` gives, when its type is tracked.
+    fn tracked_origin(&self, e: ExprId) -> Origin {
+        let origin = self.origin(e);
+        if origin.is_some() && self.is_value(e) && self.tracked(self.p.ty(e)) { origin } else { None }
+    }
+
+    /// The origin of the value `e` gives. A field or element has its base's, and a call or
+    /// construction the shortest of what it is given, as does a collection of its elements.
+    fn origin(&self, e: ExprId) -> Origin {
+        let m = self.m;
+        let tail = |block: &Block| match block.stmts.last().map(|&s| &m.stmts[s].kind) {
+            Some(StmtKind::Expr(e)) => self.origin(*e),
+            _ => None,
+        };
+        match &m.exprs[e].kind {
+            ExprKind::Name(_) | ExprKind::It => match self.p.res(e) {
+                Some(Res::Local(local)) => self.origins[local.index()],
+                _ => None,
+            },
+            ExprKind::Field { base, .. } => match self.p.res(e) {
+                Some(Res::Ctor(..)) => None,
+                _ => self.origin(*base),
+            },
+            ExprKind::Index { base, .. } => self.origin(*base),
+            ExprKind::Closure(_) => self.closure_origin(e),
+            ExprKind::Call { callee, args, .. } => {
+                let callee = if self.is_value(*callee) { self.tracked_origin(*callee) } else { None };
+                args.iter().map(|arg| self.tracked_origin(arg.value)).fold(callee, Ord::max)
+            }
+            ExprKind::MethodCall { receiver, args, .. } => {
+                let receiver = if self.is_value(*receiver) { self.tracked_origin(*receiver) } else { None };
+                args.iter().map(|arg| self.tracked_origin(arg.value)).fold(receiver, Ord::max)
+            }
+            ExprKind::Tuple(values) | ExprKind::List(values) => {
+                values.iter().map(|&value| self.tracked_origin(value)).max().flatten()
+            }
+            ExprKind::Map(entries) => {
+                entries.iter().map(|&(k, v)| self.tracked_origin(k).max(self.tracked_origin(v))).max().flatten()
+            }
+            ExprKind::If { then_block, else_branch, .. } => {
+                let other = match else_branch {
+                    Some(ElseBranch::Block(block)) => tail(block),
+                    Some(ElseBranch::If(nested)) => self.origin(*nested),
+                    None => None,
+                };
+                tail(then_block).max(other)
+            }
+            ExprKind::Match { arms, .. } => arms.iter().map(|arm| tail(&arm.body)).max().flatten(),
+            ExprKind::Else { value, fallback } => {
+                let fallback = match fallback {
+                    Fallback::Value(value) => self.origin(*value),
+                    Fallback::Block(block) => tail(block),
+                };
+                self.origin(*value).max(fallback)
+            }
+            ExprKind::Try(inner) | ExprKind::Attempt(inner) => self.origin(*inner),
+            _ => None,
+        }
+    }
+
+    /// A closure lives as long as the shortest lived local it captures by reference. A kept
+    /// one copies what it captures, which must be free, so it is free.
+    fn closure_origin(&self, e: ExprId) -> Origin {
+        let Some(info) = self.p.closures.get(e) else { return None };
+        if info.kept {
+            return None;
+        }
+        info.captures.iter().map(|(local, _)| alive(*local).max(self.origins[local.index()])).max().flatten()
+    }
+
+    /// Reports `e` when its origin is longer than `limit` allows, where it would `how`.
+    fn escapes(&mut self, e: ExprId, limit: Origin, how: &str) {
+        if self.tracked_origin(e) <= limit || self.tainted(e) || self.refused.contains(&e) {
+            return;
+        }
+        let (code, message) = if self.p.decls.holds_fn(self.p.ty(e)) {
+            let message = format!(
+                "this is a function value, or holds one, that may capture a local or a borrowed value that ends before it would, so it can't {how} (§6.7, Q34)"
+            );
+            (codes::FUNCTION_VALUE_ESCAPES, message)
+        } else {
+            let message = format!(
+                "this is borrowed, or holds or comes from a borrowed value, so it can't {how}; a `keep` parameter can be retained (§9.3)"
+            );
+            (codes::BORROWED_RETAINED, message)
+        };
+        self.report(code, self.span(e), message);
+    }
+
+    /// The longest origin a value stored into `local` may take: one that outlives it, or for
+    /// an `inout` parameter, one that outlives the call.
+    fn store_limit(&self, local: LocalId) -> Origin {
+        self.inout_limits.get(&local).copied().unwrap_or(Some(2 * local.0 + 2))
+    }
+
+    /// Stores the value `e` gives into a place of `local`, written `name`.
+    fn store(&mut self, e: ExprId, local: LocalId, name: &str) {
+        self.escapes(e, self.store_limit(local), "be stored in a place that outlives it");
+        let origin = self.tracked_origin(e);
+        self.grow(local, origin);
+        if self.holds_fn(e) {
+            let changes = self.changes_of(e);
+            self.hold_vars(local, &changes, self.span(e).hi, name.to_string());
+        }
+    }
+
+    /// The modes of the arguments of call `e`, after its receiver: those its callee takes,
+    /// and for a builtin that changes its receiver, `take` for each.
+    fn arg_modes(&self, e: ExprId) -> Vec<ParamMode> {
+        let iface = |iface: IfaceId, method: usize| self.p.decls.iface(iface).methods[method].modes.clone();
+        match (&self.m.exprs[e].kind, self.p.res(e)) {
+            (ExprKind::Call { .. }, Some(Res::Dispatch { iface: id, method, qualified: true })) => {
+                std::iter::once(self.p.decls.iface(id).methods[method].self_mode).chain(iface(id, method)).collect()
+            }
+            (ExprKind::MethodCall { .. }, Some(Res::Fn(f))) => self.p.fns[f].params.iter().map(|p| p.mode).collect(),
+            (ExprKind::MethodCall { args, .. }, Some(Res::Method(builtin))) if builtin.changes_receiver() => {
+                vec![ParamMode::Take; args.len()]
+            }
+            (ExprKind::MethodCall { .. }, Some(Res::Dispatch { iface: id, method, .. })) => iface(id, method),
+            (ExprKind::Call { callee, args, .. }, _) => match self.p.res(*callee) {
+                Some(Res::Fn(f)) => self.p.fns[f].params.iter().map(|p| p.mode).collect(),
+                Some(Res::Ctor(..)) => vec![ParamMode::Take; args.len()],
+                _ => self
+                    .p
+                    .expr_ty
+                    .get(*callee)
+                    .and_then(Ty::fn_parts)
+                    .map_or_else(Vec::new, |(modes, ..)| modes.to_vec()),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// Checks what call `e` may retain: a `keep` argument or `keep self` receiver must be
+    /// free, and what it may store into its `inout` arguments and `inout self` receiver,
+    /// what it owns or keeps and what they already hold, must outlive them.
+    fn retains(&mut self, e: ExprId, receiver: Option<(ExprId, ParamMode)>, args: &[Arg]) {
+        let modes = self.arg_modes(e);
+        let mut given: Vec<(ExprId, ParamMode)> = receiver.into_iter().collect();
+        given.extend(args.iter().enumerate().map(|(i, arg)| {
+            let mode = modes.get(i).copied().unwrap_or(ParamMode::Borrow);
+            (arg.value, if arg.inout { ParamMode::Inout } else { mode })
+        }));
+        if given.iter().all(|&(value, _)| {
+            (self.tracked_origin(value).is_none() && !self.holds_fn(value)) || self.rejected.contains(&value)
+        }) {
+            return;
+        }
+        let first_arg = usize::from(receiver.is_some());
+        for (i, &(value, mode)) in given.iter().enumerate() {
+            if mode == ParamMode::Keep {
+                let how = if i < first_arg {
+                    "be the receiver of a `keep self` method"
+                } else {
+                    "be passed to a `keep` parameter"
+                };
+                self.escapes(value, None, how);
+            }
+        }
+        let inout = |mode: ParamMode| matches!(mode, ParamMode::Inout | ParamMode::InoutPartial);
+        let targets: Vec<(ExprId, LocalId)> = given
+            .iter()
+            .filter(|&&(value, mode)| inout(mode) && !self.rejected.contains(&value) && self.tracked(self.p.ty(value)))
+            .filter_map(|&(value, _)| Some((value, self.root_local(value)?)))
+            .collect();
+        for &(source, mode) in &given {
+            if !(inout(mode) || matches!(mode, ParamMode::Take | ParamMode::Keep)) {
+                continue;
+            }
+            for &(target, local) in &targets {
+                if target != source {
+                    let name = self.describe(target);
+                    self.store(source, local, &name);
+                }
+            }
+        }
+    }
+
+    // ---- changed captures ----
+
+    /// Whether the value `e` gives can hold a function value.
+    fn holds_fn(&self, e: ExprId) -> bool {
+        self.is_value(e) && self.p.decls.holds_fn(self.p.ty(e))
+    }
+
+    /// The `var`s that the closures the value `e` gives may change, as it derives them as
+    /// [`Walk::origin`] does. A closure changes what it changes itself, and what the closures
+    /// it captures do.
+    fn changes_of(&self, e: ExprId) -> Vec<LocalId> {
+        let m = self.m;
+        let mut out = Vec::new();
+        let mut add = |vars: &[LocalId]| {
+            for var in vars {
+                if !out.contains(var) {
+                    out.push(*var);
+                }
+            }
+        };
+        let of = |e: ExprId| if self.holds_fn(e) { self.changes_of(e) } else { Vec::new() };
+        let tail = |block: &Block| match block.stmts.last().map(|&s| &m.stmts[s].kind) {
+            Some(StmtKind::Expr(e)) => self.changes_of(*e),
+            _ => Vec::new(),
+        };
+        let held = |local: LocalId| self.holders.get(&local).map_or(&[][..], |(vars, ..)| &vars[..]);
+        match &m.exprs[e].kind {
+            ExprKind::Closure(_) => {
+                if let Some(info) = self.p.closures.get(e) {
+                    add(&info.changes);
+                    for (local, _) in &info.captures {
+                        add(held(*local));
+                    }
+                }
+            }
+            ExprKind::Name(_) | ExprKind::It => {
+                if let Some(Res::Local(local)) = self.p.res(e) {
+                    add(held(local));
+                }
+            }
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => add(&of(*base)),
+            ExprKind::Call { callee, args, .. } => {
+                add(&of(*callee));
+                for arg in args {
+                    add(&of(arg.value));
+                }
+            }
+            ExprKind::MethodCall { receiver, args, .. } => {
+                add(&of(*receiver));
+                for arg in args {
+                    add(&of(arg.value));
+                }
+            }
+            ExprKind::Tuple(values) | ExprKind::List(values) => {
+                for &value in values {
+                    add(&of(value));
+                }
+            }
+            ExprKind::Map(entries) => {
+                for &(k, v) in entries {
+                    add(&of(k));
+                    add(&of(v));
+                }
+            }
+            ExprKind::If { then_block, else_branch, .. } => {
+                add(&tail(then_block));
+                match else_branch {
+                    Some(ElseBranch::Block(block)) => add(&tail(block)),
+                    Some(ElseBranch::If(nested)) => add(&self.changes_of(*nested)),
+                    None => {}
+                }
+            }
+            ExprKind::Match { arms, .. } => {
+                for arm in arms {
+                    add(&tail(&arm.body));
+                }
+            }
+            ExprKind::Else { value, fallback } => {
+                add(&self.changes_of(*value));
+                match fallback {
+                    Fallback::Value(value) => add(&self.changes_of(*value)),
+                    Fallback::Block(block) => add(&tail(block)),
+                }
+            }
+            ExprKind::Try(inner) | ExprKind::Attempt(inner) => add(&self.changes_of(*inner)),
+            _ => {}
+        }
+        out
+    }
+
+    /// Notes that `local`, written `name`, may hold a closure that changes `vars` from `at`
+    /// on.
+    fn hold_vars(&mut self, local: LocalId, vars: &[LocalId], at: u32, name: String) {
+        if vars.is_empty() {
+            return;
+        }
+        let (held, from, _) = self.holders.entry(local).or_insert_with(|| (Vec::new(), at, name));
+        *from = (*from).min(at);
+        for var in vars {
+            if !held.contains(var) {
+                held.push(*var);
+            }
+        }
+    }
+
+    /// Notes a use of `local` at `e`: where it is used last, and a use of a `var`, directly
+    /// or through a closure that reads it.
+    fn used_at(&mut self, e: ExprId, local: LocalId) {
+        let span = self.span(e);
+        if self.holds_fn[local.index()] {
+            let declared = self.declared[local.index()];
+            let outside = self.loop_spans.iter().find(|l| !(l.lo <= declared && declared < l.hi));
+            let end = outside.map_or(span.hi, |l| l.hi.max(span.hi));
+            let last = &mut self.last_use[local.index()];
+            *last = (*last).max(end);
+        }
+        if self.locals[local.index()].mutable {
+            let name: Arc<str> = self.describe(e).into();
+            self.var_uses.push((local, span, name, None));
+        }
+        if let Some(reads) = self.fn_reads.get(&local).cloned() {
+            for (var, name) in reads.iter() {
+                if self.locals[var.index()].mutable {
+                    self.var_uses.push((*var, span, name.clone(), Some(local)));
+                }
+            }
+        }
+    }
+
+    /// Reports each use of a `var` while a local holds a closure that changes it, other than
+    /// through that local (OPEN_QUESTIONS Q34).
+    fn held_vars(&mut self) {
+        let mut found = Vec::new();
+        for (&holder, (vars, from, name)) in &self.holders {
+            let until = self.last_use[holder.index()];
+            for (var, span, var_name, through) in &self.var_uses {
+                if vars.contains(var) && *through != Some(holder) && *from < span.lo && span.lo <= until {
+                    let message = format!(
+                        "`{name}` holds a closure that changes `{var_name}` until `{name}` is last used, so nothing else may use `{var_name}` meanwhile (§5.3, Q34)"
+                    );
+                    found.push((*span, message));
+                }
+            }
+        }
+        found.sort_by_key(|(span, _)| span.lo);
+        for (span, message) in found {
+            self.report(codes::OVERLAPPING_ACCESS, span, message);
+        }
+    }
+
+    /// The local the place `e` is a part of.
+    fn root_local(&self, e: ExprId) -> Option<LocalId> {
+        match self.m.exprs[e].kind {
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => self.root_local(base),
+            ExprKind::Name(_) | ExprKind::It => match self.p.res(e) {
+                Some(Res::Local(local)) => Some(local),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -1486,6 +1985,12 @@ impl Walk<'_> {
                         self.report(codes::RESOURCE_DISCARDED, self.span(*target), message.to_string());
                     }
                 }
+                if *op == AssignOp::Set
+                    && let Some(local) = self.root_local(*target)
+                {
+                    let name = self.describe(*target);
+                    self.store(*value, local, &name);
+                }
                 match self.place(*target) {
                     Some((local, path)) if *op == AssignOp::Set => {
                         self.assign_place(*target, local, &path);
@@ -1526,6 +2031,7 @@ impl Walk<'_> {
             StmtKind::Return(value) => {
                 if let Some(value) = value {
                     self.expr(*value);
+                    self.escapes(*value, self.frame, "be returned");
                 }
                 self.drops_held(0, "this `return`", m.stmts[s].span, None);
                 self.unreleased(0, "this `return`");
@@ -1570,8 +2076,13 @@ impl Walk<'_> {
     /// index or a guard that `self.lent[..upto]` lists still has it lent (§5.3).
     fn change_lent(&mut self, e: ExprId, upto: usize) {
         let Some((local, steps)) = self.access_path(e) else { return };
+        self.change_lent_at(e, local, &steps, upto);
+    }
+
+    /// [`Walk::change_lent`] for a change of `local`'s `steps` that `e` makes.
+    fn change_lent_at(&mut self, e: ExprId, local: LocalId, steps: &[Step], upto: usize) {
         let found = self.lent[..upto].iter().rev().find_map(|l| {
-            let overlap = if l.local == local { overlap(&l.steps, &steps) } else { Overlap::No };
+            let overlap = if l.local == local { overlap(&l.steps, steps) } else { Overlap::No };
             (overlap != Overlap::No).then_some((l.by, l.expr, overlap, l.captured.clone()))
         });
         let Some((by, there, overlap, captured)) = found else { return };
@@ -1651,6 +2162,11 @@ impl Walk<'_> {
 
     fn expr(&mut self, e: ExprId) {
         self.expr_kind(e);
+        // A block, arm or fallback can't give a value that depends on a local it declares.
+        if let Some(&base) = self.p.scope_tails.get(e) {
+            let how = "leave the block, arm or fallback that declares a local it depends on, which ends there";
+            self.escapes(e, Some(2 * base + 2), how);
+        }
         if *self.p.ty(e) == Ty::Never {
             // A call that never returns may still fail to the handler that goes on after it.
             if let Some(&handler) = self.p.handler_of.get(e) {
@@ -1773,7 +2289,11 @@ impl Walk<'_> {
                 self.borrowed_temp(*lhs);
                 self.borrowed_temp(*rhs);
             }
-            ExprKind::Try(inner) | ExprKind::Fail(inner) => self.expr(*inner),
+            ExprKind::Try(inner) => self.expr(*inner),
+            ExprKind::Fail(inner) => {
+                self.expr(*inner);
+                self.escapes(*inner, self.frame, "be the error a function fails with");
+            }
             ExprKind::Attempt(inner) => {
                 self.expr(*inner);
                 let failed = self.handled.remove(&e).flatten();
@@ -1834,6 +2354,7 @@ impl Walk<'_> {
                         w.pending.push(Held { by_loop: Some(e) });
                     }
                     w.bind_all(*pat);
+                    w.bind_origin(*pat, *iter);
                     w.block(body);
                     if holds {
                         w.pending.pop();
@@ -1954,6 +2475,10 @@ impl Walk<'_> {
             }
             ExprKind::Else { value, fallback } => {
                 self.expr(*value);
+                if let Some(&it) = self.p.it_local.get(e) {
+                    let origin = self.tracked_origin(*value);
+                    self.grow(it, origin);
+                }
                 let after = self.state.clone();
                 let failed = self.handled.remove(&e).flatten();
                 self.state = join(self.state.take(), failed);
@@ -1990,6 +2515,7 @@ impl Walk<'_> {
         // What is released at the head must be what it was too, which a program without
         // resources always has.
         if let (Some(entry), Some(last)) = (&entry, self.loop_cache.get(&e))
+            && last.grown == self.grown
             && entry.released_in(&last.head)
             && last.head.released_in(entry)
         {
@@ -2016,19 +2542,22 @@ impl Walk<'_> {
         let depth = self.loops.len();
         let outer_reach = std::mem::replace(&mut self.reach, usize::MAX);
         self.touched.push(HashSet::new());
+        self.loop_spans.push(self.span(e));
         loop {
             self.state = head.clone();
             let (scopes, pending) = (self.scopes.len(), self.pending.len());
             self.loops.push(LoopFrame { expr: e, breaks: None, continues: None, scopes, pending });
+            let grown = self.grown;
             let exit = turn(self);
             let frame = self.loops.pop().expect("the loop's frame was pushed");
             let back = join(self.state.take(), frame.continues);
             let next = join(entry.clone(), back);
-            let grew = match (&head, &next) {
-                (Some(head), Some(next)) => !head.holds(next),
-                (None, Some(_)) => true,
-                (_, None) => false,
-            };
+            let grew = self.grown != grown
+                || match (&head, &next) {
+                    (Some(head), Some(next)) => !head.holds(next),
+                    (None, Some(_)) => true,
+                    (_, None) => false,
+                };
             if !grew {
                 let exit = join(exit, frame.breaks);
                 let touched = self.touched.pop().expect("the loop's set was pushed");
@@ -2036,7 +2565,8 @@ impl Walk<'_> {
                 if let Some(head) = head
                     && self.reach > depth
                 {
-                    self.loop_cache.insert(e, LoopWalk { head, exit: exit.clone(), touched: touched.clone() });
+                    let grown = self.grown;
+                    self.loop_cache.insert(e, LoopWalk { head, exit: exit.clone(), touched: touched.clone(), grown });
                 } else {
                     self.loop_cache.remove(&e);
                 }
@@ -2045,6 +2575,7 @@ impl Walk<'_> {
                 }
                 self.reach = self.reach.min(outer_reach);
                 self.state = exit;
+                self.loop_spans.pop();
                 return;
             }
             head = next;
@@ -2078,6 +2609,29 @@ impl Walk<'_> {
             }
         }
         self.bind_all(pat);
+        self.bind_origin(pat, value);
+    }
+
+    /// What `pat` binds comes from the value `value` gives, so it has its origin, and holds
+    /// the `var`s its closures change.
+    fn bind_origin(&mut self, pat: PatId, value: ExprId) {
+        let origin = self.tracked_origin(value);
+        let changes = if self.holds_fn(value) { self.changes_of(value) } else { Vec::new() };
+        if origin.is_none() && changes.is_empty() {
+            return;
+        }
+        let mut locals = Vec::new();
+        self.pattern_locals(pat, &mut locals);
+        for local in locals {
+            self.grow(local, origin);
+            if self.holds_fn[local.index()] {
+                let name = match &self.m.pats[pat].kind {
+                    PatKind::Bind(name) => self.m.text(name.sym).to_string(),
+                    _ => "a binding of this pattern".to_string(),
+                };
+                self.hold_vars(local, &changes, self.span(value).hi, name);
+            }
+        }
     }
 
     /// The paths of the parts of a value at `path` that `pat` binds and moves.
@@ -2126,8 +2680,10 @@ impl Walk<'_> {
     fn bind_all(&mut self, pat: PatId) {
         let mut locals = Vec::new();
         self.pattern_locals(pat, &mut locals);
+        let at = self.m.pats[pat].span.lo;
         for local in locals {
             self.bind(local);
+            self.declared[local.index()] = at;
         }
         self.own(pat);
     }
@@ -2244,12 +2800,18 @@ impl Walk<'_> {
             }
             None => {}
         }
+        let mut rollback = Vec::new();
         if let ExprKind::Call { callee, .. } = self.m.exprs[e].kind
             && self.is_value(callee)
         {
             let reads = self.fn_reads(callee);
             self.note_reads(&mut accesses, callee, reads, Lender::Callee);
+            if self.holds_fn(callee) {
+                rollback = self.changes_of(callee);
+            }
         }
+        // What a closure argument changes, it changes as an `&` argument does.
+        let mut changed: Vec<(ExprId, Vec<LocalId>)> = Vec::new();
         for arg in args {
             if arg.inout {
                 self.indices(arg.value);
@@ -2264,8 +2826,13 @@ impl Walk<'_> {
                 continue;
             }
             self.expr(arg.value);
-            let reads = self.fn_reads(arg.value);
+            let changes = if self.holds_fn(arg.value) { self.changes_of(arg.value) } else { Vec::new() };
+            let mut reads = self.fn_reads(arg.value);
+            reads.retain(|(local, _)| !changes.contains(local));
             self.note_reads(&mut accesses, arg.value, reads, Lender::Capture);
+            if !changes.is_empty() && !self.rejected.contains(&arg.value) {
+                changed.push((arg.value, changes));
+            }
             // An argument that moves was checked against what the call lends as it moved.
             if !self.consumed.contains(&arg.value) && !self.rejected.contains(&arg.value) {
                 self.note(&mut accesses, outer, arg.value, Access::Lent);
@@ -2287,7 +2854,41 @@ impl Walk<'_> {
             self.root(receiver);
             self.note(&mut accesses, outer, receiver, Access::Inout);
         }
+        for (value, vars) in changed {
+            for var in vars {
+                if !rollback.contains(&var) {
+                    rollback.push(var);
+                }
+                self.note_change(&mut accesses, outer, value, var);
+            }
+        }
+        if !rollback.is_empty() {
+            self.rollbacks.insert(e, rollback);
+        }
         self.lent.truncate(outer);
+        self.retains(e, receiver, args);
+    }
+
+    /// Records that the closure `e` gives a call changes `var` while the call runs, as an
+    /// `&` argument does, and reports what else the call reaches it by (OPEN_QUESTIONS Q34).
+    fn note_change(&mut self, accesses: &mut Vec<CallAccess>, outer: usize, e: ExprId, var: LocalId) {
+        self.change_lent_at(e, var, &[], outer);
+        let name = self.var_names.get(&var).cloned().unwrap_or_else(|| "a variable".into());
+        if accesses.iter().any(|other| other.local == var) {
+            let message = format!(
+                "a closure this call takes changes `{name}`, so the call can't also reach `{name}` another way (§5.3, Q34)"
+            );
+            self.report(codes::OVERLAPPING_ACCESS, self.span(e), message);
+        }
+        let access = CallAccess {
+            access: Access::Inout,
+            local: var,
+            steps: Vec::new(),
+            expr: e,
+            by: Lender::Capture,
+            captured: Some(name),
+        };
+        accesses.push(access);
     }
 
     /// Reports a field that `with` replaces while it may still hold a resource, which the new

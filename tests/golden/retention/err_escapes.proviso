@@ -117,13 +117,15 @@ fn closure_kept(f: fn() -> Int) {
 
 fn closure_var() -> Int {
     var h = || 0
+    var held = Holder(f: || 0)
+    var hs = [Holder(f: || 1)]
     let n = 2
     h = || n                                        // <- E0509
-    var held = Holder(f: || 0)
     held = Holder(f: || n)                          // <- E0509
-    var hs = [Holder(f: || 1)]
     hs.push(Holder(f: || n))                        // <- E0509
-    let k = held.f
+    var later = Holder(f: || 0)
+    later = Holder(f: || n)
+    let k = later.f
     return h() + k()
 }
 

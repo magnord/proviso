@@ -13,9 +13,8 @@ use proviso_syntax::diag::{Diagnostic, Diagnostics, Severity};
 use proviso_syntax::parse_module;
 use proviso_syntax::source::{SourceMap, Span};
 
-/// How far this toolchain implements the v1 plan (OPEN_QUESTIONS P3): phases 1 and 2, and
-/// slices 3.1 to 3.6 of phase 3.
-pub const IMPLEMENTED_PHASE: Phase = Phase::slice(3, 6);
+/// How far this toolchain implements the v1 plan (OPEN_QUESTIONS P3): phases 1 to 3.
+pub const IMPLEMENTED_PHASE: Phase = Phase::whole(3);
 
 /// A point in the v1 plan: a whole phase, or a slice of one. A phase delivered over several
 /// pull requests numbers its slices `2.1`, `2.2` and so on, and each pull request turns its
