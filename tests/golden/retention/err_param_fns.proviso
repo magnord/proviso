@@ -1,0 +1,83 @@
+// phase: 3.7
+// expect-error: E0509
+// expect-error: E0607
+// A function value passed to a borrowed parameter can still give back what it captures when
+// the callee calls it, so it bounds the call's result, as it bounds the error the call fails
+// with. The callee's own parameter doesn't bound what its call gives, since the caller of the
+// callee bounds it (OPEN_QUESTIONS P5 "Where function values go", REFERENCE §6.7, §9.3).
+use std.io { Out, IoError }
+
+enum Lost {
+    Gone(out: Out)
+}
+
+record Holder {
+    f: fn() -> Out uses Out
+}
+
+impl Holder {
+    fn call(self) -> Out {
+        let f = self.f
+        return f()
+    }
+}
+
+fn give_back(f: fn() -> Out uses Out) -> Out {
+    return f()
+}
+
+fn give_fn(f: fn() -> fn() -> Int) -> fn() -> Int {
+    return f()
+}
+
+fn call_holder(h: Holder) -> Out {
+    let f = h.f
+    return f()
+}
+
+fn run(f: fn() fails Lost uses Out) fails Lost {
+    try f()
+}
+
+fn leak(out: Out, into: inout List[Out]) {
+    into.push(give_back(f: || out))                 // <- E0607
+}
+
+fn leak_fn() -> fn() -> Int {
+    var n = 41
+    return give_fn(f: || || {                       // <- E0509
+        n += 1
+        n
+    })
+}
+
+fn leak_map() -> List[fn() -> Int] {
+    let n = 41
+    return [1, 2].map(|_i| || n)                    // <- E0509
+}
+
+fn leak_holder(out: Out, into: inout List[Out]) {
+    into.push(call_holder(h: Holder(f: || out)))    // <- E0607
+}
+
+fn leak_receiver(out: Out, into: inout List[Out]) {
+    let h = Holder(f: || out)
+    into.push(h.call())                             // <- E0607
+}
+
+fn leak_error(out: Out) fails Lost {
+    try run(f: || {                                 // <- E0607
+        fail Lost.Gone(out: out)
+    })
+}
+
+fn pass_on(h: Holder) -> Out {
+    return call_holder(h: h)
+}
+
+fn pass_on_map[A](xs: List[A], f: fn(A) -> A) -> List[A] {
+    return xs.map(f)
+}
+
+pub fn main(sys: keep System) fails IoError {
+}

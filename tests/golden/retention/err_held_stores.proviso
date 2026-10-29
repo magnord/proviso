@@ -1,0 +1,50 @@
+// phase: 3.7
+// expect-error: E0505
+// A closure that reads a `var` and reaches a local some way other than a `let`, by an
+// assignment, a `push`, a pattern or a loop, still reads the `var` when a call calls it, so
+// the call can't also take the `var` with `&` (OPEN_QUESTIONS P5 "Closures and exclusivity",
+// REFERENCE §5.3).
+use std.io { IoError }
+
+record Box {
+    f: fn() -> Int
+}
+
+fn apply(f: fn() -> Int, x: inout Int) -> Int {
+    x += 100
+    return f()
+}
+
+fn apply_all(fs: List[fn() -> Int], x: inout Int) -> Int {
+    x += 100
+    var total = 0
+    for f in fs {
+        total += f()
+    }
+    return total
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var n = 1
+    var g: fn() -> Int = || 0
+    g = || n
+    let t0 = apply(f: g, x: &n)                     // <- E0505
+    var fs: List[fn() -> Int] = []
+    fs.push(|| n)
+    let t1 = apply_all(fs: fs, x: &n)               // <- E0505
+    let (a, b) = (|| n, 2)
+    let t2 = apply(f: a, x: &n)                     // <- E0505
+    var bx = Box(f: || 0)
+    bx.f = || n
+    let t3 = apply(f: bx.f, x: &n)                  // <- E0505
+    for h in [|| n] {
+        let t4 = apply(f: h, x: &n)                 // <- E0505
+    }
+    match Box(f: || n) {
+        Box(f: h) => {
+            let t5 = apply(f: h, x: &n)             // <- E0505
+        }
+    }
+    let ok = apply(f: || 7, x: &n)
+    try sys.stdout.write_line(f"{ok} {n}")
+}

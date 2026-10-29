@@ -1,0 +1,31 @@
+// phase: 3.7
+// expect-error: E0509
+// A store the check rejects gives its target nothing, in a loop as in straight code, so the
+// values that later take from the target report nothing more (REFERENCE §15.1).
+use std.io { IoError }
+
+fn straight(k: keep fn() -> Int, into: inout List[fn() -> Int]) {
+    var a = k
+    var b = k
+    let m = 1
+    b = || m                                        // <- E0509
+    a = b
+    into.push(a)
+}
+
+fn in_loop(k: keep fn() -> Int, into: inout List[fn() -> Int]) {
+    var a = k
+    var b = k
+    for i in [1, 2] {
+        let m = i
+        b = || m                                    // <- E0509
+        a = b
+    }
+    into.push(a)
+}
+
+pub fn main(sys: keep System) fails IoError {
+    var fs: List[fn() -> Int] = []
+    straight(k: || 0, into: &fs)
+    in_loop(k: || 0, into: &fs)
+}
