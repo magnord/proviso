@@ -1423,17 +1423,21 @@ impl Interp<'_> {
         cells
     }
 
+    /// What `cell` holds, unless it is lent to a change in progress.
+    #[inline(never)]
+    fn cell_value(&self, cell: &Arc<CapState>, span: Span) -> Flow<Value> {
+        let cell = cell.lock();
+        if cell.lent[0] {
+            return Err(changing_cell(span));
+        }
+        Ok(cell.values[0].clone())
+    }
+
     /// The value of local `id`, or what its cell holds. A cell lent to a change in progress
     /// is a defect to read, which the checker rules out.
     fn local(&self, id: LocalId, frame: &Frame, span: Span) -> Flow<Value> {
         match &frame[id.index()] {
-            Value::Cell(cell) => {
-                let cell = cell.lock();
-                if cell.lent[0] {
-                    return Err(changing_cell(span));
-                }
-                Ok(cell.values[0].clone())
-            }
+            Value::Cell(cell) => self.cell_value(cell, span),
             value => Ok(value.clone()),
         }
     }
