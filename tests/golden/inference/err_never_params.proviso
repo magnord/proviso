@@ -1,7 +1,7 @@
 // phase: 3.7
 // expect-error: E0301
 // Where `fn(Int) -> Int` and `fn(Never) -> Int` meet, in a branch, a collection or a type
-// argument, the result takes what either takes, which is `Never`, so it is `fn(Never) -> Int`
+// argument, the result takes only what both take, which is `Never`, so it is `fn(Never) -> Int`
 // whichever comes first (OPEN_QUESTIONS P5). Each group writes one meeting in both orders, and
 // calling the result with an `Int` shows its type. A closure whose parameter has no written
 // type takes the parameter of the value before it.

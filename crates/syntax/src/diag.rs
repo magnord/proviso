@@ -164,7 +164,7 @@ pub mod codes {
         MISSING_RETURN = "E0304", "missing_return",
             "Every path of a non-Unit function ends with an explicit `return` (REFERENCE §2).";
         IMMUTABLE_ASSIGNMENT = "E0305", "immutable_assignment",
-            "An assignment to a `let` binding, a parameter or a loop variable, or to a part of one, or a method that changes its receiver, such as `push`, or an `&` argument, on one (REFERENCE §5.2). A `state` field is the exception, which a method of its `cap record` changes through a plain `self`, even a borrowed one, outside the observes-only view (REFERENCE §9.6; OPEN_QUESTIONS P5).";
+            "An assignment to a `let` binding, a parameter or a loop variable, or to a part of one, or a method that changes its receiver, such as `push`, or an `&` argument, on one (REFERENCE §5.2). A `state` field is the exception, which a method of its `cap record` changes through a plain `self`, even a borrowed one, outside the observes-only view (REFERENCE §9.6; OPEN_QUESTIONS P5). A closure passed to a `keep fn` parameter can't change what it captures (REFERENCE §6.7).";
         UNSUPPORTED_OPERATOR = "E0306", "unsupported_operator",
             "An operator or interpolation that the operand's type doesn't support, a literal or range pattern that the matched type doesn't support, such as a `Float` literal (REFERENCE §12.2), an index on anything but a list or a pool, or a change to a pool's element through `pool[h]` (STD.md).";
         UNKNOWN_TYPE = "E0307", "unknown_type",
@@ -219,7 +219,7 @@ pub mod codes {
         LENT_VALUE_MOVED = "E0504", "lent_value_moved",
             "A borrowed or `inout` value of a unique type, or a part of one, is moved: bound to a new name, assigned, returned, stored in a value, passed to `take`, consumed by `for … in take`, or by a `take self` method or `with` (REFERENCE §5.1, §5.2). An arm's scrutinee and what its pattern binds are lent to the arm's guard, and a record's fields to its refinements, so moving them there is the same mistake (OPEN_QUESTIONS P5).";
         OVERLAPPING_ACCESS = "E0505", "overlapping_access",
-            "Two accesses to one variable overlap in a call while one of them is `inout`, such as `swap(a: &x, b: &x)` or a closure argument that captures `x` beside `&x`, or a value is moved or changed while a call, its own index or a guard has it lent, as a unique argument or a local that a closure argument or the called function value captures (REFERENCE §5.3; OPEN_QUESTIONS P5).";
+            "Two accesses to one variable overlap in a call while one of them is `inout`, such as `swap(a: &x, b: &x)` or a closure argument that captures `x` beside `&x`, or a value is moved or changed while a call, its own index or a guard has it lent, as a unique argument or a local that a closure argument or the called function value captures, or a `var` is used while a value holds a closure that changes it (REFERENCE §5.3; OPEN_QUESTIONS P5).";
         INOUT_MARKER_MISMATCH = "E0506", "inout_marker_mismatch",
             "An argument for an `inout` parameter without `&`, or `&` on an argument whose parameter isn't `inout` (REFERENCE §5.2, H5).";
         RESOURCE_NOT_CONSUMED = "E0507", "resource_not_consumed",
@@ -227,7 +227,7 @@ pub mod codes {
         RESOURCE_DISCARDED = "E0508", "resource_discarded",
             "A resource is overwritten or discarded: assigned over, or produced by an expression that nothing consumes (REFERENCE §10).";
         FUNCTION_VALUE_ESCAPES = "E0509", "function_value_escapes",
-            "A value that can hold a function value goes where it could outlive what it captures: it is returned, failed with, stored in a place that outlives it, passed to a `keep` parameter, captured by a `keep fn` closure, or given by a block, branch or arm that declares a local it captures (REFERENCE §6.7; OPEN_QUESTIONS Q34, P5).";
+            "A value that can hold a function value goes where it could outlive what it captures: it is returned, failed with, stored in a place that outlives it, passed to a `keep` parameter or as a `keep self` receiver, captured by a `keep fn` closure, or given by a block, branch or arm that declares a local it captures (REFERENCE §6.7; OPEN_QUESTIONS Q34, P5).";
         EFFECTS_CALL_IN_OBSERVES = "E0601", "effects_call_in_observes",
             "An operation that needs only `observes` permissions calls an `effects` operation (REFERENCE §9.2). It sees `self` through the observes-only view, where a capability on a path from `self` has its `observes` permissions only, so a call of an operation it then lacks, an `only` that keeps one, or passing it where the full type is expected, is reported here (REFERENCE §9.6; OPEN_QUESTIONS Q39).";
         REACH_NOT_ADMITTED = "E0602", "reach_not_admitted",
@@ -241,7 +241,7 @@ pub mod codes {
         NOT_A_CAP_RECORD = "E0606", "not_a_cap_record",
             "An `impl` of a capability interface for a type that isn't a `cap record`. Only a `cap record` implements one, so its values are handles whose copies share `state` (REFERENCE §9.6; OPEN_QUESTIONS Q30).";
         BORROWED_RETAINED = "E0607", "borrowed_retained",
-            "A borrowed value with reach, which comes from a parameter without `keep` or is derived from one, is retained: returned, failed with, stored in a place that outlives the call, passed to a `keep` parameter or captured by a `keep fn` closure (REFERENCE §9.3; OPEN_QUESTIONS P5).";
+            "A borrowed value with reach, or of a type parameter without `Copy`, which comes from a parameter without `keep` or is derived from one, is retained: returned, failed with, stored in a place that outlives the call, passed to a `keep` parameter or as a `keep self` receiver, or captured by a `keep fn` closure (REFERENCE §9.3; OPEN_QUESTIONS P5).";
 
         UNMARKED_FALLIBLE_CALL = "E0701", "unmarked_fallible_call",
             "A call that can fail must be marked with `try`, `else` or `attempt` (REFERENCE §7.2).";

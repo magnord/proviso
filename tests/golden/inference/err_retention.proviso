@@ -3,7 +3,7 @@
 // expect-error: E0607
 // Where a borrowed and a kept value meet, in a branch, a collection or a type argument, the
 // result lives as long as the shorter lived of them, whichever comes first (OPEN_QUESTIONS P5).
-// So does a closure that captures a local against one that captures nothing. Each group writes
+// So does a closure that captures a parameter against one that captures nothing. Each group writes
 // one meeting in both orders. Two kept values, or two closures that capture nothing, may be
 // kept in either order.
 use std.io { Out }
