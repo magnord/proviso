@@ -155,6 +155,7 @@ pub(crate) fn check(
             excused: HashSet::new(),
             captured: Vec::new(),
             fn_reads: HashMap::new(),
+            fn_read_sets: HashMap::new(),
             listed: Vec::new(),
             expands: 0,
             origins: vec![None; locals.len()],
@@ -597,7 +598,10 @@ struct Walk<'a> {
     /// capture, and what those read in turn, with their names, however the closures got
     /// there. A `let` local listed here is left out of the lists, since nothing can move it
     /// or give it a new value, but a `var` can still be passed with `&` (§5.3).
-    fn_reads: HashMap<LocalId, Arc<[Read]>>,
+    fn_reads: HashMap<LocalId, Arc<Vec<Read>>>,
+    /// The locals in each list of [`Walk::fn_reads`] that a store added to, so a store
+    /// adds to one in the time what it adds takes.
+    fn_read_sets: HashMap<LocalId, HashSet<LocalId>>,
     /// For each local, the last [`Walk::expand`] that listed it, so each lists it once.
     listed: Vec<u32>,
     expands: u32,
@@ -2954,19 +2958,15 @@ impl Walk<'_> {
     /// Notes that a call of the function values `local` holds may read `reads` too. A loop
     /// is walked again when the list grows, as when an origin does.
     fn add_reads(&mut self, local: LocalId, reads: Reads) {
-        let held = self.fn_reads.get(&local);
-        let mut all: Reads = held.map(|held| held.to_vec()).unwrap_or_default();
-        let before = held.map(|held| held.len());
-        for read in reads {
-            if !all.iter().any(|(l, _)| *l == read.0) {
-                all.push(read);
-            }
-        }
-        if before != Some(all.len()) {
-            if before.is_some() {
-                self.grown += 1;
-            }
-            self.fn_reads.insert(local, all.into());
+        let Some(held) = self.fn_reads.get_mut(&local) else {
+            self.fn_reads.insert(local, Arc::new(reads));
+            return;
+        };
+        let known = self.fn_read_sets.entry(local).or_insert_with(|| held.iter().map(|(l, _)| *l).collect());
+        let new: Vec<Read> = reads.into_iter().filter(|(l, _)| known.insert(*l)).collect();
+        if !new.is_empty() {
+            Arc::make_mut(held).extend(new);
+            self.grown += 1;
         }
     }
 
