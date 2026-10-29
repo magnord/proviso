@@ -96,6 +96,20 @@ fn messages_name_what_they_mean() {
     }
 }
 
+/// A `try` in a closure that waits for an unmarked call inside it names the closure, not the
+/// function or test around it, as one that doesn't wait does (REFERENCE §7.2; issue #74).
+#[test]
+fn a_waiting_try_names_its_closure() {
+    let file = source(
+        "waiting.proviso",
+        "enum Bad {\n    Oops\n}\n\nfn pick[T](a: fn() -> Int fails T) -> List[T] fails T {\n    let n = try a()\n    return []\n}\n\nfn wrap[T](xs: List[T]) -> Int {\n    return 0\n}\n\nfn boom(n: Int) -> Int fails Bad {\n    fail Bad.Oops\n}\n\nfn run_it(f: fn() -> Int) -> Int {\n    return f()\n}\n\nfn outer() -> Int {\n    let g: fn() -> Int = || try boom(n: wrap(xs: pick(a: || 1)))\n    return run_it(f: || try boom(n: wrap(xs: pick(a: || 1))))\n}\n\ntest \"t\" {\n    let n = run_it(f: || try boom(n: wrap(xs: pick(a: || 1))))\n}\n",
+    );
+    let errors = stderr(&run(&["check"], &file));
+    let message = "`try` propagates `Bad`, but the function type of this closure has no `fails Bad`";
+    assert_eq!(errors.matches(message).count(), 3, "{errors}");
+    assert_eq!(errors.matches("error[").count(), 3, "{errors}");
+}
+
 /// `debug` writes another module's `IoError` as its `show` does, without the name of the
 /// field that `std.io` keeps to itself (OPEN_QUESTIONS P5).
 #[test]

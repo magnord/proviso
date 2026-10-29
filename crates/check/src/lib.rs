@@ -8909,8 +8909,12 @@ impl Checker<'_> {
         }
         if self.f.fails.is_none() && !errors.is_empty() {
             // Error types the statement has yet to settle are reported with the types it
-            // settles, and nothing else reports one that nothing gives.
-            if errors.iter().chain(watch.iter().map(|(ty, _)| ty)).any(|err| self.vars.has_var(err)) {
+            // settles, and nothing else reports one that nothing gives. Calls that fail with
+            // `Never` wait for the unmarked calls inside them too.
+            let never = errors.iter().all(|err| self.vars.resolve(err) == Ty::Never);
+            if errors.iter().any(|err| self.vars.has_var(err))
+                || (never && watch.iter().any(|(ty, _)| self.vars.has_var(ty)))
+            {
                 errors.iter().for_each(|err| self.vars.owe(err));
                 self.pending.push(Pending::Try { errs: errors, watch, rejected, span });
             } else {

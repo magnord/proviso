@@ -1,6 +1,7 @@
 // phase: 3.6
 // expect-error: E0312
 // expect-error: E0701
+// expect-error: E0702
 // expect-error: E0703
 // expect-error: E0706
 // expect-error: E0707
@@ -12,7 +13,8 @@
 // `else` or example's `fails` around the outer call is reported once the statement settles
 // it (§7.2). One whose error a later value in the statement widens can fail, and the marker
 // may have been meant for it, so only the missing marker is reported (§15.1, issue #74),
-// whatever the order of the arguments that widen it.
+// whatever the order of the arguments that widen it. A `try` whose call fails with a known
+// type is reported where it is, as in a closure without `fails` (cli.rs has the message).
 enum Bad {
     Oops
 }
@@ -98,4 +100,16 @@ example relay(f: || relay(f: || wrap(xs: pick(a: || 1)))) fails _     // <- E070
 
 test "settled" {
     expect relay(f: || wrap(xs: pick(a: || 1))) fails _                 // <- E0708
+}
+
+fn boom(n: Int) -> Int fails Bad {
+    fail Bad.Oops
+}
+
+fn run_it(f: fn() -> Int) -> Int {
+    return f()
+}
+
+fn in_closure() -> Int {
+    return run_it(f: || try boom(n: wrap(xs: pick(a: || 1))))          // <- E0702
 }
