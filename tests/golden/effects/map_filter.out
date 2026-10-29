@@ -1,0 +1,10 @@
+[1, 4, 9, 16] [2, 4] ["<1>", "<2>", "<3>", "<4>"]
+[1, 22, 333] ["1", "22"]
+[5, 0]
+looking at 1
+looking at 2
+looking at 3
+looking at 4
+[2, 3, 4]
+Err(LoadError.BadNumber(line: "x"))
+[] []

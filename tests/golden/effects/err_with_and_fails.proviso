@@ -1,0 +1,32 @@
+// phase: 3.6
+// expect-error: E0710
+// expect-error: E0307
+// A `with E` function fails as `E` does, so it declares no `fails` of its own, and a function
+// type with `with E` has no `fails` or `uses` of its own (REFERENCE §9.5, Q2). The function
+// still propagates `E` unmarked. `with` names an effect parameter, and an effect parameter
+// is no type, so it can't be one's error or a parameter's type.
+use std.io { Out }
+
+enum Bad {
+    Oops
+}
+
+fn mixed[effect E](f: fn() with E) fails Bad with E {     // <- E0710
+    f()
+}
+
+fn mixed_type[effect E](f: fn() fails Bad with E) {}      // <- E0710
+
+fn mixed_uses[effect E](f: fn() with E uses Out) {}       // <- E0710
+
+fn type_param[T](f: fn() with T) {}                       // <- E0307
+
+fn undeclared(f: fn() with E) {}                          // <- E0307
+
+fn as_error[effect E](f: fn() fails E) {}                 // <- E0307
+
+fn as_type[effect E](x: E) {}                             // <- E0307
+
+fn as_result[effect E](f: fn() with E) -> List[E] {       // <- E0307
+    return []
+}

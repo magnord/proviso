@@ -1,11 +1,10 @@
 // phase: 2.9
 // expect-error: E0901
-// Later slices bring `with E` on a function type, effect variables, `keep fn` parameters and
-// `keep` parameters of function types, and phase 6 brings `scoped fn` (REFERENCE §9.4, §6.7).
-// So do closures that change a `var` they capture (§5.3), and the operations of `List` and
-// `Map` that take a closure, such as `map` and `filter`. `inout(partial)` parameters of
-// function types, and an `impl` for a function type, are not scheduled. A closure passed as
-// one checks its body without reporting what the rejected type would have given it (§15.1).
+// A later slice brings `keep fn` parameters and `keep` parameters of function types, and phase
+// 6 brings `scoped fn` (REFERENCE §9.4, §6.7). So do closures that change a `var` they capture
+// (§5.3). `inout(partial)` parameters of function types, and an `impl` for a function type,
+// are not scheduled. A closure passed as one checks its body without reporting what the
+// rejected type would have given it (§15.1).
 use std.io { Out }
 
 fn run(f: fn()) {
@@ -15,8 +14,6 @@ fn run(f: fn()) {
 fn bump(n: inout Int) {
     n = n + 1
 }
-
-fn effect_var(f: fn() with E) {}                    // <- E0901
 
 fn scoped_param(f: scoped fn()) {}                  // <- E0901
 
@@ -30,11 +27,6 @@ fn mutate() {
     var xs = [1]
     run(f: || xs.push(2))                           // <- E0901
     run(f: || bump(n: &n))                          // <- E0901
-}
-
-fn mapped(xs: List[Int]) {
-    let ys = xs.map(f: |x| x + 1)                   // <- E0901
-    let zs = xs.filter(f: |x| x > 1)                // <- E0901
 }
 
 enum Stop {

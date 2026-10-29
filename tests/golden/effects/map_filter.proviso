@@ -1,0 +1,57 @@
+// phase: 3.6
+// `map` and `filter` take a closure that may fail and may reach a capability, and fail and
+// reach as it does, so a call is fallible exactly when its closure is (REFERENCE §9.5). The
+// two calls of §9.5 are in `users` and `sizes`.
+use std.fs { Dir, Path, FsError }
+use std.io { Out }
+
+enum LoadError derives(Show) {
+    BadNumber(line: Text)
+    Io(cause: FsError)
+}
+
+fn parse(line: Text, line_no: Int) -> Int fails LoadError {
+    return Int.parse(line) else fail LoadError.BadNumber(line: line)
+}
+
+fn users(lines: List[Text]) -> List[Int] fails LoadError {
+    let loaded = try lines.map(|l| try parse(line: l, line_no: 0))
+    return loaded
+}
+
+fn sizes(dir: Dir[read], names: List[Path]) -> List[Int] {
+    return names.map(|n| dir.size(n) else 0)
+}
+
+fn noisy(out: Out, xs: List[Int]) -> List[Int] {
+    return xs.filter(|x| {
+        out.write_line(f"looking at {x}") else ()
+        x > 1
+    })
+}
+
+fn small(lines: List[Text]) -> List[Text] fails LoadError {
+    return try lines.filter(|l| {
+        let n = try parse(line: l, line_no: 0)
+        n < 100
+    })
+}
+
+pub fn main(sys: keep System) fails LoadError {
+    let out = sys.stdout
+    let xs = [1, 2, 3, 4]
+    let squares = xs.map(|x| x * x)
+    let evens = xs.filter(|x| x % 2 == 0)
+    let shown = xs.map(f: |x| f"<{x}>")
+    out.write_line(f"{squares} {evens} {shown}") else ()
+    let lines = ["1", "22", "333"]
+    out.write_line(f"{try users(lines)} {try small(lines)}") else ()
+    let dir = sys.fs
+    dir.write_text(path: Path("a.txt"), text: "hello") else fail LoadError.Io(cause: it)
+    out.write_line(f"{sizes(dir: dir, names: [Path("a.txt"), Path("missing")])}") else ()
+    out.write_line(f"{noisy(out: out, xs: xs)}") else ()
+    let bad = attempt users(["7", "x", "8"])
+    out.write_line(f"{bad}") else ()
+    let empty: List[Int] = []
+    out.write_line(f"{empty.map(|x| x + 1)} {empty.filter(|x| x > 0)}") else ()
+}

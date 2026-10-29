@@ -2,10 +2,10 @@
 
 This file lists the standard library items that phases 1 and 2 implement (OPEN_QUESTIONS Q36, P3). Each item is written as its declaration without a body. From phase 4, `proviso sig std` serves the same information from the installed toolchain (REFERENCE §16), and this file goes away.
 
-- **Source.** From slice 3.4, the toolchain reads these declarations from Proviso source in `crates/check/std/`, one file per module. It binds each declaration without a body to an operation it implements (OPEN_QUESTIONS P5). The sources hold the items here that the toolchain implements, without their contracts, which wait for the verifier. `Set` stays E0901, and the checker still implements `parse` and the conversions itself.
-- **Phase 1** already has `System.stdout`, `Out.write_line` and `IoError`. Slice 3.1 adds `In.read_line` and the permissions of `Out` and `In`, and slice 3.5 adds `std.fs`, `System.fs` and `std.test`. Everything else here is phase 2.
+- **Source.** From slice 3.4, the toolchain reads these declarations from Proviso source in `crates/check/std/`, one file per module. It binds each declaration without a body to an operation it implements (OPEN_QUESTIONS P5). `List.map` and `List.filter` have bodies there, written in Proviso as §9.5 writes `map`. The sources hold the items here that the toolchain implements, without their contracts, which wait for the verifier. `Set` stays E0901, and the checker still implements `parse` and the conversions itself.
+- **Phase 1** already has `System.stdout`, `Out.write_line` and `IoError`. Slice 3.1 adds `In.read_line` and the permissions of `Out` and `In`, slice 3.5 adds `std.fs`, `System.fs` and `std.test`, and slice 3.6 adds `List.map` and `List.filter`. Everything else here is phase 2.
 - **Contracts.** An `ensures` clause is listed where the verifier will need it (phase 5). The other items get theirs when `sig` exists (phase 4, T11). The toolchain implements these items natively and trusts them to meet their contracts, so the v1 profile doesn't check std contracts at runtime.
-- **Later phases.** `map`, `filter` and the other operations that take a closure that may fail need effect variables (§9.5), which arrive in slice 3.6. `File`, `Dir.sub`, `FakeClock`, `FakeNet` and `SeededRandom` are not yet scheduled (Q6, Q36).
+- **Later phases.** `File`, `Dir.sub`, `FakeClock`, `FakeNet` and `SeededRandom` are not yet scheduled (Q6, Q36). `Pool.update`'s `change` has no `with E` yet, so it may not fail or reach, and that is not yet scheduled (OPEN_QUESTIONS P5).
 
 ## The prelude
 
@@ -91,6 +91,10 @@ impl[T] List[T] {
     /// Removes the last element and returns it. The caller owns it (Q35). Returns `None` if the list is empty.
     pub fn pop(inout self) -> Option[T]
         ensures result is None or self.len() == old(self.len()) - 1
+
+    /// `f` of each element, in order. It fails and reaches as `f` does, and stops at the first failure.
+    pub fn map[B, effect E](self, f: fn(T) -> B with E) -> List[B] with E
+        ensures result.len() == self.len()
 }
 
 impl[T: Copy] List[T] {
@@ -99,6 +103,11 @@ impl[T: Copy] List[T] {
 
     /// Each element with its index, starting at 0.
     pub fn enumerate(self) -> List[(Int, T)]
+
+    /// The elements for which `f` is true, in order. It fails and reaches as `f` does, and
+    /// stops at the first failure. It copies the elements it keeps, so it needs `T: Copy`.
+    pub fn filter[effect E](self, f: fn(T) -> Bool with E) -> List[T] with E
+        ensures result.len() <= self.len()
 }
 
 impl[T: Eq] List[T] {

@@ -1,0 +1,42 @@
+// phase: 3.6
+// expect-error: E0701
+// expect-error: E0703
+// expect-error: E0706
+// expect-error: E0707
+// A call of a `with E` function is marked where `E` is concrete, as any call is (REFERENCE
+// §9.5, §7.2). With a closure that can fail it must be marked, and with one that can't, a
+// marker is an error, also where the function's own `fails` could have given `E`. Inside the
+// `with E` function, only its own body calls through `E` unmarked, so a closure in it marks
+// the call it makes.
+enum Bad {
+    Oops
+}
+
+fn check_it(n: Int) -> Int fails Bad {
+    return n
+}
+
+fn apply[effect E](x: Int, f: fn(Int) -> Int with E) -> Int with E {
+    return f(x)
+}
+
+fn inner[effect E](f: fn(Int) -> Int with E) -> Int with E {
+    let a = apply(x: 1, f: |n| f(n))                    // <- E0701
+    let b = apply(x: 2, f: |n| try f(n))
+    return a + b
+}
+
+fn missing(xs: List[Int]) -> Int fails Bad {
+    let a = xs.map(|x| try check_it(x))                 // <- E0701
+    let b = xs.filter(|x| try check_it(x) > 0)          // <- E0701
+    let c = apply(x: 1, f: check_it)                    // <- E0701
+    return a.len() + b.len() + c
+}
+
+fn extra(xs: List[Int]) -> Int fails Bad {
+    let a = try xs.map(|x| x + 1)                       // <- E0703
+    let b = attempt xs.filter(|x| x > 0)                // <- E0706
+    let c = xs.map(|x| x * 2) else []                   // <- E0707
+    let d = try apply(x: 1, f: |n| n)                   // <- E0703
+    return a.len() + c.len() + d
+}

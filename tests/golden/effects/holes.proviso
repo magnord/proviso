@@ -1,0 +1,18 @@
+// phase: 3.6
+// flags: --incomplete
+// A `todo` hole in the closure passed for `E` may be filled with a call that fails, so it
+// leaves `E`'s error open, and a `try` around the call is accepted (Q25), as it is for a type
+// parameter's `fails T`.
+enum Bad {
+    Oops
+}
+
+fn apply[effect E](f: fn() -> Int with E) -> Int with E {
+    return f()
+}
+
+fn holes(xs: List[Int]) -> Int fails Bad {
+    let a = try apply(f: || todo)
+    let b = try xs.map(|x| todo)
+    return a + b.len()
+}

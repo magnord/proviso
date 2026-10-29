@@ -659,6 +659,22 @@ impl Vars {
         !found.is_empty()
     }
 
+    /// Settles `ty` as `Never` where it is a variable that only `Never` has reached, so no
+    /// later place widens it. An effect parameter's error part comes from the arguments
+    /// alone (REFERENCE §9.5). A literal's variable keeps its default, as a literal does.
+    pub fn close_never(&mut self, ty: &Ty) {
+        if let Ty::Var(v) = self.resolve(ty)
+            && self.open(v).is_some_and(|open| open.never && open.kind == Kind::Any)
+        {
+            self.settle(v, Ty::Never);
+        }
+    }
+
+    /// Whether `ty` is a variable that only `Never` has reached.
+    pub fn only_never(&self, ty: &Ty) -> bool {
+        matches!(self.resolve(ty), Ty::Var(v) if self.open(v).is_some_and(|open| open.never))
+    }
+
     /// Settles open variable `v`'s class as `ty`.
     pub fn settle(&mut self, v: u32, ty: Ty) {
         let root = self.root(v);

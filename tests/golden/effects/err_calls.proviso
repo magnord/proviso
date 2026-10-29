@@ -1,0 +1,57 @@
+// phase: 3.6
+// expect-error: E0301
+// expect-error: E0309
+// expect-error: E0317
+// expect-error: E0602
+// expect-error: E0701
+// expect-error: E0702
+// `filter` copies the elements it keeps, so it needs `T: Copy` (OPEN_QUESTIONS P5). `::[…]`
+// gives a function's type parameters and not its effect parameters, which the closure gives.
+// A rejected closure leaves `E` unknown, so the call is marked as one that can fail
+// (inference/err_try). `Pool.update`'s `change` has no `with E`, so it admits no closure that
+// reaches or fails.
+use std.io { Out }
+use std.pool { Pool }
+
+unique record Token {
+    id: Int
+}
+
+fn apply[A, effect E](x: A, f: fn(A) -> A with E) -> A with E {
+    return f(x)
+}
+
+fn keeps(tokens: List[Token]) -> Int {
+    let mapped = tokens.map(|t| t.id)
+    let kept = tokens.filter(|t| t.id > 0)              // <- E0309
+    return mapped.len()
+}
+
+fn targs() -> Int {
+    let a = apply::[Int](x: 1, f: |n| n + 1)
+    let b = apply::[Int, Int](x: 2, f: |n| n)           // <- E0317
+    return a
+}
+
+fn mistyped(xs: List[Int]) -> Int {
+    let ys = xs.map(f: |x: Text| x)                     // <- E0701, E0301
+    return 0
+}
+
+fn updates(out: Out) fails Bad {
+    var pool: Pool[Int] = Pool.new()
+    let h = pool.insert(1)
+    let changed = pool.update(handle: h, change: |n| {  // <- E0602
+        out.write_line("changing") else ()
+        n + 1
+    })
+    let failed = pool.update(handle: h, change: |n| try fallible(n)) // <- E0702
+}
+
+enum Bad {
+    Oops
+}
+
+fn fallible(n: Int) -> Int fails Bad {
+    return n
+}

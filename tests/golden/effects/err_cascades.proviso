@@ -1,0 +1,69 @@
+// phase: 3.6
+// expect-error: E0101
+// expect-error: E0201
+// expect-error: E0210
+// expect-error: E0301
+// expect-error: E0312
+// expect-error: E0701
+// expect-error: E0710
+// A mistake in an argument for `E` may have meant a closure that can fail, so it leaves
+// `E`'s error open, and the `try` around the call isn't reported, as for a type parameter's
+// `fails T` (REFERENCE §15.1). Nor is it after an unmarked call that a nested call reports
+// once the statement settles. A name declared twice means its first declaration, effect or
+// not, and a second `with` is reported alone. An effect parameter nothing gives is named
+// once, without `::[…]`, which doesn't give it. One no parameter mentions after a rejected
+// `with` stands for an unknown type, so a call of it is marked as one whose error type is
+// unknown (inference/err_try). A literal's error defaults to `Int`.
+enum Bad {
+    Oops
+}
+
+fn risky() -> Int fails Bad {
+    return 1
+}
+
+fn apply[effect E](f: fn() -> Int with E) -> Int with E {
+    return f()
+}
+
+fn both[effect E](f: fn() -> Int with E, g: fn() -> Int with E) -> Int with E {
+    return f() + g()
+}
+
+fn arguments(xs: List[Int]) -> Int fails Bad {
+    let a = try apply(f: || risky())                    // <- E0701
+    let b = try apply(f: || try nothere())              // <- E0201
+    let c = try both(f: 5, g: || 1)                     // <- E0301
+    let d = try both(f: || 1, g: 5)                     // <- E0301
+    let e = try xs.map(|x| xs.map(|y| try risky()))     // <- E0701
+    let f = try apply(f: || apply(f: || try risky()))   // <- E0701
+    return 0
+}
+
+fn first[effect E, E](f: fn() with E) {}                // <- E0210
+
+fn twice[effect E](f: fn() with E) with E with Nope {   // <- E0101
+    f()
+}
+
+fn named() {
+    let h = apply                                       // <- E0312
+}
+
+fn rejected[effect E](f: fn() fails Bad with E) -> Int with E {    // <- E0710
+    return 0
+}
+
+fn unused() -> Int {
+    let a = rejected(f: || 1)                           // <- E0701
+    return a
+}
+
+fn raise[T: Copy](e: T) -> Int fails T {
+    fail e
+}
+
+fn literal() -> Int {
+    let a = [1, 2].map(|x| try raise(e: 5))             // <- E0701
+    return a.len()
+}

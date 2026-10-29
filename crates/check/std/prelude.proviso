@@ -138,6 +138,15 @@ impl[T] List[T] {
     /// Removes the last element and returns it. The caller owns it (Q35). Returns `None` if
     /// the list is empty.
     pub fn pop(inout self) -> Option[T]
+
+    /// `f` of each element, in order. It fails and reaches as `f` does (§9.5).
+    pub fn map[B, effect E](self, f: fn(T) -> B with E) -> List[B] with E {
+        var out: List[B] = []
+        for x in self {
+            out.push(f(x))
+        }
+        return out
+    }
 }
 
 impl[T: Copy] List[T] {
@@ -146,6 +155,18 @@ impl[T: Copy] List[T] {
 
     /// Each element with its index, starting at 0.
     pub fn enumerate(self) -> List[(Int, T)]
+
+    /// The elements for which `f` is true, in order. It fails and reaches as `f` does, and
+    /// copies the elements it keeps, so it needs `T: Copy` (OPEN_QUESTIONS P5).
+    pub fn filter[effect E](self, f: fn(T) -> Bool with E) -> List[T] with E {
+        var out: List[T] = []
+        for x in self {
+            if f(x) {
+                out.push(x)
+            }
+        }
+        return out
+    }
 }
 
 impl[T: Eq] List[T] {
