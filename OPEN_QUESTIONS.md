@@ -274,6 +274,13 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
   - `FsError` is an enum with `NotFound(path: Path)`, `PermissionDenied(path: Path)` and `Other(message: Text)`, deriving `Eq` and `Show`, as §17's `LoadError` needs.
   - `MemDir.with_files(files: Map[Text, Text]) -> Dir[read, list, write, create, delete]`, so §17's map literal with text keys fits.
   - `File` moves to not yet scheduled. No phase 3 row uses it, and the reference gives it a type (§10) but no operations.
+- **Decided for phase 4:** `proviso sig std` serves what STD.md says, and STD.md goes away, with its prose moved into doc comments (ref §16, P4).
+  - Every public std function has a doc comment and at least one contract, or `ensures(doc) "none"` (§16). The `ensures` clauses STD.md lists move into the std sources.
+  - The interfaces' methods, such as `Show.show` and `Dir.read_text`, get doc comments and no clauses. Otherwise every implementation would have to restate them (Q43), and a derived one can't. §16's rule is read as covering functions and methods that have an implementation.
+  - A std function without a body is native. Its `requires` run on entry, as §8.4 defines `requires(checked)`. Its `ensures` don't run, and `sig` labels them `[trusted]`, as §17 trusts the runtime's `Dir`. A std function with a body, such as `List.map`, runs its clauses like user code.
+  - `parse` is declared once per integer type in the prelude.
+  - A marker interface `Integer` joins the prelude. The eight integer types meet it, and nothing implements it by hand, as with `Copy` (§5.1). The conversions are declared with it, as in `fn try_from[S: Integer](value: S) -> Int32 fails ConversionError`, and behave as P5 "Conversions" says. It has to be in the prelude, because an `impl` of a prelude type sits in the prelude and the prelude can't import a plain interface (P5). Ref §3's prelude list gains it.
+  - `List` gains `is_sorted`, `is_permutation_of` and `is_unique`, which §8.1 and §8.2 use in contracts, written in Proviso. Each takes `T: Ord`, because §8.2's `sort[T: Ord]` uses `is_permutation_of` and `Ord` doesn't imply `Eq` (P5 "Derived Ord"). They compare with `cmp`.
 
 **Q37 — Building a `Set`.** Found by the collections goldens (§G).
 - **Now:** STD.md declares `Set` and its methods for phase 2. REFERENCE §2 gives literals only for lists and maps, and nothing declares a constructor, so no program can build one.
@@ -304,6 +311,49 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Unclear:** inside a parameter list, `fn(fn() uses Dir[read], Int)` could read `Int` as a second capability or as the next parameter.
 - **Decided for phase 3:** `uses` takes one capability type, or several in parentheses, as in `uses (Dir[read], Out)`. A function declaration has no `uses` clause, since its parameters carry its authority (§9.2), so `uses` there is a syntax error.
 
+**Q42 — Contracts before the verifier.** Found while planning phase 4.
+- **Now:** until phase 5, clauses that would be `[verified]` are checked at runtime and labelled `[checked]` (P3 "The v1 profile", ref §8.4).
+- **Unclear:** what each level does at runtime, when `old` is evaluated, and what a clause may contain. Phase 5 stops running `[verified]` clauses, so any effect a clause has in v1 would vanish when the verifier lands.
+- **Decided for phase 4:**
+  - `requires P` and `requires(checked) P` run on entry, after the arguments are bound. They run in the entry path that every call shares. That includes generic calls, handle calls, function values, and the implicit calls of `==`, `<`, `f"{x}"`, `abandon` and a closure that a native calls. A false one is the defect `requires_failed`, reported at the call, or at the expression that made an implicit call (§8.4).
+  - `ensures P` and `ensures(checked) P` run on each successful return. A false one is `ensures_failed`. A failure exit runs none, since `on failure` describes failures separately (§15.5).
+  - `(tested)` and `(doc)` clauses never run. `ensures(trusted)` needs `extern` (§13), so it stays not yet scheduled.
+  - A `(` right after `requires` or `ensures` that holds one level word is a level, whatever the spacing.
+  - `old(e)` is allowed only in `ensures`. It is evaluated on entry, after the `requires`. It needs no `Copy`, because the snapshot is a ghost value that only the clause reads, and abandonment never sees it.
+  - `result` in `ensures` is the success value, `()` for a `Unit` function. A function with `ensures` may not have a parameter named `result`. Elsewhere `old` and `result` are ordinary names (§2).
+  - A clause sees the parameters as lent. It may not move or change them, `try`, `fail`, `return`, `debug`, or call a function value. A `take` parameter, which the body may consume, appears in `ensures` only inside `old`.
+  - No subexpression of a clause may have a type with reach. A type parameter in a clause is checked at each call, against its type argument. So §8.2's `sort[T: Ord]` stays legal, and sorting a list of capabilities with it doesn't. Other calls are fine, as in a refinement (P5 "Calls in refinements").
+  - A `pub` function's clause may not mention a private type (§3).
+  - A function with clauses may be a function value. Its clauses run whenever it is called.
+  - A defect inside a clause is reported as itself and traced to the clause, as for refinements.
+  - A loop `invariant` may not name the loop's own bindings. It runs before the first iteration and after each iteration, including one that ends in `continue`, and not after `break`. A false one is `invariant_failed`.
+  - `all i in r: P` and `any i in r: P` iterate a range and stop at the first answer. The body extends as far right as it can, as `fail e` does, and a line that ends with its `:` continues the statement.
+  - Each turn of a quantifier and each check of an invariant counts as a loop turn for an example's fuel.
+- **Rejected for phase 4:** allowing `observes` calls in clauses, which would make a contract depend on the outside world and replay would have to log it. Also rejected is treating an open type parameter as reach, which would reject §8.2's own `sort`.
+
+**Q43 — Comparing interface and implementation contracts.** Found while planning phase 4.
+- **Now:** an implementation takes the interface's `requires` "exactly as written" and provides each `ensures` at the interface's level or a stronger one, where `[tested]` or `[doc]` may become `[checked]` or `[verified]` (ref §4.9).
+- **Unclear:** how two clauses are compared, and how an implementation can provide an `ensures(doc) "…"`, whose text no checker can relate to a predicate.
+- **Decided for phase 4:**
+  - Two clauses are the same when their levels match and their predicates are the same tree with the same resolved names. Text would be wrong across modules, where the same text can name other symbols. Parameter names already match (E0314).
+  - `requires` clauses must match in order (E0414).
+  - Each interface `ensures` must appear in the implementation at the same or an allowed stronger level. An implementation may add its own. A missing or weaker one is a new code.
+  - An interface's `ensures(doc) "…"` is met by the same clause, or by any `[checked]` or `[verified]` clause the implementation adds. This is the open weakness in §4.9's rule.
+  - At runtime an implementation's own clauses run, and they include the interface's.
+- **Rejected for phase 4:** comparing `requires` as a set, and letting an implementation inherit the `ensures` it leaves out. Inheriting saves writing but hides a contract from the implementation's reader (§0, "nothing hidden").
+
+**Q44 — Ranges as values.** Found while planning phase 4.
+- **Now:** ref §2 lists a range among the collection literals, and §6.5 iterates ranges as it iterates lists. `in` tests ranges (§6.1, §8.1).
+- **Unclear:** a range's type, and what `in` accepts.
+- **Decided for phase 4:**
+  - A range of an integer type or `Char` is a value of a new built-in prelude type `Range[T]`. It is copyable, derives `Eq` and `Show`, and has `contains(value: T) -> Bool` and `is_empty() -> Bool`. `Show` writes it as its literal. Ref §3's prelude list and §4.2 gain it.
+  - The checker allows only integer and `Char` arguments, since a constraint on a type's own parameter is not yet scheduled (P5). The two ends settle `T` as a binary operator's operands do.
+  - `a..b` and `a..=b` stay different values, so `0..3 != 0..=2`.
+  - `for` iterates a `Range` value as it iterates a literal range. An inclusive range ending at the type's maximum doesn't overflow.
+  - `x in r` is `r.contains(x)`, and `r` must be a range. Collections use `contains`, which §8.1 lists apart from "`in` with ranges".
+  - A user type named `Range` becomes an error, as one named `Option` is.
+- **Rejected for phase 4:** ranges as syntax only, with no type, and `in` over lists, sets and maps.
+
 ## C. Tooling
 
 **T1 — Broken code.**
@@ -312,6 +362,8 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Risk:** if queries fail on broken code, agents fall back to grep exactly when they need help most.
 
 **T2 — Revision hashes.** Hash normalized text or the syntax tree? Do comments and doc comments count?
+- **Decided for phase 4:** a revision is the first six hex digits of FNV-1a 64 over the item's tokens, each taken as its kind and text. Doc comments count, since `sig` shows them. Other comments and whitespace don't, so `fmt` never changes a revision. FNV-1a needs no dependency.
+- **Still open:** whether structured edits (§15.4, past v1) need a hash that also covers comments, so that an edit sees any change as stale.
 
 **T3 — Anchors for nested positions.** How do symbol-relative anchors address closures, `match` arms and loop bodies stably?
 
@@ -331,6 +383,26 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 **T6 — `diff-contracts` classification.**
 - **Need:** precise rules for BREAKING, WEAKENED, STRENGTHENED, AUTHORITY and TRUST.
 - **Need:** a way to derive "on failure" guarantees mechanically.
+- **Decided for phase 4:**
+  - `proviso diff-contracts <old file> <new file>` compares the public items of two versions of one module, matched by name, ignoring the module names. `A..B` revisions need git and are not yet scheduled.
+  - "On failure" is derived from the signature. Rollback comes from parameter modes and resources (§5.4), and an `inout` that reaches a `cap record` is rolled back except for its `state` (§9.6). "No writes outside the program" holds when the authority has no `effects` permission and no open reach, such as a type parameter without `Copy`. Q7 has no transaction model, so no external write is undone.
+  - Each change is classified by what it does to a caller or an implementor. The rows are ordered, and the first row that matches wins. A change of permissions, `uses`, `keep` or `inout(partial)` is classified by its own rows, not as a retyped parameter. Variance flips for a parameter of function type, so widening its `uses` grants authority and narrowing it breaks callers.
+
+    | Change | Class |
+    |---|---|
+    | a permission, `uses` or `keep` that a parameter needs widened, so some callers no longer fit | `BREAKING` |
+    | a permission, `uses` or `keep` narrowed, so every caller still fits and the function may do less; or a function-typed parameter's `uses` widened, so it may do more | `AUTHORITY` |
+    | `inout` became `inout(partial)` | `WEAKENED` |
+    | `inout(partial)` became `inout` | `STRENGTHENED` |
+    | item removed or made less visible; any other change of a parameter, its mode, a type or effect parameter, a constraint, the result or the error type; a field or variant of a `pub` record or enum added, removed or changed; `opaque` added; a kind changed; a `derives` entry removed; `needs` changed; a refinement added or changed; `requires` added, changed or raised; an interface method or its clauses changed | `BREAKING` |
+    | `ensures` removed, changed or lowered; `[tested]` became `[doc]`; "no writes outside the program" lost; a refinement removed | `WEAKENED` |
+    | a new `trusts` line | `TRUST` |
+    | `ensures` added or raised; `[doc]` became `[tested]`; `requires` removed or lowered; a `trusts` line removed; "no writes outside the program" gained; a `derives` entry added | `STRENGTHENED` |
+
+  - An item's class is its most severe line, in the order `BREAKING`, `WEAKENED`, `AUTHORITY`, `TRUST`, `STRENGTHENED`. An added item is listed with `+` and no class.
+  - A changed predicate counts as removed and added, since only a verifier could tell whether one implies the other.
+  - The output is §15.5's format. Clauses show their written levels, as §15.5 does, unlike `sig`, so a weakening that phase 5 will enforce is visible already.
+  - The exit code is 0 whatever changed. A gate for CI is not yet scheduled.
 
 **T7 — Applying fixes.** Only fixes with `changes_behavior: false` may be applied automatically. Which kinds qualify (formatting, imports, adding a missing `try`?), and who decides?
 
@@ -350,6 +422,30 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 - **Now:** ref §17 shows `sig` output for three items.
 - **Need:** how `sig` shows an `inout` that holds a resource (§F row 14: "`sig` says so"), reach through data (a parameter whose records hold capabilities), and the `defects` line under the v1 profile. Also whether enums are listed: §17's output leaves out `pub enum LoadError`.
 - **Until then:** f14's `.sig` is matched loosely, line by line (tests/golden/README.md).
+- **Decided for phase 4:**
+  - **Command.** `proviso sig <file>` lists the module's `pub` items in source order, and `proviso sig <file> <item>` shows one item, public or not, named `name` or `Type.method`. `proviso sig std` lists every std module, and `proviso sig std.fs` one. The output is text only. A program with check errors prints its diagnostics and exits 65. A failing example doesn't change the exit code.
+  - **Enums are listed,** like every other `pub` item. P4's agent has only `sig std`, and it needs `FsError`'s and `ParseError`'s variants. So ref §17's output gains `pub enum LoadError`.
+  - **Layout.** The header is the declaration up to its `fails` or `with`, on one line with `fmt`'s spacing (T12). `rev` and its six digits start at column 82, as on §17's function lines, or two spaces after a longer header, so §17's record line moves to match. Then come the doc comment and, for a record that isn't `opaque`, its fields, indented four. Then come the labelled lines, in the order `requires`, `ensures`, `refinements`, `authority`, `on failure`, `trusts`, `examples` and `defects`. A label starts at column 5, its text at column 19, and its level at column 74, or two spaces after a longer text. A line with several entries continues on lines with an empty label. Items are separated by one blank line.
+  - **`authority`** is `none` when no parameter, `self` included, has or may have reach. Otherwise each such parameter is `name: Type`, then `reaches C, …` or `reaches what T reaches` when the type isn't itself a capability, then `observes only`, `effects (p, q)` or `effects unknown`, then `uses nothing` or `uses C, …`, then `kept` or `not kept`, at `[type]`. A type parameter without `Copy` and an effect parameter count as open reach.
+  - **`on failure`** appears when the function can fail and has an `inout` parameter or authority. It lists each `inout` parameter as `name: rolled back`, `name: rolled back except its state` or `name: inout(partial)`, or says `no inout parameters`. An `inout` that holds a resource shows as `inout(partial)` (§5.4, §F row 14). Then it says `no writes outside the program` or `may leave writes outside the program` (T6), at `[type]`.
+  - **`trusts`** is `the runtime's X honours its permissions`, one line for each capability interface in the authority that the runtime implements, at `[trusted]`.
+  - **`examples`** is `N passing` or `N of M passing`, at `[tested]`. `sig` runs them with fuel. v1 has no example cache (§14), so the word "cached" isn't printed.
+  - **`defects`** is `none`, or counts by kind followed by `checked at run time`, at `[checked]`. A site is any place in the item's own body where the v1 interpreter can report a defect, except the item's own clauses, which have lines of their own. The sites are integer `+`, `-`, `*`, `/`, `%`, unary `-` and their compound assignments; an index and `pool[h]`; `assert`, `unreachable` and `todo`; a construction, `with` or assignment of a refined type, an `&` argument that is part of a refined value, and a change through `.value`; a `match` whose integer patterns leave a gap; a handle call, which is checked for re-entry; and a call of a function with `requires`. Calls into other functions don't otherwise count, as `query defects f` lists only `f`'s own sites (§7.3).
+  - **`refinements`** is `checked at all N construction sites`, at `[checked]`.
+  - **Clauses** show their predicate and their v1 label, so `requires P` and `ensures P` show `[checked]` (§8.4). A native std function's `ensures` show `[trusted]` (Q36). An interface method's clauses show the weakest label among its implementations.
+  - **The milestone golden** differs from §17 in seven ways. Revision values differ (T2), and the record's revision moves to column 82. Every `[verified]` becomes `[checked]`, and `proven` becomes `checked`. `load_users`'s `defects` counts `i + 1` and the handle call `dir.read_text(path)`, and `parse_user`'s counts its construction of `User`. `examples` loses "cached". `LoadError` is listed, and fields lose their hand alignment (T12). The `[checked]` levels, the defect counts and "cached" are v1 limits, which phase 5 and an example cache remove. The column and the enum change §17 to match.
+  - **Still open:** whether a handle call's re-entry check belongs on the `defects` line. §17's `none unproven` for `load_users` implies it doesn't, yet no verifier can rule re-entry out, since it depends on the caller. Phase 4 counts it, so that `defects` never claims less than v1 checks.
+
+**T12 — The canonical format.** Found while planning phase 4.
+- **Now:** there is one canonical format, applied by `proviso fmt`, and `check` warns about a file that isn't in it (ref §15.1, §16). The reference doesn't say what the format is, and its own examples align fields, `needs` clauses and trailing comments by hand.
+- **Decided for phase 4:** `fmt` changes only whitespace and keeps every line break where the author put it, so no statement ends anywhere else (H8).
+  - **Indentation.** A line is indented four spaces for each earlier line that left brackets open. A line that opens several brackets, as `db.transaction(|tx| {` does, adds one level, and the line that closes them returns to it. A line that starts with a closing bracket takes the indentation of the line that opened it. A line that continues a statement (§2) outside any bracket gets one more level, and inside brackets none. A lone `{` that opens the body of the header above it takes the header's indentation.
+  - **Spacing.** One space goes around binary operators, `=`, compound assignments, `->`, `=>` and `else`, after `,`, and after the `:` of a label, a type annotation, a map entry or a quantifier. None goes before `,`, `:`, `)` or `]`, after `(` or `[`, around `.`, `::`, `..` or `..=`, before a `(` or `[` that follows a name or a closing bracket, or after unary `-` or `&`. A `-` is binary when the token before it ends an operand. A closure's `|` pair has no space inside and one after. A block on one line keeps one space inside each brace, and `{}` and `[]` stay empty. A pair no rule covers keeps the author's spacing, as no space or one. No space is removed where the two tokens would then lex differently. Two spaces go before a trailing comment.
+  - **Lines.** Trailing whitespace goes. Runs of blank lines become one, and a block starts and ends without one. The file ends with one newline. Nothing is aligned in columns, so a one-line edit never changes its neighbours (§E counts failed edit applications). Text inside a multi-line literal is never touched.
+  - **Safety.** `fmt` lexes its output again and compares the tokens, comments included, with the original. A difference is a toolchain bug, and the file is left as it was.
+  - **Warnings.** Only `proviso check` reports a non-canonical file, with the warning W0001, never `run` or `test`. A warning doesn't make a check unclean.
+  - The reference's examples keep their hand alignment. They aren't checked, and §17's `sig` block changes only as T11 says.
+- **Rejected for phase 4:** a pretty-printer that chooses line breaks by width. It would be fully canonical, but each break must respect §2's continuation rules, and comments must be reattached. `proviso edit` will need it, and that is past v1. Also rejected is gofmt-style alignment, which matches the reference's examples but realigns neighbouring lines on each edit.
 
 ## D. Process
 
@@ -372,7 +468,7 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 | 1. Pipeline | lexer, parser, names, scalar types and functions, `fails` and `try`, `assert`, `debug`, `todo`, `unreachable`, `proviso check`, an interpreter for `run` with a stub `System` that provides only `stdout`, the golden test runner | hello world and `fib` run; an `expect-error` golden passes |
 | 2. Data and ownership | records, enums, aliases and `distinct` types, methods, `impl` blocks, interfaces and generic functions, `match`, collections and tuples, `Option` and `Result`, `fail`, `else` and `attempt`, `check`, refinements checked at runtime, kinds and moves, `inout` atomicity, resources and `Abandon`, pools and handles, function types and closures with the default lifetime, `keep` parameters and capability-typed fields without retention checks, the std items in [STD.md](STD.md), `example`, `test` and `proviso test` | `parse_user` from the reference's worked example (§17) runs with its examples; §F rows 6–9, 14 and 15 pass |
 | 3. Authority | capabilities and permissions, `observes` and `effects`, `uses` and reach, effect variables, retention and `keep self`, closure lifetimes and captures, `cap record` state, `MemDir` written in Proviso | the whole §17 module runs, including its `MemDir` test; §F rows 4, 5, 11 and 13 pass |
-| 4. Contracts and tools | contracts under the v1 profile, interface contract rules, `sig`, `fmt`, `diff-contracts`, `in` tests and ranges outside `for` loops | `proviso sig` reproduces the reference's §17 output as a golden file; §F row 12 passes; the P4 criteria are first measured |
+| 4. Contracts and tools | contracts under the v1 profile, interface contract rules, `sig`, `fmt`, `diff-contracts`, `in` tests and ranges outside `for` loops | `proviso sig` gives the reference's §17 output under the v1 profile, as a golden file (T11); §F row 12 passes; the P4 criteria are first measured |
 | 5. Verifier | the predicate fragment over linear arithmetic, admissibility, refinements under mutation, generated validators and `Invalid` | §F rows 1–3, 16 and 17 are rejected at compile time; `sig` levels move from `[checked]` to `[verified]` |
 | 6. Concurrency and replay | `scope`, tasks, cancellation, channels, `supervise`, `--record` and `replay` | §F rows 10 and 18 pass; the §E cancellation task runs |
 
@@ -387,6 +483,13 @@ The **H** items are experiment variables. They are resolved by measurement (§E)
 `supervise` moved into phase 6, with tasks, for row 18. Effect variables (§9.5) are named in phase 3, where the implementation already planned them.
 
 **Decided for phase 3.** `MemDir` is written in Proviso, so phase 3 loads the std modules from Proviso source and checks several modules as one program (§3). A user program stays one file. `scoped fn` moves to phase 6, since a `scoped` closure lives until its `scope` ends, and `spawn` is where the reference passes one (§6.7, §11). The phase's slices are in [tests/golden/README.md](tests/golden/README.md).
+
+**Decided for phase 4.** The phase's slices are in [tests/golden/README.md](tests/golden/README.md).
+- **What moves in.** Loop invariants and the quantifiers `all` and `any` move from phase 5 to phase 4. The v1 profile checks at runtime every clause that would be `[verified]`, and §8.2 lists `invariant` among the contract clauses (Q42). `pred` functions stay in phase 5, since under the v1 profile a clause may call any function, so `pred` adds nothing until the verifier checks that a body stays in the fragment.
+- **The standard library.** `proviso sig std` serves what STD.md says now, and STD.md goes away in phase 4 (Q36).
+- **The milestone** is §17's `sig` output under the v1 profile. §17 claims `[verified]`, and v1 has no verifier, so the golden can't match it line for line (T11).
+- **Not yet scheduled:** `proviso query` (§15.2), which P3 placed nowhere. `sig`'s `defects` and `trusts` lines carry what P4 needs from `query defects` and `query trust`. Also not yet scheduled are `--json` for `sig`, `fmt` and `diff-contracts`, `A..B` revisions for `diff-contracts` (T6), and the example cache (§14).
+- **Goldens.** `.sig` files must match exactly from the slice that brings `sig`, as tests/golden/README.md already says. f14's `.sig` is regenerated in full there, and its two original lines must survive. A sibling `.fmt` file makes the runner format a program and compare, and formatting the `.fmt` again must change nothing. `// diff-contracts: <old file>` compares two versions of a module with a `.diff` file.
 
 **The v1 profile.** Until phase 5 there is no verifier. Clauses that would be `[verified]`, and refinements, are checked at runtime instead, and `sig` labels them `[checked]`. So v1 never claims a guarantee it doesn't enforce. The enforcement levels are what make this honest staging possible.
 
@@ -408,6 +511,13 @@ All 18 §F rows are already written as `tests/golden/fNN_*.proviso`, each tagged
 - **Token cost.** The program's token count, measured with one stated tokenizer, is reported next to idiomatic Rust and TypeScript versions. More than 1.5 times the Rust version is a design warning.
 - **Counterexamples.** Every §F row assigned to a finished phase passes as a golden test.
 - **Standard library quality.** Every public `std` function meets the quality rule in the reference (§16).
+- **Decided for phase 4** (how the first measurement runs):
+  - One session runs it after phase 4's last slice. Its brief fixes the task before any run. The task is §17's loader plus a report that prints the number of users and their mean age, or the `LoadError`.
+  - Five fresh agent runs, a guess at a useful minimum (§E asks for sample sizes to be planned). Each run gets only REFERENCE.md, the output of `proviso sig std`, the task and `proviso check`. A run succeeds if its second `check` at the latest reports no errors, with warnings not counted, and the program passes hidden tests written before the runs.
+  - Tokens are counted with the Claude API's token counting for the model the runs use, stated with the results, and bytes are reported beside them. If no API key is available, the session asks before choosing another tokenizer.
+  - A separate agent writes the Rust and TypeScript versions, and they are reviewed for idiom before counting.
+  - The results are recorded here, under P4.
+  - The quality rule is also a test in `crates/check`, so it is checked on every change.
 
 **Implementation notes (non-normative).**
 - **Host language (decided).** The checker, interpreter and tools are written in Rust. Its integer and float types and UTF-8 strings match Proviso's scalar semantics one to one. Exhaustive matching suits a type checker, and the output is a single binary that starts instantly. The costs are build latency and lifetime friction, which are contained as follows:
@@ -648,7 +758,7 @@ Writing the §F rows as complete programs ([tests/golden](tests/golden/README.md
 | Row 13 as written calls the fallible `w` unmarked, and its `try` adds a second reason for rejection. The golden makes `w` infallible so that reach is the only reason. | f13 | the row's wording |
 | The error type of an `attempt` whose postfix chain has calls that fail with different types (§6.1, §7.2) | methods/err_methods | P5 |
 | STD.md declares `Set` for phase 2, but neither a literal nor a constructor builds one | collections/err_not_yet | Q37 |
-| STD.md declares none of `is_sorted`, `is_permutation_of` and `is_unique`, which §8.1 uses in refinements and §8.2 in contracts, so they report E0901 as not yet scheduled. Phase 2 already checks refinements at run time, so a phase 2 program can reach them, as f17 does in a distinct type's `where` | collections/err_not_yet, f17 | issue #39 |
+| STD.md declares none of `is_sorted`, `is_permutation_of` and `is_unique`, which §8.1 uses in refinements and §8.2 in contracts, so they report E0901 as not yet scheduled. Phase 2 already checks refinements at run time, so a phase 2 program can reach them, as f17 does in a distinct type's `where` | collections/err_not_yet, f17 | issue #39, Q36 |
 | What a refinement sees when an assignment to one field re-checks it (§8.3) while another field it reads has moved (§5.1) | ownership/moves | P5 |
 | Whether a type parameter may stand for a resource, which its body could drop, and what `T: Abandon` would mean (§4.8, §10) | resources/err_not_yet | P5 |
 | What an `is` test on a resource does when it fails, since it moves what it binds either way (§6.4, §10) | resources/err_discard | P5 |
